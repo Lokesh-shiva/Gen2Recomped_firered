@@ -422,7 +422,7 @@ function ContinueInfo:draw()
   end
   Font.draw(Strings("POKéDEX"), 40, 104)
   Font.draw(("%3d"):format(owned), 120, 104)
-  local t = math.floor(save.playTime or 0)
+  local t = math.floor(require("src.core.SaveData").playSeconds(save))
   Font.draw(Strings("TIME"), 40, 120)
   Font.draw(("%3d:%02d"):format(math.floor(t / 3600),
                                 math.floor(t / 60) % 60), 104, 120)

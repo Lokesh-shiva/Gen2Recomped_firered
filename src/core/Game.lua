@@ -315,8 +315,16 @@ function Game:step(dt)
     self.linkNet:update()
   end
   self.stack:update(dt)
-  -- play time for the trainer card / save screen
-  self.save.playTime = (self.save.playTime or 0) + dt
+  -- play time for the trainer card / save screen.  A save written by an older
+  -- build carries the broken-down { hours, minutes, ... } form, which would
+  -- throw here on its first frame; playSeconds normalises it, and the field is
+  -- a number from this assignment onward (SaveData.validate does the same on
+  -- load, so this is the belt to that brace).
+  local clock = self.save.playTime
+  if clock ~= nil and tonumber(clock) == nil then
+    clock = require("src.core.SaveData").playSeconds(self.save)
+  end
+  self.save.playTime = (tonumber(clock) or 0) + dt
   -- Music.update is NOT serviced here: it decrements fade counters and
   -- drives ChipAudio once per call, so running it inside the logic step
   -- would pitch music and sfx up under fast-forward. Game:update advances

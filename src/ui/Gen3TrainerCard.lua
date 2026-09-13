@@ -158,7 +158,7 @@ function Gen3TrainerCard:rows()
   local player = save.player or {}
   local dex = 0
   for _ in pairs((save.pokedex or {}).owned or {}) do dex = dex + 1 end
-  local t = math.floor(tonumber(save.playTime) or 0)
+  local t = math.floor(require("src.core.SaveData").playSeconds(save))
   local id = tonumber(player.id) or 0
   local labels = self.labels
   return {

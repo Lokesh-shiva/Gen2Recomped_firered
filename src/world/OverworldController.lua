@@ -2388,7 +2388,8 @@ function OverworldState:checkIncomingPhoneCall()
   -- CheckStandingOnEntrance: no call while the player is on a door or warp
   if self.map:warpAtCell(p.cellX, p.cellY) then return end
   local Gen2Commands = require("src.script.Gen2Commands")
-  local minutes = math.floor((tonumber(Game.save.playTime) or 0) / 60)
+  local minutes = math.floor(
+    require("src.core.SaveData").playSeconds(Game.save) / 60)
   local id, script = Gen2Commands.rollIncomingCall(
     Game.data, Game.save, self.map.def, self:timeOfDay(), minutes, false)
   if not script then return end

@@ -370,7 +370,7 @@ function Gen3StartMenu:saveInfoRows()
   end
   local owned = 0
   for _ in pairs((save.pokedex or {}).owned or {}) do owned = owned + 1 end
-  local t = math.floor(tonumber(save.playTime) or 0)
+  local t = math.floor(require("src.core.SaveData").playSeconds(save))
   -- screen order: PLAYER, BADGES, POKéDEX, TIME
   return {
     { words[1] or "PLAYER", name },

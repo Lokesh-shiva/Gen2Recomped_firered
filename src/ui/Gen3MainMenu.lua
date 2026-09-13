@@ -212,7 +212,7 @@ function Gen3MainMenu:infoRows(save)
   end
   local owned = 0
   for _ in pairs((save.pokedex or {}).owned or {}) do owned = owned + 1 end
-  local t = math.floor(tonumber(save.playTime) or 0)
+  local t = math.floor(require("src.core.SaveData").playSeconds(save))
   return {
     { words[1] or "PLAYER", (save.player and save.player.name) or "PLAYER" },
     { words[4] or "BADGES", tostring(badges) },
