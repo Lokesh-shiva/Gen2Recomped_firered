@@ -756,6 +756,16 @@ function Data:seedDefaults()
       -- does not have.  Gen3Intro keeps the card and puts Emerald's own
       -- attract skies behind it.
       boot.screens.splash = "Gen3Intro"
+      -- FireRed has its own real boot intro -- pret's intro.c, not
+      -- Emerald's bike ride -- and RomExtractorGen3:extractFireRedIntro
+      -- extracts it under its own key so a cache that predates that stage
+      -- still gets SOMETHING rather than a screen with no images to draw.
+      local core = self.constants and self.constants.gen3FRLGIntro
+      local images = core and core.images
+      if V.get() == "firered" and type(images) == "table"
+         and images.gfBg and images.scene1Grass and images.scene3Bg then
+        boot.screens.splash = "Gen3IntroFRLG"
+      end
     end
   end
   -- ------------------------------------------------------------ GEN 3 ----

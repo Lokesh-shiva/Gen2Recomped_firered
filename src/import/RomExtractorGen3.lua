@@ -35617,6 +35617,209 @@ function RomExtractorGen3:extractBerryPouchScreen()
               win.list.height, record.list.rows)
 end
 
+-- ---------------------------------------------------------------------------
+-- STAGE: FireRed's own boot intro.
+--
+-- Reported from play: "are the starting animations... like the intro
+-- animation... working well?" -- they were not, because there was no
+-- FireRed intro: every Gen 3 cache, this one included, booted into
+-- Gen3Intro.lua, which is EMERALD's attract movie (the wet-leaves shot, then
+-- the Torchic/Manectric bike ride) -- real Emerald ROM art on real beats,
+-- just the wrong cartridge's.  FireRed's own intro is pret's intro.c: a
+-- GAME FREAK logo, then three scenes -- a grass close-up, a forest pan into
+-- a Gengar/Nidorino close-up, then a fight between them -- before handing
+-- off to the title screen.
+--
+-- ADDRESSES COME STRAIGHT OFF THE SYMBOL TABLE, unlike Emerald's attract
+-- movie, which had to scan raw THUMB immediates for its beats because
+-- nothing in it carried a name.  Every graphic below is a named
+-- `s*_Gfx`/`_Map`/`_Pal` in intro.c (firered3d's all_symbols.tsv), and every
+-- frame count in Gen3IntroFRLG.lua is a real `this->timer` comparison read
+-- straight out of the matching `IntroCB_*` state machine -- not a guess.
+--
+-- WHAT IS RECONSTRUCTED, the same standard the Emerald port's own file
+-- states: the star/sparkle flourish over the logo, the claw-swipe and
+-- recoil-dust particles, and the small wide-shot Gengar/Nidorino sprites in
+-- scene 2 are not extracted here -- simple shapes stand in for them, same as
+-- Emerald's sparkles stand in for a coordinate table this pass does not
+-- read. Every BACKGROUND is the cartridge's own art: the logo (background,
+-- art and wordmark separately, so the reveal can still stage them in turn),
+-- all three scenes, Gengar's idle bounce and its four-piece "back sprite"
+-- finale, and Nidorino's close-up and fight sheet.
+-- ---------------------------------------------------------------------------
+
+-- PAL is a RAW LoadPalette() block, not LZ77 -- intro.c copies every one of
+-- these straight in (LoadPalette), unlike the GFX/MAP pairs, which all go
+-- through DecompressAndCopyTileDataToVram.  PALSIZE is that block's real
+-- byte length (16 colors = 32 bytes per bank; a couple of these are more
+-- than one bank), read off the symbol table's own size column rather than
+-- assumed.
+-- Addresses are ROM-FILE offsets (the 0x08000000 GBA mapping stripped),
+-- same convention as TM_CASE_SCREEN/BERRY_POUCH_SCREEN above -- rom:u8/u32
+-- (and lz77, which is built on them) index the file directly.
+-- BANK is the real BG_PLTT_ID() slot intro.c loads that palette into
+-- (LoadPalette's second argument) -- every tile a background's own artist
+-- placed in that layer was authored against THAT slot number, baked into
+-- the tilemap's own bank nibble, so a tile whose bank reads 5 needs palette
+-- entry 5*16 and up, not a wraparound into a lone 16-color array starting
+-- at 0. frlgIntroBgLayer subtracts BANK before indexing so a plain
+-- single-bank read (colors[1..16]) lines back up with it.
+RomExtractorGen3.FRLG_INTRO = {
+  GF_BG       = { GFX = 0x402650, MAP = 0x402668, PAL = 0x402630, PALSIZE = 0x20, BANK = 0 },
+  GF_ART      = { GFX = 0x4028F8, PAL = 0x40270C, PALSIZE = 0x20, COLS = 4,  ROWS = 8 },
+  GF_TEXT     = { GFX = 0x40272C, PAL = 0x40270C, PALSIZE = 0x20, COLS = 18, ROWS = 2 },
+  SCENE1_GRASS = { GFX = 0x402D54, MAP = 0x403FE8, PAL = 0x402D34, PALSIZE = 0x20, BANK = 1 },
+  SCENE1_BG    = { GFX = 0x4048EC, MAP = 0x404F7C, PAL = 0x4048CC, PALSIZE = 0x20, BANK = 2 },
+  SCENE2_BG      = { GFX = 0x405414, MAP = 0x405890, PAL = 0x4053B4, PALSIZE = 0x60, BANK = 1 },
+  -- the plants layer's own palette blob is pret's own dead code (its
+  -- comment says so: "Unused") -- the game never loads it, so the tilemap
+  -- was authored against whatever WAS loaded for that slot, the same
+  -- background palette scene 2 already carries
+  SCENE2_PLANTS  = { GFX = 0x405B28, MAP = 0x405CDC, PAL = 0x4053B4, PALSIZE = 0x60, BANK = 1 },
+  SCENE2_GENGAR_CLOSE   = { GFX = 0x405DC4, MAP = 0x40644C, PAL = 0x405DA4, PALSIZE = 0x20, BANK = 5 },
+  SCENE2_NIDORINO_CLOSE = { GFX = 0x406654, MAP = 0x4071D0, PAL = 0x406634, PALSIZE = 0x20, BANK = 6 },
+  SCENE3_BG            = { GFX = 0x407470, MAP = 0x407A50, PAL = 0x407430, PALSIZE = 0x40, BANK = 1 },
+  SCENE3_GENGAR_BOUNCE = { GFX = 0x407B9C, MAP = 0x408D98, PAL = 0x405DA4, PALSIZE = 0x20, BANK = 5 },
+  SCENE3_GENGAR_BACK   = { GFX = 0x409D20, PAL = 0x405DA4, PALSIZE = 0x20, COLS = 8, ROWS = 8 },
+  SCENE3_NIDORINO      = { GFX = 0x40A3E4, PAL = 0x4096AC, PALSIZE = 0x20, COLS = 8, ROWS = 8 },
+}
+
+-- A 32-wide background layer, as tall as its decompressed tilemap says --
+-- every one of these boots at screenSize 0 or 2 (intro.c's own BgTemplate
+-- arrays), which is 32 tiles wide either way, so the height is the only
+-- unknown and the tilemap's own byte length answers it.  Left this tall
+-- rather than cropped to one screen: Scene1's grass and Scene3's Gengar
+-- both hold several animation frames stacked vertically, the cartridge's own
+-- ChangeBgY trick, and the caller picks the sub-window at draw time.
+function RomExtractorGen3:frlgIntroBgLayer(def, label)
+  local rom = self.rom
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, def.GFX)
+  local okM, map = RomExtractorGen3.lz77ok(rom, def.MAP)
+  local palRaw = rom:bytes(def.PAL, def.PALSIZE or 0x20)
+  if not (okG and okM and palRaw) then
+    Logger.warn("gen3 frlg intro: %s did not decompress", label)
+    return nil
+  end
+  local cols = 32
+  local rows = math.floor(#map / 2 / cols)
+  if rows < 1 or #map % (2 * cols) ~= 0 then
+    Logger.warn("gen3 frlg intro: %s's tilemap is %d bytes -- not a %d-wide "
+                  .. "map", label, #map, cols)
+    return nil
+  end
+  local colors = {}
+  for i = 0, math.floor(#palRaw / 2) - 1 do
+    local r, g, b = RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256)
+    colors[i + 1] = { r, g, b }
+  end
+  local bankBase = def.BANK or 0
+  local image = ImageWriter.blank(cols * 8, rows * 8)
+  for ty = 0, rows - 1 do
+    for tx = 0, cols - 1 do
+      local cell = ty * cols + tx
+      local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
+      local tid = e % 1024
+      local bank = math.floor(e / 4096) % 16 - bankBase
+      if tid * 32 + 32 <= #tiles and bank >= 0 then
+        RomExtractorGen3.partyTile(image, tiles, colors, tid, bank,
+                                   tx * 8, ty * 8)
+      end
+    end
+  end
+  return image, rows
+end
+
+-- A raw OAM sprite sheet: no tilemap, tiles laid out sequentially, one
+-- `cols`x`rows` frame after another -- the same shape decodeSprite/spriteImage
+-- read for mon and trainer pics, just not fixed to their 64x64/2048-byte
+-- size, so the frame count is however many whole frames the decompressed
+-- sheet holds rather than an assumed one.
+function RomExtractorGen3:frlgIntroSpriteSheet(def, label)
+  local rom = self.rom
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, def.GFX)
+  local palRaw = rom:bytes(def.PAL, def.PALSIZE or 0x20)
+  if not (okG and palRaw) then
+    Logger.warn("gen3 frlg intro: %s did not decompress", label)
+    return nil
+  end
+  local bytesPerFrame = def.COLS * def.ROWS * 32
+  local frames = math.max(1, math.floor(#tiles / bytesPerFrame))
+  local colors = {}
+  for i = 0, math.floor(#palRaw / 2) - 1 do
+    local r, g, b = RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256)
+    colors[i + 1] = { r, g, b }
+  end
+  local w, h = def.COLS * 8, def.ROWS * 8
+  local strip = ImageWriter.blank(w * frames, h)
+  for frame = 0, frames - 1 do
+    local base = frame * def.COLS * def.ROWS
+    for ty = 0, def.ROWS - 1 do
+      for tx = 0, def.COLS - 1 do
+        RomExtractorGen3.partyTile(strip, tiles, colors, base + ty * def.COLS + tx,
+                                   0, frame * w + tx * 8, ty * 8)
+      end
+    end
+  end
+  return strip, frames
+end
+
+function RomExtractorGen3:extractFireRedIntro()
+  self:beginStage("Gen3 FireRed intro")
+  if (self.manifest or {}).frlgItemMenu == nil then
+    Logger.warn("gen3 frlg intro: not a FireRed manifest -- skipped")
+    return
+  end
+  local I = RomExtractorGen3.FRLG_INTRO
+  local images = {}
+  local function bg(key, def)
+    local img, rows = self:frlgIntroBgLayer(def, key)
+    if not img then return false end
+    self:saveImage(img, "intro_frlg/" .. key .. ".png")
+    images[key] = { path = "assets/generated/intro_frlg/" .. key .. ".png",
+                     rows = rows }
+    return true
+  end
+  local function sheet(key, def)
+    local img, frames = self:frlgIntroSpriteSheet(def, key)
+    if not img then return false end
+    self:saveImage(img, "intro_frlg/" .. key .. ".png")
+    images[key] = { path = "assets/generated/intro_frlg/" .. key .. ".png",
+                     frames = frames, cols = def.COLS, rows = def.ROWS }
+    return true
+  end
+
+  local ok = true
+  ok = bg("gfBg", I.GF_BG) and ok
+  ok = sheet("gfArt", I.GF_ART) and ok
+  ok = sheet("gfText", I.GF_TEXT) and ok
+  ok = bg("scene1Grass", I.SCENE1_GRASS) and ok
+  ok = bg("scene1Bg", I.SCENE1_BG) and ok
+  ok = bg("scene2Bg", I.SCENE2_BG) and ok
+  ok = bg("scene2Plants", I.SCENE2_PLANTS) and ok
+  ok = bg("scene2GengarClose", I.SCENE2_GENGAR_CLOSE) and ok
+  ok = bg("scene2NidorinoClose", I.SCENE2_NIDORINO_CLOSE) and ok
+  ok = bg("scene3Bg", I.SCENE3_BG) and ok
+  ok = bg("scene3GengarBounce", I.SCENE3_GENGAR_BOUNCE) and ok
+  ok = sheet("scene3GengarBack", I.SCENE3_GENGAR_BACK) and ok
+  ok = sheet("scene3Nidorino", I.SCENE3_NIDORINO) and ok
+
+  if not images.gfBg or not images.scene1Grass or not images.scene3Bg then
+    Logger.warn("gen3 frlg intro: the core backgrounds did not come out -- "
+                  .. "FireRed keeps Emerald's attract movie")
+    return
+  end
+  local record = { images = images,
+    source = "ROM:intro.c's own GAME FREAK logo and scene 1/2/3 art" }
+  local constants = self._constants or {}
+  constants.gen3FRLGIntro = record
+  self._constants = constants
+  self:write("constants", constants)
+  local made = 0
+  for _ in pairs(images) do made = made + 1 end
+  Logger.info("Gen3 FireRed intro: %d/%d pieces extracted%s", made, 13,
+              ok and "" or " (some missing -- the screen fills gaps in)")
+end
+
 function RomExtractorGen3:extractBagScreen()
   self:beginStage("Gen3 bag screen")
   local B = RomExtractorGen3.BAG_SCREEN
@@ -43086,6 +43289,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractBagScreen",
   "extractTMCaseScreen",
   "extractBerryPouchScreen",
+  "extractFireRedIntro",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
