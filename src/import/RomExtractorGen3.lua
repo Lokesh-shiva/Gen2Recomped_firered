@@ -12672,6 +12672,44 @@ function RomExtractorGen3:extractFlash()
   local F = RomExtractorGen3.FLASH
   local rom = self.rom
 
+  -- FIRERED'S FLASH IS SHAPED DIFFERENTLY and is read from its own tables.
+  -- sFlashLevelToRadius is five halfwords that do NOT close to zero
+  -- (200 72 56 40 24), and SetDefaultFlashLevel leaves a cave at level 0 once
+  -- FLAG_SYS_FLASH_ACTIVE is set and at gMaxFlashLevel otherwise -- so "lit"
+  -- is zero, which the Emerald reading below rejects.  The manifest names the
+  -- two tables and the flag (`flash`); the ROM has to agree with itself.
+  local FF = (self.manifest or {}).flash
+  if type(FF) == "table" and FF.radii and FF.max then
+    local maxLevel = rom:u32(FF.max)
+    local radii, falls = {}, true
+    for level = 0, (maxLevel or 0) do
+      radii[level + 1] = rom:u16(FF.radii + level * 2)
+      if level > 0 and radii[level + 1] >= radii[level] then falls = false end
+    end
+    local diagonal = math.ceil(math.sqrt(F.SCREEN_W ^ 2 + F.SCREEN_H ^ 2) / 2)
+    if not (maxLevel and maxLevel > 1 and maxLevel < 32 and falls
+            and radii[1] >= diagonal) then
+      Logger.warn("gen3 flash (manifest): the radii at %07X do not fall from a "
+                    .. "full screen -- nothing written", FF.radii)
+      return
+    end
+    local constants = self._constants or {}
+    constants.gen3Flash = {
+      radii = radii, maxLevel = maxLevel,
+      lit = tonumber(FF.lit) or 0, dark = maxLevel,
+      center = { F.SCREEN_W / 2, F.SCREEN_H / 2 },
+      screen = { F.SCREEN_W, F.SCREEN_H },
+      flag = ("FLAG_G3_%04X"):format(FF.flag or 0), flagNumber = FF.flag,
+      source = ("ROM:sFlashLevelToRadius %07X (%d radii), gMaxFlashLevel %07X")
+               :format(FF.radii, maxLevel + 1, FF.max),
+    }
+    self._constants = constants
+    self:write("constants", constants)
+    Logger.info("Gen3 flash (manifest): %d levels, radius %d..%d",
+                maxLevel + 1, radii[1], radii[maxLevel + 1])
+    return
+  end
+
   local tableAt = self:thumbLiteral(F.WINDOW_FN + F.AT_TABLE)
   local cxWord = rom:u16(F.WINDOW_FN + F.AT_CX)
   local cyWord = rom:u16(F.WINDOW_FN + F.AT_CY)
@@ -12824,7 +12862,11 @@ RomExtractorGen3.HEAL = {
   COLORS = 16,
   CELL = 16,                 -- the cell the anchor is the corner of
   DIM = { [0] = { [0] = { 8, 8 }, [1] = { 16, 16 } },
-          [1] = { [0] = { 16, 8 }, [1] = { 32, 8 } } },
+          [1] = { [0] = { 16, 8 }, [1] = { 32, 8 }, [2] = { 32, 16 } } },
+  -- FireRed's machine: both sprites on the glow's palette, and the monitor a
+  -- plain 32x16 sprite with four frames instead of a subsprite set
+  SHARED_PALETTE = false,
+  MONITOR_PLAIN = false,
 }
 
 function RomExtractorGen3:extractHealMachine()
@@ -12920,6 +12962,9 @@ function RomExtractorGen3:extractHealMachine()
     Logger.warn("gen3 heal machine: the sprite templates do not read")
     return
   end
+  if H.SHARED_PALETTE and glow.tag == glowTag and monitor.tag == glowTag then
+    monitorPal, monitorTag = glowPal, glowTag
+  end
   if glow.tag ~= glowTag or monitor.tag ~= monitorTag then
     Logger.warn("gen3 heal machine: the templates ask for palettes $%04X and "
                 .. "$%04X, the script loads $%04X and $%04X -- these are not "
@@ -12952,14 +12997,21 @@ function RomExtractorGen3:extractHealMachine()
   end
 
   -- ---- the subsprites, which are what say it is 24x16 --------------------
-  local subCount = rom:u32(H.SUBSPRITES)
+  local minX, minY, maxX, maxY, tiles
+  if H.MONITOR_PLAIN and monitor.dim then
+    -- one sprite, centred on its position: its own OAM says the size
+    minX, minY = -monitor.dim[1] / 2, -monitor.dim[2] / 2
+    maxX, maxY = monitor.dim[1] / 2, monitor.dim[2] / 2
+    tiles = (monitor.dim[1] / 8) * (monitor.dim[2] / 8)
+  end
+  local subCount = H.MONITOR_PLAIN and 0 or rom:u32(H.SUBSPRITES)
   local subAt = rom:pointer(H.SUBSPRITES + 4)
-  if not subAt or subCount < 1 or subCount > 8 then
+  if not H.MONITOR_PLAIN and (not subAt or subCount < 1 or subCount > 8) then
     Logger.warn("gen3 heal machine: the subsprite table reads as %s entries",
                 tostring(subCount))
     return
   end
-  local minX, minY, maxX, maxY, tiles = nil, nil, nil, nil, 0
+  if not H.MONITOR_PLAIN then tiles = 0 end
   for i = 0, subCount - 1 do
     local at = subAt + i * H.SUB_STRIDE
     local x, y = rom:u8(at), rom:u8(at + 1)

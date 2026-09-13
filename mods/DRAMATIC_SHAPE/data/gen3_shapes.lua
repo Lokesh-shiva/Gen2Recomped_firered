@@ -763,6 +763,15 @@ gTileset_Sootopolis = {
   -- the south face); bed (from above, low).
   metatiles = {
 
+    -- FIRERED'S MART (LAYOUT_MART over gTileset_Building).  The till runs
+    -- north-south down column 3 -- 661/669/677/685, blocked, with 677 the
+    -- MB_COUNTER cell the clerk speaks across -- and unpinned it flooded into
+    -- one region and stood as a wall-high pale column.  `frlg_` names are
+    -- FireRed's own (data/firered/gen3_maps.lua) and cannot meet Emerald's.
+    frlg_gTileset_Mart = {
+      [661] = "counter", [669] = "counter", [677] = "counter", [685] = "counter",
+    },
+
     -- LITTLEROOT TOWN's secondary tileset, which is where Professor Birch's
     -- lab lives (LAYOUT_LITTLEROOT_TOWN is gTileset_General over this one).
     gTileset_Petalburg = {
