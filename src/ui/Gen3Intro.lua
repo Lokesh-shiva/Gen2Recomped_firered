@@ -367,7 +367,8 @@ function Gen3Intro:shotLayers()
   for n, layer in ipairs(record.layers or {}) do
     local ok, image = pcall(Assets.image, layer.image)
     if ok and image then
-      out[#out + 1] = { image = image, backdrop = layer.backdrop, order = n }
+      out[#out + 1] = { image = image, backdrop = layer.backdrop, order = n,
+                        wrap = tonumber(layer.wrap) }
     end
   end
   -- THE LOAD ORDER IS THE PRIORITY ORDER.  The cartridge puts the first map
@@ -558,12 +559,29 @@ function Gen3Intro:drawShot(layers)
       local layer = byOrder[order]
       if layer then
         local iw, ih = layer.image:getDimensions()
+        -- A BACKGROUND WRAPS AT ITS OWN HEIGHT, WHICH IS NOT ITS PICTURE'S.
+        --
+        -- Reported from play: "when it raises upward from the water droplets
+        -- and leaves it shows a black background and missing the field of
+        -- leaves still".  These four maps are 256x512 -- the size bits of
+        -- BG0CNT..BG3CNT (9000, 9201, 9402, 9603) are 2 -- and the cartridge
+        -- fills only the top half of each, so the bottom half is tile 0 and
+        -- tile 0 is transparent.  The camera climbs out of the leaves rather
+        -- than looping them: BG0VOFS runs 40 down to -217 and BG0 simply
+        -- leaves the frame, uncovering the backdrop, which never scrolls.
+        --
+        -- Wrapping at the picture's 256 instead brought the leaf bank back
+        -- around over the sky -- its dark underside where the mountains
+        -- belong, which is the "black background", and the field of leaves
+        -- that should have arrived from below hidden behind it.
+        local wrap = math.floor(tonumber(layer.wrap) or ih)
+        if wrap < ih then wrap = ih end
         local v = self:shotScroll(order) or 0
-        local y = -(v % ih)
+        local y = -(v % wrap)
         local x = math.floor((GBA_W - math.min(GBA_W, iw)) / 2)
         love.graphics.draw(layer.image, x, y)
-        if y + ih < GBA_H then
-          love.graphics.draw(layer.image, x, y + ih)
+        if y + wrap < GBA_H then
+          love.graphics.draw(layer.image, x, y + wrap)
         end
       end
     end
@@ -988,26 +1006,74 @@ end
 -- The three bands of pines that drift between the mountains and the stand of
 -- big pines.  `bands` is the cartridge's: where each starts and how far it
 -- goes a frame, off the sprites' own 16.16 accumulator at 017B62C.
+-- WHERE ONE TREE OF A BAND IS ON THIS FRAME.
+--
+-- The cartridge's own arithmetic, not a modulo: the sprite callback at
+-- 017B62C adds its speed to a 16.16 accumulator and then, if the whole part
+-- has gone past 255, drops it to -32 and keeps the fraction.  A tree
+-- therefore covers 288 pixels a lap, so the four of a band do not stay 64
+-- apart -- one gap in the ring is 96 -- and that unevenness is the
+-- cartridge's, not an accident of tiling.
+local function sceneryX(start, speed, into, wrapAt, wrapTo)
+  local lap = wrapAt - wrapTo + 1
+  local pos = start + into * speed
+  if lap > 0 and pos > wrapAt then
+    pos = (pos - (wrapAt + 1)) % lap + wrapTo
+  end
+  return math.floor(pos)
+end
+
+-- THE THREE BANDS OF DRIFTING PINES, each its own tree off the one sheet.
+--
+-- Reported from play: "the top layer of trees closest to the player in the
+-- cycle scene arent moving".  The near band is a 32x32 pine and the two
+-- behind it are 16x32 ones; the import lays all three side by side in the
+-- scenery strip and `bands` says which slice each takes, so the band that
+-- moves fastest is now a whole tree instead of a slice of all three.
 function Gen3Intro:drawScenery(margin)
   local record = self.rideShot and self.rideShot.scenery
   local strip = self:rideSprite("scenery")
   if type(record) ~= "table" or not strip then return false end
+  local sheet = self.rideShot.sprites and self.rideShot.sprites.scenery
+  local parts = type(sheet) == "table" and sheet.parts or nil
   local sw, sh = strip:getDimensions()
   local spacing = math.max(1, math.floor(tonumber(record.spacing) or 64))
   local count = math.max(1, math.floor(tonumber(record.count) or 4))
-  local period = spacing * count
-  -- the sprite's y is its middle, and the strip is drawn from its top
-  local y = math.floor((tonumber(record.y) or 88) - sh / 2)
-  local into = math.max(0, self.frame - T_SCENE_2)
+  local wrapAt = math.floor(tonumber(record.wrapAt) or 255)
+  local wrapTo = math.floor(tonumber(record.wrapTo) or -32)
+  -- the cartridge's own clock for these, and its own stop: the scene's
+  -- handler freezes the bands on frame 1856 and the rest of the ride plays
+  -- against a still forest
+  local start = math.floor(tonumber(record.first) or T_SCENE_2)
+  local freeze = tonumber(record.freeze)
+  local now = self.frame
+  if freeze and now > freeze then now = freeze end
+  local into = math.max(0, now - start)
+  local lap = wrapAt - wrapTo + 1
+  self.sceneryQuads = self.sceneryQuads or {}
   love.graphics.setColor(1, 1, 1, 1)
-  for _, band in ipairs(record.bands or {}) do
-    local shift = ((tonumber(band.x) or 0)
-                   + into * (tonumber(band.speed) or 0)) % period
-    -- the sprite's x is its middle too
-    local x = math.floor(shift - sw / 2) - period - margin
-    while x < GBA_W + margin do
-      love.graphics.draw(strip, x, y)
-      x = x + spacing
+  for n, band in ipairs(record.bands or {}) do
+    local part = parts and parts[tonumber(band.part) or 0]
+    local bw = math.floor(tonumber(band.width) or (part and part.width) or sw)
+    local bh = math.floor(tonumber(band.height) or (part and part.height) or sh)
+    local quad = self.sceneryQuads[n]
+    if not quad then
+      quad = love.graphics.newQuad(part and part.x or 0, part and part.y or 0,
+                                   bw, bh, sw, sh)
+      self.sceneryQuads[n] = quad
+    end
+    -- the sprite's x and y are its middle, and a quad is drawn from its top
+    local y = math.floor((tonumber(record.y) or 88) - bh / 2)
+    for k = 0, count - 1 do
+      local at = sceneryX((tonumber(band.x) or 0) + k * spacing,
+                          tonumber(band.speed) or 0, into, wrapAt, wrapTo)
+      local x = at - bw / 2
+      -- a surface wider than the Game Boy's needs the lap either side of it
+      local from = math.ceil((-margin - bw - x) / lap)
+      local to = math.floor((GBA_W + margin - x) / lap)
+      for lapN = math.min(0, from), math.max(0, to) do
+        love.graphics.draw(strip, quad, math.floor(x + lapN * lap), y)
+      end
     end
   end
   return true

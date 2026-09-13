@@ -3478,11 +3478,34 @@ function RomExtractorGen3:extractConstants()
                 end
               end
             end
+            -- HOW TALL THE BACKGROUND WRAPS AT, which is not how tall its
+            -- picture is.
+            --
+            -- Reported from play: "when it raises upward from the water
+            -- droplets and leaves it shows a black background and missing the
+            -- field of leaves still".  The four maps of the opening shot are
+            -- 1024 cells each -- 256x256 -- but BG0CNT..BG3CNT are 9000,
+            -- 9201, 9402 and 9603, and bits 14-15 of those are 2, which on a
+            -- text background means 256 WIDE BY 512 TALL.  The cartridge
+            -- loads the top half and leaves the bottom half as it found it,
+            -- which is tile 0, which is thirty-two zero bytes: transparent.
+            --
+            -- So the camera climbing out of the leaves (BG0VOFS runs 40 down
+            -- to -217) does not loop the picture back around under itself --
+            -- it climbs off the top of it into empty rows, and what stays on
+            -- screen is the backdrop, which never scrolls at all.  Wrapping
+            -- these at the picture's own 256 brought the leaves back around
+            -- over the sky and put the dark underside of the leaf bank where
+            -- the mountains belong, which is the black the report describes.
+            local control = math.floor(tonumber(layer.bgControl) or 0)
+            local sizeBits = math.floor(control / 16384) % 4
+            local wrap = rows * 8 * ((sizeBits >= 2) and 2 or 1)
             local file = ("ui/gen3_shot_%s%d.png"):format(name, n)
             self:saveImage(image, file)
             layers[n] = {
               image = "assets/generated/" .. file,
               width = cols * 8, height = rows * 8,
+              wrap = (wrap ~= rows * 8) and wrap or nil,
               backdrop = layer.backdrop or nil,
             }
           end
@@ -3518,12 +3541,65 @@ function RomExtractorGen3:extractConstants()
               fw, fh, frames = 64, math.ceil(tiles / 8) * 8, 1
               tw, th = 8, math.ceil(tiles / 8)
             end
+            -- ONE SHEET MAY BE SEVERAL SPRITES OF DIFFERENT SHAPES.
+            --
+            -- Reported from play: "the top layer of trees closest to the
+            -- player in the cycle scene arent moving".  The ride's scenery
+            -- tag is a single 1024-byte sheet, and reading it as one 64x32
+            -- frame -- eight tiles across, four down -- is what the shape
+            -- guesser falls back to when nothing names it.  It is not one
+            -- sprite.  The twelve objects that carry it come off ONE template
+            -- with THREE animations, and the sprite struct each of them ends
+            -- up with says so: four are 32x32 (attr0 0000A0, attr1 008130)
+            -- and eight are 16x32 (attr0 0080A0), and the three animations at
+            -- 5F5114 name tiles 0, 16 and 24.  Sixteen tiles plus eight plus
+            -- eight is the whole sheet, which is the check: a big pine for
+            -- the near band and a narrow one each for the middle and far.
+            -- Read flat, all three bands drew the same sliced-up strip, and
+            -- the near band -- the one the report is about -- never showed a
+            -- whole tree to notice moving.
+            --
+            -- `parts` names them, and they are laid out side by side at their
+            -- own widths so a band can take its own slice.
+            local parts = {}
+            if type(spr.parts) == "table" and spr.parts[1] then
+              local at = 0
+              for k, part in ipairs(spr.parts) do
+                local pw = math.floor(tonumber(part.width) or 0)
+                local ph = math.floor(tonumber(part.height) or 0)
+                local t0 = math.floor(tonumber(part.tile) or 0)
+                if pw >= 8 and ph >= 8 then
+                  parts[k] = { x = at, y = 0, width = pw, height = ph,
+                               tile = t0 }
+                  at = at + pw
+                end
+              end
+              if parts[1] then
+                fw, fh, frames = at, 0, 1
+                for _, part in ipairs(parts) do
+                  if part.height > fh then fh = part.height end
+                end
+              end
+            end
             local image = ImageWriter.blank(fw * frames, fh)
             for t = 0, tiles - 1 do
               local frame = math.floor(t / (tw * th))
               local within = t % (tw * th)
               local ox = frame * fw + (within % tw) * 8
               local oy = math.floor(within / tw) * 8
+              if parts[1] then
+                ox, oy = nil, nil
+                for _, part in ipairs(parts) do
+                  local span = (part.width / 8) * (part.height / 8)
+                  if t >= part.tile and t < part.tile + span then
+                    local k = t - part.tile
+                    local pw = part.width / 8
+                    ox = part.x + (k % pw) * 8
+                    oy = part.y + math.floor(k / pw) * 8
+                  end
+                end
+              end
+              if ox then
               for y = 0, 7 do
                 for px = 0, 7 do
                   local byte = sart[t * 32 + y * 4 + math.floor(px / 2) + 1]
@@ -3536,6 +3612,7 @@ function RomExtractorGen3:extractConstants()
                   end
                 end
               end
+              end
             end
             local sfile = ("ui/gen3_shot_%s_spr%d.png"):format(name, n)
             self:saveImage(image, sfile)
@@ -3544,7 +3621,7 @@ function RomExtractorGen3:extractConstants()
               width = fw * frames, height = fh, tiles = tiles,
               frameWidth = fw, frameHeight = fh, frames = frames,
               role = spr.role, drop = spr.drop, ripple = spr.ripple,
-              tag = spr.tag,
+              tag = spr.tag, parts = parts[1] and parts or nil,
             }
             if spr.role then sprites[spr.role] = sprites[n] end
           end)
@@ -3600,13 +3677,20 @@ function RomExtractorGen3:extractConstants()
             local sc = ride.scenery
             local bands = {}
             for i, band in ipairs(sc.layers or {}) do
-              bands[i] = { x = band.x, speed = band.speed / (sc.fixed or 65536) }
+              bands[i] = { x = band.x, speed = band.speed / (sc.fixed or 65536),
+                           part = band.part, width = band.width,
+                           height = band.height, sub = band.sub }
             end
+            -- the front band last, because a lower subpriority draws in front
+            table.sort(bands, function(a, b)
+              return (a.sub or 0) > (b.sub or 0)
+            end)
             if bands[1] then
               out[name] = out[name] or {}
               out[name].scenery = {
                 bands = bands, y = sc.y, spacing = sc.spacing,
-                count = sc.count, width = sc.width, height = sc.height,
+                count = sc.count, wrapAt = sc.wrapAt, wrapTo = sc.wrapTo,
+                first = sc.first, freeze = sc.freeze,
                 source = ("ROM:%07X sheet, sprite callback %07X, data[1] "
                           .. "%d/%d/%d in 16.16")
                          :format(sc.sheet or 0, 0x17B62C,
@@ -38886,13 +38970,40 @@ RomExtractorGen3.INTRO_SCENE2 = {
   -- slot 0 (5F21B0); the sheet is the trees, not the clouds at 5F16A8 or the
   -- houses at 5F2814 -- the ride hands 5F50EC to the sheet loader, and that
   -- record's data pointer is this one
+  --
+  -- THE THREE BANDS ARE THREE DIFFERENT TREES, and the sheet is exactly the
+  -- three of them: sixteen tiles of 32x32 for the near band and eight tiles
+  -- of 16x32 for each of the other two, named by the three animations at
+  -- 5F5114 (image 0, 16 and 24, thirty frames each and then END).  The near
+  -- band is the fast one and it carries the lowest subpriority, so it is the
+  -- one in front.
+  --
+  -- The callback at 017B62C is the whole motion:
+  --     x = ((pos1.x << 16) | data[2]) + data[1]
+  --     pos1.x = x >> 16 ; data[2] = x & FFFF
+  --     if pos1.x > 255 then pos1.x = -32 end
+  -- so a tree runs from -32 to 255 and starts again -- 288 pixels a lap, not
+  -- the 256 a tiled background would take, which is why the four of a band
+  -- are not evenly spaced for the whole ride.
   scenery = {
-    sheet = 0x5F21D0, palette = 0x5F21B0, width = 64, height = 32,
+    sheet = 0x5F21D0, palette = 0x5F21B0,
     y = 88, spacing = 64, count = 4, fixed = 65536,
+    wrapAt = 255, wrapTo = -32,
+    -- ...AND THEY STOP BEFORE THE RIDE DOES.  Scene two's handler compares
+    -- its counter to 1856 (016D65E: E8 << 3) and writes 2 to the state word
+    -- the callback reads first, and 2 is the branch that returns without
+    -- touching the accumulator.  The last two hundred frames of the ride are
+    -- a still forest behind the rider leaving.  1855 here rather than 1856
+    -- because the state is set before that frame's callbacks run, so 1855 is
+    -- the last frame the accumulator moves on.
+    freeze = 1855,
+    -- the twelve are created on frame 1028 and the sprite callbacks run later
+    -- the same frame, so frame f has moved them f - 1027 times
+    first = 1027,
     layers = {
-      { x = 16, speed = 8192 },
-      { x = 40, speed = 4096 },
-      { x = 56, speed = 2048 },
+      { x = 16, speed = 8192, part = 1, width = 32, height = 32, sub = 100 },
+      { x = 40, speed = 4096, part = 2, width = 16, height = 32, sub = 101 },
+      { x = 56, speed = 2048, part = 3, width = 16, height = 32, sub = 102 },
     },
   },
 }
