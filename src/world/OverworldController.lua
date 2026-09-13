@@ -12333,13 +12333,29 @@ function OverworldState:drawGen3Heal(ha, cam)
   if monitor then
     love.graphics.draw(monitor, ox + record.monitor.x, oy + record.monitor.y)
   end
+  -- Reported from play: the healing machine's layout looks wrong -- what was
+  -- actually wrong is that a lit ball was invisible rather than misplaced.
+  -- The console art the map tileset already draws bakes in its own row of
+  -- (unlit-looking) LED dots, and this glow sprite is the ROM's own tiny
+  -- 4x4 dot meant to sit exactly over one -- at native size, one more red
+  -- pixel-cluster on top of art that is already mostly red LEDs, it could
+  -- not be told apart from the backdrop it was drawn on. 2x scale and a
+  -- bright gold tint (a lit Poke Ball, not a red LED) makes each one land.
   local glow = record.glow.image and picture(record.glow.image)
   if glow then
+    love.graphics.setColor(1, 0.85, 0.2, 1)
+    local SPRITE_SCALE, SPREAD = 1.6, 1.3
     for i = 1, math.min(ha.lit or 0, #(record.glow.offsets or {})) do
       local at = record.glow.offsets[i]
-      love.graphics.draw(glow, ox + record.glow.x + at[1],
-                         oy + record.glow.y + at[2])
+      -- the offsets spread out a little less than the sprite grows, or six
+      -- enlarged dots meant for the ROM's own tight 4x4 spacing pile into
+      -- one blob (or spill past the console) instead of reading as six
+      -- separate balls
+      love.graphics.draw(glow, ox + record.glow.x + at[1] * SPREAD,
+                         oy + record.glow.y + at[2] * SPREAD, 0,
+                         SPRITE_SCALE, SPRITE_SCALE)
     end
+    love.graphics.setColor(1, 1, 1, 1)
   end
   return (monitor or glow) ~= nil
 end
