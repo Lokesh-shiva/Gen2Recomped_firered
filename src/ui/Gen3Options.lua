@@ -66,7 +66,10 @@ end
 -- description of the cartridge and this file owns what the engine does with
 -- it.
 local BINDINGS = {
-  textSpeed = { field = "textSpeed", choices = { "slow", "mid", "fast" } },
+  -- the frame delays TextBox actually reads (5/3/1).  These were the words
+  -- "slow"/"mid"/"fast": a save's numeric 3 matched none of them, so the row
+  -- showed SLOW, and picking a value wrote a string TextBox rejects.
+  textSpeed = { field = "textSpeed", choices = { 5, 3, 1 } },
   battleScene = { field = "battleAnim", choices = { true, false } },
   battleStyle = { field = "battleStyle", choices = { "shift", "set" } },
   sound = { field = "stereo", choices = { false, true } },

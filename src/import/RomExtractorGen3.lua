@@ -3159,10 +3159,18 @@ function RomExtractorGen3:extractConstants()
   if optionAt then
     local words, at = {}, optionAt
     for i = 1, 24 do
-      local text, used = self:readText(at, 32)
-      if not (text and used) then break end
-      if text ~= "" then words[#words + 1] = text end
-      at = at + used
+      local okT, text, used = pcall(self.readText, self, at, 32)
+      if okT and text and used then
+        if text ~= "" then words[#words + 1] = text end
+        at = at + used
+      else
+        -- a string this charmap cannot read (FireRed keeps a Japanese
+        -- "TYPE" in the middle of the block): step past its terminator
+        local p = at
+        while p < self.rom.size and self.rom:u8(p) ~= 0xFF do p = p + 1 end
+        if p >= self.rom.size then break end
+        at = p + 1
+      end
     end
     local function has(w)
       for _, v in ipairs(words) do if v == w then return w end end
@@ -3185,7 +3193,8 @@ function RomExtractorGen3:extractConstants()
           -- very block. Before the charmap had it the row read NORMAL / LR
           -- and lost its third setting entirely.
           { key = "buttonMode", label = has("BUTTON MODE"),
-            values = { has("NORMAL"), has("LR"), has("L=A") } },
+            -- FireRed's first button mode is HELP where Emerald's is NORMAL
+            values = { has("NORMAL") or has("HELP"), has("LR"), has("L=A") } },
           { key = "frame", label = has("FRAME"), value = has("TYPE") },
         },
         cancel = has("CANCEL"),
