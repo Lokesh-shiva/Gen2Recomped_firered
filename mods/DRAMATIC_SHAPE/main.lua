@@ -595,6 +595,32 @@ local SETTINGS = {
     .. "costing you frames and you want to keep the shoreline. Needs WATER "
     .. "on FULL; there is no reflection to be in below that.",
     when = function() return Water.level() >= 2 end },
+  -- ...and the third half of the same question, under both of them.
+  --
+  -- `when` gates it the same way WATER SPRITES is gated and for the same
+  -- reason: below FULL the shader never reads the mirror, so the row would
+  -- decide nothing.
+  --
+  -- NOT set by the FULL preset, and that is the one place this row parts
+  -- company with WATER and WATER SPRITES. FULL pins the rows that describe
+  -- the diorama's LOOK, and this is a look the mode has never had at a price
+  -- nothing else in the mode charges -- the whole scene drawn a second time.
+  -- A preset that quietly switched it on would be the frame halving itself
+  -- on a machine whose owner asked for "the diorama", which is the opposite
+  -- of what a preset is for. So it stays where the player left it, and
+  -- because FULL does not pin it, FULL must not take it off the menu either:
+  -- it is marked `full` for exactly that reason -- a row the preset does not
+  -- set and does remove is a value the player can no longer reach, which is
+  -- the trap TILT and GBC FX are pinned to avoid.
+  { Water.planarSetting,
+    "Reflect people and scenery that the surface reflection cannot reach: "
+    .. "the world is drawn a second time, upside down under the water, so "
+    .. "characters standing BESIDE a lake appear in it and so does anything "
+    .. "just off the top of the screen. This is the most expensive row in "
+    .. "the mode -- it is the whole scene again, not an effect over it -- "
+    .. "so it is OFF unless you ask for it. Needs WATER on FULL.",
+    full = true,
+    when = function() return Water.level() >= 2 end },
   -- `full` marks a row FULL does not take away. FULL owns the diorama's own
   -- knobs; what a battle is drawn over, and how it is framed, are not that.
   -- Off the OPTIONS menu while VR is on: the headset REQUIRES staged

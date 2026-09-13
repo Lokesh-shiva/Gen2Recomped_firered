@@ -1140,7 +1140,28 @@ local function rememberHome(ctx, target, x, y)
   save.gen3ObjectHomes = save.gen3ObjectHomes or {}
   local perMap = save.gen3ObjectHomes[mapId] or {}
   save.gen3ObjectHomes[mapId] = perMap
-  perMap[tonumber(target) or 0] = { x = math.floor(x), y = math.floor(y) }
+  local slot = perMap[tonumber(target) or 0] or {}
+  slot.x, slot.y = math.floor(x), math.floor(y)
+  perMap[tonumber(target) or 0] = slot
+end
+
+-- The same store, for the other half of the template a script can rewrite.
+-- Kept in one slot per object so a scene that both moves somebody and re-poses
+-- them does not have the second write drop the first.
+--
+-- On the module rather than a file local: this file is one chunk and Lua caps
+-- a chunk at 200 locals, which it already sits against.
+function Gen3Commands.rememberMovementType(ctx, target, movementType)
+  local save = ctx.save
+  local mapId = ctx.mapId
+    or (ctx.overworld and ctx.overworld.map and ctx.overworld.map.id)
+  if not (save and mapId and movementType) then return end
+  save.gen3ObjectHomes = save.gen3ObjectHomes or {}
+  local perMap = save.gen3ObjectHomes[mapId] or {}
+  save.gen3ObjectHomes[mapId] = perMap
+  local slot = perMap[tonumber(target) or 0] or {}
+  slot.movementType = math.floor(movementType)
+  perMap[tonumber(target) or 0] = slot
 end
 
 function Commands.g3_place_perm(ctx, target, x, y)
@@ -1160,11 +1181,34 @@ function Commands.g3_copy_xy_to_perm(ctx, target)
   rememberHome(ctx, index or 0, entity.cellX, entity.cellY)
 end
 
+-- ...AND WHICH WAY IT FACES AND WHETHER IT MOVES, which is the same store
+-- and was the same two mistakes.
+--
+-- Reported from play, of Littleroot: "mom looks the wrong way".  This wrote
+-- `npc.gen3MovementType` and stopped, and no line in the engine has ever read
+-- that field -- so every `setobjectmovementtype` in Hoenn was a no-op, and an
+-- object stayed posed the way its map definition left it however many times a
+-- script re-posed it.  NPC:setMovementType is the reader that was missing.
+--
+-- AND IT WAS TALKING TO THE WRONG OBJECT.  `ctx.overworld.npcs` is the spawn
+-- list in spawn order; `index` is the object's template index, and the two
+-- only agree on a map where nothing is hidden.  `npcByIndex` is the lookup
+-- the neighbouring `copyobjectxytoperm` already uses for exactly this reason.
+--
+-- The template is remembered beside the perm position, because on the
+-- cartridge that is literally what this command writes -- the template, not
+-- the object -- so it has to survive walking out of the room and back in, in
+-- the same way a `setobjectxyperm` does.
 function Commands.g3_movement_type(ctx, target, movementType)
   local index = objectId(ctx, target)
-  local npc = index and ctx.overworld and ctx.overworld.npcs
-              and ctx.overworld.npcs[index]
-  if npc then npc.gen3MovementType = tonumber(movementType) end
+  local type_ = tonumber(movementType)
+  if not type_ then return end
+  Gen3Commands.rememberMovementType(ctx, index or 0, type_)
+  local ow = ctx.overworld
+  local npc = index and ow and ow:npcByIndex(index)
+  if npc and npc.setMovementType then
+    npc:setMovementType(ctx.game and ctx.game.data, type_)
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -1396,11 +1440,21 @@ function Commands.g3_mart(ctx, listPointer)
                 tostring(listPointer))
     return
   end
+  -- ...AND THE SCREEN IT OPENS ON, which was still the Game Boy's.
+  --
+  -- Reported from play, with screenshots: "the pokemarts sell menu isnt
+  -- showing the gen3 bag and the buy menu isnt looking like the gen3 buy
+  -- menu".  This pushed the screen id "ShopMenu" through Screens, and the
+  -- Gen 3 alias table has no entry under that name -- so every counter in
+  -- Hoenn resolved to src/ui/ShopMenu.lua, which is pokered's.  Named
+  -- directly, the way the decoration counter two functions down already is,
+  -- so there is no alias table left to forget.
   local runner = ctx.runner
   local ok = pcall(function()
-    require("src.ui.Screens").push(ctx.game, "ShopMenu", stock, function()
-      if runner then runner:resume() end
-    end)
+    require("src.ui.Gen3ShopMenu").counter(ctx.game, {
+      stock = stock,
+      onQuit = function() if runner then runner:resume() end end,
+    })
   end)
   if not ok then return end
   if runner then runner:yield() end
@@ -1623,7 +1677,8 @@ Gen3Commands.FALL_THROUGH_KINDS = FALL_THROUGH_KINDS
 -- (the SIGHT path was gated, which is why only talking re-triggered), so
 -- every trainer in Hoenn fought you again, forever, every time you spoke to
 -- them.
-function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText)
+function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
+                                    introText, defeatText)
   ctx.g3Trainer = tonumber(trainerId)
   ctx.g3TrainerKind = tonumber(kind)
   local k = tonumber(kind) or 0
@@ -1682,8 +1737,39 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText)
       return "end"
     end
   end
+  -- WHAT THEY SAY WHEN THEY SEE YOU.
+  --
+  -- Reported from play: "when talking to a gym leader to battle them it just
+  -- initiates the battle they have no pre battle text".  Every trainer in
+  -- Hoenn was silent, and the reason was upstream -- the record's first two
+  -- pointers were never read (Gen3ScriptOps.TRAINER_BATTLE_INTRO_SLOT).
+  --
+  -- HERE is where it goes, and that is the cartridge's own order rather than
+  -- a guess.  EventScript_TryDoNormalTrainerBattle (0827_1362) runs
+  --
+  --     lock / faceplayer / the "!" walk
+  --     specialvar VAR_RESULT, $39      -- already beaten?  leave
+  --     special $3B
+  --     special $013C                   -- THE INTRO SPEECH
+  --     goto 0827_143C                  -- wait for the button, then fight
+  --
+  -- and the double script (0827_138A) is the same with the "can you field
+  -- two?" refusal ahead of it -- so the line comes after both checks above
+  -- and before the battle, which is where this sits.  Mode 3 reaches neither
+  -- special and carries no intro pointer, so it stays silent by construction.
+  if type(introText) == "string" then
+    Commands.show_text(ctx, introText)
+  end
   startTrainer(ctx, ctx.g3Trainer,
                isDouble and { double = true, trainerB = partner } or nil)
+  -- ...AND WHAT THEY SAY WHEN THEY LOSE, which the cartridge prints from
+  -- inside the battle (the defeat speech is the beaten trainer's last word
+  -- before the screen comes back).  There is no in-battle text hook for it
+  -- here, and the player-visible order is the same either way: the trainer
+  -- speaks, and only then does the win script hand over the badge.
+  if ctx.lastBattleResult == "win" and type(defeatText) == "string" then
+    Commands.show_text(ctx, defeatText)
+  end
   if ctx.lastBattleResult == "win" and not FALL_THROUGH_KINDS[k] then
     -- ON A WIN THE CARTRIDGE DOES NOT FALL THROUGH.
     --
@@ -1770,15 +1856,24 @@ function Commands.g3_set_wild(ctx, species, level, item)
                  item = item and itemId(ctx, item) or nil }
 end
 
-function Commands.g3_wild_battle(ctx)
+-- `legendary` is BATTLE_TYPE_LEGENDARY, which the three legendary specials
+-- set and `dowildbattle` does not.  It changes nothing about the fight; it is
+-- what BattleSetup_StartLegendaryBattle's own transition switch reads, and
+-- without it GROUDON -- which is that switch's DEFAULT rather than one of its
+-- named cases -- cannot be told from any other wild encounter.
+function Commands.g3_wild_battle(ctx, legendary)
   local wild = ctx.g3Wild
   if not wild then return end
   if not wild.species then
     Logger.warn("gen3: dowildbattle with no species -- skipped")
     return
   end
-  Commands.start_battle(ctx, "wild", wild.species, wild.level or 5,
-                        wild.item and { heldItem = wild.item } or nil)
+  local opts = wild.item and { heldItem = wild.item } or nil
+  if legendary then
+    opts = opts or {}
+    opts.legendary = true
+  end
+  Commands.start_battle(ctx, "wild", wild.species, wild.level or 5, opts)
 end
 
 -- ---------------------------------------------------------------------------
@@ -5761,7 +5856,7 @@ end
 -- through to GetBattleOutcome, read whatever an unrelated battle had left
 -- there, and the legend stood in front of you having done nothing.
 Gen3Commands.SPECIALS[314] = function(ctx)
-  Commands.g3_wild_battle(ctx)
+  Commands.g3_wild_battle(ctx, true)
 end
 
 -- ---------------------------------------------------------------------------
@@ -5782,7 +5877,7 @@ end
 -- Unimplemented it failed the way 314 did: the cry played, the chamber went
 -- quiet, and GetBattleOutcome read a stale result off an unrelated fight.
 Gen3Commands.SPECIALS[315] = function(ctx)
-  Commands.g3_wild_battle(ctx)
+  Commands.g3_wild_battle(ctx, true)
 end
 
 -- ---------------------------------------------------------------------------
@@ -9944,13 +10039,94 @@ end
 -- 98 ShowEasyChatScreen.  VAR_0x8004 is which caller it is.
 --
 -- BLOCKING: every one of the nineteen callers follows it with `waitstate`.
+-- HOW MANY WORDS EACH CALLER ASKS FOR, read out of the screen rather than
+-- guessed.  gSpecials[98] is ShowEasyChatScreen (011A4F0): it opens `mov
+-- r5,#3`, jumps through a 21-entry table on VAR_0x8004 (011A510), and every
+-- arm either leaves that 3 alone or overwrites r5 before branching to the
+-- common tail at 011A7C2, which passes r5 to the screen as its slot count.
+-- Walking each arm to that branch and taking the last write to r5 is where
+-- these numbers come from; `false` is the one arm that reads the count at
+-- runtime instead (type 5 takes it from VAR_0x8006), and 0 is what the two
+-- display-only arms set.
+--
+-- Type 10 -- one word -- is the interview, and that single word is the
+-- "battle clincher" GABBY quotes back at you on the next meeting.
+Gen3Commands.EASY_CHAT_WORDS = {
+  [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3,
+  [5] = false,
+  [6] = 3, [7] = 1, [8] = 0, [9] = 3, [10] = 1, [11] = 0, [12] = 1,
+  [13] = 3, [14] = 2, [15] = 3, [17] = 3, [18] = 3, [19] = 3, [20] = 3,
+}
+
+-- Where a phrase that is not the bard's is kept.  The cartridge writes each
+-- caller's words into its own corner of the save block; nothing in this port
+-- reads those corners yet, so they are kept together under the mode that
+-- chose them -- which is enough for the script that asked to be told the
+-- player answered, and keeps the phrase for whatever comes to read it.
+function Gen3Commands.easyChatSlot(save, mode)
+  if not save then return nil end
+  save.gen3EasyChat = save.gen3EasyChat or {}
+  save.gen3EasyChat[mode] = save.gen3EasyChat[mode] or {}
+  return save.gen3EasyChat[mode]
+end
+
 Gen3Commands.SPECIALS[98] = function(ctx)
   local mode = math.floor(tonumber(getVar(ctx.save, 0x8004)) or -1)
   setVar(ctx.save, VAR_RESULT, 0)
   local game, runner = ctx.game, ctx.runner
   if mode ~= Gen3Commands.EASY_CHAT_BARD then
-    Logger.debug("gen3 easy chat: mode %d is not served yet, so the script "
-                   .. "is told the player backed out", mode)
+    -- EVERY OTHER CALLER GETS THE SCREEN TOO.
+    --
+    -- Reported from play: "After battling the reporter and camera guy They
+    -- interview me but I dint get any option to awnser their questions same
+    -- with the question person in dewford".  There was none: only the bard's
+    -- mode opened the screen and all eighteen others returned here having set
+    -- VAR_RESULT to 0, which every caller reads as "the player backed out".
+    -- GABBY's script then went straight to her "Oh... okay, but don't give
+    -- up!" line with nothing ever asked.
+    local want = Gen3Commands.EASY_CHAT_WORDS[mode]
+    if want == false then
+      -- type 5 takes its count from the caller (011A61A reads VAR_0x8006)
+      want = math.floor(tonumber(getVar(ctx.save, 0x8006)) or 0)
+    end
+    if not (want and want > 0) then
+      Logger.debug("gen3 easy chat: mode %d asks for no words, so there is "
+                     .. "nothing to choose", mode)
+      return
+    end
+    local slot = Gen3Commands.easyChatSlot(ctx.save, mode)
+    local okScreen, Screen = pcall(require, "src.ui.Gen3EasyChat")
+    if not (okScreen and game and game.stack and runner and slot) then return end
+    local opened = Screen.open(game, {
+      count = want,
+      words = slot,
+      onDone = function(words)
+        local kept = {}
+        for i, w in ipairs(words) do kept[i] = w end
+        ctx.save.gen3EasyChat[mode] = kept
+        -- the first slot is the one a caller quotes back; an all-empty
+        -- phrase is the same as backing out
+        local any = false
+        for _, w in ipairs(kept) do
+          if w ~= Gen3Commands.EASY_CHAT_EMPTY then any = true end
+        end
+        -- ...and it is also what {VAR1} reads on the way out
+        if any then
+          local EasyChat = require("src.script.EasyChat")
+          ctx.game.stringBuffers = ctx.game.stringBuffers or {}
+          ctx.game.stringBuffers[1] =
+            EasyChat.phrase and EasyChat.phrase(ctx.game.data, kept)
+            or EasyChat.text(ctx.game.data, kept[1])
+        end
+        setVar(ctx.save, VAR_RESULT, any and 1 or 0)
+        runner:resume()
+      end,
+      onCancel = function()
+        setVar(ctx.save, VAR_RESULT, 0)
+        runner:resume()
+      end,
+    })
+    if opened then runner:yield() end
     return
   end
   local bard, record = Gen3Commands.bard(ctx)

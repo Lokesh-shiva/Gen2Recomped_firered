@@ -822,9 +822,35 @@ gTileset_Sootopolis = {
       [643] = "bed", [644] = "bed", [645] = "bed",
       [651] = "bed", [652] = "bed", [653] = "bed",
 
-      -- The television stands in front of the wall; the console above it
-      -- (613) stays part of the wall band, which is where it is drawn.
-      [614] = "tv",
+      -- THE GAME SYSTEM, and it is not a television: the handheld on its
+      -- stand under the shelf.  IN-GAME LOCATION: BrendansHouse_2F (3, 2)
+      -- and, on its own id, MaysHouse_2F (5, 2).
+      --
+      -- 614 AND 615 ARE ONE DRAWING.  DERIVED: the two carve to the same 89
+      -- pixels row for row, in the same four islands (83 of game system and
+      -- three 2-pixel floorboard nail dots).  Brendan's cell was pinned and
+      -- May's was not, so the same object stood as a 12px model in one
+      -- bedroom and was painted flat on the floor in the other.
+      --
+      -- `cutout` -- "paper: one voxel, pure profile", `PINNED_DEPTH.cutout
+      -- = 1` -- because a flat 2D sprite standing where the thing is drawn is
+      -- what was asked for, and because `cutout` carries the same one-object
+      -- contract `console` does: the drawing is ringed by the floor it stands
+      -- on, and the nail dots in that floor must not be extruded with it.
+      --
+      -- NOT `tv` (12), which is in JOINERY_H and lays the picture on a lid.
+      -- That pin was right when the ask was "table height"; this one is a
+      -- different ask about a different object, and the two other cells that
+      -- carry `tv` -- 576/577, the white cabinet in both living rooms -- keep
+      -- it.
+      --
+      -- THE WALL BAND ABOVE STAYS UNPINNED, and here the measurement says so
+      -- rather than only the rule: 613 and 599 carve to 256 of 256 pixels,
+      -- because a bedroom's floor set is its floorboards and the wall behind
+      -- the shelf is not in it.  A cutout pinned there would stand the whole
+      -- cell as a solid 16x16 panel.  So the upper half of the game system
+      -- stays drawn on the wall, exactly as before.
+      [614] = "cutout", [615] = "cutout",
 
       -- the stool at the shelves
       [610] = "chair",
@@ -841,6 +867,199 @@ gTileset_Sootopolis = {
 
       -- the shelf unit in the north wall band, with its things on it
       [601] = "cabinet",
+    },
+
+    -- PROFESSOR BIRCH'S LAB, and the three other rooms drawn from the same
+    -- tileset: Route114_LanettesHouse, Route119_WeatherInstitute_1F and _2F.
+    -- gTileset_Lab had NO block here at all, so every piece of furniture in
+    -- those rooms fell to the structural rule, and indoors that rule is the
+    -- blocked-run flood.
+    --
+    -- MEASURED, on the lab itself: rows 0 and 1 are ONE run of blocked cells
+    -- standing at h = 32 -- the computer, the two book desks and the corner
+    -- plant flooded in with the plain wall -- and the east wall's run swallows
+    -- the chairs at (11..12, 2..3).  That is the report, twice over: "the
+    -- books are pulling the wall in in the corner of the lab" and "the plant
+    -- is pulling the wall in too".  A run wears its picture UP ITS SOUTH
+    -- FACE, so a desk top drawn in plan is stood on its edge and the wall it
+    -- is drawn on comes forward with it.
+    --
+    -- WHY THE DETECTOR CANNOT REACH THEM, so nobody re-derives it: the indoor
+    -- furniture detector is gated on "FURNITURE IS A DISCRETE OBJECT; A WALL
+    -- IS A RUN" (BOULDER_RUN_MAX = 8, lib/Gen3.lua).  That gate is why the
+    -- lab's own free-standing bookcases at (0..3, 6..7) already stand as 32px
+    -- carcasses, and why nothing inside a 32-cell wall run ever will.  A pin
+    -- is the only instrument that reaches these cells.
+    --
+    -- ...AND WHICH ROW.  Rule 1 above says pin the FRONT row, not the wall
+    -- band, and that rule is about the KITCHEN case -- two blocked rows, both
+    -- of them the object.  These benches have ONE blocked row: the bench top
+    -- is drawn in the wall band and its legs are drawn in the walkable row
+    -- below it (546/563/574, all passable, all left alone).  There is no
+    -- front row to pin.  The plain wall ids -- 520, 521, 522, 530, 531, 572 --
+    -- are NOT pinned and go on flooding as the wall.  DERIVED: after these
+    -- pins the north wall's row 0 still measures one run of 32 across all
+    -- thirteen cells.
+    --
+    -- AND WHAT A PIN COSTS ITS NEIGHBOURS, which is the reason four of the
+    -- ids below are here at all.  A pinned cell LEAVES the blocked run
+    -- (`if ctx.pins[m] then return false end` in `blockedRun`), so pinning
+    -- can drop a neighbouring run under BOULDER_RUN_MAX and re-arm the round
+    -- carve on cells nobody asked about.  Measured cell by cell over all four
+    -- maps, before and after: the desks, the computer, the green chairs and
+    -- the corner plant move nothing but themselves; 584 would flip the lab
+    -- bench cells 560 and 576 from `tabletop` to `cylinder`, and 558 would
+    -- flip 571 and 587 the same way.  Those four ids already resolve
+    -- `tabletop` on all six cells they lay -- they are the workbench units --
+    -- so they are PINNED TO THE ANSWER THEY ALREADY HAVE, which both states
+    -- what they are and stops it depending on how big the run around them
+    -- happens to be.  With them in, the whole block moves 18 cells and not
+    -- one other cell in Hoenn.
+    gTileset_Lab = {
+
+      -- ---- THE COMPUTER, and the bench it stands on ---------------------
+      -- IN-GAME LOCATION: LittlerootTown_ProfessorBirchsLab (3..4, 1) and
+      -- Route114_LanettesHouse (7..8, 1) -- 4 cells in Hoenn.  "the computer
+      -- in birches lab is showing as a cylinder" was answered last round by
+      -- stopping the round carve lathing them; this is the other half, which
+      -- is that they were left standing as wall.
+      --
+      -- `console` is this file's own word for A MACHINE STANDING ON
+      -- FURNITURE: the per-pixel standee pool, `PINNED_DEPTH.console = 10`,
+      -- with the one-object contract that keeps only the largest connected
+      -- drawing "because the drawing is ringed by the furniture it sits on".
+      -- That is this object exactly -- a tower and a monitor on a yellow
+      -- bench -- and a per-pixel model of it is what was asked for.
+      --
+      -- NOT `tabletop` like the two book desks below, DERIVED off the carve:
+      -- 538 keeps 233 of its 256 pixels and 539 keeps 208, because the
+      -- computer fills the cell from row 0 down to the bench top at row 14.
+      -- Extruded from above at 12, that whole picture -- monitor, screen and
+      -- tower -- would be laid flat on a lid.
+      --
+      -- The computer's own TOP is drawn in the wall band above it (530/531,
+      -- rows 10..15) and stays where it is drawn.  Same compromise the 614
+      -- pin already ships and for the same reason: the wall must stay whole.
+      -- Pinning 530/531 too would vacate two cells of row 0 and re-open the
+      -- hole in the lab's north wall that `blockedRun` was written to close.
+      [538] = "console", [539] = "console",
+
+      -- ---- THE TWO BOOK DESKS -------------------------------------------
+      -- IN-GAME LOCATION: the lab's (6..7, 1) and (8..9, 1) -- the desk with
+      -- the papers and the red book, and the desk with the red book and the
+      -- stack of blue ones -- plus 524 again in Lanette's House at (6, 1).
+      -- 5 cells in Hoenn.  "the books are pulling the wall in".
+      --
+      -- DRAWN FROM ABOVE, which is what picks the class: the yellow hatched
+      -- top fills rows 4..14 of each cell and the front edge is the single
+      -- brown row 15.  The carve agrees and says where the wall stops --
+      -- DERIVED, it drops rows 0..3 of 523, 524 and 525 (the wall band) and
+      -- keeps 177, 178 and 179 pixels of desk; 526 keeps 203 because the blue
+      -- book stack rises into rows 1..3.
+      --
+      -- `tabletop` is the class for a surface drawn from above with things on
+      -- it -- the dining cloth above, MB_ROULETTE, Mossdeep's game tables --
+      -- and it is in `JOINERY_H`, so each cell is extruded from its OWN
+      -- carved silhouette rather than boxed.  TWELVE is that class's shipped
+      -- waist height on 1,561 cells: STATED by the class, not measured here.
+      [523] = "tabletop", [524] = "tabletop",
+      [525] = "tabletop", [526] = "tabletop",
+
+      -- ---- THE CHAIRS WITH BLUE BACKS ------------------------------------
+      -- IN-GAME LOCATION: the lab's (11..12, 2) on 666 and (0, 10..11) on
+      -- 584 -- 4 cells.
+      --
+      -- ONE DRAWING, two ids.  DERIVED: 666 and 584 carve to the same 198
+      -- pixels row for row -- the same chair on the wall band and against the
+      -- west wall.  Both pairs were being read as part of a wall run.
+      --
+      -- DRAWN FACE-ON: the blue back fills rows 0..4 and the seat and frame
+      -- rows 5..15, edge to edge.  That rules out `chair` -- DERIVED, the
+      -- column-top profile is 8,5,6,0,0,0,0,0,0,0,0,0,4,5,6 and its plateau
+      -- is 0, so `CHAIR_BACK_H` finds no back to raise and the chair would
+      -- come out as an 8px pad, which is the "stool, not a chair" that rule
+      -- was written to stop.
+      --
+      -- `post` is the per-pixel slab that extracts EVERY CELL ON ITS OWN
+      -- (Structures' post pool).  That is what these need and `prop` is not:
+      -- 584's two cells are stacked at (0, 10) and (0, 11) and their drawings
+      -- touch across the cell seam, so pooled they would flood into one
+      -- component and stand as a single 32px tower -- the exact failure the
+      -- post pool's own comment describes for a fence line.
+      --
+      -- 562 IS THE SAME CHAIR AND IS DELIBERATELY NOT PINNED.  It lays the
+      -- lab's third chair at (12, 3) and five more in Lanette's House, where
+      -- they sit INSIDE the west wall's furniture mass.  Measured, pinning it
+      -- moves 15 cells nobody asked about: eleven of Lanette's blocked cells
+      -- leave their run, and her two bench machines at (6..7, 3..4) fall out
+      -- of `tabletop` into `canopy` and `cylinder` -- a tree crown over a lab
+      -- bench.  Holding those down needs four more pins in a room this report
+      -- is not about, and even then five cells still move.  One chair left in
+      -- the run is the smaller error.
+      [666] = "post", [584] = "post",
+
+      -- ---- THE GREEN CHAIRS ----------------------------------------------
+      -- IN-GAME LOCATION: the lab's (4, 3), (2, 10) and (10, 10) -- three
+      -- cells, one per id, and all three PASSABLE (rule 2 above).
+      --
+      -- DRAWN IN PLAN, and the three ids are the same chair facing three
+      -- ways.  DERIVED off the carve's column-top profile, which is the very
+      -- reading `CHAIR_BACK_H` makes:
+      --
+      --   577  -,6,5,4,4,4,4,4,4,4,4,1,0,0,1,-   plateau 4 -> back cols 11..14
+      --   585  -,1,0,0,1,4,4,4,4,4,4,4,4,5,6,-   plateau 4 -> back cols 1..4
+      --   569  -,-,1,0,0,0,0,0,0,0,0,0,0,1,-,-   plateau 0 -> no back
+      --
+      -- The first two are profile for profile the shipped dining chairs
+      -- 540/548 and 537/545, so they get real backs standing over an 8px
+      -- seat.  569 is the one whose back is drawn along the NORTH edge, where
+      -- a column profile cannot see it, and it gets the seat alone -- stated
+      -- here rather than worked around, because the rule declining IS the
+      -- rule, and a per-pixel chair on the floor still beats a picture
+      -- painted on it.
+      [577] = "chair", [585] = "chair", [569] = "chair",
+
+      -- ---- THE POTTED PLANTS ---------------------------------------------
+      -- IN-GAME LOCATION: the lab's corner plant at (2, 2) on 580 -- "the
+      -- plant is pulling the wall in too instead of being a per pixel round
+      -- plant pot" -- and the two on 558 at (3, 12) and (12, 9).
+      --
+      -- 580 AND 558 ARE THE SAME DRAWING.  DERIVED, twice over: their carved
+      -- silhouettes are identical row for row, 173 pixels each, and their
+      -- object palettes match count for count (72 dark outline, 31 light
+      -- green, 47 dark green, 10 terracotta, 5 brown, 3 pale yellow, 3
+      -- yellow).  The only difference between the two cells is the 83 pixels
+      -- of BACKGROUND behind them -- wall base for 580, floor for 558.
+      --
+      -- So this is not a choice of class, it is a correction of one cell's
+      -- background.  558 at (3, 12) already resolves `cylinder` off the round
+      -- carve and its lathe is right; 580 sits on the wall band, joined the
+      -- wall run and came out as wall, and 558's OTHER cell at (12, 9) came
+      -- out `tabletop`.  Pinning both ids puts all four plants on the lathe
+      -- that one of them already had.  The silhouette states the pot: 15
+      -- columns wide at row 3, tapering to 4 at row 14.
+      --
+      -- The taper gate in `Gen3.buildScenery` is NOT touched -- a pin returns
+      -- from `classAt`'s first arm, long before the carve runs -- so Oldale's
+      -- table corners and the other 17,895 `cylinder` cells are untouched.
+      [580] = "cylinder", [558] = "cylinder",
+
+      -- ---- THE WORKBENCH UNITS, pinned to the answer they already have ---
+      -- IN-GAME LOCATION: the lab's (1, 9) and (1, 11) on 560 and 576, its
+      -- (11, 9) and (11, 11) on 571 and 587, and 560/576 again in Lanette's
+      -- House at (4, 3) and (4, 5).  6 cells in Hoenn, and MEASURED, every
+      -- one of the six resolves `tabletop` today off the round carve.
+      --
+      -- This pin changes nothing by itself -- and that is the point.  Without
+      -- it, 584 above drops 560 and 576 out of `tabletop` into `cylinder` and
+      -- 558 does the same to 571 and 587, because a pin takes its cell out of
+      -- the blocked run and the shrunken run falls under BOULDER_RUN_MAX.
+      -- These are boxy benches with a machine and a cup on them, so a lathe
+      -- is the wrong answer for them; saying outright what they are is the
+      -- right one, and it stops the answer depending on what is pinned beside
+      -- them.
+      [560] = "tabletop", [576] = "tabletop",
+      [571] = "tabletop", [587] = "tabletop",
     },
 
     -- EVERY POKEMON CENTER IN HOENN shares this tileset, so one pin set

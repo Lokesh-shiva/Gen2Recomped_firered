@@ -36,9 +36,69 @@ local Zoom = require("src.render.Zoom")
 local Strings = require("src.core.Strings")
 
 -- isOverworld marks the live world state for WorldAPI's stack scan
+-- PER-FRAME REQUIRES ARE NOT FREE.  `require` is a string hash into
+-- package.loaded on every call, and the draw path asked for these on every
+-- single frame.  They cannot be top-level requires here (TileRenderer and
+-- SpriteRenderer both reach back into this file), so they are resolved once
+-- on first use and kept.
+local TileRenderer, SpriteRendererMod, Gen3WeatherMod, Gen3CommandsMod
+local function tileRenderer()
+  TileRenderer = TileRenderer or require("src.render.TileRenderer")
+  return TileRenderer
+end
+
+-- the draw order comparators, hoisted out of the frame
+local function byGhostY(a, b) return a.npc.py + a.oy < b.npc.py + b.oy end
+local function byEntityY(a, b) return a.py < b.py end
+
+local function spriteRenderer()
+  SpriteRendererMod = SpriteRendererMod or require("src.render.SpriteRenderer")
+  return SpriteRendererMod
+end
+local function gen3Commands()
+  Gen3CommandsMod = Gen3CommandsMod or require("src.script.Gen3Commands")
+  return Gen3CommandsMod
+end
+local function gen3Weather()
+  Gen3WeatherMod = Gen3WeatherMod or require("src.world.Gen3Weather")
+  return Gen3WeatherMod
+end
+
 local OverworldState = { isOpaque = true, isOverworld = true }
 
 local Game -- set on enter (avoids circular require at load time)
+
+-- AN EMPTY PLOT DRAWS NOTHING, asked once per entity per frame.  Written
+-- with `pcall(function() ... require(...) ... end)` this was a closure, a
+-- pcall frame and a package.loaded lookup for every entity on the map, sixty
+-- times a second; pcall takes arguments, so none of that is needed.
+local function berryStageOf(id)
+  return gen3Commands().berryTreeStage(Game.save, id)
+end
+
+local function plotIsEmpty(e)
+  if not e.berryTreeId then return false end
+  local ok, stage = pcall(berryStageOf, e.berryTreeId)
+  return ok and (stage or 0) <= 0
+end
+
+-- ONE PLOT'S POSE, lifted out of the pcall it used to be written inside.
+local function poseBerryTree(self, npc, trees, G, SR)
+  local stage = G.berryTreeStage(Game.save, npc.berryTreeId) or 0
+  if stage <= 0 then return end
+  local key = trees.sheetKeys
+              and trees.sheetKeys[G.berryTreeBerry(Game.save, npc.berryTreeId)]
+  local def = key and Game.data.sprites and Game.data.sprites[key]
+  if def and npc.berrySheet ~= key then
+    npc.sprite = SR.new(def, npc.id)
+    npc.berrySheet = key
+  end
+  local frames = trees.stages and trees.stages[stage]
+  if frames and #frames > 0 then
+    local at = math.floor(self.berryClock / OverworldState.BERRY_TREE_HOLD)
+    npc.fixedFrame = frames[(at % #frames) + 1]
+  end
+end
 
 local mapScripts -- registry of hand-ported map scripts
 
@@ -385,10 +445,19 @@ local function objectHome(save, mapId, obj)
   save = save or (Game and Game.save)
   local homes = save and save.gen3ObjectHomes and save.gen3ObjectHomes[mapId]
   local home = homes and homes[obj.index]
-  if not (home and home.x and home.y) then return obj end
+  local placed = home and home.x and home.y
+  -- ...AND HOW IT STANDS THERE, which is the other half of the template a
+  -- script can rewrite.  `setobjectmovementtype` writes the template on the
+  -- cartridge exactly as `setobjectxyperm` does, so it has to come back the
+  -- same way on the next map build -- otherwise Littleroot re-poses Mom on
+  -- arrival and she is facing her map definition's way again the moment you
+  -- walk out and back in.
+  local posed = home and home.movementType
+  if not (placed or posed) then return obj end
   local moved = {}
   for k, v in pairs(obj) do moved[k] = v end
-  moved.x, moved.y = home.x, home.y
+  if placed then moved.x, moved.y = home.x, home.y end
+  if posed then moved.movementType = home.movementType end
   return moved
 end
 OverworldState.objectHome = objectHome -- exposed for tests
@@ -1351,20 +1420,111 @@ function OverworldState:rebuildNeighbors()
 
   -- visual-only NPCs on connected maps (survey zoom): same spawn filter
   -- as a real map entry, but they never join self.entities -- no sight
-  -- lines, triggers, dialogue or player collision.  Instances are
-  -- shared with the real-NPC pool, so positions carry across the seam.
+  -- lines, triggers or dialogue.  Instances are shared with the real-NPC
+  -- pool, so positions carry across the seam.
+  --
+  -- THEY STILL HAVE BODIES, though, and that half of the exclusion was a
+  -- bug: see updateCast below.
   self.ghosts = {}
   for _, nb in ipairs(self.neighbors) do
     local peers = {}
+    nb.peers = peers
+    -- the seam offset in CELLS.  Everything in this engine steps on a 16px
+    -- grid whatever the dataset's block size, and a connection offset is a
+    -- whole number of blocks, so this is always exact.
+    nb.cx, nb.cy = nb.ox / 16, nb.oy / 16
     for _, obj in ipairs(nb.map.def.objects or {}) do
       if objectVisible(Game.save, nb.map.id, obj) then
         local npc = pooledNPC(self.npcPool, Game.data, nb.map.id, obj)
         table.insert(peers, npc)
         table.insert(self.ghosts,
                      { npc = npc, map = nb.map, ox = nb.ox, oy = nb.oy,
-                       peers = peers })
+                       nb = nb, peers = peers })
       end
     end
+  end
+  self.cast = nil
+end
+
+-- ONE CAST, IN EVERY LOADED MAP'S OWN CELLS.
+--
+-- Asked for directly: "npcs walk through each other".  At a seam two of the
+-- three casts on screen could not see each other at all.  A neighbour's
+-- ghosts are deliberately kept out of self.entities -- no sight lines, no
+-- triggers, no dialogue -- and the exclusion took their BODIES with it, so
+-- the home cast and the player walked through them, and they walked back.
+-- Two attendants standing in the same tile from either side of a connection
+-- is also what a "duplicate NPC" looks like, which is the other half of the
+-- same report.
+--
+-- The cartridge has no seam to fall down: gObjectEvents spans the loaded map
+-- AND its connections in one coordinate space, and every collision test
+-- reads that one array.  This rebuilds the same thing once a frame -- the
+-- whole cast, written once in home cells and once in each neighbour's.
+--
+-- The translations are PROXIES rather than the entities themselves, because
+-- an NPC has one set of coordinates and they belong to its own map.  Each
+-- proxy names its owner in `of`, which is how Collision.occupied tells a
+-- mover apart from its own shadow, and the tables are reused frame to frame
+-- so a crowded seam does not turn into garbage.
+--
+-- The Battle Frontier is the worst case in Hoenn and the place it was
+-- reported from: six of its outdoor maps are a connected 3x2 grid, so five
+-- foreign casts can be on screen at once.
+local function castProxy(store, i, body, cx, cy)
+  local pr = store[i]
+  if not pr then pr = {} ; store[i] = pr end
+  pr.of = body
+  pr.cellX = body.cellX and (body.cellX + cx)
+  pr.cellY = body.cellY and (body.cellY + cy)
+  pr.targetX = body.targetX and (body.targetX + cx)
+  pr.targetY = body.targetY and (body.targetY + cy)
+  pr.big = Collision.isBig(body) or nil
+  pr.passable = body.passable or body.hidden or nil
+  return pr
+end
+
+function OverworldState:updateCast()
+  local ghosts = self.ghosts
+  if not (ghosts and ghosts[1]) then
+    -- no seam in view: everybody is already in the one list they need
+    self.cast = nil
+    return
+  end
+  local store = self.castStore
+  if not store then store = { home = {}, away = {} } ; self.castStore = store end
+  -- home cells: the real cast as it stands, plus every ghost brought over
+  local home = store.homeList or {}
+  store.homeList = home
+  for i = #home, 1, -1 do home[i] = nil end
+  for _, e in ipairs(self.entities or {}) do home[#home + 1] = e end
+  for i, g in ipairs(ghosts) do
+    home[#home + 1] = castProxy(store.home, i, g.npc, g.nb.cx, g.nb.cy)
+  end
+  self.cast = home
+  -- ...and the same crowd in each neighbour's cells.  Its OWN ghosts go in
+  -- untranslated -- they are already in those cells, and a body that is
+  -- present as itself never needs a shadow.
+  local away = store.away
+  for n, nb in ipairs(self.neighbors) do
+    local list = away[n]
+    if not list then list = { bodies = {} } ; away[n] = list end
+    for i = #list, 1, -1 do list[i] = nil end
+    for _, npc in ipairs(nb.peers or {}) do list[#list + 1] = npc end
+    local cx, cy = -nb.cx, -nb.cy
+    local at = 0
+    for _, e in ipairs(self.entities or {}) do
+      at = at + 1
+      list[#list + 1] = castProxy(list.bodies, at, e, cx, cy)
+    end
+    for _, g in ipairs(ghosts) do
+      if g.nb ~= nb then
+        at = at + 1
+        list[#list + 1] =
+          castProxy(list.bodies, at, g.npc, g.nb.cx + cx, g.nb.cy + cy)
+      end
+    end
+    nb.cast = list
   end
 end
 
@@ -1685,6 +1845,17 @@ function OverworldState:pushBattleTransition(battle, opts, onDone)
   -- job now -- the one choke point every battle passes through on exit,
   -- guaranteed regardless of which caller pushed the battle -- so this
   -- function only owns the entry wipe.
+  -- WHAT EMERALD'S OWN CHOICE NEEDS, on top of the Game Boy's three bits.
+  --
+  -- GetBattleTransitionTypeByMap wants the map, the flash level and the water;
+  -- GetTrainerBattleTransition wants the opponent's class and name; the
+  -- legendary starters want the species.  All of it is here already, and
+  -- BattleTransition simply ignores whatever a Game Boy dataset cannot answer.
+  local enemyMon = battle and battle.enemy and battle.enemy.mon
+  local enemySpecies = enemyMon and enemyMon.species
+  local speciesDef = enemySpecies and Game.data.pokemon
+                     and Game.data.pokemon[enemySpecies]
+  local trainer = battle and battle.trainer
   Game.stack:push(BattleTransition.new(Game, onDone or function()
     Game.stack:push(battle)
   end, {
@@ -1694,8 +1865,43 @@ function OverworldState:pushBattleTransition(battle, opts, onDone)
     tutorial = opts and opts.tutorial or nil,
     contest = opts and opts.contest or nil,
     safari = opts and opts.safari or nil,
+    mapTransitionType = self:gen3TransitionType(),
+    enemyLevel = enemyLevel,
+    leadLevel = lead and lead.level or nil,
+    trainerClass = trainer and tonumber(trainer.class) or nil,
+    trainerName = trainer and trainer.name or nil,
+    legendary = battle and battle.legendary or nil,
+    legendSpecies = (speciesDef and speciesDef.name) or enemySpecies,
   }))
   return true
+end
+
+-- GetBattleTransitionTypeByMap (00B0D24), which answers 0..3 and not a
+-- boolean.  Its four questions in the cartridge's own order:
+--
+--   Overworld_GetFlashLevel() non-zero        -> 2   a dark cave
+--   the player is on surfable water           -> 3
+--   gMapHeader.mapType is UNDERGROUND         -> 1
+--   gMapHeader.mapType is UNDERWATER          -> 3
+--   otherwise                                 -> 0
+--
+-- nil outside Hoenn, where the Game Boy's three bits still decide.
+function OverworldState:gen3TransitionType()
+  if not GameVersion.isGen3() then return nil end
+  local record = (Game.data.constants or {}).gen3BattleTransitions
+  local types = (record and record.mapTypes)
+                or { normal = 0, cave = 1, flash = 2, water = 3 }
+  local okFlash, level = pcall(function()
+    return require("src.world.Gen3Flash").level(Game)
+  end)
+  if okFlash and (tonumber(level) or 0) > 0 then return types.flash end
+  if self.player and self.player.surfing then return types.water end
+  local def = self.map and self.map.def
+  if def then
+    if def.mapType == "UNDERWATER" then return types.water end
+    if def.mapType == "UNDERGROUND" then return types.cave end
+  end
+  return types.normal
 end
 
 function OverworldState:pushBattle(battle, opts)
@@ -2657,13 +2863,16 @@ function OverworldState:update(dt)
   end
   self:poseBerryTrees()
   self:updateRipples()
+  -- every body on screen, home and foreign alike, in this map's cells
+  self:updateCast()
+  local cast = self.cast or self.entities
   for _, npc in ipairs(self.npcs) do
-    npc:update(self.map, self.entities)
+    npc:update(self.map, cast)
   end
   require("src.world.PikachuFollower").update(Game, self)
 
   for _, g in ipairs(self.ghosts) do
-    g.npc:update(g.map, g.peers)
+    g.npc:update(g.map, (g.nb and g.nb.cast) or g.peers)
   end
 
   -- THE PLAYER TAKES ITS SCRIPTED STEP HERE TOO, with the NPCs.
@@ -2909,6 +3118,49 @@ function OverworldState:checkGen2CarpetExit(dir)
   return true
 end
 
+-- TryArrowWarp (field_control_avatar.c), which is the OTHER HALF of making
+-- Hoenn's exit mats directional -- and unlike Gen 2's carpets it is not
+-- merely the polite way off the mat, it is the only way off it at all.
+--
+-- Reported from play: "when i walk left or right onto the warp tiles it warps
+-- me back outside, it should only do this if walk back out facing the exit".
+-- Taking the sideways step away in Warp.onArrive is half a fix, and on its own
+-- it would lock the player inside every Pokemon Center in the region, because
+-- all three of the port's other ways out are shut on these cells:
+--
+--   * A STEP OUT THE FRONT CANNOT HAPPEN.  On all 535 arrow warps in Hoenn
+--     the cell in the mat's own direction is out of bounds (385 of them) or
+--     impassable (the other 150) -- derived over data/generated -- which is
+--     what a doorway IS.  There is no completed step to qualify.
+--   * checkEdgeExit and the blocked-step Warp.onCollision are both gated on
+--     BIT_STANDING_ON_WARP, and refreshStandingOnWarp clears it for exactly
+--     these cells: a mat is a warp tile and is not a door tile.  Checked
+--     against the real data -- MAP_G01_N00's (8,8) and (9,8) both answer
+--     false -- so canCollisionWarp is false on every mat in the game.
+--   * ExtraWarpCheck's carpet table is Gen 1 data (field.warpCarpets) and
+--     this dataset ships none, so extraCheck falls back to "facing the map
+--     edge", which is false for the 150 mats that back onto a wall.
+--
+-- The cartridge's own condition is the d-pad HELD in a direction the player
+-- already faces -- ProcessPlayerFieldInput runs TryArrowWarp under
+-- `input->heldDirection && input->dpadDirection == playerDirection` -- which
+-- is precisely the branch this sits in, ahead of the step.  It consults
+-- neither BIT_STANDING_ON_WARP nor the arrival guard, and that is right and
+-- deliberate: you may turn round on the mat you have just this moment landed
+-- on and walk straight back out of the Center, which is what the game lets
+-- you do.
+function OverworldState:checkGen3ArrowWarp(dir)
+  local p = self.player
+  -- duck-typed map stubs (the editor, the save converter, a mod's fixture)
+  -- may not carry the method; they are not Gen 3 maps either
+  if not self.map.arrowWarpDirAt then return false end
+  if self.map:arrowWarpDirAt(p.cellX, p.cellY) ~= dir then return false end
+  local w = self.map:warpAtCell(p.cellX, p.cellY)
+  if not w then return false end
+  self:takeWarp(w.def)
+  return true
+end
+
 -- Put the Cycling Road down, on both generations.
 --
 -- Gen 1 kept ALWAYS_ON_BIKE in `save.forcedBike`; Gen 2 keeps it -- and
@@ -3032,7 +3284,9 @@ function OverworldState:checkGen3Gate(dir)
   -- ...but only when the step would otherwise have been allowed.  The
   -- cartridge asks the gates AFTER the map has said the cell is walkable, so
   -- a gate behind a wall is never asked and never turns.
-  if not Collision.canMove(self.map, self.entities, p, dir) then return false end
+  if not Collision.canMove(self.map, self.cast or self.entities, p, dir) then
+    return false
+  end
   local Gates = require("src.world.Gen3Gates")
   local function passable(cx, cy)
     if not self.map:inBounds(cx, cy) then return false end
@@ -3314,12 +3568,20 @@ function OverworldState:handleInput()
       if self:checkGen2Whirlpool(dir) then return end
       if not self.player.moving and self.player.facing == dir then
         if self:checkGen2CarpetExit(dir) then return end
+        -- ...and its Gen 3 counterpart, which is the only way off a Hoenn
+        -- exit mat: the cell the mat points at is a wall or off the map on
+        -- every one of them, so there is no step for the arrival check to
+        -- qualify.  Ahead of checkEdgeExit deliberately -- that path answers
+        -- for the 385 mats whose front is off the map, and it is gated on
+        -- BIT_STANDING_ON_WARP, which is clear on every mat.
+        if self:checkGen3ArrowWarp(dir) then return end
         if self:checkEdgeExit(dir) then return end
         if self:checkLedgeHop(dir) then return end
         if self:checkBoulderPush(dir) then return end
         if self:checkGen3Gate(dir) then return end
       end
-      local result, why = self.player:tryMove(dir, self.map, self.entities)
+      local result, why =
+        self.player:tryMove(dir, self.map, self.cast or self.entities)
       -- a collision while standing on a warp square fires the warp when the
       -- extra check passes (CheckWarpsCollision: route-gate doorways, dock
       -- entrances, ...), and only while BIT_STANDING_ON_WARP is set (issue
@@ -3401,7 +3663,7 @@ function OverworldState:handleInput()
     end
     if downhill then
       self.player.facing = "down"
-      self.player:tryMove("down", self.map, self.entities)
+      self.player:tryMove("down", self.map, self.cast or self.entities)
       return
     end
   end
@@ -4039,7 +4301,7 @@ function OverworldState:facingIsLandDismount()
   local fx, fy = p:facingCell()
   if self.map:inBounds(fx, fy) then
     return self.map:isWalkableCell(fx, fy)
-       and Collision.canMove(self.map, self.entities, p, p.facing)
+       and Collision.canMove(self.map, self.cast or self.entities, p, p.facing)
   end
   local dest, ts, x, y = self:connectionLanding(p.facing)
   if not dest then return false end
@@ -6268,7 +6530,7 @@ function OverworldState:logGen3Weather()
   if not GameVersion.isGen3() then return end
   local save = Game.save
   if not save then return end
-  local Gen3Weather = require("src.world.Gen3Weather")
+  local Gen3Weather = gen3Weather()
   local value = save.gen3WeatherActive
   local name = self:weatherName(value)
   local stage = self:gen3WeatherStage()
@@ -6283,10 +6545,25 @@ function OverworldState:logGen3Weather()
               draws and "drawn" or "nothing to draw")
 end
 
+-- ONE CLOSURE FOR THE LIFE OF THE STATE, not one a frame.  Weather is up
+-- across most of Hoenn, so the handler the renderer holds is built once and
+-- reads the three fields the state keeps beside it.
+local function screenWeather(self)
+  local fn = self.weatherDraw
+  if not fn then
+    fn = function(w, h)
+      local G3 = gen3Weather()
+      return G3.draw(self.weatherName, self.weatherAt, w, h, self.weatherStage)
+    end
+    self.weatherDraw = fn
+  end
+  return fn
+end
+
 function OverworldState:drawFieldWeather()
   local name = self:fieldWeather()
   if not name then return false end
-  local Gen3Weather = require("src.world.Gen3Weather")
+  local Gen3Weather = gen3Weather()
   local frame = self.weatherFrame or 0
   local stage = self:gen3WeatherStage()
   if not Gen3Weather.draws(name, frame, stage) then return false end
@@ -6304,9 +6581,8 @@ function OverworldState:drawFieldWeather()
   -- cartridge's background-layer weather sits beneath the window layer.
   local r = Game.renderer
   if r then
-    r.screenWeather = function(w, h)
-      Gen3Weather.draw(name, frame, w, h, stage)
-    end
+    self.weatherName, self.weatherAt, self.weatherStage = name, frame, stage
+    r.screenWeather = screenWeather(self)
     return true
   end
   local w, h = self:uiSize()
@@ -6361,7 +6637,7 @@ function OverworldState:checkGen3Current()
     self.gen3Current = nil
     return false
   end
-  if not Collision.canMove(map, self.entities, p, way) then
+  if not Collision.canMove(map, self.cast or self.entities, p, way) then
     self.gen3Current = nil
     return false
   end
@@ -6543,7 +6819,7 @@ function OverworldState:checkMuddySlope()
   -- ...and you are pushed back the way the ramp faces, which is the opposite
   -- of the one direction it can be climbed in
   local slide = MUDDY_OPPOSITE[climb] or "down"
-  if not Collision.canMove(map, self.entities, p, slide) then
+  if not Collision.canMove(map, self.cast or self.entities, p, slide) then
     self.muddySlide = nil
     return false
   end
@@ -6583,7 +6859,7 @@ function OverworldState:checkGen2Ice()
   -- Full permission check (bounds, walkable, side walls, pairs, entities).
   -- Ice Path cliffs are LAND with a directional wall; isWalkableCell alone
   -- lets the slide walk straight off them and off the map edge.
-  local allowed = Collision.canMove(self.map, self.entities, p, dir)
+  local allowed = Collision.canMove(self.map, self.cast or self.entities, p, dir)
   if not allowed then
     self.iceSlide = nil
     return false
@@ -8074,7 +8350,17 @@ function OverworldState:checkTrainerSight()
         -- 4-tiles-north tile that cell math would still count as in range.
         if dist and dist >= 1 then
           local pixelDist = trainerSightPixelDist(npc, p, horizontal)
-          if pixelDist > 0 and pixelDist <= range * 16 then
+          -- ...AND NOTHING IN THE WAY.  A shared row and a range are only
+          -- two thirds of GetTrainerApproachDistance (0B3DF0): its third
+          -- act walks the tiles between and gives the whole direction up
+          -- on the first wall, ledge or NPC standing in them
+          -- (Collision.sightPathClear carries the cartridge's own mask).
+          --
+          -- Reported from play: "they also see me through each other".
+          local clear = pixelDist > 0
+            and Collision.sightPathClear(self.map, self.cast or self.entities,
+                                         npc, way, dist)
+          if clear and pixelDist <= range * 16 then
             -- a trainer who looks every way turns to face you first, which
             -- is what the cartridge does before the approach walk
             npc.facing = way
@@ -8840,7 +9126,12 @@ function OverworldState:onStepComplete()
       -- being re-stated at each call site. It was stated here and NOT at the
       -- call further down that actually takes the warp, which is exactly how
       -- a doormat became a trapdoor.
-      warpFirst = Warp.onArrive(self.map, p.cellX, p.cellY)
+      -- p.facing IS the direction of the step that just finished: tryMove
+      -- sets the facing before it starts the step and nothing turns the
+      -- player mid-step (Player:tryMove, scriptMove).  Gen 3 needs it to tell
+      -- a step ONTO an exit mat from a step THROUGH one; Gen 1 and Gen 2
+      -- ignore the argument entirely.
+      warpFirst = Warp.onArrive(self.map, p.cellX, p.cellY, p.facing)
     end
   end
 
@@ -8986,7 +9277,11 @@ function OverworldState:onStepComplete()
     -- CheckWarpsNoCollision: door/warp tiles fire immediately; otherwise
     -- ExtraWarpCheck must pass AND either a d-pad is held or BIT_FORCED_WARP
     -- is set (Seafoam B3F currents -- home/overworld.asm).
-    local w = Warp.onArrive(self.map, p.cellX, p.cellY)
+    -- ...and the direction goes to THIS one too.  It was stated at the
+    -- ordering check above and not at the call that actually takes the warp
+    -- once before -- that is exactly how the Gen 2 doormat became a trapdoor
+    -- (see the comment on Warp.onArrive), so both sites pass it.
+    local w = Warp.onArrive(self.map, p.cellX, p.cellY, p.facing)
     -- ...and ExtraWarpCheck is a GEN 1 routine with no Gen 2 counterpart.
     -- Gen 2's CheckTileEvent runs CheckWarpTile and nothing else; the only
     -- other way a warp fires there is DoPlayerMovement .CheckWarp, which is
@@ -9951,7 +10246,8 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
       -- onto shelves) the step bumps and the player stays on the door,
       -- arrival disable intact, instead of clipping into the wall.
       if self.map:isDoorTileCell(self.player.cellX, self.player.cellY) then
-        if Collision.canMove(self.map, self.entities, self.player, "down") then
+        if Collision.canMove(self.map, self.cast or self.entities,
+                             self.player, "down") then
           -- THE ARRIVAL GUARD STAYS UP while the walk-out runs.
           --
           -- It used to be dropped here, on the reasoning that the auto-walk
@@ -10167,6 +10463,41 @@ function OverworldState:replaceBlock(bx, by, block)
   self.map.blocksDirty = nil
   Runtime.emit("world.block_replaced",
     { mapId = self.map.id, bx = bx, by = by, block = block })
+end
+
+-- THE WHOLE MAP AT ONCE (Prism's `changemap`).
+--
+-- ChangeMap (00:$1868) reads the loaded map's own wMapWidth and wMapHeight and
+-- copies that many bytes of a decompressed blob over its block buffer, so the
+-- map decides how much is taken, not the blob.
+--
+-- It goes through the same per-instance blockPatch a single changeblock uses,
+-- and deliberately so: the generated map record stays the cartridge's, and the
+-- map's own script header is what re-establishes the swap on a later entry
+-- (Mound Cave's is `checkevent / siftrue / changemap`), exactly as the
+-- cartridge re-derives it from its callbacks every time the map loads.
+function OverworldState:replaceBlocks(blocks)
+  local map = self.map
+  local def = map and map.def
+  if not (def and blocks) then return false end
+  local width = tonumber(def.width) or 0
+  local count = width * (tonumber(def.height) or 0)
+  if count <= 0 then return false end
+  local changed = 0
+  for i = 1, math.min(count, #blocks) do
+    local block = blocks[i]
+    local bx, by = (i - 1) % width, math.floor((i - 1) / width)
+    if block ~= nil and block ~= map:blockAt(bx, by) then
+      map.blockPatch[i] = block
+      changed = changed + 1
+    end
+  end
+  if changed == 0 then return false end
+  map.blocksDirty = true
+  if map.renderer then map.renderer:rebuild() end
+  map.blocksDirty = nil
+  Runtime.emit("world.blocks_replaced", { mapId = map.id, count = changed })
+  return true
 end
 
 -- A map's `variablesprite` callback usually runs after its objects have been
@@ -10936,17 +11267,28 @@ end
 -- A cache that predates the stage answers nothing and nothing reflects, which
 -- is exactly what this port did before and is a missing picture rather than a
 -- wrong one.
-function OverworldState:reflectiveCell(cx, cy)
+-- ASKED ABOUT A HUNDRED TIMES A FRAME, so the behaviour list is turned into a
+-- lookup once rather than walked for every cell of every reflection search.
+-- The set is data that only changes with the dataset, and `reflectSet` is the
+-- table it was built from, so a reloaded cache rebuilds it.
+function OverworldState:reflectiveBehaviours()
   local set = Game and Game.data and Game.data.constants
               and Game.data.constants.gen3Reflection
   local list = set and set.behaviours
-  if not (list and self.map and self.map.cellBehaviour) then return false end
-  local here = self.map:cellBehaviour(cx, cy)
-  if not here then return false end
-  for _, b in ipairs(list) do
-    if b == here then return true end
+  if not list then return nil end
+  if self._reflectFrom ~= list then
+    local want = {}
+    for _, b in ipairs(list) do want[b] = true end
+    self._reflectFrom, self._reflectSet = list, want
   end
-  return false
+  return self._reflectSet
+end
+
+function OverworldState:reflectiveCell(cx, cy)
+  local want = self:reflectiveBehaviours()
+  if not (want and self.map and self.map.cellBehaviour) then return false end
+  local here = self.map:cellBehaviour(cx, cy)
+  return (here and want[here]) and true or false
 end
 
 -- ...AND THE WATER IS RARELY THE TILE YOU ARE STANDING ON.
@@ -11019,18 +11361,33 @@ function OverworldState:reflectionSearch(e)
   local sprite = e.sprite
   local tall = math.max(1, math.floor((((sprite and sprite.tileH) or 16) + 8) / 16))
   local wide = math.max(1, math.floor((((sprite and sprite.tileW) or 16) + 8) / 16))
-  local cells, seen = nil, {}
+  -- THE WORKING TABLES ARE KEPT, not built a frame.  This allocated a `seen`
+  -- table and a closure for every reflective entity on every frame, plus one
+  -- two-element table per cell it found -- forty-odd objects a frame on a
+  -- waterside route, which is GC pressure rather than work.  `seen` belongs
+  -- to the state (it never outlives the call); the cell list belongs to the
+  -- ENTITY, because the answer is stored on it and read later in the frame,
+  -- so one shared list would hand every entity the last one's water.  The
+  -- SHAPE is unchanged: a list of {cx, cy} pairs, or nil.
+  local seen = self._reflectSeen
+  if not seen then seen = {} self._reflectSeen = seen
+  else for k in pairs(seen) do seen[k] = nil end end
+  local cells = e._reflectCells
+  if not cells then cells = {} e._reflectCells = cells end
+  local n = 0
+  local px = e.targetX or e.cellX
+  local py = e.targetY or e.cellY
   local function ask(cx, cy)
     local k = cx * 4096 + cy
     if seen[k] then return end
     seen[k] = true
     if self:reflectiveCell(cx, cy) then
-      cells = cells or {}
-      cells[#cells + 1] = { cx, cy }
+      n = n + 1
+      local pair = cells[n]
+      if pair then pair[1], pair[2] = cx, cy
+      else cells[n] = { cx, cy } end
     end
   end
-  local px = e.targetX or e.cellX
-  local py = e.targetY or e.cellY
   for row = 1, tall do
     ask(e.cellX, e.cellY + row)
     ask(px, py + row)
@@ -11041,6 +11398,8 @@ function OverworldState:reflectionSearch(e)
       ask(px - col, py + row)
     end
   end
+  for i = #cells, n + 1, -1 do cells[i] = nil end
+  if n == 0 then return nil end
   return cells
 end
 
@@ -11158,15 +11517,27 @@ function OverworldState:rippleSprite()
   return self._rippleSprite or nil
 end
 
+-- ONE RING, in the flat camera's coordinates.
+--
+-- Split out of drawRipples because the two paths that draw rings want them at
+-- different granularities.  The flat path draws the whole set in one sheet of
+-- screen space.  A render pipeline (the voxel diorama) cannot: each ring lies
+-- on the water at its OWN cell, so each has to be projected onto the ground
+-- separately, one `at()` call apiece through ctx.drawFx.  Sharing this keeps
+-- exactly one copy of the sheet's four-pixel lift.
+function OverworldState:drawRippleRing(sprite, r, camX, camY)
+  -- drawFixedFrame subtracts the sheet's own four-pixel lift, so the y here
+  -- is handed over with it added back
+  sprite:drawFixedFrame(r.px, r.py + 4, camX, camY, self:rippleFrame(r.clock))
+end
+
 function OverworldState:drawRipples(camX, camY)
   local live = self.ripples
   if not (live and #live > 0) then return end
   local sprite = self:rippleSprite()
   if not sprite then return end
   for _, r in ipairs(live) do
-    -- drawFixedFrame subtracts the sheet's own four-pixel lift, so the y here
-    -- is handed over with it added back
-    sprite:drawFixedFrame(r.px, r.py + 4, camX, camY, self:rippleFrame(r.clock))
+    self:drawRippleRing(sprite, r, camX, camY)
   end
 end
 
@@ -11245,30 +11616,17 @@ function OverworldState:poseBerryTrees()
                 and Game.data.constants.gen3Berries
                 and Game.data.constants.gen3Berries.trees
   if not (trees and self.npcs) then return end
-  local G = require("src.script.Gen3Commands")
-  local SR = require("src.render.SpriteRenderer")
+  local G = gen3Commands()
+  local SR = spriteRenderer()
   self.berryClock = (self.berryClock or 0) + 1
   for _, npc in ipairs(self.npcs) do
     if npc.berryTreeId then
       -- a plot whose record is missing or malformed keeps whatever it is
-      -- already wearing rather than taking the whole field update down
-      pcall(function()
-        local stage = G.berryTreeStage(Game.save, npc.berryTreeId) or 0
-        if stage <= 0 then return end
-        local key = trees.sheetKeys
-                    and trees.sheetKeys[G.berryTreeBerry(Game.save,
-                                                         npc.berryTreeId)]
-        local def = key and Game.data.sprites and Game.data.sprites[key]
-        if def and npc.berrySheet ~= key then
-          npc.sprite = SR.new(def, npc.id)
-          npc.berrySheet = key
-        end
-        local frames = trees.stages and trees.stages[stage]
-        if frames and #frames > 0 then
-          local at = math.floor(self.berryClock / OverworldState.BERRY_TREE_HOLD)
-          npc.fixedFrame = frames[(at % #frames) + 1]
-        end
-      end)
+      -- already wearing rather than taking the whole field update down.
+      -- pcall TAKES ARGUMENTS: written as pcall(function() ... end) this was
+      -- a fresh closure per plot per frame, and a route with a dozen plots
+      -- pays that sixty times a second.
+      pcall(poseBerryTree, self, npc, trees, G, SR)
     end
   end
 end
@@ -11284,11 +11642,12 @@ function OverworldState:drawWorld()
   -- advance the water/flower tile animation (runs under dialogs too).
   -- TileRenderer.tick uses wall-clock 60Hz steps so display refresh rate
   -- does not speed or slow the cycle (issue #4).
-  require("src.render.TileRenderer").tick()
+  local TR = tileRenderer()
+  TR.tick()
   -- let the renderer know whether a spinner puzzle is currently sliding
   -- the player, so it can flicker the arrow tiles between the blur and
   -- static graphic (engine/overworld/spinners.asm LoadSpinnerArrowTiles)
-  require("src.render.TileRenderer").setSpinning(self.player.spinning)
+  TR.setSpinning(self.player.spinning)
   local cam = self.camera
   -- ShakeElevator's oscillation (engine/overworld/elevator.asm) writes
   -- hSCY, which scrolls the BG layer only -- tiles bounce while OAM
@@ -11335,10 +11694,11 @@ function OverworldState:drawWorld()
   -- tilting.  nil headless / on stale palettes -> billboards go uncolorized.
   local zones = tilt and self.sgbWorldZones and self:sgbWorldZones() or nil
 
-  -- ghost NPCs on neighbor maps, y-sorted among themselves
-  table.sort(self.ghosts,
-             function(a, b) return a.npc.py + a.oy < b.npc.py + b.oy end)
-  table.sort(self.entities, function(a, b) return a.py < b.py end)
+  -- ghost NPCs on neighbor maps, y-sorted among themselves.  The two
+  -- comparators are file-level: built inline they were two closures on every
+  -- frame, and table.sort is unstable so the sorts themselves have to stay.
+  table.sort(self.ghosts, byGhostY)
+  table.sort(self.entities, byEntityY)
 
   -- === shared FX draw bodies ==========================================
   -- Each draws at flat world-canvas offsets; the tilt path wraps the
@@ -11827,6 +12187,18 @@ function OverworldState:drawWorld()
       if self.healAnim then
         at(fxHeal, self.healAnim.px + 8, self.healAnim.py + 16)
       end
+      -- THE WATER RIPPLES ARE NOT HERE, AND MUST NOT BE.
+      --
+      -- They are the one field effect that is not a picture pasted over the
+      -- scene: a ring LIES ON THE WATER, so it has to be drawn with the
+      -- water, under whoever is standing in it.  This seam composites over
+      -- the FINISHED scene -- terrain, water and every character already
+      -- down -- which is exactly the report it produced when the rings were
+      -- offered here: "the ripples are appearing over the player character".
+      -- A pipeline that wants them draws them itself, as ground geometry, in
+      -- its own pass ordering (DRAMATIC_SHAPE: VoxelScene.drawRipples, drawn
+      -- between the water pass and the character pass).  The FLAT path is
+      -- unaffected and still draws them through OverworldState:drawRipples.
       -- standing effects anchor at the foot of whoever they belong to
       if self.emote and self.emote.npc then
         at(fxEmote, self.emote.npc.px + 8, self.emote.npc.py + 16)
@@ -11884,14 +12256,7 @@ function OverworldState:drawWorld()
     -- ...AND A PLOT'S ANSWER CHANGES WHILE YOU ARE STANDING THERE.  A tree
     -- is planted, grows and is picked without the map reloading, so its
     -- emptiness is asked at draw time rather than remembered at spawn.
-    local function plotEmpty(e)
-      if not e.berryTreeId then return false end
-      local ok, stage = pcall(function()
-        return require("src.script.Gen3Commands")
-          .berryTreeStage(Game.save, e.berryTreeId)
-      end)
-      return ok and (stage or 0) <= 0
-    end
+    local plotEmpty = plotIsEmpty
     local function drawEntity(e)
       if not (self.flyAnim and self:hasFlyBird() and e == self.player)
          and not e.hidden and not plotEmpty(e) then

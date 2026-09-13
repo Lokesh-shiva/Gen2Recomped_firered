@@ -115,11 +115,41 @@ function Gen3BoxMenu:sgbPalettes()
                            math.ceil(GBA_H / 8) - 1) }
 end
 
+-- WHAT THE CARTRIDGE SAYS ABOUT DEPOSITING, out of the storage system's own
+-- string block (gen3PCMenu.storage.text, swept beside "What would you like to
+-- do?").  The fallbacks are this port's English for a cache imported before
+-- the sweep; none of them is the wording it used to use, which was invented.
+local BOX_FALLBACK = {
+  deposited = "was deposited.",
+  boxFull   = "The BOX is full.",
+  lastMon   = "That's your last POKeMON!",
+  whichTake = "Which one will you take?",
+}
+
+function Gen3BoxMenu.word(game, key)
+  local storage = ((game.data.constants or {}).gen3PCMenu or {}).storage
+  local said = type(storage) == "table" and type(storage.text) == "table"
+               and storage.text[key] or nil
+  return type(said) == "string" and said or BOX_FALLBACK[key]
+end
+
 function Gen3BoxMenu.new(game, opts)
   local self = setmetatable({ game = game, opts = opts or {}, t = 0 },
                             Gen3BoxMenu)
   Boxes.ensure(game.save)
   self.row, self.col = 1, 1
+  -- DEPOSIT OPENS ON THE PARTY, because on the cartridge it IS a party
+  -- screen: sInPartyMenu is set from the box option before the first frame,
+  -- so BOXOPTION_DEPOSIT slides the party in and puts the cursor in it rather
+  -- than on the grid.  The question it asks afterwards -- "Deposit in which
+  -- BOX?" -- is the other half of the same fact: the mon is chosen first and
+  -- the box second, which is the wrong way round if the grid has the cursor.
+  --
+  -- Reported from play: "the deposit Pokemon screen should show your party
+  -- from the start not the box".
+  if self.opts.mode == "deposit" then
+    self.partyOpen, self.partyIndex = true, 1
+  end
   return self
 end
 
@@ -180,41 +210,55 @@ function Gen3BoxMenu:release(slot)
     ("%s was released."):format(name)))
 end
 
--- The deposit half.  Emerald pulls the party up over the grid; this port has
--- a party screen that already looks right and already answers a pick, so the
--- flow borrows it rather than drawing a second party list here.
+-- THE DEPOSIT HALF, and it happens IN THIS SCREEN.
+--
+-- This used to push the Gen 3 party MENU over the box and take a pick there,
+-- on the reasoning that the port already had a party list that looked right.
+-- The cartridge does not: storage's party is a panel of this screen that
+-- slides in over the grid (PARTY above), the cursor starts in it for the
+-- deposit option, and the grid behind it stays visible because it is the
+-- destination.  Reported from play: "the deposit Pokemon screen should show
+-- your party from the start not the box".
+--
+-- SELECT still lands here, because SELECT is how the older screen reached
+-- deposit and a save in the wild may have that habit; it just opens the panel
+-- instead of a second screen.
 function Gen3BoxMenu:deposit()
   local game = self.game
-  if #game.save.party <= 1 then
-    game.stack:push(TextBox.new(game,
-      Strings("You can't deposit your last POKéMON!")))
+  if #(game.save.party or {}) <= 1 then
+    game.stack:push(TextBox.new(game, Gen3BoxMenu.word(game, "lastMon")))
     return
   end
-  -- `pickOnly` + `onSwitch` is how EVERY picker in this port is asked for --
-  -- an item's target, a script's `choosemon`, the battle's forced switch --
-  -- and it is what Screens' alias table says the Gen 3 party menu serves.  A
-  -- callback under any other name is a push that alias declines, and the
-  -- player gets the Game Boy party list in Hoenn.
-  require("src.ui.Screens").push(game, "PartyMenu", {
-    pickOnly = true,
-    onSwitch = function(mon)
-      if not mon then return end
-      if #self:box() >= Boxes.capacity() then
-        game.stack:push(TextBox.new(game, Strings("This BOX is full!")))
-        return
-      end
-      local party = game.save.party
-      for i = 1, #party do
-        if party[i] == mon then
-          table.remove(party, i)
-          break
-        end
-      end
-      table.insert(self:box(), mon)
-      game.stack:push(TextBox.new(game,
-        ("%s was stored."):format(self:nameOf(mon))))
-    end,
-  })
+  self.onButtons = nil
+  self.partyOpen, self.partyIndex = true, 1
+end
+
+-- Put the party mon in slot `index` into the box on screen.  The box is the
+-- one the grid is showing, which is what the cartridge asks for by name
+-- ("Deposit in which BOX?") and what left/right on the title row chooses
+-- here -- so stepping out of the panel, changing box and coming back is the
+-- same choice in a different order.
+function Gen3BoxMenu:depositFromParty(index)
+  local game = self.game
+  local party = game.save.party or {}
+  local mon = party[index]
+  if not mon then return end
+  if #party <= 1 then
+    game.stack:push(TextBox.new(game, Gen3BoxMenu.word(game, "lastMon")))
+    return
+  end
+  if #self:box() >= Boxes.capacity() then
+    game.stack:push(TextBox.new(game, Gen3BoxMenu.word(game, "boxFull")))
+    return
+  end
+  table.remove(party, index)
+  table.insert(self:box(), mon)
+  -- the cartridge's line is the bare "was deposited." with the name in front
+  -- of it, the way every storage message is built
+  game.stack:push(TextBox.new(game,
+    ("%s %s"):format(self:nameOf(mon), Gen3BoxMenu.word(game, "deposited"))))
+  local last = #PARTY.slots + 1
+  self.partyIndex = math.max(1, math.min(self.partyIndex, math.min(#party, last)))
 end
 
 function Gen3BoxMenu:nameOf(mon)
@@ -298,7 +342,15 @@ function Gen3BoxMenu:update(dt)
     elseif input:wasPressed("a") then
       Sound.play(self.game.data, "Press_AB")
       local mon = (self.game.save.party or {})[self.partyIndex]
-      if mon then self:carryFromParty(self.partyIndex) end
+      if mon then
+        -- ...and what A means here is the mode's, exactly as it is over the
+        -- grid: MOVE picks the mon up to carry it, DEPOSIT puts it away.
+        if self.opts.mode == "deposit" then
+          self:depositFromParty(self.partyIndex)
+        else
+          self:carryFromParty(self.partyIndex)
+        end
+      end
     end
     return
   end
@@ -318,9 +370,11 @@ function Gen3BoxMenu:update(dt)
     elseif input:wasPressed("a") then
       Sound.play(self.game.data, "Press_AB")
       if self.buttonIndex == 1 then
-        -- MOVE POKeMON and MOVE ITEMS are the only modes that may summon it
-        -- (080C839E); WITHDRAW gets "Which one will you take?" instead
-        if self.opts.mode == "move" then
+        -- MOVE POKeMON and MOVE ITEMS may summon it (080C839E), and so may
+        -- DEPOSIT -- which opens inside it and needs a way back once the
+        -- player has stepped out to change box.  WITHDRAW gets "Which one
+        -- will you take?" instead, and has no use for the party at all.
+        if self.opts.mode == "move" or self.opts.mode == "deposit" then
           self.onButtons = nil
           self.partyOpen, self.partyIndex = true, 1
         end

@@ -61,6 +61,18 @@ end
 function Gen3StartMenu:uiSize() return GBA_W, GBA_H end
 function Gen3StartMenu:wantsFillScale() return true end
 
+-- NOT A PANEL, so its edge is not a frame to continue.
+--
+-- Renderer:bleedEdges paints the letterbox with the surface's outermost row
+-- and column so a menu's border appears to run to the window edge.  Here the
+-- outermost column is a small window in the corner with the MAP behind it -- pulling it
+-- outward stretches that sideways instead of extending a border.  Reported
+-- from play: "fix the stretching of borders on the start menu, main menu,
+-- main menu intro and the continue, new game, options, exit menus ... instead
+-- make them full screen/fit the screen without stretching".  wantsFillScale
+-- above is what makes it fill; this is what stops it smearing.
+function Gen3StartMenu:wantsEdgeBleed() return false end
+
 -- colour, not four shades: the same reasoning as Gen3Title's
 function Gen3StartMenu:sgbPalettes()
   local P = require("src.render.PaletteFX")
