@@ -53,11 +53,19 @@ local STD_MSGBOX_SIGN        = 3
 local STD_MSGBOX_DEFAULT     = 4
 local STD_MSGBOX_YESNO       = 5
 local STD_MSGBOX_AUTOCLOSE   = 6
+-- STD_RECEIVED_ITEM: `msgreceiveditem`'s own box (FireRed's giveitem_msg;
+-- see event.inc).  Emerald has the same slot -- some of its scripts call it
+-- directly by number rather than through a named macro.  Unlike
+-- STD_OBTAIN_ITEM/STD_FIND_ITEM it does not add the item itself (the
+-- script's own `additem` already ran); it only fills the {STR_VAR_n}
+-- placeholders from VAR_0x8000/0x8001, plays the fanfare and shows the
+-- SCRIPT'S OWN text -- "AAAAAAA received TM39\nfrom BROCK.", not the
+-- generic "got item" box.
+local STD_RECEIVED_ITEM      = 9
 
 local PLAIN_MSGBOX = {
   [STD_MSGBOX_NPC] = true, [STD_MSGBOX_SIGN] = true,
   [STD_MSGBOX_DEFAULT] = true, [STD_MSGBOX_AUTOCLOSE] = true,
-  [9] = true,                     -- the fanfare box; the tune is std-internal
 }
 
 -- Emerald numbers flags and vars in one space each; the port's flag registry
@@ -362,6 +370,8 @@ local function std(ir, s, isJump)
     emit(s, { "g3_from_yesno" })
   elseif index == STD_OBTAIN_ITEM or index == STD_FIND_ITEM then
     emit(s, { "g3_std_obtain_item", index })
+  elseif index == STD_RECEIVED_ITEM then
+    emit(s, { "g3_std_received_item", s.lastText })
   else
     emit(s, { "g3_std", index })
   end

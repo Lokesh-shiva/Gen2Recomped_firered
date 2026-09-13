@@ -1201,9 +1201,19 @@ local function itemId(ctx, n)
 end
 Gen3Commands.itemId = itemIdFor
 
+-- `additem`/`addpcitem` ARE SILENT ON THE CARTRIDGE.  ScrCmd_additem
+-- (scrcmd.c) is `gSpecialVar_Result = AddBagItem(...)` and nothing else --
+-- no text, no sound.  The message every gift script shows is a SEPARATE
+-- std script the `giveitem`/`finditem` macros route through (g3_std_obtain_
+-- item, below), or -- on FireRed -- `giveitem_msg`'s own custom line
+-- (g3_std_received_item).  A raw `additem` printing "{PLAYER} got X!" meant
+-- every FireRed `giveitem_msg` (additem, then its own received-text std)
+-- showed the generic box AND the cartridge's line, one after the other --
+-- reported from play as Brock's TM39 showing "AAAAAAA got TM39!" instead of
+-- "AAAAAAA received TM39\nfrom BROCK."
 function Commands.g3_give_item(ctx, item, quantity)
   local id = itemId(ctx, item)
-  if id then Commands.give_item(ctx, id, tonumber(quantity) or 1) end
+  if id then Commands.give_item(ctx, id, tonumber(quantity) or 1, false) end
   setVar(ctx.save, VAR_RESULT, 1)
   setResult(ctx, 1)
 end
@@ -6403,6 +6413,47 @@ function Commands.g3_std_obtain_item(ctx, which)
   local id = itemIdFor(ctx.game and ctx.game.data, item)
   if id then Commands.give_item(ctx, id, count) end
   -- the bag has no cap in this port, so it always fits
+  setVar(save, VAR_RESULT, 1)
+  setResult(ctx, 1)
+end
+
+-- STD_RECEIVED_ITEM (9): `msgreceiveditem`'s box.  Unlike STD_OBTAIN_ITEM
+-- above, the item is ALREADY in the bag -- `giveitem_msg` expands to a raw
+-- `additem` followed by this std, and additem is what added it (silently;
+-- see g3_give_item).  This std's whole job is to fill {STR_VAR_1}/{STR_VAR_2}
+-- from VAR_0x8000/0x8001, play the jingle, and show the SCRIPT'S OWN text --
+-- not add anything a second time.
+--
+-- Reported from play: Brock's TM39 showed "AAAAAAA got TM39!", the engine's
+-- generic line, instead of the cartridge's "AAAAAAA received TM39\nfrom
+-- BROCK." -- both halves of that were this std being unhandled: additem was
+-- printing the generic box (fixed in g3_give_item) and this one, on
+-- FALLING THROUGH TO g3_std, was silently dropping the cartridge's line
+-- (Logger.debug and nothing shown) rather than displaying it.
+function Commands.g3_std_received_item(ctx, text)
+  local save = ctx.save
+  local data = ctx.game and ctx.game.data
+  local item = getVar(save, 0x8000)
+  local count = getVar(save, 0x8001)
+  if (tonumber(count) or 0) < 1 then count = 1 end
+  local id = itemIdFor(data, item)
+  local def = id and data and data.items and data.items[id]
+  ctx.game.stringBuffers = ctx.game.stringBuffers or {}
+  ctx.game.stringBuffers[1] = def and def.name or tostring(item)
+  ctx.game.stringBuffers[2] = tostring(count)
+  -- the legacy single buffer too, for a text that reaches it via {STR_VAR_1}
+  -- resolving through RAM:wStringBuffer rather than the numbered slot
+  ctx.game.stringBuffer = ctx.game.stringBuffers[1]
+  if text then
+    local Sound = require("src.core.Sound")
+    local jingle = (def and def.keyItem) and "Get_Key_Item" or "Get_Item1"
+    ctx.textOpts = ctx.textOpts or {}
+    ctx.textOpts.auto = {
+      sound = function() return Sound.play(ctx.game.data, jingle) end,
+      wait = true,
+    }
+    Commands.show_text(ctx, text)
+  end
   setVar(save, VAR_RESULT, 1)
   setResult(ctx, 1)
 end

@@ -35,7 +35,7 @@ return function(game)
       battled = true
       U.wait(200); shot("91_brock_battle")
     end
-    if battled and i % 600 == 0 and n < 8 then
+    if battled and i % 90 == 0 and n < 20 then
       n = n + 1
       shot(("92_after_%02d"):format(n))
     end
