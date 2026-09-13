@@ -63,6 +63,15 @@ local Theme = require("src.ui.Theme")
 
 local Gen3BagMenu = {}
 Gen3BagMenu.__index = Gen3BagMenu
+-- Every other full-screen menu in this port (ShopMenu, Gen3ShopMenu,
+-- Gen3Options, ...) declares this; the bag never did.  Opening the TM CASE
+-- or the BERRY POUCH pushes a SECOND Gen3BagMenu on top of the first, and
+-- with neither one opaque the stack draws from the bottom up (Game.
+-- drawBaseInStack / StateStack:visibleBase) -- the parent screen's bag
+-- sprite, tilted toward whatever pocket it was on, painted first and then
+-- only PARTLY covered by the child's own background.  Reported from play as
+-- a grey silhouette showing through the TM CASE screen.
+Gen3BagMenu.isOpaque = true
 
 local GBA_W, GBA_H = 240, 160
 
@@ -596,7 +605,20 @@ function Gen3BagMenu:draw()
     end
   end
 
-  -- the bag itself, tilted toward the pocket in front
+  -- the bag itself, tilted toward the pocket in front.
+  --
+  -- TRIED, AND REVERTED: skipping this for the TM CASE / BERRY POUCH sub-
+  -- views (opened with a locked pocket) on the grounds that neither has a
+  -- bag drawn on the real cartridge -- they are their own screens
+  -- (tm_case.c / berry_pouch.c), not the bag's.  It uncovered a worse
+  -- problem instead of fixing one: the extracted FRLG background
+  -- (bag_male.png/bag_female.png) carries a flat grey drop-shadow tile
+  -- where the bag SPRITE normally sits on top of it, and with the sprite
+  -- gone that shadow shows as an unexplained grey blob.  Drawing the bag
+  -- anyway at least reads as "a bag", which is closer to right than a
+  -- silhouette with nothing on it.  The real fix is TM CASE and BERRY
+  -- POUCH getting their own extracted backgrounds instead of borrowing the
+  -- bag's; out of scope for this pass.
   local image, quad = self:bagFrame()
   if image and quad then
     local B = r.bag or FALLBACK.bag
