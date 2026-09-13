@@ -15471,16 +15471,51 @@ function RomExtractorGen3:extractMapScripts()
   -- so a literal `setvar` seen earlier in the same script is carried forward
   -- and resolved.  A target that cannot be resolved is left alone rather than
   -- guessed at -- a wrongly hidden NPC is worse than a wrongly shown one.
-  local spawned = {}
+  -- ...AND AN OBJECT A MAP PUTS BACK ON ARRIVAL IS NOT ONE IT SPAWNS LATER.
+  --
+  -- Reported from play: "some npcs are still missing in the trainer hall".
+  -- Four of the Trainer Hill entrance's five people were, and the fifth was
+  -- the only one no script mentions.  The map's ON_RETURN_TO_FIELD (026811B)
+  -- is four bare lines --
+  --
+  --     addobject 2 / addobject 1 / addobject 5 / addobject 4 / end
+  --
+  -- -- and this pass read them as "these four are spawned by a script", which
+  -- makes them hidden until one runs.  They are not.  That callback is a
+  -- RESTORE: those four are in the map's own object_events and stand there
+  -- from the moment it loads, and the callback puts them back after a
+  -- challenge has taken them away.  `addobject` on somebody already present
+  -- is a no-op on the cartridge, which is why it can be written this way.
+  --
+  -- The distinction is the SCRIPT KIND, and the map header carries it.  ON_LOAD
+  -- (1), ON_TRANSITION (3), ON_RESUME (5), ON_DIVE_WARP (6) and
+  -- ON_RETURN_TO_FIELD (7) all run as you arrive, before you can see the map,
+  -- so anybody they add is present when the fade comes up.  The var-gated
+  -- TABLES -- ON_FRAME_TABLE (2) and ON_WARP_INTO_MAP_TABLE (4) -- are the
+  -- cutscene shape this pass was written for ("the rival is waiting for you
+  -- the first time you walk in"), and they are untouched.
+  --
+  -- So both facts travel: `spawned` still says which ids a script can add, and
+  -- `restored` says which of them an arrival callback puts back -- and an id
+  -- in `restored` starts on the map rather than off it.
+  local ARRIVAL_CALLBACKS = { [1] = true, [3] = true, [5] = true, [6] = true,
+                              [7] = true }
+  local spawned, restored = {}, {}
   do
     local index = self._mapScriptIndex or {}
     for mapId, entry in pairs(index) do
       local roots, seen, ids = {}, {}, {}
+      local backRoots, backSeen, backIds = {}, {}, {}
       local function add(key) if type(key) == "string" then roots[#roots + 1] = key end end
       for _, key in pairs(entry.objects or {}) do add(key) end
       for _, key in pairs(entry.signs or {}) do add(key) end
       for _, rec in ipairs(entry.coords or {}) do add(rec.script or rec[2]) end
-      for _, rec in ipairs(entry.callbacks or {}) do add(rec.script or rec[2]) end
+      for _, rec in ipairs(entry.callbacks or {}) do
+        add(rec.script or rec[2])
+        if ARRIVAL_CALLBACKS[rec.type] and type(rec.script) == "string" then
+          backRoots[#backRoots + 1] = rec.script
+        end
+      end
       -- A VAR-GATED TABLE KEEPS ITS SCRIPTS IN ITS ROWS, and this walked the
       -- table record itself -- which has no `script` of its own -- so every
       -- one of them was skipped.  That is where a map's cutscenes live: an
@@ -15521,7 +15556,38 @@ function RomExtractorGen3:extractMapScripts()
           end
         end
       end
+      -- the same walk again, rooted only at the callbacks that run on arrival
+      local backAt = 1
+      while backRoots[backAt] do
+        local key = backRoots[backAt]
+        backAt = backAt + 1
+        if not backSeen[key] then
+          backSeen[key] = true
+          local vars = {}
+          for _, row in ipairs(scripts[key] or {}) do
+            local op = row[1]
+            if op == "setvar" then
+              local id, value = tonumber(row[2]), tonumber(row[3])
+              if id and value then vars[id] = value end
+            elseif op == "addobject" or op == "addobjectat" then
+              local target = tonumber(row[2])
+              local resolved = target
+              if target and target >= 0x4000 then resolved = vars[target] end
+              if resolved and resolved > 0 and resolved < 256 then
+                backIds[resolved] = true
+              end
+            end
+            for k = 2, #row do
+              local v = row[k]
+              if type(v) == "number" and v > 0x8000000 and v < 0x9000000 then
+                backRoots[#backRoots + 1] = ("S%07X"):format(v - 0x8000000)
+              end
+            end
+          end
+        end
+      end
       if next(ids) then spawned[mapId] = ids end
+      if next(backIds) then restored[mapId] = backIds end
     end
   end
 
@@ -15531,6 +15597,8 @@ function RomExtractorGen3:extractMapScripts()
     movements = movements,          -- filled by extractMovementScripts
     -- local ids the map's own scripts spawn; see the note above
     spawned = spawned,
+    -- ...and the ones an arrival callback puts BACK, which start on the map
+    restored = restored,
     maps = self._mapScriptIndex or {},
     info = {
       rootCount = rootCount,

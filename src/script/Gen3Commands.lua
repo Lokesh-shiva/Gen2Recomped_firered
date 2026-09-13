@@ -10930,7 +10930,114 @@ Gen3Commands.installFrontierDispatchers = function()
       return Gen3Commands.frontierCall(ctx, facility)
     end
   end
+  -- ...except this one, which cannot answer zero.  See below.
+  Gen3Commands.SPECIALS[507] = function(ctx)
+    return Gen3Commands.trainerHillCall(ctx)
+  end
 end
+
+-- ---------------------------------------------------------------------------
+-- TRAINER HILL, WHERE ZERO IS NOT A NEUTRAL ANSWER.
+--
+-- Reported from play: "The trainer hill above mauville in emerald is acting as
+-- if i already battled when i walk in".  It was: the receptionist met you with
+-- "That was too bad.  I think you put in a tremendous effort in your battling.
+-- Please come back and try again!" before you had fought anybody.
+--
+-- WHERE THAT LINE COMES FROM.  The entrance's map scripts (02680AC) carry an
+-- ON_FRAME_TABLE at 026813E whose first arm runs on the frame you arrive:
+--
+--     VAR_0x4000 == 0 -> 0268182
+--         setvar VAR_0x8004, 6
+--         special CallTrainerHillFunction        (507)
+--         copyvar VAR_0x8000, VAR_RESULT
+--         goto_if eq VAR_0x8000, 0 -> 02681B5    "That was too bad..."
+--         goto_if eq VAR_0x8000, 1 -> 02681CA    "we moved the counter here"
+--         goto_if eq VAR_0x8000, 2 -> 02681EE    end -- say nothing
+--
+-- and 507 was going through the generic Frontier dispatcher above, which
+-- answers VAR_RESULT = 0 on purpose because zero is the "no / not yet / none"
+-- arm of every one of THOSE.  Here it is the arm that means YOU JUST LOST A
+-- CHALLENGE, so the one choice that is safe everywhere else is the single
+-- worst answer on this map.
+--
+-- WHAT THE CARTRIDGE ANSWERS.  CallTrainerHillFunction (01D5494) indexes the
+-- eighteen-entry table at 062A618 with VAR_0x8004.  Four of those functions
+-- have a result the entrance's scripts branch on, and each was read off its
+-- handler.  All four are written against one flags byte in the save
+-- (gSaveBlock1 + 3D6E), and every bit of it is clear until a challenge has
+-- actually been played:
+--
+--   6  (01D5AD0)  bit 3 set -> clear it, answer 0   the challenge was lost
+--                 bit 4 set -> clear it, answer 1   the counter moved
+--                 otherwise            answer 2   nothing to say  <- ours
+--   8  (01D5BBC)  floors == 4 -> 1, else print the count and answer 0.
+--                 The stock hill (no e-Reader data) has four, so 1 -- which
+--                 is the "TRAINERS gathered in every room" line.  Answering
+--                 0 printed "Up to floor no." with an empty number in it.
+--   9  (01D5C00)  answers 0 unconditionally.  The only one the old stub had
+--                 right, and it had it right by accident.
+--   16 (01D6568)  bit 3 of the same byte -> 0, otherwise 1.  ON_RESUME
+--                 (02680D0 -> 02680FF) ends quietly on 1 and walks the player
+--                 on 0, so this one was moving you as you came in.
+--
+-- THE REST ARE STILL NOT PORTED -- starting, timing and scoring a Trainer Hill
+-- run is a whole game mode, and nothing here pretends otherwise.  They fall
+-- through to the Frontier dispatcher's log and its zero, which is correct for
+-- them: the entrance reads none of their results.
+--
+-- The flags byte is kept in the save so that if the mode is ever implemented,
+-- the two functions that CONSUME a bit already do.
+Gen3Commands.TRAINER_HILL_LOST_BIT = 8      -- bit 3, the "you lost" notice
+Gen3Commands.TRAINER_HILL_MOVED_BIT = 16    -- bit 4, the "counter moved" one
+Gen3Commands.TRAINER_HILL_FLOORS = 4        -- the stock hill's floor count
+
+function Gen3Commands.trainerHillFlags(save)
+  local record = save and save.gen3TrainerHill
+  return math.floor(tonumber(record and record.flags) or 0)
+end
+
+-- a field rather than a file-level local: this chunk is at Lua's 200-local
+-- ceiling (see the note on the Frontier facility loop above)
+function Gen3Commands.takeTrainerHillFlag(save, bit)
+  local flags = Gen3Commands.trainerHillFlags(save)
+  if flags % (bit * 2) < bit then return false end
+  if save then
+    save.gen3TrainerHill = save.gen3TrainerHill or {}
+    save.gen3TrainerHill.flags = flags - bit
+  end
+  return true
+end
+
+function Gen3Commands.trainerHillCall(ctx)
+  local save = ctx.save
+  local arg = math.floor(tonumber(getVar(save, 0x8004)) or 0)
+  local LOST = Gen3Commands.TRAINER_HILL_LOST_BIT
+  local MOVED = Gen3Commands.TRAINER_HILL_MOVED_BIT
+  if arg == 6 then
+    local answer = 2
+    local take = Gen3Commands.takeTrainerHillFlag
+    if take(save, LOST) then answer = 0
+    elseif take(save, MOVED) then answer = 1 end
+    setVar(save, VAR_RESULT, answer)
+    return 0
+  elseif arg == 8 then
+    local floors = math.floor(tonumber(
+      (save and save.gen3TrainerHill and save.gen3TrainerHill.floors))
+      or Gen3Commands.TRAINER_HILL_FLOORS)
+    setVar(save, VAR_RESULT, floors == Gen3Commands.TRAINER_HILL_FLOORS and 1 or 0)
+    return 0
+  elseif arg == 9 then
+    setVar(save, VAR_RESULT, 0)
+    return 0
+  elseif arg == 16 then
+    local flags = Gen3Commands.trainerHillFlags(save)
+    setVar(save, VAR_RESULT, (flags % (LOST * 2) >= LOST) and 0 or 1)
+    return 0
+  end
+  return Gen3Commands.frontierCall(ctx, "trainerHill")
+end
+
 Gen3Commands.installFrontierDispatchers()
 
 -- ---------------------------------------------------------------------------

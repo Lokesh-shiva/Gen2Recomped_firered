@@ -348,17 +348,33 @@ local function objectVisible(save, mapId, obj)
   local spawnList = Game and Game.data and Game.data.map_scripts
                     and Game.data.map_scripts.spawned
   local scripted = spawnList and spawnList[mapId]
+  local spawnRestored = Game and Game.data and Game.data.map_scripts
+                        and Game.data.map_scripts.restored
   if scripted and obj.index and scripted[obj.index] then
     -- an explicit toggle by a script wins; nothing else does
     local told = obj.eventFlag and save.flags and save.flags[obj.eventFlag]
     local slot = save.gen3Spawned and save.gen3Spawned[mapId]
     local here = slot and obj.index and slot[obj.index]
+    -- ...AND AN OBJECT THE MAP PUTS BACK ON ARRIVAL STARTS ON IT.
+    --
+    -- Reported from play: "some npcs are still missing in the trainer hall".
+    -- A map's ON_LOAD / ON_TRANSITION / ON_RESUME / ON_RETURN_TO_FIELD run
+    -- before the fade comes up, so an `addobject` in one of them is putting
+    -- somebody BACK, not introducing them -- the Trainer Hill entrance's
+    -- whole ON_RETURN_TO_FIELD is four of them in a row, for the four people
+    -- who were missing.  The import tells the two apart by the script kind
+    -- the map header gives it (see `restored` in RomExtractorGen3).
+    --
+    -- It only moves the DEFAULT: a flag, or a spawn this session recorded,
+    -- still wins, which is what keeps a cutscene actor hidden when their
+    -- scene has not run.
+    local back = spawnRestored and spawnRestored[mapId]
     if told ~= nil then
       visible = not told
     elseif here ~= nil then
       visible = here
     else
-      visible = false
+      visible = (back and back[obj.index]) and true or false
     end
   end
   -- ...AND AN OBJECT WITH NO FLAG OF ITS OWN, TAKEN AWAY FOR THIS VISIT.
@@ -1484,6 +1500,36 @@ local function castProxy(store, i, body, cx, cy)
   return pr
 end
 
+-- A GHOST'S SEAM OFFSET, IN CELLS, FROM WHICHEVER FIELD IT CARRIES.
+--
+-- Reported from play on Crystal and Emerald with Wild Skies enabled:
+-- "src/world/OverworldController.lua:1502: attempt to index field 'nb' (a nil
+-- value)", and "worked before the last few updates".
+--
+-- Every ghost THIS file builds carries the neighbour record it came from, so
+-- reading nb.cx straight off one was safe while this file was the only thing
+-- that ever appended to self.ghosts.  It is not the only thing: a mod that
+-- puts its own figures on a neighbouring map appends here too, and what it
+-- was written against is the ox/oy pair that has always sat beside `nb` in
+-- the same record -- which is still what every OTHER consumer of the list
+-- reads (byGhostY, the ghost draw pass, the billboard pass).  `nb` is the one
+-- field this pass added, and it is the one field a third-party ghost has no
+-- reason to know about.
+--
+-- So: the neighbour's cells when the ghost names a neighbour, its own offset
+-- when it does not, and the home map's own cells when it has neither.  The
+-- two agree by construction -- nb.cx IS nb.ox / 16 -- so this is the same
+-- number by a shorter route, not a fallback that means something different.
+local function ghostCell(g)
+  local nb = g.nb
+  if nb and nb.cx then return nb.cx, nb.cy end
+  local ox, oy = tonumber(g.ox), tonumber(g.oy)
+  if ox and oy then return ox / 16, oy / 16 end
+  return 0, 0
+end
+OverworldState.ghostCell = ghostCell -- exposed for tests, and for a mod that
+                                     -- appends ghosts of its own to the list
+
 function OverworldState:updateCast()
   local ghosts = self.ghosts
   if not (ghosts and ghosts[1]) then
@@ -1499,7 +1545,8 @@ function OverworldState:updateCast()
   for i = #home, 1, -1 do home[i] = nil end
   for _, e in ipairs(self.entities or {}) do home[#home + 1] = e end
   for i, g in ipairs(ghosts) do
-    home[#home + 1] = castProxy(store.home, i, g.npc, g.nb.cx, g.nb.cy)
+    local gx, gy = ghostCell(g)
+    home[#home + 1] = castProxy(store.home, i, g.npc, gx, gy)
   end
   self.cast = home
   -- ...and the same crowd in each neighbour's cells.  Its OWN ghosts go in
@@ -1520,8 +1567,9 @@ function OverworldState:updateCast()
     for _, g in ipairs(ghosts) do
       if g.nb ~= nb then
         at = at + 1
+        local gx, gy = ghostCell(g)
         list[#list + 1] =
-          castProxy(list.bodies, at, g.npc, g.nb.cx + cx, g.nb.cy + cy)
+          castProxy(list.bodies, at, g.npc, gx + cx, gy + cy)
       end
     end
     nb.cast = list
@@ -2873,7 +2921,12 @@ function OverworldState:update(dt)
   require("src.world.PikachuFollower").update(Game, self)
 
   for _, g in ipairs(self.ghosts) do
-    g.npc:update(g.map, (g.nb and g.nb.cast) or g.peers)
+    -- the same reasoning as ghostCell: a ghost that names no neighbour is
+    -- standing in the home map's own cells, so the home map and the home cast
+    -- are what it walks around.  Collision.occupied does ipairs on whatever it
+    -- is handed, so "no cast at all" is a crash rather than an empty room.
+    g.npc:update(g.map or self.map,
+                 (g.nb and g.nb.cast) or g.peers or self.cast or self.entities)
   end
 
   -- THE PLAYER TAKES ITS SCRIPTED STEP HERE TOO, with the NPCs.
