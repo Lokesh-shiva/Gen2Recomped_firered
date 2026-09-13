@@ -645,6 +645,74 @@ local function drawStatusPanel(battle, battler, x, y, player)
   -- not: the foe's cream box is nineteen tall and the player's is
   -- TWENTY-SEVEN, because the player's is the tall box and has a third row
   -- for the current-and-max numbers.
+  -- THE CARTRIDGE'S OWN WINDOWS, when the import recorded them: every piece
+  -- of text goes where UpdateNickInHealthbox / UpdateLvlInHealthbox /
+  -- UpdateHpTextInHealthbox copy it, and the bar where SpriteCB_HealthBar
+  -- puts its sprite.  See RomExtractorGen3.HUD_WINDOWS.
+  local win = record and record.windows
+    and record.windows[player and "player" or "opponent"]
+  if win and win.name and win.level and win.bar then
+    local strip = hpRampFor(record, battler)
+    local maxHp = math.max(1, battler.mon.stats.hp or 1)
+    local barW = HUD_HP_TILES * 8
+    local filled = 0
+    if shownHP(battler) > 0 then
+      filled = math.max(1, math.floor(shownHP(battler) * barW / maxHp))
+    end
+    local badge = statusBadge(record, battle, battler)
+    local label = hudImage(record.bars and record.bars.label)
+    love.graphics.setColor(1, 1, 1, 1)
+    if badge then
+      love.graphics.draw(badge, x + win.label.x, y + win.label.y)
+    elseif label then
+      love.graphics.draw(label, x + win.label.x, y + win.label.y)
+    end
+    drawRamp(strip, x + win.bar.x, y + win.bar.y, HUD_HP_TILES, filled)
+
+    local symbol, symbolInk = genderSymbol(record, battle, battler)
+    local symbolW = symbol and Font.width(symbol) or 0
+    local shown = fitName(battler.name, win.name.w - symbolW)
+    Font.draw(shown, x + win.name.x, y + win.name.y)
+    if symbol then
+      Font.pushStyle(symbolInk)
+      Font.draw(symbol, x + win.name.x + Font.width(shown), y + win.name.y)
+      Font.popStyle()
+    end
+    -- "{LV_2}" then the number left-aligned, shifted right five pixels for
+    -- every digit short of three
+    local digits = #tostring(battler.mon.level)
+    levelAt(battle, battler, x + win.level.x + 5 * (3 - digits),
+            y + win.level.y, "Lv" .. tostring(battler.mon.level))
+
+    if player and win.hpCurrent and win.hpMax then
+      -- both right-aligned in three digit cells, the current one with its
+      -- slash, exactly as ConvertIntToDecimalStringN pads them
+      local cell = Font.width("0")
+      local cur = tostring(shownHP(battler))
+      local max = tostring(battler.mon.stats.hp)
+      Font.draw(cur .. "/", x + win.hpCurrent.x + cell * (3 - #cur),
+                y + win.hpCurrent.y)
+      Font.draw(max, x + win.hpMax.x + cell * (3 - #max), y + win.hpMax.y)
+    end
+    if player then
+      local exp = hudImage(record.bars and record.bars.exp)
+      local place = hudExpStrip(record)
+      if exp and place then
+        local filledExp = 0
+        if battle.expFraction then
+          local okFill, value = pcall(battle.expFraction, battle)
+          filledExp = (okFill and tonumber(value)) or 0
+        end
+        local top = (record.bars and tonumber(record.bars.expTop)) or 0
+        drawRamp(exp, x + place.x, y + place.y - top, math.floor(place.w / 8),
+                 math.floor(place.w * math.max(0, math.min(1, filledExp))))
+      end
+    end
+    Font.popStyle()
+    if faced then Font.popFace() end
+    return
+  end
+
   local inner = hudInterior(record, player)
   local ix, iy = x + inner.x, y + inner.y
 

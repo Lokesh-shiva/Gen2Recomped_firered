@@ -38,6 +38,16 @@ local ImageWriter = require("src.import.ImageWriter")
 local Logger = require("src.core.Logger")
 
 local RomExtractorGen3 = {}
+
+-- pcall-shaped LZ77: RomGba:lz77 RETURNS nil for a missing header rather than
+-- raising, so `pcall(rom.lz77, ...)` reported success with no data and every
+-- guard after it indexed nil.  This one says false when there is nothing.
+function RomExtractorGen3.lz77ok(rom, off)
+  local ok, data, err = pcall(rom.lz77, rom, off)
+  if not ok then return false, data end
+  if type(data) ~= "table" then return false, err or "no data" end
+  return true, data
+end
 RomExtractorGen3.__index = RomExtractorGen3
 
 -- The progress denominator.  Kept honest with the two stage lists below: a
@@ -45,7 +55,84 @@ RomExtractorGen3.__index = RomExtractorGen3
 -- kind of small wrongness that survives for months.
 local STAGE_COUNT = 90
 
+-- ---------------------------------------------------------------------------
+-- The stage tables below are keyed to Emerald's ROM.  A sibling cartridge
+-- (FireRed) ships the same structures at other offsets, so its manifest may
+-- carry `addressMap` -- { ["C00000"] = 0xD00000, ... }, Emerald offset to
+-- this ROM's offset, resolved by symbol name -- and every matching number in
+-- the UPPERCASE tables is swapped before a stage reads it.  The originals are
+-- kept, so a later import of Emerald in the same process sees them again.
+-- ---------------------------------------------------------------------------
+
+function RomExtractorGen3._walkAddressTables(fn)
+  local seen = {}
+  local function walk(t)
+    if seen[t] then return end
+    seen[t] = true
+    for k, v in pairs(t) do
+      if type(v) == "number" and v >= 0x100000 and v < 0x2000000 then
+        fn(t, k, v)
+      elseif type(v) == "table" then
+        walk(v)
+      end
+    end
+  end
+  for name, t in pairs(RomExtractorGen3) do
+    if type(name) == "string" and name:match("^[A-Z][A-Z0-9_]*$")
+       and type(t) == "table" then
+      walk(t)
+    end
+  end
+end
+
+function RomExtractorGen3.applyAddressMap(map)
+  if RomExtractorGen3._pristine then
+    for i = #RomExtractorGen3._pristine, 1, -1 do
+      local rec = RomExtractorGen3._pristine[i]
+      rec[1][rec[2]] = rec[3]
+    end
+  end
+  RomExtractorGen3._pristine = {}
+  if type(map) ~= "table" or next(map) == nil then return 0 end
+  local swapped = 0
+  RomExtractorGen3._walkAddressTables(function(t, k, v)
+    local to = map[("%06X"):format(v)]
+    if to then
+      RomExtractorGen3._pristine[#RomExtractorGen3._pristine + 1] = { t, k, v }
+      t[k] = tonumber(to)
+      swapped = swapped + 1
+    end
+  end)
+  return swapped
+end
+
+-- ...and `stageOverrides` -- { BATTLE_TEXTBOX = { FRAME_COUNT = 10 } } --
+-- replaces whole fields where the sibling's structure genuinely differs
+-- rather than merely moved.  Applied after the address map, restored with it.
+function RomExtractorGen3.applyStageOverrides(overrides)
+  if type(overrides) ~= "table" then return 0 end
+  local n = 0
+  for tableName, fields in pairs(overrides) do
+    local t = RomExtractorGen3[tableName]
+    if type(t) == "table" and type(fields) == "table" then
+      for k, v in pairs(fields) do
+        RomExtractorGen3._pristine[#RomExtractorGen3._pristine + 1] = { t, k, t[k] }
+        t[k] = v
+        n = n + 1
+      end
+    end
+  end
+  return n
+end
+
 function RomExtractorGen3.new(romData, version, manifest, progress)
+  local swapped = RomExtractorGen3.applyAddressMap((manifest or {}).addressMap)
+  swapped = swapped
+    + RomExtractorGen3.applyStageOverrides((manifest or {}).stageOverrides)
+  if swapped > 0 then
+    Logger.info("gen3: %d Emerald-keyed stage addresses remapped for %s",
+                swapped, tostring(version and version.id or version))
+  end
   return setmetatable({
     rom = RomGba.new(romData),
     version = version,
@@ -1798,7 +1885,7 @@ function RomExtractorGen3:statFlourish()
     local flat = at - 0x08000000
     if flat < 0 or flat + 4 >= rom.size then return nil end
     if rom:u8(flat) ~= 0x10 then return nil end
-    local ok, raw = pcall(rom.lz77, rom, flat)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, flat)
     if not (ok and raw and #raw == want) then return nil end
     return raw
   end
@@ -2134,7 +2221,7 @@ function RomExtractorGen3:surfWave()
     local flat = at - 0x08000000
     if flat < 0 or flat + 4 >= rom.size then return nil end
     if rom:u8(flat) ~= 0x10 then return nil end
-    local ok, raw = pcall(rom.lz77, rom, flat)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, flat)
     if not (ok and raw and #raw == want) then return nil end
     return raw
   end
@@ -5191,7 +5278,7 @@ function RomExtractorGen3:extractFont()
           -- one 4bpp palette, or the pair the box loads together
           if sa >= 0x100 and sa <= 0x2000 and sa % 32 == 0
              and (sc == 32 or sc == 64) then
-            local ok, tiles = pcall(rom.lz77, rom, pa)
+            local ok, tiles = RomExtractorGen3.lz77ok(rom, pa)
             if ok and type(tiles) == "table" and #tiles >= 96 then
               local blank, ink = true, 0
               for i = 1, 32 do if (tiles[i] or 0) ~= 0 then blank = false break end end
@@ -5346,14 +5433,19 @@ function RomExtractorGen3:extractFont()
       local fh = math.floor(tonumber(face.cellHeight) or cellH)
       local ftop = math.floor(tonumber(face.inkTop) or 0)
       local cells, fadv = {}, {}
+      -- Emerald stores a glyph as two 8px tiles across and two down (64
+      -- bytes); FireRed's small face is ONE tile across (32 bytes,
+      -- DecompressGlyph_Small reads +0x0 and +0x8 words).
+      local across = math.floor(tonumber(face.tilesAcross) or 2)
+      local stride = math.floor(tonumber(face.glyphBytes) or 0x40)
       for code = 0, count - 1 do
-        local base = face.glyphs + code * 0x40
+        local base = face.glyphs + code * stride
         local cell = {}
         for row = 0, fh - 1 do
           local srcRow = ftop + row
-          local half = srcRow < 8 and 0 or 2
+          local half = srcRow < 8 and 0 or across
           local line = {}
-          for tile = 0, 1 do
+          for tile = 0, across - 1 do
             local word = self.rom:u16(base + (half + tile) * 16
                                       + (srcRow % 8) * 2)
             for x = 0, 7 do
@@ -12312,7 +12404,14 @@ function RomExtractorGen3:extractDecorations()
   for i = 0, D.SHAPE_COUNT - 1 do
     local arm = rom:u32(D.SHAPE_JUMP + i * 4)
     local w, h
-    if arm and arm >= 0x08000000 then
+    -- FRLG: also bound the TOP of the pointer. FireRed has no secret
+    -- bases and no decorations, decorationTableAt false-positives on it,
+    -- and the Emerald SHAPE_JUMP address then reads as garbage -- an arm
+    -- of 0x78082400 passes `>= 0x08000000` and shapeAt walks off the end
+    -- of the cartridge ("GBA read past the end of the ROM: 70082400")
+    -- instead of the stage declining cleanly the way the warnings below
+    -- are written to.
+    if arm and arm >= 0x08000000 and arm < 0x08000000 + rom.size then
       w, h = RomExtractorGen3.shapeAt(rom, arm - 0x08000000, D)
     end
     if not (w and h and w >= 1 and w <= 4 and h >= 1 and h <= 4) then
@@ -17280,7 +17379,7 @@ function RomExtractorGen3:regionMapArt(entriesAt)
   for o = from, entriesAt - 4, 4 do
     local clen, size = lz77Length(rom, o)
     if clen and size % 64 == 0 and size >= 0x2000 and palettePair(rom, o - 64) then
-      local ok, raw = pcall(rom.lz77, rom, o)
+      local ok, raw = RomExtractorGen3.lz77ok(rom, o)
       if ok and type(raw) == "table" and #raw == size then
         local low, high = 256, -1
         for i = 1, size do
@@ -17296,7 +17395,7 @@ function RomExtractorGen3:regionMapArt(entriesAt)
           local mlen, msize = lz77Length(rom, mapAt)
           local tiles = size / 64
           if mlen and msize >= 1024 then
-            local okm, cells = pcall(rom.lz77, rom, mapAt)
+            local okm, cells = RomExtractorGen3.lz77ok(rom, mapAt)
             local good = okm and type(cells) == "table" and #cells == msize
             if good then
               for i = 1, msize do
@@ -17390,8 +17489,8 @@ function RomExtractorGen3:regionMapArt(entriesAt)
   if largeAt then
     local smallAt, smallSize = blobEndingAt(largeAt, 0x400)
     if smallAt then
-      local okS, small = pcall(rom.lz77, rom, smallAt)
-      local okL, large = pcall(rom.lz77, rom, largeAt)
+      local okS, small = RomExtractorGen3.lz77ok(rom, smallAt)
+      local okL, large = RomExtractorGen3.lz77ok(rom, largeAt)
       if okS and okL then
         art.cursor = {
           palette = RomGba.palette(rom:bytes(smallAt - 32, 32)),
@@ -22090,9 +22189,25 @@ function RomExtractorGen3:extractTilesets()
     local tilesAt = rom:pointer(a + 4)
     local palAt = rom:pointer(a + 8)
     local metaAt = rom:pointer(a + 12)
-    local attrAt = rom:pointer(a + 16)
-    local span = (metaAt and attrAt) and (attrAt - metaAt) or -1
-    local metatiles = (span > 0 and span % 16 == 0) and span / 16 or nil
+    -- FRLG: struct Tileset SWAPS two fields against Emerald's.
+    --   Emerald  +0x10 metatileAttributes, +0x14 callback
+    --   FireRed  +0x10 callback,           +0x14 metatileAttributes
+    -- Reading +0x10 on FireRed yields the callback, the span comes out
+    -- nonsense, `metatiles` is nil and EVERY tileset is skipped
+    -- ("Gen3 tilesets: 0 written, 63 skipped"), which then leaves the
+    -- world loader with "wants unknown tileset".
+    -- Try both slots and keep whichever gives a sane span -- the
+    -- attributes array always sits after the metatiles at 16 bytes per
+    -- metatile, and a callback pointer does not satisfy that by accident.
+    local attrAt, span, metatiles
+    for _, off in ipairs({ 16, 20 }) do
+      local cand = rom:pointer(a + off)
+      local sp = (metaAt and cand) and (cand - metaAt) or -1
+      if sp > 0 and sp % 16 == 0 then
+        attrAt, span, metatiles = cand, sp, sp / 16
+        break
+      end
+    end
 
     if not (tilesAt and palAt and metatiles) then
       skipped = skipped + 1
@@ -22140,7 +22255,7 @@ function RomExtractorGen3:extractTilesets()
           tiles = table.concat(pixels),
           metatiles = table.concat(comp),
           attributes = table.concat(attrs),
-          callback = rom:u32(a + 20),
+          callback = rom:u32(a + (attrAt == rom:pointer(a + 16) and 20 or 16)),
           image = "assets/generated/tilesets/" .. key:lower() .. ".png",
           source = ("ROM:Tileset@%07X"):format(a),
         }
@@ -22151,6 +22266,7 @@ function RomExtractorGen3:extractTilesets()
       end)
       if not ok then
         skipped = skipped + 1
+        if skipped <= 2 then print(("TILESET-ERR %07X: %s"):format(a, tostring(err))) end
         Logger.warn("gen3 tileset %07X: %s", a, tostring(err))
       end
     end
@@ -23850,7 +23966,7 @@ function RomExtractorGen3:extractPlayerBackPic()
   for k = 0, GEN3_BACK_COUNT - 1 do
     local ptr = rom:pointer(palBase + k * 8)
     local tag = rom:u16(palBase + k * 8 + 4)
-    local ok, raw = pcall(rom.lz77, rom, ptr or 0)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, ptr or 0)
     if not (ptr and tag == k and ok and type(raw) == "table"
             and #raw >= GEN3_BACK_PAL_BYTES) then
       Logger.warn("gen3 player back pic: the palette table after %07X does "
@@ -23867,7 +23983,7 @@ function RomExtractorGen3:extractPlayerBackPic()
   local function frontPalette(index)
     if not (frontPal and index) then return nil end
     local ptr = rom:pointer(frontPal + index * 8)
-    local ok, raw = pcall(rom.lz77, rom, ptr or 0)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, ptr or 0)
     if not (ok and type(raw) == "table") then return nil end
     return RomGba.palette(raw)
   end
@@ -26020,7 +26136,7 @@ function RomExtractorGen3:trainerCardBadges(constants)
   local function strip(off)
     local clen, size = lz77Length(rom, off)
     if not (clen and size == STRIP_BYTES) then return nil end
-    local ok, raw = pcall(rom.lz77, rom, off)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, off)
     if not (ok and type(raw) == "table" and #raw == STRIP_BYTES) then
       return nil
     end
@@ -32356,7 +32472,7 @@ function RomExtractorGen3:extractRayquazaScene()
   local function lz(flat, want)
     if not flat or flat < 0 or flat + 4 >= rom.size then return nil end
     if rom:u8(flat) ~= 0x10 then return nil end
-    local okR, raw = pcall(rom.lz77, rom, flat)
+    local okR, raw = RomExtractorGen3.lz77ok(rom, flat)
     if not okR or not raw then return nil end
     if want and #raw ~= want then return nil end
     return raw
@@ -32567,7 +32683,7 @@ function RomExtractorGen3:extractBattleBackgrounds()
   local function lzOf(off, want)
     if not off or off + 4 >= rom.size then return nil end
     if rom:u8(off) ~= 0x10 then return nil end
-    local ok, raw = pcall(rom.lz77, rom, off)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, off)
     if not (ok and raw and #raw == want) then return nil end
     return raw
   end
@@ -32870,9 +32986,9 @@ function RomExtractorGen3:extractBattleScenes()
   -- ---- decompress ---------------------------------------------------------
   local rows = {}
   for i = 2, GEN3_SCENE_ARMS do
-    local ok, tile = pcall(rom.lz77, rom, tiles[i])
-    local ok2, tmap = pcall(rom.lz77, rom, maps[i])
-    local ok3, pal = pcall(rom.lz77, rom, pals[i])
+    local ok, tile = RomExtractorGen3.lz77ok(rom, tiles[i])
+    local ok2, tmap = RomExtractorGen3.lz77ok(rom, maps[i])
+    local ok3, pal = RomExtractorGen3.lz77ok(rom, pals[i])
     if not (ok and ok2 and ok3 and tile and tmap and pal) then
       Logger.warn("gen3 battle scenes: scene %s did not decompress",
                   GEN3_SCENE_NAMES[i])
@@ -33927,7 +34043,7 @@ function RomExtractorGen3:extractSummaryScreen()
   local accents, cells = {}, {}
   local decoded = {}
   for i, at in ipairs(win.maps) do
-    local ok, tmap = pcall(rom.lz77, rom, at)
+    local ok, tmap = RomExtractorGen3.lz77ok(rom, at)
     if not (ok and tmap) then
       Logger.warn("gen3 summary art: tilemap %d did not decompress", i)
       return
@@ -34422,6 +34538,57 @@ end
 -- bottom, which is why the player's box is the tall one and the foe's is not.
 -- `rows` is derived from the blob rather than assumed, so both shapes come
 -- out right.
+-- THE HEALTHBOX'S TEXT WINDOWS, from the code that fills them.
+--
+-- The panel art is a PLACEHOLDER under every piece of text: UpdateNickIn-
+-- Healthbox, UpdateLvlInHealthbox and UpdateHpTextInHealthbox render into a
+-- window filled with index 2 and copy it over fixed tiles of the sprite
+-- (TextIntoHealthboxObject copies the lower three rows of one tile row and
+-- all of the next).  FireRed's placeholder has "Lv" drawn where the name's
+-- last tile lands, so drawing the art as-is shows it twice.  Coordinates are
+-- in the composed panel (two halves side by side):
+--
+--   player   name  tiles 2-7 +0x800 -> x16..72  y5..15, text at (16,3)
+--            level tile 65-67 (+0x820) -> x72..96, "{LV_2}n" at 72+5*(3-d)
+--            hp    tiles 23,80,81 "ddd/" at (60,21); tiles 82,83 "ddd" at (80,21)
+--            bar   SpriteCB_HealthBar: box centre +16, subsprites -16/+16,
+--                  so "HP" at x32 and the six ramp tiles from x48, y16
+--   opponent name  tiles 1-7 -> x8..64, level tile 32 (+0x400) -> x64..88,
+--            bar   box centre +8: "HP" at x24, the ramp from x40, y16
+--
+-- (The 64x32 template's centre-to-corner vector is kept when the player's
+-- box is reshaped to 64x64, which is why both panels' y origin is centre-16.)
+-- Emerald runs the same code; this is enabled per cartridge by manifest until
+-- it has been checked against Emerald's screen too.
+RomExtractorGen3.HUD_WINDOWS = {
+  ENABLED = false,
+  PAPER = 2,
+  player = {
+    blank = { { 16, 5, 56, 11 }, { 72, 5, 24, 11 }, { 56, 21, 40, 11 } },
+    name = { x = 16, y = 3, w = 56 }, level = { x = 72, y = 3, w = 24 },
+    hpCurrent = { x = 60, y = 21 }, hpMax = { x = 80, y = 21 },
+    label = { x = 32, y = 16 }, bar = { x = 48, y = 16 },
+  },
+  opponent = {
+    blank = { { 8, 5, 56, 11 }, { 64, 5, 24, 11 } },
+    name = { x = 8, y = 3, w = 56 }, level = { x = 64, y = 3, w = 24 },
+    label = { x = 24, y = 16 }, bar = { x = 40, y = 16 },
+  },
+}
+
+-- Paper over the windows the cartridge overwrites at run time.
+function RomExtractorGen3.blankHudWindows(image, rects, colors, paper)
+  local c = colors[paper + 1]
+  if not (c and rects) then return end
+  for _, r in ipairs(rects) do
+    for y = r[2], r[2] + r[4] - 1 do
+      for x = r[1], r[1] + r[3] - 1 do
+        image:setPixel(x, y, c[1] / 255, c[2] / 255, c[3] / 255, 1)
+      end
+    end
+  end
+end
+
 function RomExtractorGen3:healthboxImage(raw, colors)
   local half = math.floor(#raw / 2)
   local rows = math.floor(half / (GEN3_HB_COLS * 32))
@@ -34756,8 +34923,8 @@ function RomExtractorGen3:extractBagScreen()
   local B = RomExtractorGen3.BAG_SCREEN
   local rom = self.rom
 
-  local okG, tiles = pcall(rom.lz77, rom, B.GFX)
-  local okM, map = pcall(rom.lz77, rom, B.TILEMAP)
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, B.GFX)
+  local okM, map = RomExtractorGen3.lz77ok(rom, B.TILEMAP)
   if not (okG and okM) then
     Logger.warn("gen3 bag screen: the sheet or the tilemap did not "
                   .. "decompress -- the bag keeps its own drawing")
@@ -34779,7 +34946,7 @@ function RomExtractorGen3:extractBagScreen()
   local images = {}
   for _, row in ipairs({ { key = "male", at = B.PAL_MALE },
                          { key = "female", at = B.PAL_FEMALE } }) do
-    local okP, palRaw = pcall(rom.lz77, rom, row.at)
+    local okP, palRaw = RomExtractorGen3.lz77ok(rom, row.at)
     if okP and #palRaw == B.PALETTES * 32 then
       local colors = {}
       for i = 0, B.PALETTES * 16 - 1 do
@@ -34927,7 +35094,7 @@ function RomExtractorGen3:extractBagScreen()
     markerColour = {}
     for _, row in ipairs({ { key = "male", at = B.PAL_MALE },
                            { key = "female", at = B.PAL_FEMALE } }) do
-      local okP, palRaw = pcall(rom.lz77, rom, row.at)
+      local okP, palRaw = RomExtractorGen3.lz77ok(rom, row.at)
       if okP and #palRaw >= 32 then
         -- the dots are drawn from palette bank 1
         local i = 16 + marker.index
@@ -35155,9 +35322,9 @@ function RomExtractorGen3:extractPartyMenu()
   local P = RomExtractorGen3.PARTY_MENU
   local rom = self.rom
 
-  local okG, tiles = pcall(rom.lz77, rom, P.BG_GFX)
-  local okM, map = pcall(rom.lz77, rom, P.BG_TILEMAP)
-  local okP, palRaw = pcall(rom.lz77, rom, P.BG_PAL)
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, P.BG_GFX)
+  local okM, map = RomExtractorGen3.lz77ok(rom, P.BG_TILEMAP)
+  local okP, palRaw = RomExtractorGen3.lz77ok(rom, P.BG_PAL)
   if not (okG and okM and okP) then
     Logger.warn("gen3 party menu: the sheet, the tilemap or the palettes did "
                   .. "not decompress -- the screen keeps its own drawing")
@@ -35229,11 +35396,11 @@ function RomExtractorGen3:extractPartyMenu()
   end
 
   -- ---- the ball behind each icon, and the status pills --------------------
-  local okBallPal, ballPalRaw = pcall(rom.lz77, rom, P.BALL_PAL)
+  local okBallPal, ballPalRaw = RomExtractorGen3.lz77ok(rom, P.BALL_PAL)
   if okBallPal and #ballPalRaw == 32 then
     local ballColors = RomGba.palette(ballPalRaw)
     local function frames(at, count, tilesPer, w, h, name)
-      local okF, raw = pcall(rom.lz77, rom, at)
+      local okF, raw = RomExtractorGen3.lz77ok(rom, at)
       if not okF or #raw ~= count * tilesPer * 32 then return end
       pcall(function()
         local img = ImageWriter.blank(w * count, h)
@@ -35542,7 +35709,7 @@ function RomExtractorGen3:partySummary()
   end
   -- the bar is COMPRESSED (LoadCompressedSpriteSheetUsingHeap) and the icons
   -- are not (LoadSpriteSheet), which is the difference between the two calls
-  local okBar, bar = pcall(rom.lz77, rom, barFrom)
+  local okBar, bar = RomExtractorGen3.lz77ok(rom, barFrom)
   if not (okBar and type(bar) == "table" and #bar == barBytes) then
     Logger.warn("gen3 party summary: the bar at %07X does not decompress to "
                 .. "%d bytes -- the row is left out", barFrom, barBytes)
@@ -35881,7 +36048,7 @@ function RomExtractorGen3:extractPokedexScreen()
   end
 
   local function blob(at, want)
-    local ok, raw = pcall(rom.lz77, rom, at - 0x08000000)
+    local ok, raw = RomExtractorGen3.lz77ok(rom, at - 0x08000000)
     if not (ok and type(raw) == "table" and #raw == want) then return nil end
     return raw
   end
@@ -36244,7 +36411,7 @@ function RomExtractorGen3:extractBattleHud()
   -- for.
   local seen, boxes = {}, {}
   for _, r in ipairs(found.rows) do
-    local raw = select(2, pcall(rom.lz77, rom, r.target))
+    local raw = select(2, RomExtractorGen3.lz77ok(rom, r.target))
     if type(raw) == "table" and not seen[r.target]
        and (#raw == 2 * GEN3_HB_HALF_BYTES or #raw == 4 * GEN3_HB_HALF_BYTES)
     then
@@ -36354,10 +36521,15 @@ function RomExtractorGen3:extractBattleHud()
 
   local images = {}
   local ok, saveErr = pcall(function()
-    self:saveImage(self:healthboxImage(player.raw, boxColors),
-                   "battle/hud/player.png")
-    self:saveImage(self:healthboxImage(opponent.raw, boxColors),
-                   "battle/hud/opponent.png")
+    local W = RomExtractorGen3.HUD_WINDOWS
+    local playerImg = self:healthboxImage(player.raw, boxColors)
+    local opponentImg = self:healthboxImage(opponent.raw, boxColors)
+    if W.ENABLED then
+      RomExtractorGen3.blankHudWindows(playerImg, W.player.blank, boxColors, W.PAPER)
+      RomExtractorGen3.blankHudWindows(opponentImg, W.opponent.blank, boxColors, W.PAPER)
+    end
+    self:saveImage(playerImg, "battle/hud/player.png")
+    self:saveImage(opponentImg, "battle/hud/opponent.png")
     if playerDoubles then
       self:saveImage(self:healthboxImage(playerDoubles.raw, boxColors),
                      "battle/hud/player_doubles.png")
@@ -36413,9 +36585,15 @@ function RomExtractorGen3:extractBattleHud()
   -- the wrong offset fails on the first step.
   local ramps = {}
   for _, ramp in ipairs(GEN3_HB_RAMPS) do
-    local good = true
-    for step = 0, GEN3_HB_RAMP_STEPS - 1 do
-      if fillOf(ramp.tile + step, ramp.fill[1]) ~= step then good = false break end
+    -- Either shade of the bar may carry the ramp: Emerald draws both of its
+    -- two fill colours one pixel at a time, FireRed only the second.
+    local good = false
+    for _, index in ipairs(ramp.fill) do
+      local ramps1 = true
+      for step = 0, GEN3_HB_RAMP_STEPS - 1 do
+        if fillOf(ramp.tile + step, index) ~= step then ramps1 = false break end
+      end
+      if ramps1 then good = true break end
     end
     if not good then
       Logger.warn("gen3 battle HUD: the %s bar does not ramp one pixel at a "
@@ -36609,6 +36787,10 @@ function RomExtractorGen3:extractBattleHud()
     -- two are not the same shape and the layout used to assume they were --
     -- see healthboxGeometry.
     geometry = geometry,
+    windows = RomExtractorGen3.HUD_WINDOWS.ENABLED and {
+      player = RomExtractorGen3.HUD_WINDOWS.player,
+      opponent = RomExtractorGen3.HUD_WINDOWS.opponent,
+    } or nil,
     -- ...and the ink the healthbox prints in.  The window it renders text
     -- into names its own three indices -- background 2, letter 1, shadow 3
     -- (AddTextPrinterAndCreateWindowOnHealthbox) -- and the two GENDER
@@ -36693,8 +36875,8 @@ function RomExtractorGen3:extractItemIcons()
     local gfxAt, palAt = rom:pointer(o), rom:pointer(o + 4)
     local row = nil
     if gfxAt and palAt then
-      local okG, tiles = pcall(rom.lz77, rom, gfxAt)
-      local okP, palRaw = pcall(rom.lz77, rom, palAt)
+      local okG, tiles = RomExtractorGen3.lz77ok(rom, gfxAt)
+      local okP, palRaw = RomExtractorGen3.lz77ok(rom, palAt)
       if okG and okP and #tiles == I.GFX_BYTES and #palRaw == I.PAL_BYTES then
         row = { gfx = gfxAt, pal = palAt, tiles = tiles, palRaw = palRaw }
         clean = clean + 1
@@ -36946,7 +37128,7 @@ RomExtractorGen3.POKENAV = {
 -- decompressor, and which is which is not worth a table: ask for 32 bytes and
 -- take whichever answer is 32 bytes long.
 function RomExtractorGen3:palette16(at)
-  local ok, raw = pcall(self.rom.lz77, self.rom, at)
+  local ok, raw = RomExtractorGen3.lz77ok(self.rom, at)
   if not (ok and raw and #raw == 32) then
     raw = {}
     for i = 1, 32 do raw[i] = self.rom:u8(at + i - 1) end
@@ -36962,8 +37144,8 @@ end
 -- One 32x20 background layer, drawn onto `image` with index 0 transparent.
 function RomExtractorGen3:bgLayer(image, layer)
   local rom = self.rom
-  local okT, tiles = pcall(rom.lz77, rom, layer.tiles)
-  local okM, map = pcall(rom.lz77, rom, layer.map)
+  local okT, tiles = RomExtractorGen3.lz77ok(rom, layer.tiles)
+  local okM, map = RomExtractorGen3.lz77ok(rom, layer.map)
   if not (okT and okM) then return false end
   local colors = self:palette16(layer.pal)
   local tileCount = math.floor(#tiles / 32)
@@ -37971,10 +38153,27 @@ function RomExtractorGen3:extractBattleTextbox()
   local T = RomExtractorGen3.BATTLE_TEXTBOX
   local rom = self.rom
 
-  local okT, tiles = pcall(rom.lz77, rom, T.TILES)
-  local okM, map = pcall(rom.lz77, rom, T.TILEMAP)
-  local okP, palRaw = pcall(rom.lz77, rom, T.PALETTE)
-  local okW, menuRaw = pcall(rom.lz77, rom, T.MENU_PALETTE)
+  local okT, tiles = RomExtractorGen3.lz77ok(rom, T.TILES)
+  local okM, map = RomExtractorGen3.lz77ok(rom, T.TILEMAP)
+  local okP, palRaw = RomExtractorGen3.lz77ok(rom, T.PALETTE)
+  local okW, menuRaw
+  if T.MENU_PALETTE_SETS then
+    -- FireRed has no menu palette blob: LoadBattleMenuWindowGfx writes the
+    -- entries of BG palette 5 one at a time.  { index, bgr555 } pairs.
+    local raw = {}
+    for k = 1, T.MENU_PALETTE_BYTES do raw[k] = 0 end
+    for _, set in ipairs(T.MENU_PALETTE_SETS) do
+      raw[set[1] * 2 + 1] = set[2] % 256
+      raw[set[1] * 2 + 2] = math.floor(set[2] / 256)
+    end
+    okW, menuRaw = true, raw
+  else
+    okW, menuRaw = RomExtractorGen3.lz77ok(rom, T.MENU_PALETTE)
+  end
+  okT = okT and type(tiles) == "table"
+  okM = okM and type(map) == "table"
+  okP = okP and type(palRaw) == "table"
+  okW = okW and type(menuRaw) == "table"
   if not (okT and okM and okP and okW) then
     Logger.warn("gen3 battle textbox: one of the four blobs did not "
                   .. "decompress -- the battle keeps its drawn boxes")
@@ -38079,8 +38278,10 @@ function RomExtractorGen3:extractBattleTextbox()
     end
     local sheet = {}
     for k = 1, #tiles do sheet[k] = tiles[k] end
-    for k = 1, T.FRAME_TILES_BYTES do
-      sheet[T.FRAME_TILE_BASE * 32 + k] = ft[k]
+    for _, tileBase in ipairs(T.FRAME_TILE_BASES or { T.FRAME_TILE_BASE }) do
+      for k = 1, T.FRAME_TILES_BYTES do
+        sheet[tileBase * 32 + k] = ft[k]
+      end
     end
     local pal = {}
     for i = 0, 31 do pal[i] = base[i] end
@@ -38292,8 +38493,8 @@ function RomExtractorGen3:extractBallAnims()
     local palAt, palTag = rom:pointer(palO), rom:u16(palO + 4)
     local row
     if gfxAt and palAt then
-      local okG, tiles = pcall(rom.lz77, rom, gfxAt)
-      local okP, raw = pcall(rom.lz77, rom, palAt)
+      local okG, tiles = RomExtractorGen3.lz77ok(rom, gfxAt)
+      local okP, raw = RomExtractorGen3.lz77ok(rom, palAt)
       if okG and okP and #tiles == B.SHEET_BYTES and #raw == B.PALETTE_BYTES
          and size == B.SHEET_BYTES and tag == palTag then
         row = { gfx = gfxAt, pal = palAt, tag = tag, tiles = tiles, raw = raw }
@@ -38302,7 +38503,7 @@ function RomExtractorGen3:extractBallAnims()
     end
     sheets[i] = row
   end
-  local okO, openTiles = pcall(rom.lz77, rom, B.OPEN_FRAME)
+  local okO, openTiles = RomExtractorGen3.lz77ok(rom, B.OPEN_FRAME)
   if clean ~= B.COUNT or not (okO and #openTiles == B.OPEN_BYTES) then
     Logger.warn("gen3 ball animation: %d of %d sheets are %d bytes with a "
                   .. "matching palette tag, and the shared open frame is %s "
@@ -38318,8 +38519,8 @@ function RomExtractorGen3:extractBallAnims()
     local r, g, b = RomGba.bgr555(rom:u16(B.COLOURS + i * 2))
     colours[i + 1] = { r, g, b }
   end
-  local okPart, particles = pcall(rom.lz77, rom, B.PARTICLES)
-  local okPPal, particlePal = pcall(rom.lz77, rom, B.PARTICLE_PALETTE)
+  local okPart, particles = RomExtractorGen3.lz77ok(rom, B.PARTICLES)
+  local okPPal, particlePal = RomExtractorGen3.lz77ok(rom, B.PARTICLE_PALETTE)
   if not (okPart and okPPal and #particles == B.PARTICLE_BYTES
           and #particlePal == B.PALETTE_BYTES) then
     Logger.warn("gen3 ball animation: the particle sheet at %07X is not %d "
@@ -38679,7 +38880,7 @@ RomExtractorGen3.SLOT_SCREEN = {
 function RomExtractorGen3:slotScreen()
   local S = RomExtractorGen3.SLOTS
   local rom = self.rom
-  local ok, tiles = pcall(rom.lz77, rom, S.BG_TILES)
+  local ok, tiles = RomExtractorGen3.lz77ok(rom, S.BG_TILES)
   if not (ok and type(tiles) == "table") then
     return nil, "the machine's tiles do not decompress"
   end
@@ -41195,8 +41396,8 @@ function RomExtractorGen3:hallOfFameArt()
   end
   local tilesAt, mapAt, palAt = loads[1], loads[2], loads[3]
 
-  local okT, tiles = pcall(rom.lz77, rom, tilesAt)
-  local okM, map = pcall(rom.lz77, rom, mapAt)
+  local okT, tiles = RomExtractorGen3.lz77ok(rom, tilesAt)
+  local okM, map = RomExtractorGen3.lz77ok(rom, mapAt)
   if not (okT and type(tiles) == "table" and #tiles == H.TILE_BYTES) then
     return nil, ("the tiles at %07X are %s bytes, not %d")
                 :format(tilesAt, okT and tostring(#tiles) or "unreadable",

@@ -864,6 +864,25 @@ GameVersion.VERSIONS = {
 -- sha1 is the canonical (USA, Europe) dump, game code BPEE, revision 0 --
 -- the build pokeemerald targets, which is what makes the discovered
 -- addresses meaningful.
+  -- FireRed, added locally to test an FRLG port of the Gen 3 pipeline.
+  -- Manifest built by a patched gen3_discover.py plus a pret-derived
+  -- symbol table; see docs/frlg-gen3-symbol-map.md in the recomp repo.
+  firered = {
+    id = "firered",
+    generation = 3,
+    label = "FireRed",
+    displayName = "Pokemon FireRed",
+    launcherName = "FireRed",
+    sha1 = "41cb23d8dccc8ebd7c649cd8fbb58eeace6e2fdc",
+    manifest = "tools/rom_manifest_firered.json",
+    cachePrefix = "firered/",
+    saveSuffix = "_firered",
+    importable = true,
+    experimental = true,
+    experimentalLabel = "ALPHA",
+    hasRunning = true,
+  },
+
   emerald = {
     id = "emerald",
     generation = 3,

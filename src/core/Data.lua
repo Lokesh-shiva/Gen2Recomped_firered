@@ -1274,8 +1274,23 @@ function Data:load()
   self.isGen3Cache = isGen3Cache
   local isRequired = {}
   for _, name in ipairs(required) do isRequired[name] = true end
+  -- FRLG: two generated modules cannot be produced for FireRed at all,
+  -- and neither is fatal.
+  --   scenes -- gen3_discover's scene-loader matching is written against
+  --     Emerald's graphics/palette library functions. Per the project
+  --     author, Emerald's own scenes were HAND-AUTHORED regardless, so
+  --     there is nothing to derive. Gen3Scene already treats a missing
+  --     scene as "a screen with no backdrop, not an error".
+  --   field -- FireRed's heal-location stage produces nothing yet; Data
+  --     builds `field` up itself (`self.field = self.field or {}`).
+  -- Degrade to an empty table rather than refusing to boot, which is
+  -- what happens today and what sends the user back to Import.
+  local OPTIONAL_GEN3 = { scenes = { _roles = {} }, field = {} }
   for _, name in ipairs(required) do
     local ok, mod = loadModule(dir, name)
+    if not ok and isGen3Cache and OPTIONAL_GEN3[name] then
+      mod, ok = OPTIONAL_GEN3[name], true
+    end
     if not ok then
       if dir then
         error(("missing data module '%s/%s.lua' (POKEPORT_DATA_DIR).\n(%s)")
