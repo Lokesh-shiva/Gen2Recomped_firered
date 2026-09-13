@@ -17776,8 +17776,34 @@ function RomExtractorGen3:extractHealLocations()
     return a < b
   end)
 
+  -- WHERE A WHITEOUT ACTUALLY LANDS, on a cartridge that says so separately.
+  --
+  -- FireRed's SetWhiteoutRespawnWarpAndHealerNpc does not send you to the
+  -- heal location itself: sWhiteoutRespawnHealCenterMapIdxs maps each one to
+  -- the room with the healer in it -- a Pokemon Center 1F at (7,4), or the
+  -- player's house at (8,5) for Pallet -- with a few named exceptions.  The
+  -- manifest (`whiteoutRespawn`) names the table and the exceptions; FLY and
+  -- TELEPORT keep the outdoor point.
+  local W = (self.manifest or {}).whiteoutRespawn
+  if type(W) == "table" and W.maps then
+    local placed = 0
+    for i, row in ipairs(list) do
+      local o = W.maps + (i - 1) * 4
+      local group, num = rom:u16(o), rom:u16(o + 2)
+      local id = ("MAP_G%02d_N%02d"):format(group, num)
+      if byGM[group * 256 + num] then
+        local at = (W.exceptions or {})[id] or W.default or { 7, 4 }
+        row.respawn = { map = id, x = at[1], y = at[2] }
+        placed = placed + 1
+      end
+    end
+    Logger.info("Gen3 heal locations: %d of %d whiteouts land in their healer's "
+                  .. "room (%07X)", placed, #list, W.maps)
+  end
+
   local constants = self._constants or {}
   constants.gen3HealLocations = list
+  constants.gen3DefaultRespawnIndex = W and W.startIndex or nil
   constants.gen3HealLocationSource =
     ("ROM:sHealLocations %07X, %d records"):format(at, count)
 
@@ -26474,8 +26500,211 @@ function RomExtractorGen3:partyTeachText(constants)
   }
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S BAG MENU AND CLERK, which are laid out differently enough that
+-- the Emerald search above cannot find them.
+--
+-- sItemMenuContextActions is twelve { text, handler } records in the order of
+-- ITEMMENUACTION_* -- USE TOSS REGISTER GIVE CANCEL BATTLE_USE CHECK OPEN
+-- OPEN_BERRIES WALK DESELECT DUMMY -- and the field lists are
+-- sContextMenuItems_Field, three rows of four bytes for the three pockets
+-- the bag has (item_menu.c).  The menu is one column (ShowBagWindow).  The
+-- clerk's words sit together in strings.c from gText_ShopBuy on.  The
+-- manifest names the three anchors (`frlgItemMenu`); the labels are checked
+-- against the words the enum says they are before anything is written.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_MART_TEXT = {
+  { key = "buyTotal",     find = "and you want" },
+  { key = "boughtBag",    find = "Here you are!" },
+  { key = "anythingElse", find = "anything else I can do" },
+}
+
+function RomExtractorGen3:itemMenuActionsFireRed(constants, M)
+  local rom = self.rom
+  local labels, fns = {}, {}
+  for i = 0, 11 do
+    local at = M.actions + i * 8
+    local ptr = rom:pointer(at)
+    local ok, text = pcall(self.readText, self, ptr or 0, 20)
+    labels[i + 1] = (ok and type(text) == "string") and text or ""
+    fns[i + 1] = rom:u32(at + 4)
+  end
+  local expect = { "USE", "TOSS", "REGISTER", "GIVE", "CANCEL", "USE" }
+  for i, word in ipairs(expect) do
+    if labels[i] ~= word then
+      Logger.warn("gen3 item menu (FRLG): action %d reads %q, not %q -- the bag "
+                    .. "keeps the engine's own options", i - 1, labels[i], word)
+      return
+    end
+  end
+  -- by handler: CHECK, OPEN and WALK run the USE task; DESELECT the REGISTER one
+  local kinds = {}
+  for i = 1, 12 do
+    if fns[i] == fns[1] then kinds[i] = "use"
+    elseif fns[i] == fns[3] then kinds[i] = "register"
+    elseif i == 2 then kinds[i] = "toss"
+    elseif i == 4 then kinds[i] = "give"
+    elseif i == 5 then kinds[i] = "cancel"
+    elseif i == 6 or i == 9 then kinds[i] = "use"
+    elseif fns[i] == 0 then kinds[i] = "blank"
+    else kinds[i] = "other" end
+  end
+  local rows = {}
+  for r = 0, 2 do
+    local list = {}
+    for c = 0, 3 do
+      local b = rom:u8(M.fieldLists + r * 4 + c)
+      if b == 11 then break end            -- ITEMMENUACTION_DUMMY
+      list[#list + 1] = b + 1
+    end
+    rows[r + 1] = list
+  end
+  -- ITEMS pocket is USE GIVE TOSS CANCEL, and every list closes on CANCEL
+  local ok = #rows[1] == 4 and kinds[rows[1][1]] == "use"
+  for _, list in ipairs(rows) do
+    if kinds[list[#list]] ~= "cancel" then ok = false end
+  end
+  if not ok then
+    Logger.warn("gen3 item menu (FRLG): the field lists at %07X do not read as "
+                  .. "three pockets closing on CANCEL", M.fieldLists)
+    return
+  end
+  constants.gen3ItemMenu = {
+    labels = labels, kinds = kinds, columns = 1, cancel = 5, blank = 12,
+    pockets = {
+      ITEM = rows[1], KEY_ITEM = rows[2], BALL = rows[3],
+      -- the TM CASE and BERRY POUCH lists are their own screens' (tm_case.c,
+      -- berry_pouch.c); USE GIVE CANCEL and USE GIVE TOSS CANCEL
+      TM_HM = { 1, 4, 5 }, BERRY = { 1, 4, 2, 5 },
+    },
+    source = ("ROM:sItemMenuContextActions %07X, sContextMenuItems_Field %07X")
+             :format(M.actions, M.fieldLists),
+  }
+
+  -- the clerk
+  local mart, martFound = {}, 0
+  local o, stop = M.martText, math.min(rom.size, M.martText + 0x400)
+  while o < stop do
+    if rom:u8(o) == 0xFF then
+      o = o + 1
+    else
+      local okT, text = pcall(self.readText, self, o, 200)
+      if okT and type(text) == "string" and #text > 0 then
+        for _, lists in ipairs({ RomExtractorGen3.FRLG_MART_TEXT, MART_TEXT }) do
+          for _, want in ipairs(lists) do
+            if not mart[want.key] and text:find(want.find, 1, true) then
+              mart[want.key] = text
+              martFound = martFound + 1
+            end
+          end
+        end
+        local word = MART_WORDS[text] or (text == "SEE YA!" and "quit") or nil
+        if word and not mart[word] then
+          mart[word] = text
+          martFound = martFound + 1
+        end
+        if #text <= 12 and text:sub(-6) == "{VAR1}" and not mart.money
+           and text:sub(1, 1) ~= "{" then
+          mart.money, mart.currency = text, text:sub(1, #text - 6)
+          martFound = martFound + 1
+        end
+      end
+      local p2 = o
+      while p2 < rom.size and rom:u8(p2) ~= 0xFF do p2 = p2 + 1 end
+      o = p2 + 1
+    end
+  end
+  if mart.buy and mart.sell and mart.quit and martFound >= 8 then
+    mart.source = ("ROM:FireRed shop strings near %07X"):format(M.martText)
+    constants.gen3MartText = mart
+  else
+    Logger.warn("gen3 mart text (FRLG): %d lines found -- the shop keeps the "
+                  .. "engine's own words", martFound)
+  end
+  -- ---- THE BUY SCREEN ------------------------------------------------------
+  --
+  -- BuyMenuDecompressBgGraphics: gBuyMenuFrame_Gfx, its 32x32 tilemap and a
+  -- two-bank palette (bank 0 becomes BG palette 11, which is what the frame
+  -- is drawn in).  The left column the tilemap leaves empty -- ten tiles wide,
+  -- rows 1-13 -- is where BuyMenuDrawMapView paints the shop floor around the
+  -- clerk, so it is left transparent here and the screen shows the world
+  -- through it.  The six windows are sShopBuyMenuWindowTemplatesNormal
+  -- (buy_menu_helpers.c): money, IN BAG, message, quantity, list, description.
+  local B = M.buyMenu
+  if type(B) == "table" then
+    local okG, gfx = RomExtractorGen3.lz77ok(rom, B.gfx)
+    local okT, map = RomExtractorGen3.lz77ok(rom, B.tilemap)
+    local okP, pal = RomExtractorGen3.lz77ok(rom, B.palette)
+    local windows, keys = {}, { "money", "inBag", "message", "quantity",
+                                "list", "description" }
+    for i, key in ipairs(keys) do
+      local o = B.windows + (i - 1) * 8
+      windows[key] = { x = rom:u8(o + 1) * 8, y = rom:u8(o + 2) * 8,
+                       width = rom:u8(o + 3) * 8, height = rom:u8(o + 4) * 8 }
+    end
+    local sane = okG and okT and okP and #map == 2048 and #pal >= 32
+                 and windows.list.width == 136 and windows.list.height == 96
+                 and rom:u8(B.windows + 6 * 8) == 0xFF
+    if not sane then
+      Logger.warn("gen3 buy menu (FRLG): the frame or sShopBuyMenuWindowTemplates"
+                    .. "Normal at %07X does not read -- the shop keeps its boxes",
+                  B.windows)
+    else
+      local colors = {}
+      for i = 0, 15 do
+        local r, g, b = RomGba.bgr555(pal[i * 2 + 1] + pal[i * 2 + 2] * 256)
+        colors[i + 1] = { r, g, b }
+      end
+      local tileCount = math.floor(#gfx / 32)
+      local okImg = pcall(function()
+        local img = ImageWriter.blank(240, 160)
+        for ty = 0, 19 do
+          for tx = 0, 29 do
+            local cell = ty * 32 + tx
+            local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
+            local tid = e % 1024
+            if tid > 0 and tid < tileCount then
+              RomExtractorGen3.partyTile(img, gfx, colors, tid, 0, tx * 8, ty * 8)
+            end
+          end
+        end
+        self:saveImage(img, "ui/buymenu_frame.png")
+      end)
+      constants.gen3BuyMenu = {
+        image = okImg and "assets/generated/ui/buymenu_frame.png" or nil,
+        windows = windows,
+        -- BuyMenuBuildListMenuTemplate / BuyMenuPrintPriceInList
+        list = { itemX = 9, cursorX = 1, upTextY = 2, rowHeight = 16, rows = 6,
+                 priceX = 0x69, priceDigits = 4 },
+        description = { x = 0, y = 3, lineHeight = 14 },
+        -- CreateItemMenuIcon: a 32x32 sprite centred on (24,140)
+        itemIcon = { x = 8, y = 124, size = 24 },
+        -- sShopMenuWindowTemplate: BUY / SELL / SEE YA!
+        menu = { left = rom:u8(B.menuWindow + 1), top = rom:u8(B.menuWindow + 2),
+                 width = rom:u8(B.menuWindow + 3),
+                 height = rom:u8(B.menuWindow + 4) },
+        source = ("ROM:gBuyMenuFrame %07X/%07X/%07X, windows %07X")
+                 :format(B.gfx, B.tilemap, B.palette, B.windows),
+      }
+      local mw = constants.gen3BuyMenu.menu
+      constants.gen3ShopMenu = constants.gen3ShopMenu
+        or { left = mw.left, top = mw.top, width = mw.width, height = mw.height }
+    end
+  end
+
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 item menu (FRLG): ITEM[%s] KEY[%s] BALL[%s]; %d mart lines",
+              table.concat(rows[1], ","), table.concat(rows[2], ","),
+              table.concat(rows[3], ","), martFound)
+end
+
 function RomExtractorGen3:itemMenuActions(constants)
   local rom = self.rom
+  local frlgMenu = (self.manifest or {}).frlgItemMenu
+  if type(frlgMenu) == "table" then
+    return self:itemMenuActionsFireRed(constants, frlgMenu)
+  end
   local screens = (self.manifest or {}).screenText or {}
   local anchor = screens.bagActions and tonumber(screens.bagActions.at)
   if not anchor then

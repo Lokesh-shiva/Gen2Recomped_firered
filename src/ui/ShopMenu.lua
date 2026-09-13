@@ -254,18 +254,36 @@ local function gen3Box(game)
            tw = width + 2, th = height + 2 }
 end
 
+-- FireRed's buy screen lets the shop floor show through its frame, so the
+-- stack draws what is under it -- including this BUY / SELL / SEE YA! box,
+-- which the cartridge takes down while the list is up.  The box under the
+-- screen stops drawing until the screen closes.
+function ShopMenu.coverWith(game, screen)
+  local under = game.stack:top()
+  if under and screen.isOpaque == false then
+    local draw = under.draw
+    under.draw = function() end
+    local quit = screen.onQuit
+    screen.onQuit = function(...)
+      under.draw = draw
+      if quit then return quit(...) end
+    end
+  end
+  game.stack:push(screen)
+end
+
 function ShopMenu.new(game, stock, onQuit)
   local counter = gen3Counter(game)
   if counter then
     local Menu = require("src.ui.Menu")
     local menu = Menu.new(game, {
       { label = line(game, "buy", Strings("BUY")), keepOpen = true,
-        onSelect = function()
-          game.stack:push(counter.new(game, { mode = "buy", stock = stock }))
+        onSelect = function(menuSelf)
+          ShopMenu.coverWith(game, counter.new(game, { mode = "buy", stock = stock }))
         end },
       { label = line(game, "sell", Strings("SELL")), keepOpen = true,
         onSelect = function()
-          game.stack:push(counter.new(game, { mode = "sell" }))
+          ShopMenu.coverWith(game, counter.new(game, { mode = "sell" }))
         end },
       { label = line(game, "quit", Strings("QUIT")), onSelect = onQuit },
     }, gen3Box(game))

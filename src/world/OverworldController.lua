@@ -8412,8 +8412,8 @@ function OverworldState:applyFieldPoison()
         save.money = math.floor(save.money
           / (FieldDefaults.world(Game.data, "blackoutMoneyDivisor") or 2))
         Runtime.emit("world.blacked_out",
-          { save = save, healTarget = self:healPoint() })
-        self:warpToHealPoint()
+          { save = save, healTarget = self:healPoint(true) })
+        self:warpToHealPoint(nil, { whiteout = true })
       end))
     end
   end
@@ -9621,8 +9621,8 @@ function OverworldState:afterBattle(result, battle)
     Game.save.money = math.floor(Game.save.money
       / (FieldDefaults.world(Game.data, "blackoutMoneyDivisor") or 2))
     Runtime.emit("world.blacked_out",
-      { save = Game.save, healTarget = self:healPoint() })
-    self:warpToHealPoint(evolutions)
+      { save = Game.save, healTarget = self:healPoint(true) })
+    self:warpToHealPoint(evolutions, { whiteout = true })
   else
     -- EndTrainerBattle sets BIT_CUR_MAP_LOADED_1 (home/trainers.asm), which
     -- re-runs the floor's door callback: beating the last Rocket Hideout guard
@@ -9658,7 +9658,7 @@ end
 
 -- field.boot: where a save with no heal point of its own returns to.  The
 -- lastHeal record wins; otherwise the new game's own spawn cell.
-function OverworldState:healPoint()
+function OverworldState:healPoint(whiteout)
   -- GEN 3 ANSWERS THIS FROM ITS OWN TABLE.  `setrespawn` is the script
   -- command every Pokemon Centre in Hoenn runs on entry, and its argument is
   -- an INDEX INTO sHealLocations -- so the index the command already stored
@@ -9667,8 +9667,17 @@ function OverworldState:healPoint()
   -- `gen3RespawnIndex` was written by the script engine and read by nothing,
   -- and a Hoenn blackout fell through to the boot spawn -- the truck.
   if GameVersion.isGen3() then
-    local list = Game.data.constants and Game.data.constants.gen3HealLocations
-    local row = list and list[tonumber(Game.save.gen3RespawnIndex or 0) or 0]
+    local c = Game.data.constants or {}
+    local list = c.gen3HealLocations
+    local index = tonumber(Game.save.gen3RespawnIndex
+                           or c.gen3DefaultRespawnIndex or 0) or 0
+    local row = list and list[index]
+    -- a WHITEOUT lands in the healer's room where the cartridge names one
+    -- (FireRed's sWhiteoutRespawnHealCenterMapIdxs); FLY and TELEPORT keep
+    -- the outdoor point
+    if row and whiteout and row.respawn then
+      return { map = row.respawn.map, x = row.respawn.x, y = row.respawn.y }
+    end
     if row then return { map = row.map, x = row.x, y = row.y } end
   end
   local boot = (Game.data.field or {}).boot or {}
@@ -9818,7 +9827,7 @@ end
 -- GBFadeOutToBlack + PrepareForSpecialWarp + SpecialEnterMap, and never
 -- sets BIT_FLY_WARP / BIT_DUNGEON_WARP, so EnterMap never runs EnterMapAnim.
 function OverworldState:warpToHealPoint(onDone, opts)
-  local heal = self:healPoint()
+  local heal = self:healPoint(opts and opts.whiteout)
   self.player.surfing = false
   self:syncSurfingPikachu()
   -- HandleFlyWarpOrDungeonWarp + DisplayPlayerBlackedOutText both clear
