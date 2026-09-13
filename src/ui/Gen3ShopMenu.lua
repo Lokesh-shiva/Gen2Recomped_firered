@@ -353,18 +353,36 @@ function Gen3ShopMenu:sell(row)
     onDone = function(qty)
       if not qty then return end
       local paid = unit * qty
+      -- WHICH {VARn} CARRIES THE PRICE IS NOT THE SAME NUMBER ON BOTH
+      -- CARTRIDGES.  Emerald's line is "I can pay ¥{STR_VAR_1}." -- FireRed's
+      -- is "I can pay ¥{STR_VAR_3}." (strings.c, both games).  This message
+      -- has exactly one placeholder, so it costs nothing to fill every slot
+      -- with the same value rather than pick the wrong one and print a
+      -- blank amount, which is what a hard-coded VAR1 did against FireRed.
       local ask = line(game, "sellPrice",
                        Strings("I can pay you\n%s for that.",
                                price(game, paid)),
-                       { VAR1 = tostring(paid) })
+                       { VAR1 = tostring(paid), VAR2 = tostring(paid),
+                         VAR3 = tostring(paid) })
       game.stack:push(TextBox.new(game, ask, nil, {
         choice = function(yes)
           if not yes then return end
           game.save.money = (tonumber(game.save.money) or 0) + paid
           Bag.remove(game.save, row.id, qty)
           self:rebuild()
-          self.say = line(game, "sold", Strings("Thank you!"),
-                          { VAR1 = tostring(paid), VAR2 = row.label })
+          -- Emerald: "Turned over the {VAR2}\nand received ¥{VAR1}." --
+          -- FireRed: "Turned over the {VAR1}...\nworth ¥{VAR3}."  The two
+          -- meanings (amount, item) sit in DIFFERENT slots per game -- VAR1
+          -- is the amount on one cartridge and the item on the other -- so
+          -- unlike sellPrice above this cannot be answered with one value
+          -- in every slot; it has to know which cartridge it is.
+          local soldVars
+          if require("src.core.GameVersion").get() == "firered" then
+            soldVars = { VAR1 = row.label, VAR3 = tostring(paid) }
+          else
+            soldVars = { VAR1 = tostring(paid), VAR2 = row.label }
+          end
+          self.say = line(game, "sold", Strings("Thank you!"), soldVars)
         end,
       }))
     end,
