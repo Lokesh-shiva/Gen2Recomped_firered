@@ -155,8 +155,25 @@ function Gen3BagMenu.new(game, opts)
               Strings("KEY ITEMS") }
   end
   self.pockets = {}
-  for i, key in ipairs(POCKET_KEYS) do
-    self.pockets[i] = { key = key, name = names[i] or key }
+  local screenRec = (game.data.constants or {}).gen3BagScreen
+  self.frlg = type(screenRec) == "table" and screenRec.layout == "frlg"
+  if self.frlg then
+    -- FIRERED'S BAG HAS THREE POCKETS (sPocketNames): the TMs and berries
+    -- live in the TM CASE and BERRY POUCH, which open lists of their own
+    local frNames = (names and #names == 3) and names
+      or { "ITEMS", "KEY ITEMS", "POKé BALLS" }
+    for i, key in ipairs({ "ITEM", "KEY_ITEM", "BALL" }) do
+      self.pockets[i] = { key = key, name = frNames[i] }
+    end
+    if opts.pocket == "TM_HM" then
+      self.pockets[#self.pockets + 1] = { key = "TM_HM", name = "TM CASE" }
+    elseif opts.pocket == "BERRY" then
+      self.pockets[#self.pockets + 1] = { key = "BERRY", name = "BERRY POUCH" }
+    end
+  else
+    for i, key in ipairs(POCKET_KEYS) do
+      self.pockets[i] = { key = key, name = names[i] or key }
+    end
   end
   -- HANDING ONE BACK INSTEAD OF USING IT.
   --
@@ -239,6 +256,8 @@ function Gen3BagMenu:rebuild()
         -- here came back nil and Emerald's bag showed no "x3" against
         -- anything at all.
         qty = (game.save.inventory or {})[id],
+        important = def and (tonumber(def.importance) or 0) ~= 0
+          or want == "KEY_ITEM" or nil,
         description = def and (def.description or def.desc),
       }
     end
@@ -310,6 +329,13 @@ function Gen3BagMenu:choose()
   -- logged "no item flow yet" -- which made EVERY out-of-battle item use in
   -- Hoenn do nothing at all, TMs and HMs included, with the machine data and
   -- the teaching code both already present and working.
+  if self.frlg and (row.id == "TM_CASE" or row.id == "BERRY_POUCH") then
+    self.game.stack:push(Gen3BagMenu.new(self.game, {
+      pocket = row.id == "TM_CASE" and "TM_HM" or "BERRY",
+      onCancel = function() self:rebuild() end,
+    }))
+    return
+  end
   local entries = self:actionsFor(row.id)
   if not entries then
     -- no cartridge list: use it, which is what the choice would have led to
@@ -455,7 +481,17 @@ local function drawRows(self, inset)
     if not row then break end
     local y = top + i * pitch + inset
     Font.draw(row.label, itemX, y)
-    if row.qty and row.qty > 1 then
+    if L.quantityX and row.qty and not row.close and not row.important then
+      -- FireRed: "x" then the count right-aligned in three digit cells, in
+      -- the small face, at a fixed x (BagListMenuItemPrintFunc) -- shown
+      -- even for a single item; key items print none
+      local faced = Font.pushFace("small")
+      local n = tostring(row.qty)
+      local cell = Font.width("0")
+      Font.draw("x", win.x + L.quantityX, y)
+      Font.draw(n, win.x + L.quantityX + Font.width("x") + cell * (3 - #n), y)
+      if faced then Font.popFace() end
+    elseif not L.quantityX and row.qty and row.qty > 1 then
       local qty = Strings("x%d", row.qty)
       Font.draw(qty, qtyRight - Font.width(qty), y)
     end
@@ -584,7 +620,7 @@ function Gen3BagMenu:draw()
   -- showing properly".  They were not showing at all: this used to draw a
   -- one-pixel underline of its own invention below the cell, because nothing
   -- had gone looking for the tile the cartridge swaps in.
-  local dots = r.pocketDots or FALLBACK.pocketDots
+  local dots = r.pocketDots or (r.layout ~= "frlg" and FALLBACK.pocketDots)
   local mark = dots and dots.selected
   if dots and mark and (tonumber(dots.count) or 0) > 0 then
     local step = math.max(1, math.floor(tonumber(dots.step) or 8))
@@ -643,10 +679,13 @@ function Gen3BagMenu:draw()
   local D = r.description or FALLBACK.description
   local text = row and (row.close and Strings("Close the BAG.")
                         or row.description) or ""
-  local y = desc.y + (tonumber(D.y) or 1) + inset
+  -- FireRed prints three lines at the face's own fourteen-pixel pitch from
+  -- y 3 (PrintItemDescriptionOnMessageWindow); the record says so
+  local pitch = tonumber(D.lineHeight) or ROW_PITCH
+  local y = desc.y + (tonumber(D.y) or 1) + (D.lineHeight and 0 or inset)
   for line in tostring(text or ""):gmatch("[^\n]+") do
     Font.draw(line, desc.x + (tonumber(D.x) or 3), y)
-    y = y + ROW_PITCH
+    y = y + pitch
   end
   love.graphics.setColor(1, 1, 1, 1)
 end

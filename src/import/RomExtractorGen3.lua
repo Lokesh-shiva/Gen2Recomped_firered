@@ -4613,7 +4613,11 @@ function RomExtractorGen3:extractItems()
       -- cartridge saying "an HM is not yours to throw away" in the same field.
       importance = self.rom:u8(o + 24),
       keyItem = self.rom:u8(o + 24) ~= 0 or nil,
-      pocket = POCKETS[self.rom:u8(o + 26)],
+      -- the pocket enum is per game: FireRed numbers KEY ITEMS 2 and
+      -- POKE BALLS 3 (the manifest's `pocketEnum`, 1-based names)
+      pocket = (self.manifest.pocketEnum
+                and self.manifest.pocketEnum[self.rom:u8(o + 26)])
+               or POCKETS[self.rom:u8(o + 26)],
       source = ("ROM:gItems[%d]"):format(i),
     }
     if i % 64 == 0 then self:tick("Gen3 items", i, count) end
@@ -34880,6 +34884,7 @@ end
 -- into "the cartridge's".
 -- ---------------------------------------------------------------------------
 RomExtractorGen3.BAG_SCREEN = {
+  LAYOUT = "rse",
   GFX = 0xD9A620, TILEMAP = 0xD9A88C,
   PAL_MALE = 0xD9A588, PAL_FEMALE = 0xD9A5D4,
   TILES = 53, COLS = 32, ROWS = 20, PALETTES = 2,
@@ -34918,10 +34923,143 @@ RomExtractorGen3.BAG_SCREEN = {
   POCKET_DOTS = { x = 40, y = 24, step = 8, count = 5, row = 3, col = 5 },
 }
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S BAG IS ANOTHER SCREEN, not Emerald's at other addresses.
+--
+-- DoLoadBagGraphics (item_menu.c) loads gBagBg_Gfx, gBagBg_Tilemap and
+-- THREE palette banks from gBagBgPalette, and for a girl overwrites bank 0
+-- only with gBagBgPalette_FemaleOverride.  sDefaultBagWindowsStd (bag.c)
+-- holds three windows -- list, description, pocket name -- and there are no
+-- pocket dots: FireRed shows arrows.  The list template is item_X 9,
+-- cursor_X 1, upText_Y 2 with sixteen-pixel rows; the quantity "x ddd" is
+-- printed in the small face at x 110 (BagListMenuItemPrintFunc).
+-- CreateBagSprite puts the 64x64 bag's centre at (40,68), and
+-- CreateItemMenuIcon the 32x32 icon sprite's centre at (24,140), the 24x24
+-- picture in its top-left corner.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.BAG_SCREEN_FRLG = {
+  GFX = 0xE830CC, TILEMAP = 0xE832C0,
+  PALETTE = 0xE835B4, PALETTE_BANKS = 3, FEMALE_BANK0 = 0xE83604,
+  TILES = 55, COLS = 32, ROWS = 20,
+  WINDOWS = 0x4530C4, WINDOW_STRIDE = 8, TERMINATOR = 0xFF,
+  WINDOW_KEYS = { "list", "description", "pocketName" },
+  ITEM_X = 9, CURSOR_X = 1, UP_TEXT_Y = 2, ROW_HEIGHT = 16,
+  QUANTITY_X = 110,
+  DESC_X = 0, DESC_Y = 3, DESC_LINE = 14,
+  BAG_CENTRE = { x = 40, y = 68 }, BAG_SIZE = 64,
+  ITEM_ICON = { x = 8, y = 124, size = 24 },
+}
+
+function RomExtractorGen3:extractBagScreenFireRed()
+  local B = RomExtractorGen3.BAG_SCREEN_FRLG
+  local rom = self.rom
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, B.GFX)
+  local okM, map = RomExtractorGen3.lz77ok(rom, B.TILEMAP)
+  local okP, palRaw = RomExtractorGen3.lz77ok(rom, B.PALETTE)
+  local okF, femaleRaw = RomExtractorGen3.lz77ok(rom, B.FEMALE_BANK0)
+  if not (okG and okM and okP and okF) then
+    Logger.warn("gen3 bag screen (FRLG): a blob did not decompress -- the bag "
+                  .. "keeps its own drawing")
+    return
+  end
+  if #tiles ~= B.TILES * 32 or #map ~= 32 * 32 * 2
+     or #palRaw ~= B.PALETTE_BANKS * 32 or #femaleRaw ~= 32 then
+    Logger.warn("gen3 bag screen (FRLG): %d tiles, %d map bytes, %d/%d palette "
+                  .. "bytes -- not the bag's run", math.floor(#tiles / 32),
+                #map, #palRaw, #femaleRaw)
+    return
+  end
+
+  local function colours(raw, into)
+    local out = into or {}
+    for i = 0, math.floor(#raw / 2) - 1 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      out[i + 1] = { r, g, b }
+    end
+    return out
+  end
+  local male = colours(palRaw)
+  local female = colours(palRaw)
+  colours(femaleRaw, female)
+
+  local images = {}
+  for _, row in ipairs({ { key = "male", colors = male },
+                         { key = "female", colors = female } }) do
+    local ok = pcall(function()
+      local img = ImageWriter.blank(240, 160)
+      for ty = 0, B.ROWS - 1 do
+        for tx = 0, 29 do
+          local cell = ty * B.COLS + tx
+          local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
+          local tid = e % 1024
+          local bank = math.floor(e / 4096) % 16
+          if tid < B.TILES and bank < B.PALETTE_BANKS then
+            RomExtractorGen3.partyTile(img, tiles, row.colors, tid, bank,
+                                       tx * 8, ty * 8)
+          end
+        end
+      end
+      self:saveImage(img, "ui/bag_" .. row.key .. ".png")
+    end)
+    if ok then
+      images[row.key] = "assets/generated/ui/bag_" .. row.key .. ".png"
+    end
+  end
+
+  local win = {}
+  for i = 0, #B.WINDOW_KEYS - 1 do
+    local o = B.WINDOWS + i * B.WINDOW_STRIDE
+    if rom:u8(o) == B.TERMINATOR then break end
+    win[B.WINDOW_KEYS[i + 1]] = {
+      x = rom:u8(o + 1) * 8, y = rom:u8(o + 2) * 8,
+      width = rom:u8(o + 3) * 8, height = rom:u8(o + 4) * 8,
+      bg = rom:u8(o), palette = rom:u8(o + 5),
+    }
+  end
+  -- the terminator has to follow the third row, and the list has to be the
+  -- tall window right of the pocket name
+  if not (win.list and win.description and win.pocketName
+          and rom:u8(B.WINDOWS + 3 * B.WINDOW_STRIDE) == B.TERMINATOR
+          and win.list.x > win.pocketName.x + win.pocketName.width - 8
+          and win.list.height > win.description.height) then
+    Logger.warn("gen3 bag screen (FRLG): %07X does not read as "
+                  .. "sDefaultBagWindowsStd", B.WINDOWS)
+    return
+  end
+
+  local record = {
+    layout = "frlg",
+    images = images,
+    palettes = { male = B.PALETTE, female = B.FEMALE_BANK0 },
+    windows = win,
+    list = { itemX = B.ITEM_X, cursorX = B.CURSOR_X, upTextY = B.UP_TEXT_Y,
+             rowHeight = B.ROW_HEIGHT,
+             rows = math.floor(win.list.height / B.ROW_HEIGHT),
+             quantityX = B.QUANTITY_X },
+    description = { x = B.DESC_X, y = B.DESC_Y, lineHeight = B.DESC_LINE },
+    bag = { x = B.BAG_CENTRE.x - B.BAG_SIZE / 2,
+            y = B.BAG_CENTRE.y - B.BAG_SIZE / 2, size = B.BAG_SIZE },
+    itemIcon = B.ITEM_ICON,
+    source = ("ROM:gBagBg_Gfx %07X, tilemap %07X, palette %07X (+female %07X), "
+              .. "sDefaultBagWindowsStd %07X")
+             :format(B.GFX, B.TILEMAP, B.PALETTE, B.FEMALE_BANK0, B.WINDOWS),
+  }
+  local constants = self._constants or {}
+  constants.gen3BagScreen = record
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 bag screen (FRLG): %d tiles, list (%d,%d) %dx%d = %d rows, "
+                .. "description (%d,%d) %dx%d", B.TILES, win.list.x, win.list.y,
+              win.list.width, win.list.height, record.list.rows,
+              win.description.x, win.description.y, win.description.width,
+              win.description.height)
+end
+
 function RomExtractorGen3:extractBagScreen()
   self:beginStage("Gen3 bag screen")
   local B = RomExtractorGen3.BAG_SCREEN
   local rom = self.rom
+  if B.LAYOUT == "frlg" then return self:extractBagScreenFireRed() end
 
   local okG, tiles = RomExtractorGen3.lz77ok(rom, B.GFX)
   local okM, map = RomExtractorGen3.lz77ok(rom, B.TILEMAP)
