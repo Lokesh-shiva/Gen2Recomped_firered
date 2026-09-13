@@ -6547,13 +6547,28 @@ end
 
 -- ONE CLOSURE FOR THE LIFE OF THE STATE, not one a frame.  Weather is up
 -- across most of Hoenn, so the handler the renderer holds is built once and
--- reads the three fields the state keeps beside it.
+-- reads the record the state keeps beside it.
+--
+-- A RECORD AND NOT THREE FIELDS, and that is the whole of a crash.
+--
+-- Reported from play: "src/world/OverworldController.lua:6490: attempt to call
+-- method 'weatherName' (a string value)" on loading a save and on walking into
+-- Petalburg Woods.  The three fields used to be self.weatherName,
+-- self.weatherAt and self.weatherStage -- and OverworldState:weatherName is a
+-- METHOD.  The first frame that actually drew weather assigned a string over
+-- it, and from then on every `self:weatherName(...)` in this file --
+-- fieldWeather, battleWeather, logGen3Weather -- called a string.  It ran
+-- until the first drawn frame, which is why it looked like a loading bug.
+--
+-- The table is reused rather than rebuilt, so a frame still allocates nothing.
 local function screenWeather(self)
   local fn = self.weatherDraw
   if not fn then
     fn = function(w, h)
+      local shown = self.weatherShown
+      if not shown or not shown.name then return false end
       local G3 = gen3Weather()
-      return G3.draw(self.weatherName, self.weatherAt, w, h, self.weatherStage)
+      return G3.draw(shown.name, shown.frame, w, h, shown.stage)
     end
     self.weatherDraw = fn
   end
@@ -6581,7 +6596,9 @@ function OverworldState:drawFieldWeather()
   -- cartridge's background-layer weather sits beneath the window layer.
   local r = Game.renderer
   if r then
-    self.weatherName, self.weatherAt, self.weatherStage = name, frame, stage
+    local shown = self.weatherShown
+    if not shown then shown = {} self.weatherShown = shown end
+    shown.name, shown.frame, shown.stage = name, frame, stage
     r.screenWeather = screenWeather(self)
     return true
   end
