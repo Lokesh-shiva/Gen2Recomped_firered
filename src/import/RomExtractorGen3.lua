@@ -127,6 +127,19 @@ end
 
 function RomExtractorGen3.new(romData, version, manifest, progress)
   local swapped = RomExtractorGen3.applyAddressMap((manifest or {}).addressMap)
+  -- the opcode table differs past $C6 on FireRed: { [opcode] = {name, spec} }
+  local cmds = (manifest or {}).scriptCommands
+  if type(cmds) == "table" then
+    for key, row in pairs(cmds) do
+      local op = tonumber(key)
+      if op and type(row) == "table" then
+        RomExtractorGen3._pristine[#RomExtractorGen3._pristine + 1] =
+          { Gen3ScriptOps.COMMANDS, op + 1, Gen3ScriptOps.COMMANDS[op + 1] }
+        Gen3ScriptOps.COMMANDS[op + 1] = { row[1], row[2] }
+        swapped = swapped + 1
+      end
+    end
+  end
   swapped = swapped
     + RomExtractorGen3.applyStageOverrides((manifest or {}).stageOverrides)
   if swapped > 0 then
@@ -10763,6 +10776,20 @@ function RomExtractorGen3:decodeScriptAt(start, queue)
         end
       end
     end
+    -- A SIBLING CARTRIDGE NUMBERS ITS SPECIALS DIFFERENTLY.  Every handler
+    -- and every stage here is keyed by Emerald's index, so a FireRed call is
+    -- rewritten to the Emerald index of the same-named function (manifest
+    -- `specialRemap`, 0-based, -1 for a FireRed-only one, which becomes
+    -- 0x1000 + its own index so it can never land on an Emerald handler).
+    local remap = self.manifest.specialRemap
+    if remap and (name == "special" or name == "specialvar") then
+      local slot = name == "special" and 1 or 2
+      local raw = args[slot]
+      local to = raw and remap[raw + 1]
+      if to ~= nil then
+        args[slot] = (to >= 0) and to or (0x1000 + raw)
+      end
+    end
     lines[#lines + 1] = { address = o, op = op, name = name, args = args }
     o = at
     if Gen3ScriptOps.TERMINATORS[op] then return lines, nil end
@@ -17615,16 +17642,23 @@ function RomExtractorGen3:extractHealLocations()
   end
 
   local function runAt(at)
-    local n, seen = 0, {}
+    local n, seen, seenSection = 0, {}, {}
     while true do
       local def, _, _, key = record(at + n * HEAL_LOCATION_RECORD)
       if not def then break end
       seen[key] = true
+      if def.regionMapSection then seenSection[def.regionMapSection] = true end
       n = n + 1
       if n > 64 then break end
     end
+    -- a town is covered by its own record or by one in the same region-map
+    -- section: FireRed carries Saffron twice (the second map is the one its
+    -- connections use) and only one of them has a heal location
     for key in pairs(towns) do
-      if not seen[key] then return nil end
+      local section = byGM[key] and byGM[key].regionMapSection
+      if not seen[key] and not (section and seenSection[section]) then
+        return nil
+      end
     end
     return n
   end
@@ -19097,7 +19131,10 @@ function RomExtractorGen3:counterBehaviour(tilesetPairs)
       end
     end
   end
-  if not best or stat[best].served < 20 or stat[best].served < second * 4 then
+  -- twelve, not twenty: Kanto has fewer staffed counters than Hoenn (FireRed
+  -- finds 19 with no runner-up at all), and the runner-up test is what
+  -- actually separates the counter from everything else
+  if not best or stat[best].served < 12 or stat[best].served < second * 4 then
     Logger.warn("gen3 counters: no behaviour stands out as the one people "
                   .. "stand behind (best %d cells, next %d) -- talking across "
                   .. "a counter is left off",
@@ -22232,7 +22269,24 @@ function RomExtractorGen3:extractTilesets()
             local v = rom:u16(metaAt + m * 16 + t * 2)
             comp[#comp + 1] = string.char(v % 256, math.floor(v / 256) % 256)
           end
-          local av = rom:u16(attrAt + m * 2)
+          -- FIRERED'S ATTRIBUTES ARE u32 (behaviour bits 0-8, layer type
+          -- bits 29-30) and its behaviour numbers are its own.  Everything
+          -- downstream reads Emerald's u16 (behaviour low byte, layer type
+          -- bits 12-15) with Emerald's numbering, so the record is packed
+          -- into that shape here, once (manifest `metatileAttributes`).
+          local A = self.manifest.metatileAttributes
+          local av
+          if A and A.bytes == 4 then
+            local raw32 = rom:u32(attrAt + m * 4)
+            local beh = raw32 % ((A.behaviorMask or 0x1FF) + 1)
+            local mapped = A.behaviorRemap and A.behaviorRemap[tostring(beh)]
+            beh = tonumber(mapped) or (beh < 256 and beh or 0)
+            local layer = math.floor(raw32 / 2 ^ (A.layerShift or 29))
+                          % ((A.layerMask or 3) + 1)
+            av = beh + layer * 4096
+          else
+            av = rom:u16(attrAt + m * 2)
+          end
           attrs[#attrs + 1] = string.char(av % 256, math.floor(av / 256) % 256)
         end
         -- The 4bpp TILE PIXELS travel with the record, not just as a PNG.

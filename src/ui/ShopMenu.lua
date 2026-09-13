@@ -64,6 +64,11 @@ local function price(game, amount)
   if said and type(said.money) == "string" then
     return fill(said.money, { VAR1 = tostring(amount) })
   end
+  -- a Gen 3 font has the POKe DOLLAR itself (FireRed maps it in its
+  -- charmap); the escape below is the Game Boy font's yen tile
+  if require("src.core.GameVersion").isGen3() then
+    return ("₽%d"):format(amount)
+  end
   return ("94u%d"):format(amount)
 end
 
