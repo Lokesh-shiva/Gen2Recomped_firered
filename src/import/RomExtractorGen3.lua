@@ -24052,9 +24052,86 @@ RomExtractorGen3.BACK_INTRO = {
 local GEN3_BACK_PAL_MIN = 12
 local GEN3_BACK_PAL_MARGIN = 3
 
+-- FIRERED'S BACK PICS are a six-row table, not Emerald's eight, and whose is
+-- whose is fixed by pokefirered's TRAINER_BACK_PIC_* enum rather than by
+-- matching trainer rows -- FireRed has no BRENDAN/MAY rows naming the player.
+-- Without this the battle fell back to Gen 1's redb.png path, which a Gen 3
+-- cache never writes.
+RomExtractorGen3.FRLG_BACK = { TABLE = 0x239FA4, PALETTES = 0x239FD4, COUNT = 6,
+                    RED = 0, LEAF = 1, OLD_MAN = 5 }
+
+function RomExtractorGen3:extractPlayerBackPicFireRed()
+  local FRLG_BACK = RomExtractorGen3.FRLG_BACK
+  local rom = self.rom
+  local function row(base, k)
+    local o = base + k * 8
+    return rom:pointer(o), rom:u16(o + 4), rom:u16(o + 6)
+  end
+  local images = {}
+  for k = 0, FRLG_BACK.COUNT - 1 do
+    local ptr, size, tag = row(FRLG_BACK.TABLE, k)
+    -- a CompressedSpritePalette is {ptr, u16 tag}: the tag sits where a
+    -- sheet row keeps its size
+    local palPtr, palTag = row(FRLG_BACK.PALETTES, k)
+    local okP, palRaw = RomExtractorGen3.lz77ok(rom, palPtr or 0)
+    if not (ptr and tag == k and size and size > 0
+            and size % GEN3_BACK_FRAME_BYTES == 0
+            and palPtr and palTag == k and okP) then
+      Logger.warn("gen3 player back pic (FRLG): row %d at %07X does not read "
+                    .. "as gTrainerBackPicTable -- no back pic written",
+                  k, FRLG_BACK.TABLE)
+      return
+    end
+    local raw = rom:bytes(ptr, size)
+    local frames = math.floor(size / GEN3_BACK_FRAME_BYTES)
+    local colors = RomGba.palette(palRaw)
+    local ok = pcall(function()
+      self:saveImage(self:spriteImage(raw, colors, 1, 8, 8),
+                     ("battle/trainers/back_%d.png"):format(k))
+      self:saveImage(self:animStrip(raw, colors, 8, 8, frames),
+                     ("battle/trainers/back_%d_strip.png"):format(k))
+    end)
+    if ok then
+      images[k] = {
+        pic = ("assets/generated/battle/trainers/back_%d.png"):format(k),
+        strip = ("assets/generated/battle/trainers/back_%d_strip.png"):format(k),
+        frames = frames,
+      }
+    end
+  end
+  if not (images[FRLG_BACK.RED] and images[FRLG_BACK.LEAF]) then
+    Logger.warn("gen3 player back pic (FRLG): the sheets could not be composed")
+    return
+  end
+  local field = self._field or {}
+  local forms = field.playerForms or {}
+  for who, k in pairs({ boy = FRLG_BACK.RED, girl = FRLG_BACK.LEAF }) do
+    forms[who] = forms[who] or {}
+    forms[who].back = images[k].pic
+    forms[who].backStrip = images[k].strip
+    forms[who].backIndex = k
+    forms[who].trueColor = true
+  end
+  field.playerForms = forms
+  if images[FRLG_BACK.OLD_MAN] then
+    local pics = field.playerPics or {}
+    pics.demoBack = images[FRLG_BACK.OLD_MAN].pic
+    pics.demoBackTrueColor = true
+    field.playerPics = pics
+  end
+  self._field = field
+  self:write("field", field)
+  Logger.info("Gen3 player back pic (FRLG): RED %d frames, LEAF %d frames, "
+                .. "OLD MAN for the catching demo",
+              images[FRLG_BACK.RED].frames, images[FRLG_BACK.LEAF].frames)
+end
+
 function RomExtractorGen3:extractPlayerBackPic()
   self:beginStage("Gen3 player back pic")
   local rom = self.rom
+  if (self.manifest or {}).frlgItemMenu ~= nil then
+    return self:extractPlayerBackPicFireRed()
+  end
 
   local function recordAt(at)
     local ptr = rom:pointer(at)
@@ -35685,6 +35762,23 @@ RomExtractorGen3.FRLG_INTRO = {
   SCENE3_GENGAR_BOUNCE = { GFX = 0x407B9C, MAP = 0x408D98, PAL = 0x405DA4, PALSIZE = 0x20, BANK = 5 },
   SCENE3_GENGAR_BACK   = { GFX = 0x409D20, PAL = 0x405DA4, PALSIZE = 0x20, COLS = 8, ROWS = 8 },
   SCENE3_NIDORINO      = { GFX = 0x40A3E4, PAL = 0x4096AC, PALSIZE = 0x20, COLS = 8, ROWS = 8 },
+  -- the OAM sprites the scenes create (sizes from intro.c's own OamData)
+  STAR          = { GFX = 0x402A64, PAL = 0x402A44, PALSIZE = 0x20, COLS = 2, ROWS = 2 },
+  SPARKLE_SMALL = { GFX = 0x402ADC, PAL = 0x402ABC, PALSIZE = 0x20, COLS = 1, ROWS = 1 },
+  SPARKLE_BIG   = { GFX = 0x402B2C, PAL = 0x402ABC, PALSIZE = 0x20, COLS = 4, ROWS = 4 },
+  PRESENTS      = { GFX = 0x402CD4, PAL = 0x40270C, PALSIZE = 0x20, COLS = 4, ROWS = 1 },
+  SCENE2_GENGAR   = { GFX = 0x40926C, PAL = 0x405DA4, PALSIZE = 0x20, COLS = 8, ROWS = 8 },
+  SCENE2_NIDORINO = { GFX = 0x4096CC, PAL = 0x4096AC, PALSIZE = 0x20, COLS = 8, ROWS = 8 },
+  SCENE3_GRASS  = { GFX = 0x409A3C, PAL = 0x409A1C, PALSIZE = 0x20, COLS = 8, ROWS = 4 },
+  SCENE3_SWIPE  = { GFX = 0x40B874, PAL = 0x40B834, PALSIZE = 0x20, COLS = 4, ROWS = 8 },
+  SCENE3_DUST   = { GFX = 0x40BAE0, PAL = 0x40B854, PALSIZE = 0x20, COLS = 2, ROWS = 2 },
+  -- pieces whose OAM shape differs from their neighbours', so a uniform
+  -- frame slice cannot cut them: {first tile, width, height} in tiles
+  SCENE3_GENGAR_PIECES = { GFX = 0x409D20, PAL = 0x405DA4, PALSIZE = 0x20,
+    PIECES = { tl = { 0, 8, 8 }, tr = { 64, 4, 8 },
+               bl = { 96, 8, 8 }, br = { 160, 4, 8 } } },
+  SCENE3_SWIPE_BOTTOM = { GFX = 0x40B874, PAL = 0x40B834, PALSIZE = 0x20,
+    PIECES = { a = { 64, 4, 2 }, b = { 72, 4, 2 } } },
 }
 
 -- A 32-wide background layer, as tall as its decompressed tilemap says --
@@ -35805,6 +35899,46 @@ function RomExtractorGen3:extractFireRedIntro()
   ok = bg("scene3GengarBounce", I.SCENE3_GENGAR_BOUNCE) and ok
   ok = sheet("scene3GengarBack", I.SCENE3_GENGAR_BACK) and ok
   ok = sheet("scene3Nidorino", I.SCENE3_NIDORINO) and ok
+  ok = sheet("star", I.STAR) and ok
+  ok = sheet("sparkleSmall", I.SPARKLE_SMALL) and ok
+  ok = sheet("sparkleBig", I.SPARKLE_BIG) and ok
+  ok = sheet("presents", I.PRESENTS) and ok
+  ok = sheet("scene2Gengar", I.SCENE2_GENGAR) and ok
+  ok = sheet("scene2Nidorino", I.SCENE2_NIDORINO) and ok
+  ok = sheet("scene3Grass", I.SCENE3_GRASS) and ok
+  ok = sheet("scene3Swipe", I.SCENE3_SWIPE) and ok
+  ok = sheet("scene3Dust", I.SCENE3_DUST) and ok
+  -- pieces: one picture each, cut at their own tile shape
+  local function pieces(key, def)
+    local okG, tiles = RomExtractorGen3.lz77ok(self.rom, def.GFX)
+    if not okG then
+      Logger.warn("gen3 frlg intro: %s did not decompress", key)
+      return false
+    end
+    local palRaw = self.rom:bytes(def.PAL, def.PALSIZE or 0x20)
+    local colors = {}
+    for i = 0, math.floor(#palRaw / 2) - 1 do
+      local r, g, b = RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256)
+      colors[i + 1] = { r, g, b }
+    end
+    for name, p in pairs(def.PIECES) do
+      local first, w, h = p[1], p[2], p[3]
+      local img = ImageWriter.blank(w * 8, h * 8)
+      for ty = 0, h - 1 do
+        for tx = 0, w - 1 do
+          RomExtractorGen3.partyTile(img, tiles, colors, first + ty * w + tx,
+                                     0, tx * 8, ty * 8)
+        end
+      end
+      local id = key .. "_" .. name
+      self:saveImage(img, "intro_frlg/" .. id .. ".png")
+      images[id] = { path = "assets/generated/intro_frlg/" .. id .. ".png",
+                     frames = 1, cols = w, rows = h }
+    end
+    return true
+  end
+  ok = pieces("gengarPiece", I.SCENE3_GENGAR_PIECES) and ok
+  ok = pieces("swipeBottom", I.SCENE3_SWIPE_BOTTOM) and ok
 
   if not images.gfBg or not images.scene1Grass or not images.scene3Bg then
     Logger.warn("gen3 frlg intro: the core backgrounds did not come out -- "

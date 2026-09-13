@@ -205,18 +205,25 @@ function Gen3Title:draw()
   -- The fallback, for a dataset whose overlay pass found nothing: the words
   -- set in the cartridge's own font over a band dark enough to read them.
   local prompt = Strings("PRESS START")
+  local promptY = GBA_H - 34
   if not drewBrand then
-    local brand = self.title.brandText or Strings("POKéMON EMERALD")
+    local GameVersion = require("src.core.GameVersion")
+    local brand = self.title.brandText
+                  or (GameVersion.get() == "firered" and Strings("POKéMON FIRERED"))
+                  or Strings("POKéMON EMERALD")
     local bandY = GBA_H - 40
     love.graphics.setColor(0.04, 0.09, 0.16, 0.72)
     love.graphics.rectangle("fill", 0, bandY, GBA_W, 40)
     love.graphics.setColor(1, 1, 1, 1)
-    Font.draw(brand, math.floor((GBA_W - Font.width(brand)) / 2), bandY + 6)
+    Font.draw(brand, math.floor((GBA_W - Font.width(brand)) / 2), bandY + 4)
+    -- on its own line: both used to print at bandY + 6 and the blink
+    -- overprinted the brand into garbage
+    promptY = bandY + 22
   end
   if self.blink < 40 then
     -- PRESS START blinks low on the screen, where the cartridge puts it
     local px = math.floor((GBA_W - Font.width(prompt)) / 2)
-    Font.draw(prompt, px, GBA_H - 34)
+    Font.draw(prompt, px, promptY)
   end
   love.graphics.setColor(1, 1, 1, 1)
 end

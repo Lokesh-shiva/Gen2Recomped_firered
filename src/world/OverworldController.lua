@@ -297,6 +297,15 @@ local function objectVisible(save, mapId, obj)
       visible = not told
     elseif here ~= nil then
       visible = here
+    elseif obj.eventFlag and GameVersion.get() == "firered" then
+      -- An object with its OWN hide flag is spawned at map load whenever
+      -- that flag is clear; an addobject somewhere else on the map does not
+      -- change that. FireRed's lab rival is exactly this: present from the
+      -- start, and only removed and re-added by the much later National Dex
+      -- scene -- read as "absent until spawned", Blue was missing from the
+      -- whole starter scene and his own battle. The new-game hide flags
+      -- (gen3NewGameFlags) are what keep the genuinely-absent ones hidden.
+      visible = true
     else
       visible = false
     end
