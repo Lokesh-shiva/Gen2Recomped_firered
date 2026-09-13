@@ -5134,6 +5134,9 @@ end
 -- (`jump2_down` is two tiles, which the derivation cannot see) and the two
 -- agree on direction everywhere they overlap, which is what the suite checks.
 function RomExtractorGen3:movementName(id)
+  if (self.manifest or {}).frlgItemMenu ~= nil then
+    return Gen3ScriptOps.movementName(id, true)
+  end
   local named = Gen3ScriptOps.MOVEMENT_ACTIONS[id]
   if named then return named end
   local derived = (self.manifest.movementActions or {})[tostring(id)]

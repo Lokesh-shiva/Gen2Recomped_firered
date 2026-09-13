@@ -1285,6 +1285,12 @@ end
 Gen3Commands.speciesId = speciesId
 
 function Commands.g3_give_pokemon(ctx, species, level, item)
+  -- ScrCmd_givemon reads all three through VarGet, so any of them may name a
+  -- var. FireRed's starter does: `givemon PLAYER_STARTER_SPECIES` is var
+  -- $4002, and taken as a species number it failed and left the player to
+  -- fight the rival with no Pokemon.
+  species, level, item = valueOf(ctx, species), valueOf(ctx, level),
+                         valueOf(ctx, item)
   local id = speciesId(ctx.game and ctx.game.data, species)
   if not id then return end
   -- The fourth argument is skipNickname, not the held item -- passing the
@@ -1312,7 +1318,7 @@ function Commands.g3_give_pokemon(ctx, species, level, item)
 end
 
 function Commands.g3_give_egg(ctx, species)
-  local id = speciesId(ctx.game and ctx.game.data, species)
+  local id = speciesId(ctx.game and ctx.game.data, valueOf(ctx, species))
   if not id then return end
   -- an egg, and it really is one: give_pokemon takes the flag now rather
   -- than ignoring a fifth argument it never had
@@ -2687,6 +2693,7 @@ end
 -- the frame is drawn one tile outside that and PicBox is told both rather
 -- than keeping its Game Boy constants.
 function Commands.g3_show_mon_pic(ctx, species, x, y)
+  species = valueOf(ctx, species)   -- ScrCmd_showmonpic: VarGet
   ctx.g3MonPic = tonumber(species)
   local ow, game = ctx.overworld, ctx.game
   if not (ow and game and game.stack) then return end
