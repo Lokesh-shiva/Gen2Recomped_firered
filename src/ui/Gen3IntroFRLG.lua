@@ -303,9 +303,17 @@ end
 
 function Gen3IntroFRLG:drawScene2()
   local f = self.frame - T_S1_END
-  love.graphics.setColor(1, 1, 1, 1)
-  love.graphics.rectangle("fill", 0, 0, GBA_W, GBA_H)
   if f < T_S2_CLOSE - T_S1_END then
+    -- Black, not white: scene2Bg's compiled tilemap is taller than one
+    -- screen (it holds the wide shot AND, further down, the close-up cut's
+    -- own ground art, reached by the real ChangeBgY the source does at the
+    -- cut) and the wide shot's own band does not fill the full 160px --
+    -- the rows above and below are the map's unused padding, which real
+    -- hardware shows as its backdrop colour, not this engine's white
+    -- canvas clear. See drawScene3Bg for the fuller note.
+    love.graphics.setColor(0, 0, 0, 1)
+    love.graphics.rectangle("fill", 0, 0, GBA_W, GBA_H)
+    love.graphics.setColor(1, 1, 1, 1)
     -- the wide shot: background trees pan one way, foreground plants the
     -- other (Scene2_Task_PanForest, :1521-1525)
     local age = math.max(0, f - 10)
@@ -322,10 +330,11 @@ function Gen3IntroFRLG:drawScene2()
     if plants then
       local iw = plants:getDimensions()
       local x = fgShift % iw
-      love.graphics.draw(plants, x - iw, GBA_H - 64)
-      love.graphics.draw(plants, x, GBA_H - 64)
+      love.graphics.draw(plants, x - iw, 0)
+      love.graphics.draw(plants, x, 0)
     end
   else
+    love.graphics.setColor(1, 1, 1, 1)
     -- the cut to the close-up: Gengar above, Nidorino below (:1489-1502)
     self:drawBand("scene2GengarClose", 0, 0, 0, GBA_W, 80)
     self:drawBand("scene2NidorinoClose", 0, 0, 80, GBA_W, 80)
@@ -344,8 +353,20 @@ function Gen3IntroFRLG:bgScrollX(f, fast)
   return -math.floor(f * speed)
 end
 
+-- The extracted background is a compiled tilemap taller than one screen
+-- (this port keeps it whole so a multi-pose layer like the grass or the
+-- Gengar bounce can crop its own band out of it) but the painted content in
+-- a SINGLE-pose one like this only fills the middle of it -- the tile rows
+-- above and below are the compiled map's own unused padding, transparent on
+-- real hardware too, where they show the GBA's backdrop colour rather than
+-- this engine's white canvas clear. Painting black behind it first is the
+-- same trade Gen3Intro's own black fallback rectangle makes: not the real
+-- backdrop register value, but the right family of colour for a night forest
+-- scene instead of a jarring white gap.
 function Gen3IntroFRLG:drawScene3Bg(f)
   local bg = self:piece("scene3Bg")
+  love.graphics.setColor(0, 0, 0, 1)
+  love.graphics.rectangle("fill", 0, 0, GBA_W, GBA_H)
   love.graphics.setColor(1, 1, 1, 1)
   if bg then
     local iw = bg:getDimensions()
@@ -353,10 +374,29 @@ function Gen3IntroFRLG:drawScene3Bg(f)
     local shift = self:bgScrollX(f, fast) % iw
     love.graphics.draw(bg, shift - iw, 0)
     love.graphics.draw(bg, shift, 0)
-  else
-    love.graphics.setColor(0.1, 0.1, 0.2, 1)
-    love.graphics.rectangle("fill", 0, 0, GBA_W, GBA_H)
   end
+end
+
+-- Gengar's attack sprite is really its own four-piece "back sprite"
+-- (Scene3_CreateGengarSprite, :1877-1896): four quadrants, each its own OAM
+-- shape (:1892 overrides odd pieces to a taller rectangle), that tile
+-- together into one large Gengar turning to face the camera. Reassembling
+-- that from a flat cols*rows sprite-sheet slice needs each piece's real OAM
+-- size, which this pass does not read -- tried as four square copies of one
+-- extracted frame, it came out as four overlapping duplicates rather than
+-- one Gengar, which is worse than the plain bounce pose it replaced. One
+-- clean, enlarged instance of the same art the idle bounce already uses
+-- reads as "Gengar looms" without claiming quadrant geometry this port does
+-- not have.
+local function gengarAttackPose(self, ff)
+  local image, rec = self:piece("scene3GengarBounce")
+  if not (image and rec) then return end
+  local age = ff - F_GENGAR_BACK
+  local grow = 1.4 + math.min(1, age / 20) * 0.4
+  local iw, ih = image:getDimensions()
+  local band = math.min(ANIM_BAND_PX, ih)
+  local quad = love.graphics.newQuad(0, 0, iw, band, iw, ih)
+  love.graphics.draw(image, quad, 120, 96, 0, grow, grow, iw / 2, band / 2)
 end
 
 function Gen3IntroFRLG:drawScene3()
@@ -365,19 +405,49 @@ function Gen3IntroFRLG:drawScene3()
 
   -- Gengar's idle bounce, the bg-layer stacked-frame trick (:1649-1661) --
   -- cycle through however many poses the extraction actually found, rather
-  -- than assuming the cartridge's own 2
-  local _, bounceRec = self:piece("scene3GengarBounce")
-  local bounceRows = bounceRec and math.max(1, math.floor((bounceRec.rows or 8) * 8 / ANIM_BAND_PX)) or 1
-  local bounceFrame = math.floor(f / 30) % bounceRows
-  self:drawBand("scene3GengarBounce", bounceFrame * ANIM_BAND_PX, 152, 16, 64, 64)
+  -- than assuming the cartridge's own 2.  Hidden once its back-sprite
+  -- finale takes over (:1825 HideBg(BG_SCENE3_GENGAR)).
+  local ffForGengar = f - (T_S3_ENTER_END - T_S2_END)
+  if ffForGengar < F_GENGAR_BACK then
+    local _, bounceRec = self:piece("scene3GengarBounce")
+    local bounceRows = bounceRec
+                       and math.max(1, math.floor((bounceRec.rows or 8) * 8
+                                                   / ANIM_BAND_PX)) or 1
+    local bounceFrame = math.floor(f / 30) % bounceRows
+    self:drawBand("scene3GengarBounce", bounceFrame * ANIM_BAND_PX, 152, 16, 64, 64)
+  end
 
-  -- Nidorino slides in over the entrance (Scene3_StartNidorinoEntrance(0,
-  -- 180, 52) -- :1603), then stands at x=180 for the fight
+  -- THE ONE PLACE Nidorino IS POSITIONED AND DRAWN.  Everything from the
+  -- entrance slide through the cry, the hit recoil, the two hops and the
+  -- attack lunge sets `nx`/`ny` for whichever beat is current and draws
+  -- exactly once at the end -- an earlier draft drew the entrance pose
+  -- unconditionally AND a fight-phase pose on top of it, which is the
+  -- "trailing sprite" ghosting reported from play.
+  local nx, ny = 180, 104
   local enterSpan = math.max(1, T_S3_ENTER_END - T_S2_END)
-  local slideT = math.min(1, f / enterSpan)
-  slideT = slideT * slideT * (3 - 2 * slideT)
-  local nidoX = 0 + (180 - 0) * slideT
-  self:drawFrame("scene3Nidorino", 0, nidoX, 104)
+  if f < enterSpan then
+    local slideT = f / enterSpan
+    slideT = slideT * slideT * (3 - 2 * slideT)
+    nx = 180 * slideT
+  else
+    local ff = f - enterSpan
+    if ff >= F_CRY_START and ff < F_CRY_ANIM then
+      local age = ff - F_CRY_START
+      ny = 104 - math.sin(math.min(1, age / 20) * math.pi) * 6
+    elseif ff >= F_ATTACK_LAND and ff < F_RECOIL_END then
+      local age = ff - F_ATTACK_LAND
+      nx = 180 + math.max(0, 10 - age) * 1.5
+    elseif ff >= F_HOP1_START and ff < F_NIDO_ATTACKS then
+      local hopAge = (ff - F_HOP1_START) % 20
+      nx = 180 - hopAge * 0.3
+      ny = 104 - math.sin(math.min(1, hopAge / 12) * math.pi) * 5
+    elseif ff >= F_NIDO_ATTACKS and ff < F_GENGAR_BACK then
+      local age = ff - F_NIDO_ATTACKS
+      nx = 180 - math.min(1, age / 10) * 30
+    end
+  end
+  love.graphics.setColor(1, 1, 1, 1)
+  self:drawFrame("scene3Nidorino", 0, nx, ny)
 
   -- the small grass clump that passes through the foreground (:1611-1612,
   -- :1702-1733)
@@ -390,55 +460,12 @@ function Gen3IntroFRLG:drawScene3()
     end
   end
 
-  if f < T_S3_ENTER_END - T_S2_END then return end
-  local ff = f - (T_S3_ENTER_END - T_S2_END)
+  if f < enterSpan then return end
+  local ff = f - enterSpan
 
-  -- Nidorino's cry: a small hop-in-place (RECONSTRUCTED motion on the real
-  -- sprite; the cry itself is a sound the engine does not yet route here)
-  if ff >= F_CRY_START and ff < F_CRY_ANIM then
-    local age = ff - F_CRY_START
-    local hop = math.sin(math.min(1, age / 20) * math.pi) * 6
-    love.graphics.setColor(1, 1, 1, 1)
-    self:drawFrame("scene3Nidorino", 0, 180, 104 - hop)
-  end
-
-  -- Gengar's attack: the four-piece back sprite converges on Nidorino
-  -- (Scene3_CreateGengarSprite, :1877-1896 -- quadrant layout reconstructed
-  -- from the `(i & 1) * 48 + 49` x-offset the source uses)
   if ff >= F_GENGAR_BACK then
-    local age = ff - F_GENGAR_BACK
-    local settle = math.min(1, age / 20)
-    for i = 0, 3 do
-      local qx = (i % 2) * 48 + 49
-      local qy = math.floor(i / 2) * 40 + 30
-      local jitter = (1 - settle) * ((i % 2 == 0) and -6 or 6)
-      love.graphics.setColor(0.35, 0.2, 0.45, 1)
-      love.graphics.rectangle("fill", qx + jitter - 16, qy - 16, 32, 32)
-    end
-  end
-
-  -- Nidorino's recoil from the hit
-  if ff >= F_ATTACK_LAND and ff < F_RECOIL_END then
-    local age = ff - F_ATTACK_LAND
-    local kick = math.max(0, 10 - age) * 1.5
     love.graphics.setColor(1, 1, 1, 1)
-    self:drawFrame("scene3Nidorino", 0, 180 + kick, 104)
-  end
-
-  -- Nidorino's own two hops and attack lunge back at Gengar
-  if ff >= F_HOP1_START and ff < F_NIDO_ATTACKS then
-    local hopAge = (ff - F_HOP1_START) % 20
-    local hop = math.sin(math.min(1, hopAge / 12) * math.pi) * 5
-    love.graphics.setColor(1, 1, 1, 1)
-    self:drawFrame("scene3Nidorino", 0, 180 - hopAge * 0.3, 104 - hop)
-  elseif ff >= F_NIDO_ATTACKS and ff < F_GENGAR_BACK then
-    local age = ff - F_NIDO_ATTACKS
-    local lunge = math.min(1, age / 10) * 30
-    love.graphics.setColor(1, 1, 1, 1)
-    self:drawFrame("scene3Nidorino", 0, 180 - lunge, 104)
-  elseif ff < F_HOP1_START then
-    love.graphics.setColor(1, 1, 1, 1)
-    self:drawFrame("scene3Nidorino", 0, 180, 104)
+    gengarAttackPose(self, ff)
   end
 
   -- the finale: white flash, then fade to black and hold for the title cut
