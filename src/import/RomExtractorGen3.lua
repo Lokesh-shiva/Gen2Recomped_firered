@@ -35399,6 +35399,224 @@ function RomExtractorGen3:extractBagScreenFireRed()
               win.description.height)
 end
 
+-- ---------------------------------------------------------------------------
+-- STAGE: THE TM CASE AND THE BERRY POUCH, FIRERED ONLY
+--
+-- Both are their own screens (tm_case.c, berry_pouch.c) -- not the bag at
+-- a locked pocket, which is what this port drew for them until now.  Each
+-- has its own compressed background (gfx + 32x32 tilemap + a male/female
+-- palette split, the same shape the FRLG bag screen already reads) and its
+-- own window table.
+--
+-- WHAT IS NOT EXTRACTED HERE, and why that is a real scope line rather than
+-- an oversight: the TM disc sprite that slides in and out of the case
+-- (CreateDiscSprite, type-tinted from gTMCaseDiscTypes1/2_Pal), the type/
+-- power/accuracy/PP icon sheet BlitMenuInfoIcon draws from, and the SELL
+-- flow either screen offers when opened from a Mart.  Every one of those is
+-- its own small reverse-engineering job on top of the two done here.  The
+-- INFORMATION they carry is not lost -- the move's type, power, accuracy
+-- and PP are already in data/generated/moves.lua and are drawn as text
+-- instead of icons; selling a TM or a berry still works from the ordinary
+-- bag, which is the same trade the earlier bag-screen work made for the
+-- pocket dots' selected-page marker.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.TM_CASE_SCREEN = {
+  GFX = 0xE845D8, TILEMAP = 0xE84B70,          -- gTMCase_Gfx / gTMCase_Tilemap
+  PALETTE = 0xE84CB0, FEMALE_PALETTE = 0xE84D20, -- gTMCaseMenu_{Male,Female}_Pal
+  TILES = 91, COLS = 32, ROWS = 20, PALETTE_BANKS = 4,  -- the map is 32x32 but only the top 20 rows (160px) are ever drawn
+  -- sWindowTemplates (tm_case.c): list, description, selected-msg, title,
+  -- move-info labels, move-info values, message, sell-quantity, money
+  WINDOWS = 0x463190, WINDOW_STRIDE = 8,
+  WINDOW_KEYS = { "list", "description", "selectedMsg", "title",
+                  "moveInfoLabels", "moveInfo", "message", "sellQuantity",
+                  "money" },
+  -- InitTMCaseListMenuItems: item_X 8, cursor_X 0, upText_Y 2, itemVertical-
+  -- Padding 2 -> a 16px row before the +2 discs make it 18 in the wobble
+  ITEM_X = 8, CURSOR_X = 0, UP_TEXT_Y = 2, ROW_HEIGHT = 16,
+  -- List_ItemPrintFunc: the small-face "xNNN" count sits at column 126
+  QUANTITY_X = 126,
+  -- PrintDescription: 2 pixels in, 3 down
+  DESC_X = 2, DESC_Y = 3, DESC_LINE = 14,
+}
+
+RomExtractorGen3.BERRY_POUCH_SCREEN = {
+  GFX = 0xE859D0, TILEMAP = 0xE85C44,          -- gBerryPouchBgGfx / Bg1Tilemap
+  PALETTE = 0xE85BA4, FEMALE_BANK0 = 0xE85BF4,  -- gBerryPouchBgPals(+override)
+  TILES = 52, COLS = 32, ROWS = 20, PALETTE_BANKS = 3,  -- likewise
+  -- sWindowTemplates_Main (berry_pouch.c): list, description, title
+  WINDOWS = 0x4643B8, WINDOW_STRIDE = 8,
+  WINDOW_KEYS = { "list", "description", "title" },
+  -- BerryPouchItemPrintFunc mirrors the ordinary bag's small-face count
+  ITEM_X = 8, CURSOR_X = 0, UP_TEXT_Y = 2, ROW_HEIGHT = 16,
+  QUANTITY_X = 126,
+  DESC_X = 2, DESC_Y = 3, DESC_LINE = 14,
+}
+
+-- Shared by both: an opaque 240x160 background from a 32x32 tilemap over a
+-- male/female palette split, exactly like extractBagScreenFireRed's own.
+-- `femaleMode`: "bank" replaces palette bank 0 with a second blob (the bag
+-- and the berry pouch); "full" replaces the whole palette (the TM case,
+-- which loads one four-bank set or the other outright).
+function RomExtractorGen3:extractGenderedScreen(S, femaleMode, label)
+  local rom = self.rom
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, S.GFX)
+  local okM, map = RomExtractorGen3.lz77ok(rom, S.TILEMAP)
+  local okP, palRaw = RomExtractorGen3.lz77ok(rom, S.PALETTE)
+  local okF, femaleRaw = true, nil
+  if femaleMode == "bank" then
+    okF, femaleRaw = RomExtractorGen3.lz77ok(rom, S.FEMALE_BANK0)
+  elseif femaleMode == "full" then
+    okF, femaleRaw = RomExtractorGen3.lz77ok(rom, S.FEMALE_PALETTE)
+  end
+  if not (okG and okM and okP and okF) then
+    Logger.warn("gen3 %s: a blob did not decompress -- left unripped", label)
+    return nil
+  end
+  if #tiles ~= S.TILES * 32 or #map ~= 32 * 32 * 2
+     or #palRaw ~= S.PALETTE_BANKS * 32
+     or (femaleMode == "bank" and #femaleRaw ~= 32)
+     or (femaleMode == "full" and #femaleRaw ~= S.PALETTE_BANKS * 32) then
+    Logger.warn("gen3 %s: %d tiles, %d map bytes, %d palette bytes -- not "
+                  .. "this screen's run", label, math.floor(#tiles / 32),
+                #map, #palRaw)
+    return nil
+  end
+
+  local function colours(raw, into)
+    local out = into or {}
+    for i = 0, math.floor(#raw / 2) - 1 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      out[i + 1] = { r, g, b }
+    end
+    return out
+  end
+  local male = colours(palRaw)
+  local female
+  if femaleMode == "bank" then
+    female = colours(palRaw)
+    colours(femaleRaw, female)
+  elseif femaleMode == "full" then
+    female = colours(femaleRaw)
+  else
+    female = male
+  end
+
+  local images = {}
+  for _, row in ipairs({ { key = "male", colors = male },
+                         { key = "female", colors = female } }) do
+    local ok, err = pcall(function()
+      local img = ImageWriter.blank(240, 160)
+      for ty = 0, S.ROWS - 1 do
+        for tx = 0, 29 do
+          local cell = ty * S.COLS + tx
+          local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
+          local tid = e % 1024
+          local bank = math.floor(e / 4096) % 16
+          if tid < S.TILES and bank < S.PALETTE_BANKS then
+            RomExtractorGen3.partyTile(img, tiles, row.colors, tid, bank,
+                                       tx * 8, ty * 8)
+          end
+        end
+      end
+      self:saveImage(img, "ui/" .. label .. "_" .. row.key .. ".png")
+    end)
+    if ok then
+      images[row.key] = "assets/generated/ui/" .. label .. "_" .. row.key
+                        .. ".png"
+    else
+      Logger.warn("gen3 %s: %s picture failed: %s", label, row.key,
+                  tostring(err))
+    end
+  end
+  if not (images.male or images.female) then return nil end
+
+  local win = {}
+  for i = 0, #S.WINDOW_KEYS - 1 do
+    local o = S.WINDOWS + i * S.WINDOW_STRIDE
+    win[S.WINDOW_KEYS[i + 1]] = {
+      x = rom:u8(o + 1) * 8, y = rom:u8(o + 2) * 8,
+      width = rom:u8(o + 3) * 8, height = rom:u8(o + 4) * 8,
+    }
+  end
+  return images, win
+end
+
+function RomExtractorGen3:extractTMCaseScreen()
+  self:beginStage("Gen3 TM case screen")
+  if (self.manifest or {}).frlgItemMenu == nil then
+    Logger.warn("gen3 TM case screen: not a FireRed manifest -- skipped")
+    return
+  end
+  local S = RomExtractorGen3.TM_CASE_SCREEN
+  local images, win = self:extractGenderedScreen(S, "full", "tmcase")
+  if not images then
+    Logger.warn("gen3 TM case screen: the background could not be composed")
+    return
+  end
+  if not (win.list and win.description and win.title
+          and win.list.width > win.description.width) then
+    Logger.warn("gen3 TM case screen: %07X does not read as tm_case.c's "
+                  .. "sWindowTemplates", S.WINDOWS)
+    return
+  end
+  local record = {
+    images = images,
+    windows = win,
+    list = { itemX = S.ITEM_X, cursorX = S.CURSOR_X, upTextY = S.UP_TEXT_Y,
+             rowHeight = S.ROW_HEIGHT,
+             rows = math.floor(win.list.height / S.ROW_HEIGHT),
+             quantityX = S.QUANTITY_X },
+    description = { x = S.DESC_X, y = S.DESC_Y, lineHeight = S.DESC_LINE },
+    source = ("ROM:gTMCase_Gfx %07X, tilemap %07X, sWindowTemplates %07X")
+             :format(S.GFX, S.TILEMAP, S.WINDOWS),
+  }
+  local constants = self._constants or {}
+  constants.gen3TMCaseScreen = record
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 TM case screen: %d tiles, list (%d,%d) %dx%d = %d rows",
+              S.TILES, win.list.x, win.list.y, win.list.width,
+              win.list.height, record.list.rows)
+end
+
+function RomExtractorGen3:extractBerryPouchScreen()
+  self:beginStage("Gen3 berry pouch screen")
+  if (self.manifest or {}).frlgItemMenu == nil then
+    Logger.warn("gen3 berry pouch screen: not a FireRed manifest -- skipped")
+    return
+  end
+  local S = RomExtractorGen3.BERRY_POUCH_SCREEN
+  local images, win = self:extractGenderedScreen(S, "bank", "berrypouch")
+  if not images then
+    Logger.warn("gen3 berry pouch screen: the background could not be composed")
+    return
+  end
+  if not (win.list and win.description and win.title
+          and win.list.height > win.description.height) then
+    Logger.warn("gen3 berry pouch screen: %07X does not read as "
+                  .. "berry_pouch.c's sWindowTemplates_Main", S.WINDOWS)
+    return
+  end
+  local record = {
+    images = images,
+    windows = win,
+    list = { itemX = S.ITEM_X, cursorX = S.CURSOR_X, upTextY = S.UP_TEXT_Y,
+             rowHeight = S.ROW_HEIGHT,
+             rows = math.floor(win.list.height / S.ROW_HEIGHT),
+             quantityX = S.QUANTITY_X },
+    description = { x = S.DESC_X, y = S.DESC_Y, lineHeight = S.DESC_LINE },
+    source = ("ROM:gBerryPouchBgGfx %07X, tilemap %07X, sWindowTemplates_Main "
+              .. "%07X"):format(S.GFX, S.TILEMAP, S.WINDOWS),
+  }
+  local constants = self._constants or {}
+  constants.gen3BerryPouchScreen = record
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 berry pouch screen: %d tiles, list (%d,%d) %dx%d = %d rows",
+              S.TILES, win.list.x, win.list.y, win.list.width,
+              win.list.height, record.list.rows)
+end
+
 function RomExtractorGen3:extractBagScreen()
   self:beginStage("Gen3 bag screen")
   local B = RomExtractorGen3.BAG_SCREEN
@@ -42866,6 +43084,8 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractBattleHud",
   "extractPartyMenu",
   "extractBagScreen",
+  "extractTMCaseScreen",
+  "extractBerryPouchScreen",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",

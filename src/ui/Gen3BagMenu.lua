@@ -338,9 +338,17 @@ function Gen3BagMenu:choose()
   -- logged "no item flow yet" -- which made EVERY out-of-battle item use in
   -- Hoenn do nothing at all, TMs and HMs included, with the machine data and
   -- the teaching code both already present and working.
-  if self.frlg and (row.id == "TM_CASE" or row.id == "BERRY_POUCH") then
-    self.game.stack:push(Gen3BagMenu.new(self.game, {
-      pocket = row.id == "TM_CASE" and "TM_HM" or "BERRY",
+  -- TM CASE and BERRY POUCH are their OWN screens on FireRed (tm_case.c,
+  -- berry_pouch.c) -- not the bag reopened at a locked pocket, which is
+  -- what this pushed until Gen3TMCase.lua/Gen3BerryPouch.lua existed.
+  if self.frlg and row.id == "TM_CASE" then
+    self.game.stack:push(require("src.ui.Gen3TMCase").new(self.game, {
+      onCancel = function() self:rebuild() end,
+    }))
+    return
+  end
+  if self.frlg and row.id == "BERRY_POUCH" then
+    self.game.stack:push(require("src.ui.Gen3BerryPouch").new(self.game, {
       onCancel = function() self:rebuild() end,
     }))
     return
