@@ -447,6 +447,7 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- the battle here so there is one place that knows, whichever way it
     -- was decided.
     if opts and opts.double then battle.double = true end
+    if opts and opts.canLose then battle.canLose = true end
     if battle.trainer and battle.trainer.doubleBattle then battle.double = true end
     -- AND WHO THE OTHER ONE IS, when two walked up together.  The battle
     -- fills its second opponent slot from this trainer's own party rather

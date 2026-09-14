@@ -1639,10 +1639,31 @@ Gen3Commands.FALL_THROUGH_KINDS = FALL_THROUGH_KINDS
 -- (the SIGHT path was gated, which is why only talking re-triggered), so
 -- every trainer in Hoenn fought you again, forever, every time you spoke to
 -- them.
-function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText)
+function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
+                                    rivalFlags)
   ctx.g3Trainer = tonumber(trainerId)
   ctx.g3TrainerKind = tonumber(kind)
   local k = tonumber(kind) or 0
+  -- FIRERED'S TRAINER_BATTLE_EARLY_RIVAL (CB2_EndTrainerBattle): no beaten
+  -- check, and the script ALWAYS continues after the battle -- on a win, and
+  -- on a loss when RIVAL_BATTLE_HEAL_AFTER is set (heal, VAR_RESULT = TRUE).
+  -- A loss without it is an ordinary whiteout. Ending the script on a win,
+  -- as the other modes do, skipped Oak's lab's EndRivalBattle -- the heal,
+  -- Blue leaving and the scene var -- so the trigger fought him again.
+  if k == 9 and require("src.core.GameVersion").get() == "firered" then
+    local healAfter = (tonumber(rivalFlags) or 0) % 2 == 1
+    startTrainer(ctx, ctx.g3Trainer, healAfter and { canLose = true } or nil)
+    local lost = ctx.lastBattleResult ~= "win"
+    if lost and healAfter then
+      local Pokemon = require("src.pokemon.Pokemon")
+      for _, mon in ipairs((ctx.save or {}).party or {}) do Pokemon.heal(mon) end
+    end
+    if lost and ctx.g3Trainer then
+      Gen3Commands.markTrainerBeaten(ctx, ctx.g3Trainer)   -- SetBattledTrainerFlag
+    end
+    setVar(ctx.save, VAR_RESULT, lost and 1 or 0)
+    return
+  end
   if FLAG_CHECKED_KINDS[k] then
     local name = trainerFlag(ctx.g3Trainer, ctx.game and ctx.game.data)
     if name and (ctx.save or {}).flags and ctx.save.flags[name] == true then

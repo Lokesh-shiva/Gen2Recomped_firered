@@ -540,7 +540,8 @@ end
 -- ir[5] is the line a DOUBLE trainer says when the party cannot field two,
 -- and it is the only one of the five that four types carry and six do not.
 L.trainerbattle = function(ir, s)
-  emit(s, { "g3_trainer_battle", ir[2], ir[3], ir[4], ir[5] })
+  -- ir[6]: FireRed's early-rival flags (type 9 only)
+  emit(s, { "g3_trainer_battle", ir[2], ir[3], ir[4], ir[5], ir[6] })
 end
 L.dotrainerbattle = function(_, s) emit(s, { "g3_do_trainer_battle" }) end
 L.checktrainerflag = function(ir, s) emit(s, { "g3_check_trainer_flag", ir[2] }) end

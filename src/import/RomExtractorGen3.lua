@@ -10759,6 +10759,14 @@ function RomExtractorGen3:decodeScriptAt(start, queue)
           args[4] = rom:u32(cantAt)
         end
       end
+      -- FIRERED'S TYPE 9 IS TRAINER_BATTLE_EARLY_RIVAL, whose header word is
+      -- not a local id but sRivalBattleFlags: RIVAL_BATTLE_TUTORIAL (Oak's
+      -- lab) lets the battle be lost and heals; 0 (Route 22) whites out.
+      if kind == 9 and (self.manifest or {}).frlgItemMenu ~= nil then
+        if args[3] == nil then args[3] = false end
+        if args[4] == nil then args[4] = false end
+        args[5] = rom:u16(o + 4)
+      end
       at = o + length
     else
       for i = 1, #spec do
