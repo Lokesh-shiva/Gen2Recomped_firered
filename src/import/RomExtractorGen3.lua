@@ -37361,6 +37361,77 @@ function RomExtractorGen3:extractFireRedFieldShadow()
   self:write("constants", constants)
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S DUNGEON PREVIEWS (map_preview_screen.c sMapPreviewScreenData):
+-- 28 records of { u8 mapsec, u8 type (0 cave, 1 forest), u16 flag, tiles
+-- (LZ), tilemap (LZ), palette (3 raw rows loaded at bank 13) }.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_MAP_PREVIEWS = { TABLE = 0x43E9E8, COUNT = 28, PAL_BANK = 13 }
+
+function RomExtractorGen3:extractFireRedMapPreviews()
+  self:beginStage("Gen3 FireRed map previews")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local P = RomExtractorGen3.FRLG_MAP_PREVIEWS
+  local rom = self.rom
+  local bySection, rendered, drawn = {}, {}, 0
+  for i = 0, P.COUNT - 1 do
+    local at = P.TABLE + i * 16
+    local sec, kind, flag = rom:u8(at), rom:u8(at + 1), rom:u16(at + 2)
+    local tilesAt, mapAt, palAt = rom:pointer(at + 4), rom:pointer(at + 8), rom:pointer(at + 12)
+    if tilesAt and mapAt and palAt then
+      local key = ("%07X"):format(tilesAt)
+      if rendered[key] == nil then
+        rendered[key] = false
+        pcall(function()
+          local okT, tiles = RomExtractorGen3.lz77ok(rom, tilesAt)
+          local okM, map = RomExtractorGen3.lz77ok(rom, mapAt)
+          if not (okT and okM) then return end
+          local raw = rom:bytes(palAt, 96)
+          local pal = {}
+          for c = 0, 47 do pal[c] = { RomGba.bgr555(raw[c * 2 + 1] + raw[c * 2 + 2] * 256) } end
+          local cols = (#map % 60 == 0 and #map <= 1200) and 30 or 32
+          local img = ImageWriter.blank(240, 160)
+          for cy = 0, 19 do
+            for cx = 0, 29 do
+              local c = cy * cols + cx
+              local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+              local tid, bank = e % 1024, math.floor(e / 4096) % 16 - P.PAL_BANK
+              local hflip, vflip = math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1
+              local base = tid * 32
+              if bank >= 0 and bank < 3 and base + 32 <= #tiles then
+                for y = 0, 7 do
+                  for x = 0, 7 do
+                    local sx = hflip and (7 - x) or x
+                    local sy = vflip and (7 - y) or y
+                    local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+                    local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+                    local col = pal[bank * 16 + v]
+                    img:setPixel(cx * 8 + x, cy * 8 + y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+                  end
+                end
+              end
+            end
+          end
+          local path = ("map_preview_frlg/%s.png"):format(key)
+          self:saveImage(img, path)
+          rendered[key] = "assets/generated/" .. path
+          drawn = drawn + 1
+        end)
+      end
+      if rendered[key] then
+        bySection[sec] = { image = rendered[key], type = kind == 1 and "forest" or "cave",
+                           flag = ("FLAG_G3_%04X"):format(flag) }
+      end
+    end
+  end
+  local constants = self._constants or {}
+  constants.gen3FRLGMapPreviews = { bySection = bySection,
+    source = "ROM:sMapPreviewScreenData 043E9E8" }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed map previews: %d pictures", drawn)
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -45116,6 +45187,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedPocketArt",
   "extractFireRedNaming",
   "extractFireRedFieldShadow",
+  "extractFireRedMapPreviews",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",

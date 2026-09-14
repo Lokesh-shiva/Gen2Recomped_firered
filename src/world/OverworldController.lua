@@ -9955,9 +9955,26 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
   local arriveWarp = self.arriveWarp
   self.arriveWarp = nil
   local fromId = self.map.id
+  local fromSection = self.map.def and self.map.def.regionMapSection
   Game.stack:push(Transition.new(Game, function()
     self:setMap(mapId, x, y, facing or "down", opts)
     self:noteGen2Spawn(fromId)
+    -- FIRERED: a warp into a dungeon with a preview picture shows it first
+    local section = self.map.def and self.map.def.regionMapSection
+    if section and section ~= fromSection and GameVersion.get() == "firered" then
+      local Preview = require("src.world.Gen3MapPreviewFRLG")
+      if Preview.record(Game, section) then
+        local frlg = (Game.data.constants or {}).gen3FRLGRegionMap
+        local name = frlg and frlg.names and frlg.names[section]
+        local state = Preview.new(Game, section, name and Strings(name) or "")
+        if state then
+          Game.stack:push(state)
+          -- the preview already named the place (FieldCB_WarpExitFadeFromBlack
+          -- takes the preview branch instead of ShowMapNamePopup)
+          self.mapNameSign = nil
+        end
+      end
+    end
     -- The warp we land ON stays inert for the completed-step check until we
     -- physically step off it, so a warp whose destination cell is itself a
     -- warp cannot bounce us straight back (elevator cars, stacked stair/door
