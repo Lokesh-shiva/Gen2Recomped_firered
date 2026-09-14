@@ -356,6 +356,7 @@ function NamingScreen:jumpToEnd()
 end
 
 function NamingScreen:update(dt)
+  self.blink = (self.blink or 0) + 1
   local GRID = self:grid()
   local caseRow, edRow, edCol, backRow = findMeta(GRID, self.switchLabels)
   local input = self.game.input
@@ -633,7 +634,135 @@ function NamingScreen:drawGen3()
   love.graphics.setColor(1, 1, 1, 1)
 end
 
+-- FIRERED'S, out of RomExtractorGen3:extractFireRedNaming: BG3 the striped
+-- field with the name plate, BG1 the page's coloured frame with the keys on
+-- its fill, the three sprite plates in the column at x 204, the bracket
+-- cursor at sPageColumnXPos + 38, the underscores and the input arrow.
+function NamingScreen:frlgImage(key)
+  local r = (self.game.data.constants or {}).gen3FRLGNaming
+  local path = r and r.images and r.images[key]
+  if not path then return nil end
+  self._img = self._img or {}
+  if self._img[path] == nil then
+    local ok, img = pcall(require("src.render.Assets").image, path)
+    self._img[path] = ok and img or false
+  end
+  return self._img[path] or nil
+end
+
+local FRLG_LABEL = { upper = "label_upper", lower = "label_lower", symbols = "label_others" }
+
+function NamingScreen:drawFireRed(rec)
+  local g = love.graphics
+  local m = self:metrics()
+  local function rgb(t, f) t = t or f return { t[1] / 255, t[2] / 255, t[3] / 255, 1 } end
+  local function text(s, x, y, ink, shadow, small)
+    local faced = small and Font.hasFace and Font.hasFace("small") and Font.pushFace("small")
+    local two = Font.beginTwoTone(ink, shadow)
+    if not two then g.setColor(ink) end
+    Font.draw(s, x, y)
+    if two then Font.endTwoTone() end
+    if faced then Font.popFace() end
+    g.setColor(1, 1, 1, 1)
+  end
+  local cc = rec.colors or {}
+  g.setColor(1, 1, 1, 1)
+  local bg = self:frlgImage("bg")
+  if bg then g.draw(bg, 0, 0) end
+
+  -- the banner: window (0,0) 30x2, "{DPAD}MOVE {A}OK {B}BACK" right-aligned
+  g.setColor(0, 123 / 255, 197 / 255, 1)
+  g.rectangle("fill", 0, 0, 240, 16)
+  local white, darkGray = { 1, 1, 1, 1 }, { 98 / 255, 98 / 255, 98 / 255, 1 }
+  local hints = { { "+", Strings("MOVE") }, { "A", Strings("OK") }, { "B", Strings("BACK") } }
+  local faced = Font.hasFace and Font.hasFace("small") and Font.pushFace("small")
+  local width = 0
+  for _, h in ipairs(hints) do width = width + 12 + Font.width(h[2]) + 4 end
+  if faced then Font.popFace() end
+  local hx = 240 - 4 - width + 4
+  for _, h in ipairs(hints) do
+    g.setColor(white)
+    g.rectangle("line", hx + 0.5, 2.5, 10, 9, 3, 3)
+    text(h[1], hx + 2, 0, white, darkGray, true)
+    text(h[2], hx + 12, 0, white, darkGray, true)
+    local f2 = Font.hasFace and Font.hasFace("small") and Font.pushFace("small")
+    hx = hx + 12 + Font.width(h[2]) + 4
+    if f2 then Font.popFace() end
+  end
+
+  -- the question and the typed name, on the plate BG3 already draws
+  local entryInk = cc.entry and rgb(cc.entry[2]) or darkGray
+  local entryShadow = cc.entry and rgb(cc.entry[3]) or { 0.84, 0.84, 0.81, 1 }
+  text(self.title, 72 + 1, 32 + 1, entryInk, entryShadow)
+  local base = math.floor((240 - self.maxLen * 8) / 2) + 6
+  local underscore, arrow = self:frlgImage("underscore"), self:frlgImage("arrow")
+  for i = 1, self.maxLen do
+    local x = base + (i - 1) * 8
+    local glyph = self.glyphs[i]
+    if glyph then text(Strings(glyph), x, 48 + 1, entryInk, entryShadow) end
+    if underscore then g.draw(underscore, x + 3 - 4, 60 - 4) end
+  end
+  local at = math.min(#self.glyphs + 1, self.maxLen)
+  if arrow and math.floor((self.blink or 0) / 30) % 2 == 0 then
+    g.draw(arrow, base + (at - 1) * 8 - 4, 56 - 4)
+  end
+
+  -- the page: BG1's frame, the window's fill, the keys
+  local page = self.pages[self.page] or self.pages[1]
+  local frame = self:frlgImage("kb_" .. page.name)
+  if frame then g.draw(frame, 0, 0) end
+  local fill = cc.fill and cc.fill[page.name]
+  if fill then
+    g.setColor(rgb(fill))
+    g.rectangle("fill", 24, 80, 152, 64)
+    g.setColor(1, 1, 1, 1)
+  end
+  local keyInk = cc.key and rgb(cc.key[1]) or white
+  local keyShadow = cc.key and rgb(cc.key[2]) or darkGray
+  local cols = (self.layout.columns or {})[page.name] or {}
+  for r = 1, m.keyRows do
+    for c, cell in ipairs(m.rows[r]) do
+      -- centred under the cursor, whose centre is sPageColumnXPos + 38
+      local s = Strings(cell)
+      local cx = 38 + (cols[c] or (c - 1) * 12)
+      text(s, cx - math.floor(Font.width(s) / 2), 80 + (r - 1) * 16 + 1, keyInk, keyShadow)
+    end
+  end
+
+  -- the column of plates: the page swap (labelled with where it goes), BACK, OK
+  local nextPage = self.pages[self.page % #self.pages + 1]
+  local plates = {
+    { self:frlgImage("frame"), 184, 72 },
+    { self:frlgImage("back"), 184, 104 },
+    { self:frlgImage("ok"), 184, 128 },
+  }
+  for i, p in ipairs(plates) do
+    if p[1] then
+      g.draw(p[1], p[2], p[3])
+      if m.buttonAt and self.row == m.buttonAt + i - 1 then
+        -- the chosen plate brightens (the cartridge's palette flash)
+        g.setBlendMode("add")
+        g.setColor(1, 1, 1, 0.18 + 0.12 * math.abs(math.sin((self.blink or 0) / 10)))
+        g.draw(p[1], p[2], p[3])
+        g.setBlendMode("alpha")
+        g.setColor(1, 1, 1, 1)
+      end
+    end
+  end
+  local label = self:frlgImage(FRLG_LABEL[nextPage.name] or "label_others")
+  if label then g.draw(label, 192, 76) end
+
+  -- the cursor, on a key
+  local cursor = self:frlgImage("cursor")
+  if cursor and self.row <= m.keyRows then
+    g.draw(cursor, 30 + (cols[self.col] or 0), 80 + (self.row - 1) * 16)
+  end
+  g.setColor(1, 1, 1, 1)
+end
+
 function NamingScreen:draw()
+  local frlg = self.layout and (self.game.data.constants or {}).gen3FRLGNaming
+  if frlg and frlg.images and frlg.images.bg then return self:drawFireRed(frlg) end
   if self.layout then return self:drawGen3() end
   return self:drawClassic()
 end

@@ -37155,6 +37155,115 @@ function RomExtractorGen3:extractFireRedPocketArt()
   Logger.info("Gen3 FireRed pocket art: %d images", n)
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S NAMING SCREEN ART (pokefirered src/naming_screen.c)
+--
+-- gNamingScreenMenu_Gfx under BG3 (the background) and BG1 (the keyboard
+-- page's frame), palettes 0-5 from gNamingScreenMenu_Pal and 10 from
+-- gNamingScreenKeyboard_Pal.  The sprites are raw 8x8-tile sheets laid out
+-- by their subsprite tables: the BACK and OK plates are 40x24 (five tiles a
+-- row), the page-swap frame 40x32, the page labels 24x8, the cursor 16x16.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_NAMING = {
+  GFX = 0xE980E4, BG_MAP = 0xE982BC,
+  KB_MAPS = { upper = 0xE98398, lower = 0xE98458, symbols = 0xE98518 },
+  MENU_PAL = 0xE98024, KB_PAL = 0xE97FE4,
+  SPRITES = {
+    back = { 0xE98858, 40, 24, 4 }, ok = { 0xE98A38, 40, 24, 4 },
+    frame = { 0xE985D8, 40, 32, 4 }, swap_button = { 0xE98FD8, 64, 8, 1 },
+    label_upper = { 0xE98C18, 24, 8, 4 }, label_lower = { 0xE98CB8, 24, 8, 4 },
+    label_others = { 0xE98D58, 24, 8, 4 },
+    cursor = { 0xE98DF8, 16, 16, 5 }, cursor_filled = { 0xE98F38, 16, 16, 5 },
+    arrow = { 0xE990D8, 8, 8, 3 }, underscore = { 0xE990F8, 8, 8, 3 },
+  },
+}
+
+function RomExtractorGen3:extractFireRedNaming()
+  self:beginStage("Gen3 FireRed naming screen")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local N = RomExtractorGen3.FRLG_NAMING
+  local rom = self.rom
+  local pal = {}
+  local function rows(at, first, count)
+    local raw = rom:bytes(at, count * 32)
+    for i = 0, count * 16 - 1 do
+      pal[first * 16 + i] = { RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256) }
+    end
+  end
+  rows(N.MENU_PAL, 0, 6)
+  rows(N.KB_PAL, 10, 1)
+  local ok, tiles = RomExtractorGen3.lz77ok(rom, N.GFX)
+  if not ok then Logger.warn("gen3 frlg naming: tiles did not decompress") return end
+  local images = {}
+  local function save(key, img)
+    self:saveImage(img, "naming_frlg/" .. key .. ".png")
+    images[key] = "assets/generated/naming_frlg/" .. key .. ".png"
+  end
+  local function layer(key, at, keep0)
+    local okM, map = RomExtractorGen3.lz77ok(rom, at)
+    if not okM then return end
+    local cols = (#map % 60 == 0 and #map <= 1200) and 30 or 32
+    local img = ImageWriter.blank(240, 160)
+    for cy = 0, 19 do
+      for cx = 0, 29 do
+        local c = cy * cols + cx
+        local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+        local tid, bank = e % 1024, math.floor(e / 4096) % 16
+        local hflip, vflip = math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1
+        local base = tid * 32
+        if base + 32 <= #tiles then
+          for y = 0, 7 do
+            for x = 0, 7 do
+              local sx = hflip and (7 - x) or x
+              local sy = vflip and (7 - y) or y
+              local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+              local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+              local col = (v ~= 0 or keep0) and pal[bank * 16 + v]
+              if col then img:setPixel(cx * 8 + x, cy * 8 + y, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
+            end
+          end
+        end
+      end
+    end
+    save(key, img)
+  end
+  pcall(layer, "bg", N.BG_MAP, true)
+  for key, at in pairs(N.KB_MAPS) do pcall(layer, "kb_" .. key, at, false) end
+  for key, spec in pairs(N.SPRITES) do
+    pcall(function()
+      local at, w, h, bank = spec[1], spec[2], spec[3], spec[4]
+      local cols, rws = w / 8, h / 8
+      local raw = rom:bytes(at, cols * rws * 32)
+      local px = RomGba.tiles4bpp(raw, cols, rws)
+      local img = ImageWriter.blank(w, h)
+      for y = 1, h do
+        for x = 1, w do
+          local v = px[y][x]
+          local col = v ~= 0 and pal[bank * 16 + v]
+          if col then img:setPixel(x - 1, y - 1, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
+        end
+      end
+      save(key, img)
+    end)
+  end
+  local function c(i) local t = pal[i] return { t[1], t[2], t[3] } end
+  local constants = self._constants or {}
+  constants.gen3FRLGNaming = {
+    images = images,
+    colors = {
+      fill = { upper = c(10 * 16 + 13), lower = c(10 * 16 + 14), symbols = c(10 * 16 + 15) },
+      key = { c(10 * 16 + 1), c(10 * 16 + 2) },
+      entry = { c(10 * 16 + 1), c(10 * 16 + 2), c(10 * 16 + 3) },
+    },
+    source = "ROM:naming_screen.c gNamingScreen* tiles, tilemaps, sprites and palettes",
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(images) do n = n + 1 end
+  Logger.info("Gen3 FireRed naming screen: %d images", n)
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -44908,6 +45017,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedRegionMap",
   "extractFireRedStorage",
   "extractFireRedPocketArt",
+  "extractFireRedNaming",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
