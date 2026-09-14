@@ -1249,13 +1249,36 @@ function OverworldState:updateMapNameSignGen3()
   self.signLandmark = section
   local names = (Game.data.constants or {}).gen3MapSections
   local name = names and names[section]
+  -- FireRed names its sections in sMapNames (read with the town map)
+  if type(name) ~= "string" or name == "" then
+    local frlg = (Game.data.constants or {}).gen3FRLGRegionMap
+    name = frlg and frlg.names and frlg.names[section]
+  end
   if type(name) ~= "string" or name == "" then
     self.mapNameSign = nil
     return
   end
+  -- FireRed's popup slides 12 frames in, holds 120, slides 12 out
+  -- (Task_MapNamePopup); the other Gen 3 sign keeps the old timing
+  local frlg = GameVersion.get and GameVersion.get() == "firered"
+  local text = Strings((name:gsub("[\n\f\v]", " ")))
+  local width = 14
+  -- MapNamePopupAppendFloorNum: " B1F" / " 5F" widen the window by 5 tiles,
+  -- " ROOFTOP" by 8
+  local floor = frlg and tonumber(def.floorNum) or 0
+  if floor ~= 0 then
+    if floor == 127 then
+      text, width = text .. " " .. Strings("ROOFTOP"), 22
+    else
+      text = text .. " " .. (floor < 0 and ("B%dF"):format(-floor) or ("%dF"):format(floor))
+      width = 19
+    end
+  end
   self.mapNameSign = {
-    name = Strings((name:gsub("[\n\f\v]", " "))),
-    frames = MAP_NAME_SIGN_FRAMES,
+    name = text,
+    frames = frlg and 144 or MAP_NAME_SIGN_FRAMES,
+    frlg = frlg or nil,
+    width = width,
   }
 end
 
@@ -12387,7 +12410,30 @@ function OverworldState:drawUI()
   -- poison flash below.  PlaceMapNameFrame draws the frame at hlcoord 0, 0
   -- with two interior rows, and PlaceMapNameCenterAlign centres the name on
   -- the second of them (hlcoord 0, 2 + (SCREEN_WIDTH - len) / 2).
-  if self.mapNameSign then
+  if self.mapNameSign and self.mapNameSign.frlg then
+    -- FIRERED (map_name_popup.c): a 14x2 window at tile (1,29) of BG0 with
+    -- its outer border, scrolled down from above the screen two pixels a
+    -- frame until 24 in; the name centred in 112 pixels, 2 down
+    local Font = require("src.render.Font")
+    local left = self.mapNameSign.frames
+    local shown = 144 - left
+    local pos = math.min(24, shown * 2, left * 2)
+    love.graphics.push()
+    -- the frame's top row starts one tile above the interior, which lands at
+    -- y 0 once fully in
+    love.graphics.translate(0, pos - 32)
+    local inner = self.mapNameSign.width or 14
+    Font.drawBox(0, 0, inner + 2, 4)
+    love.graphics.setColor(98 / 255, 98 / 255, 98 / 255, 1)
+    local name = self.mapNameSign.name
+    local two = Font.beginTwoTone and Font.beginTwoTone({ 98 / 255, 98 / 255, 98 / 255, 1 },
+                                                        { 214 / 255, 214 / 255, 206 / 255, 1 })
+    local maxWidth = (inner == 14 and 112) or (inner == 19 and 152) or 176
+    Font.draw(name, 8 + math.max(0, math.floor((maxWidth - Font.width(name)) / 2)), 8 + 2)
+    if two then Font.endTwoTone() end
+    love.graphics.pop()
+    love.graphics.setColor(1, 1, 1, 1)
+  elseif self.mapNameSign then
     local Font = require("src.render.Font")
     Font.drawBox(0, 0, 20, 4)
     love.graphics.setColor(0, 0, 0, 1)

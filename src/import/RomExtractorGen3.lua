@@ -10572,6 +10572,20 @@ function RomExtractorGen3:extractMaps()
       battleScene = rom:u8(h + 27),
       source = ("ROM:gMapGroups[%d][%d]"):format(entry.group, entry.number),
     }
+    -- FIRERED PACKS THEM DIFFERENTLY (pokefirered global.fieldmap.h):
+    -- 0x18 bikingAllowed, 0x19 allowEscaping:1 allowRunning:1 showMapName:6,
+    -- 0x1A floorNum (signed), 0x1B battleType
+    if (self.manifest or {}).frlgItemMenu ~= nil then
+      local b19 = rom:u8(h + 25)
+      def.flags = b19
+      def.allowCycling = rom:u8(h + 24) ~= 0
+      def.allowEscaping = b19 % 2 == 1
+      def.allowRunning = math.floor(b19 / 2) % 2 == 1
+      def.showMapName = math.floor(b19 / 4) ~= 0
+      local floor = rom:u8(h + 26)
+      def.floorNum = floor >= 128 and floor - 256 or floor
+      def.battleScene = rom:u8(h + 27)
+    end
 
     local entry = { objects = {}, signs = {}, coords = {}, callbacks = {},
                     tables = {} }
