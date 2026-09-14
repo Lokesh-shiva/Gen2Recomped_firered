@@ -244,9 +244,82 @@ local function panel(self, key)
   return b
 end
 
+-- FIRERED (berry_pouch.c): the field already carries the frames, so no
+-- boxes go over it -- the title and description print white on its dark
+-- panels ({0,1,2}), the list dark on light ({0,2,3}), the pouch OBJ stands
+-- at (40,76) and the berry's icon at (24,147).
+function Gen3BerryPouch:drawFireRed(field, art)
+  local g = love.graphics
+  g.setColor(1, 1, 1, 1)
+  g.draw(field, 0, 0)
+  local function img(key)
+    self._img = self._img or {}
+    local path = art.images[key]
+    if not path then return nil end
+    if self._img[path] == nil then
+      local ok, im = pcall(require("src.render.Assets").image, path)
+      self._img[path] = ok and im or false
+    end
+    return self._img[path] or nil
+  end
+  local pouch = img("berry_pouch")
+  if pouch then
+    local wobble = self.wobble and self.wobble > 0 and math.floor(math.sin(self.wobble * 0.8) * 2) or 0
+    g.draw(pouch, 40 - 32 + wobble, 76 - 32)
+  end
+  local cc = art.colors or {}
+  local function rgb(t, f) t = t or f return { t[1] / 255, t[2] / 255, t[3] / 255, 1 } end
+  local white = rgb(cc.white, { 255, 255, 255 })
+  local dark = rgb(cc.dark, { 98, 98, 98 })
+  local light = rgb(cc.light, { 214, 214, 206 })
+  local function text(s, x, y, ink, shadow, small)
+    local faced = small and Font.hasFace and Font.hasFace("small") and Font.pushFace("small")
+    local two = Font.beginTwoTone(ink, shadow)
+    if not two then g.setColor(ink) end
+    Font.draw(s, x, y)
+    if two then Font.endTwoTone() end
+    if faced then Font.popFace() end
+    g.setColor(1, 1, 1, 1)
+  end
+  local title = Strings("BERRY POUCH")
+  local tb = self:box("title")
+  text(title, tb.x + math.floor((72 - Font.width(title)) / 2), tb.y + 1, white, dark)
+
+  local win = self:box("list")
+  local rows = self:listRows()
+  for i = 0, rows - 1 do
+    local row = self.rows[self.top + i]
+    if not row then break end
+    local y = win.y + 2 + i * ROW_PITCH
+    text(row.label, win.x + 9, y, dark, light)
+    if not row.close and row.qty then
+      text(Strings("×%3d", row.qty), win.x + 110, y + 2, dark, light, true)
+    end
+    if self.top + i == self.index then Font.drawCode(Theme.cursor, win.x + 1, y) end
+  end
+
+  local row = self:selected()
+  local desc = self:box("description")
+  local s = row and (row.close and Strings("The BERRY POUCH will be\nput away.") or row.description) or ""
+  local y = desc.y + 2
+  for line in (tostring(s) .. "\n"):gmatch("([^\n]*)\n") do
+    text(line, desc.x, y, white, dark)
+    y = y + 14
+  end
+  if row and not row.close then
+    local ok, icon, quad, size = pcall(require("src.ui.Gen3BagMenu").itemIcon, { game = self.game }, row.id)
+    if ok and icon then g.draw(icon, quad, 24 - math.floor(size / 2), 147 - math.floor(size / 2)) end
+  end
+  g.setColor(1, 1, 1, 1)
+end
+
 function Gen3BerryPouch:draw()
   love.graphics.setColor(1, 1, 1, 1)
   local field = self:background()
+  local art = (self.game.data.constants or {}).gen3FRLGPocketArt
+  if field and type(art) == "table" and art.images and art.images.berry_pouch then
+    return self:drawFireRed(field, art)
+  end
   if field then
     love.graphics.draw(field, 0, 0)
   else

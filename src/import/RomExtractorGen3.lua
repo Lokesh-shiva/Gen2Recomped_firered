@@ -36680,6 +36680,8 @@ function RomExtractorGen3:extractFireRedSummary()
       ROCK = 0x44, BUG = 0x6C, GHOST = 0x68, STEEL = 0x88, MYSTERY = 0xA4, FIRE = 0x24,
       WATER = 0x28, GRASS = 0x2C, ELECTRIC = 0x40, PSYCHIC = 0x84, ICE = 0x4C,
       DRAGON = 0xA0, DARK = 0x8C,
+      -- the move table's own six-letter spellings
+      FIGHT = 0x64, ELECTR = 0x40, PSYCHC = 0x84, TYPE_09 = 0xA4,
     },
     source = "ROM:pokemon_summary_screen.c gSummaryScreen_* and sprite parts",
   }
@@ -36997,6 +36999,160 @@ function RomExtractorGen3:extractFireRedStorage()
   local n = 0
   for _ in pairs(images) do n = n + 1 end
   Logger.info("Gen3 FireRed storage: %d images", n)
+end
+
+-- ---------------------------------------------------------------------------
+-- WHAT THE TM CASE AND BERRY POUCH STAGES LEFT OUT
+--
+-- tm_case.c draws TWO layers from gTMCase_Gfx: BG2 is gTMCaseMenu_Tilemap
+-- (the blue field under every window) and BG1 gTMCase_Tilemap (the case);
+-- extractTMCaseScreen only composed BG1, so the field came out blank.  The
+-- disc is a compressed 2x32x32 OBJ sheet (TM, HM) tinted per move type from
+-- gTMCaseDiscTypes1/2_Pal at sTMSpritePaletteOffsetByType, and HMs carry a
+-- 16x12 bitmap tag in the list.  The berry pouch's pouch is a compressed
+-- 64x64 OBJ at (40, 76).
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_POCKET_ART = {
+  TM_GFX = 0xE845D8, TM_MENU_MAP = 0xE84A24, TM_CASE_MAP = 0xE84B70,
+  TM_PAL = { male = 0xE84CB0, female = 0xE84D20 },
+  DISC = 0xE84D90, DISC_PAL1 = 0xE84F20, DISC_PAL2 = 0xE85068, DISC_OFFSETS = 0x463238,
+  HM = 0xE99118, STD_PAL = 0x41F408,
+  POUCH = 0xE8560C, POUCH_PAL = 0xE85C1C,
+  TYPES = { "NORMAL", "FIGHTING", "FLYING", "POISON", "GROUND", "ROCK", "BUG", "GHOST",
+            "STEEL", "MYSTERY", "FIRE", "WATER", "GRASS", "ELECTRIC", "PSYCHIC", "ICE",
+            "DRAGON", "DARK" },
+}
+
+function RomExtractorGen3:extractFireRedPocketArt()
+  self:beginStage("Gen3 FireRed pocket art")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local A = RomExtractorGen3.FRLG_POCKET_ART
+  local rom = self.rom
+  local function colours(list)
+    local out = {}
+    for i = 0, math.floor(#list / 2) - 1 do
+      out[i] = { RomGba.bgr555(list[i * 2 + 1] + list[i * 2 + 2] * 256) }
+    end
+    return out
+  end
+  local images = {}
+  local function save(key, img)
+    self:saveImage(img, "pockets_frlg/" .. key .. ".png")
+    images[key] = "assets/generated/pockets_frlg/" .. key .. ".png"
+  end
+  local function objSheet(tiles, pal, w, h, frames, img, ox, oy)
+    local per = w * h / 2
+    for f = 0, frames - 1 do
+      local px = RomGba.tiles4bpp({ unpack(tiles, f * per + 1, (f + 1) * per) }, w / 8, h / 8)
+      for y = 0, h - 1 do
+        for x = 0, w - 1 do
+          local v = px[y + 1][x + 1]
+          local c = v ~= 0 and pal[v]
+          if c then img:setPixel(ox + f * w + x, oy + y, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+        end
+      end
+    end
+  end
+  -- the TM case's two layers
+  pcall(function()
+    local ok, tiles = RomExtractorGen3.lz77ok(rom, A.TM_GFX)
+    if not ok then return end
+    for gender, at in pairs(A.TM_PAL) do
+      local okP, raw = RomExtractorGen3.lz77ok(rom, at)
+      if okP then
+        local pal = colours(raw)
+        for key, mapAt in pairs({ menu = A.TM_MENU_MAP, case = A.TM_CASE_MAP }) do
+          local okM, map = RomExtractorGen3.lz77ok(rom, mapAt)
+          if okM then
+            local cols = (#map % 60 == 0 and #map <= 1200) and 30 or 32
+            local img = ImageWriter.blank(240, 160)
+            for cy = 0, 19 do
+              for cx = 0, 29 do
+                local c = cy * cols + cx
+                local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+                local tid, bank = e % 1024, math.floor(e / 4096) % 16
+                local hflip, vflip = math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1
+                local base = tid * 32
+                if base + 32 <= #tiles then
+                  for y = 0, 7 do
+                    for x = 0, 7 do
+                      local sx = hflip and (7 - x) or x
+                      local sy = vflip and (7 - y) or y
+                      local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+                      local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+                      local col = (v ~= 0 or key == "menu") and pal[bank * 16 + v]
+                      if col then
+                        img:setPixel(cx * 8 + x, cy * 8 + y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+                      end
+                    end
+                  end
+                end
+              end
+            end
+            save("tm_" .. key .. "_" .. gender, img)
+          end
+        end
+      end
+    end
+  end)
+  -- discs: one row per type, TM then HM
+  pcall(function()
+    local ok, tiles = RomExtractorGen3.lz77ok(rom, A.DISC)
+    local ok1, p1 = RomExtractorGen3.lz77ok(rom, A.DISC_PAL1)
+    local ok2, p2 = RomExtractorGen3.lz77ok(rom, A.DISC_PAL2)
+    if not (ok and ok1 and ok2) then return end
+    local all = colours(p1)
+    local extra = colours(p2)
+    -- the second blob decompresses to buffer + 0x100 colours
+    for i = 0, 15 do if extra[i] then all[0x100 + i] = extra[i] end end
+    local img = ImageWriter.blank(64, 32 * #A.TYPES)
+    for t = 0, #A.TYPES - 1 do
+      local offset = rom:u16(A.DISC_OFFSETS + t * 2)
+      local pal = {}
+      for i = 0, 15 do pal[i] = all[offset + i] end
+      objSheet(tiles, pal, 32, 32, 2, img, 0, t * 32)
+    end
+    save("discs", img)
+  end)
+  -- the HM tag: a 16-wide bitmap in the standard menu palette
+  pcall(function()
+    local pal = colours(rom:bytes(A.STD_PAL, 32))
+    pal[6] = { RomGba.bgr555(8 + 8 * 32 + 8 * 1024) }
+    pal[7] = { RomGba.bgr555(30 + 16 * 32 + 6 * 1024) }
+    local raw = rom:bytes(A.HM, 0x80)
+    local img = ImageWriter.blank(16, 12)
+    for y = 0, 11 do
+      for x = 0, 15 do
+        local byte = raw[y * 8 + math.floor(x / 2) + 1] or 0
+        local v = (x % 2 == 0) and byte % 16 or math.floor(byte / 16)
+        local c = v ~= 0 and pal[v]
+        if c then img:setPixel(x, y, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+      end
+    end
+    save("hm_tag", img)
+  end)
+  -- the berry pouch
+  pcall(function()
+    local ok, tiles = RomExtractorGen3.lz77ok(rom, A.POUCH)
+    local okP, raw = RomExtractorGen3.lz77ok(rom, A.POUCH_PAL)
+    if not (ok and okP) then return end
+    local img = ImageWriter.blank(64, 64)
+    objSheet(tiles, colours(raw), 64, 64, 1, img, 0, 0)
+    save("berry_pouch", img)
+  end)
+  local std = colours(rom:bytes(A.STD_PAL, 32))
+  local function c(t) return { t[1], t[2], t[3] } end
+  local constants = self._constants or {}
+  constants.gen3FRLGPocketArt = {
+    images = images, types = A.TYPES,
+    colors = { white = c(std[1]), dark = c(std[2]), light = c(std[3]) },
+    source = "ROM:tm_case.c gTMCase*, berry_pouch.c gBerryPouchSprite*",
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(images) do n = n + 1 end
+  Logger.info("Gen3 FireRed pocket art: %d images", n)
 end
 
 function RomExtractorGen3:extractFireRedIntro()
@@ -44751,6 +44907,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedSummary",
   "extractFireRedRegionMap",
   "extractFireRedStorage",
+  "extractFireRedPocketArt",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
