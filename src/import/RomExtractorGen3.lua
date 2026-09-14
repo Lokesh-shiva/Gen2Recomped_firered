@@ -11567,7 +11567,9 @@ function RomExtractorGen3:wallpaperRows(symbol)
     if not (tilesAt and mapAt and palAt) then
       return nil, ("row %d is not three cartridge pointers"):format(i)
     end
-    if tilesAt - palAt ~= W.PAL_BEFORE then
+    -- (FireRed's Stars row keeps an unused palette between the two, so the
+    -- gap may be larger; the table's own pointer is what gets read)
+    if tilesAt - palAt < W.PAL_BEFORE or tilesAt - palAt > W.PAL_BEFORE * 2 then
       return nil, ("row %d's palette is %d bytes before its tiles, not %d")
                   :format(i, tilesAt - palAt, W.PAL_BEFORE)
     end
@@ -11686,6 +11688,11 @@ function RomExtractorGen3:extractBoxWallpapers()
     Logger.warn("gen3 box wallpapers: Walda's set: %s", tostring(friendWhy))
   end
   local names, nameWhy = self:wallpaperNames()
+  if not names and (self.manifest or {}).frlgItemMenu ~= nil then
+    -- FireRed's sMenuTexts is laid out differently; its sixteen are sWallpapers' order
+    names = { "FOREST", "CITY", "DESERT", "SAVANNA", "CRAG", "VOLCANO", "SNOW", "CAVE",
+              "BEACH", "SEAFLOOR", "RIVER", "SKY", "STARS", "POKéCENTER", "TILES", "SIMPLE" }
+  end
   if not names then
     Logger.warn("gen3 box wallpapers: %s -- the rip is refused rather than "
                 .. "guessing at the labels", tostring(nameWhy))
@@ -32500,7 +32507,10 @@ function RomExtractorGen3:iconTableBase(declared, indices, count)
   elseif indices ~= lo + expected * 4 then
     why = ("the palette indices are at %07X, not at the run's end %07X")
            :format(indices, lo + expected * 4)
-  elseif rom:pointer(lo) ~= rom:pointer(lo + 4) then
+  -- (FireRed gives SPECIES_NONE the "?" icon rather than Bulbasaur's, so the
+  -- duplicate opening is Emerald's fact, not a test the base must pass there)
+  elseif rom:pointer(lo) ~= rom:pointer(lo + 4)
+         and (self.manifest or {}).frlgItemMenu == nil then
     why = "the first two entries are not the same pointer"
   else
     local bad = 0
@@ -36764,10 +36774,11 @@ function RomExtractorGen3:extractFireRedRegionMap()
       local p = colours(palAt, 16)
       local frames = math.max(1, math.floor(#raw / 128))      local img = ImageWriter.blank(16 * frames, 16)
       for f = 0, frames - 1 do
+        -- OBJ sheets are 8x8 tiles in row order, not scanlines
+        local px = RomGba.tiles4bpp({ unpack(raw, f * 128 + 1, (f + 1) * 128) }, 2, 2)
         for y = 0, 15 do
           for x = 0, 15 do
-            local byte = raw[f * 128 + y * 8 + math.floor(x / 2) + 1] or 0
-            local v = (x % 2 == 0) and byte % 16 or math.floor(byte / 16)
+            local v = px[y + 1][x + 1]
             local col = v ~= 0 and p[v]
             if col then img:setPixel(f * 16 + x, y, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
           end
@@ -36826,6 +36837,166 @@ function RomExtractorGen3:extractFireRedRegionMap()
   for _ in pairs(names) do n = n + 1 end
   Logger.info("Gen3 FireRed region map: %d names; %s / %s", n,
               tostring(names[0x58]), tostring(text.dpadMove))
+end
+
+-- ---------------------------------------------------------------------------
+-- FIRERED'S BOX SCREEN CHROME (pokefirered src/pokemon_storage_system_tasks.c)
+--
+-- BG1 is sMenu_Tilemap over gPokeStorageMenu_Gfx in palettes 0 (interface),
+-- 1 (party menu), 2 (no display mon), 3 (scrolling bg) and 15 (item frame);
+-- three pieces are pasted over it -- the PKMN DATA tab (8x4 at 1,0, rows 0-1
+-- with a mon shown and 2-3 without), the CLOSE BOX tab (9x4 at 21,0, rows
+-- 0-1 and the flash 2-3), and the 12x22 party panel at column 10 whose last
+-- two rows are the PARTY POKeMON tab while it is put away.  BG3 is a 256x256
+-- pattern scrolling half a pixel a frame on both axes.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_STORAGE = {
+  MENU_GFX = 0xE9C438, MENU_MAP = 0x3CE5FC,
+  PAL = { [0] = 0xE9C3F8, [1] = 0xE9C3D8, [2] = 0xE9C418, [3] = 0x3CE738, [15] = 0x3CEA10 },
+  SCROLL_GFX = 0x3CE438, SCROLL_MAP = 0x3CE4D0,
+  PKMN_DATA = 0x3CE6F8, CLOSE_BOX = 0x3CE778, PARTY_MAP = 0xE9CAEC,
+  SLOT_FILLED = 0x3CE7C0, SLOT_EMPTY = 0x3CE7D8,
+  HAND = 0x3D2BEC, HAND_SHADOW = 0x3D33EC, HAND_PAL = 0x3D2BCC,
+}
+
+function RomExtractorGen3:extractFireRedStorage()
+  self:beginStage("Gen3 FireRed storage")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local S = RomExtractorGen3.FRLG_STORAGE
+  local rom = self.rom
+  local pal = {}
+  for bank, at in pairs(S.PAL) do
+    local raw = rom:bytes(at, 32)
+    for i = 0, 15 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      pal[bank * 16 + i] = { r, g, b }
+    end
+  end
+  local okM, menuTiles = RomExtractorGen3.lz77ok(rom, S.MENU_GFX)
+  local okS, scrollTiles = RomExtractorGen3.lz77ok(rom, S.SCROLL_GFX)
+  if not (okM and okS) then Logger.warn("gen3 frlg storage: tiles did not decompress") return end
+  local images = {}
+  local function save(key, img)
+    self:saveImage(img, "storage_frlg/" .. key .. ".png")
+    images[key] = "assets/generated/storage_frlg/" .. key .. ".png"
+  end
+  -- entries: a 0-based u16 reader; cols/rows the piece's size
+  -- BG1's template has baseTile 0x100, so its tiles load 256 in and its
+  -- tilemaps count from there
+  local function render(tiles, entry, cols, rows, keep0)
+    local img = ImageWriter.blank(cols * 8, rows * 8)
+    local offset = tiles == menuTiles and 0x100 or 0
+    for cy = 0, rows - 1 do
+      for cx = 0, cols - 1 do
+        local e = entry(cy * cols + cx)
+        local tid, bank = e % 1024 - offset, math.floor(e / 4096) % 16
+        if tid < 0 then tid = 1e9 end
+        local hflip, vflip = math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1
+        local base = tid * 32
+        if base + 32 <= #tiles then
+          for y = 0, 7 do
+            for x = 0, 7 do
+              local sx = hflip and (7 - x) or x
+              local sy = vflip and (7 - y) or y
+              local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+              local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+              local c = (v ~= 0 or keep0) and pal[bank * 16 + v]
+              if c then img:setPixel(cx * 8 + x, cy * 8 + y, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+            end
+          end
+        end
+      end
+    end
+    return img
+  end
+  local function lzEntries(at, stride)
+    local ok, map = RomExtractorGen3.lz77ok(rom, at)
+    if not ok then return nil end
+    local cols = stride or ((#map % 60 == 0 and #map <= 1200) and 30 or 32)
+    return function(i)
+      local c = i
+      if stride == nil then c = math.floor(i / 30) * cols + i % 30 end
+      return (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+    end, #map
+  end
+  local function rawEntries(at)
+    return function(i) return rom:u16(at + i * 2) end
+  end
+  pcall(function()
+    local menu = lzEntries(S.MENU_MAP)
+    if menu then save("menu", render(menuTiles, menu, 30, 20, false)) end
+  end)
+  pcall(function()
+    local ok, map = RomExtractorGen3.lz77ok(rom, S.SCROLL_MAP)
+    if not ok then return end
+    local side = math.floor(math.sqrt(#map / 2) + 0.5)
+    save("scroll", render(scrollTiles, function(i)
+      return (map[i * 2 + 1] or 0) + (map[i * 2 + 2] or 0) * 256
+    end, side, side, true))
+  end)
+  pcall(function() save("pkmn_data", render(menuTiles, rawEntries(S.PKMN_DATA), 8, 4, false)) end)
+  pcall(function() save("close_box", render(menuTiles, rawEntries(S.CLOSE_BOX), 9, 4, false)) end)
+  pcall(function()
+    local ok, map = RomExtractorGen3.lz77ok(rom, S.PARTY_MAP)
+    if not ok then return end
+    local buf = {}
+    for i = 0, 12 * 22 - 1 do buf[i] = (map[i * 2 + 1] or 0) + (map[i * 2 + 2] or 0) * 256 end
+    local function withSlots(filledUpTo)
+      local copy = {}
+      for i = 0, 12 * 22 - 1 do copy[i] = buf[i] end
+      for pos = 1, 5 do
+        local src = pos < filledUpTo and S.SLOT_FILLED or S.SLOT_EMPTY
+        local index = 12 * (3 * (pos - 1) + 1) + 7
+        for i = 0, 2 do
+          for j = 0, 3 do copy[index + j] = rom:u16(src + (i * 4 + j) * 2) end
+          index = index + 12
+        end
+      end
+      return function(i) return copy[i] end
+    end
+    -- one picture per party size: slots 2..6 filled while the party reaches them
+    for n = 1, 6 do
+      save("party_" .. n, render(menuTiles, withSlots(n), 12, 22, false))
+    end
+  end)
+  -- the hand: four raw 32x32 frames (point, grab, and their item-mode twins)
+  -- and a 16x16 shadow, in sPokeStorageMisc1Pal
+  pcall(function()
+    local p = {}
+    local raw = rom:bytes(S.HAND_PAL, 32)
+    for i = 0, 15 do p[i] = { RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256) } end
+    -- OBJ sheets are 8x8 tiles in row order, not scanlines
+    local function sheet(at, w, h, frames)
+      local img = ImageWriter.blank(w * frames, h)
+      local per = w * h / 2
+      local bytes = rom:bytes(at, per * frames)
+      for f = 0, frames - 1 do
+        local px = RomGba.tiles4bpp({ unpack(bytes, f * per + 1, (f + 1) * per) }, w / 8, h / 8)
+        for y = 0, h - 1 do
+          for x = 0, w - 1 do
+            local v = px[y + 1][x + 1]
+            local col = v ~= 0 and p[v]
+            if col then img:setPixel(f * w + x, y, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
+          end
+        end
+      end
+      return img
+    end
+    save("hand", sheet(S.HAND, 32, 32, 4))
+    save("hand_shadow", sheet(S.HAND_SHADOW, 16, 16, 1))
+  end)
+  local function c(i) local t = pal[i] return { t[1], t[2], t[3] } end
+  local constants = self._constants or {}
+  constants.gen3FRLGStorage = {
+    images = images,
+    colors = { text = { c(3 * 16 + 2), c(3 * 16 + 3) }, panel = c(3 * 16 + 1) },
+    source = "ROM:pokemon_storage_system_tasks.c menu, party, close-box and scrolling bg",
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(images) do n = n + 1 end
+  Logger.info("Gen3 FireRed storage: %d images", n)
 end
 
 function RomExtractorGen3:extractFireRedIntro()
@@ -44579,6 +44750,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedPokedex",
   "extractFireRedSummary",
   "extractFireRedRegionMap",
+  "extractFireRedStorage",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
