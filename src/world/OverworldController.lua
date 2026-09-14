@@ -12359,17 +12359,13 @@ function OverworldState:drawGen3Heal(ha, cam)
   -- bright gold tint (a lit Poke Ball, not a red LED) makes each one land.
   local glow = record.glow.image and picture(record.glow.image)
   if glow then
-    love.graphics.setColor(1, 0.85, 0.2, 1)
-    local SPRITE_SCALE, SPREAD = 1.6, 1.3
+    -- NATIVE SIZE AND COLOURS.  An enlarged, gold-tinted ball read better in
+    -- the voxel view but dwarfed the machine in the plain game; the sprite and
+    -- sPokeballCoordOffsets are the cartridge's own and are drawn as such.
     for i = 1, math.min(ha.lit or 0, #(record.glow.offsets or {})) do
       local at = record.glow.offsets[i]
-      -- the offsets spread out a little less than the sprite grows, or six
-      -- enlarged dots meant for the ROM's own tight 4x4 spacing pile into
-      -- one blob (or spill past the console) instead of reading as six
-      -- separate balls
-      love.graphics.draw(glow, ox + record.glow.x + at[1] * SPREAD,
-                         oy + record.glow.y + at[2] * SPREAD, 0,
-                         SPRITE_SCALE, SPRITE_SCALE)
+      love.graphics.draw(glow, ox + record.glow.x + at[1],
+                         oy + record.glow.y + at[2])
     end
     love.graphics.setColor(1, 1, 1, 1)
   end

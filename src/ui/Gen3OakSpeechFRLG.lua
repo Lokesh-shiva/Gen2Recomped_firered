@@ -43,6 +43,7 @@ local GUIDE_TEXT = {
 local PIC_X, PIC_Y = 88, 16          -- LoadTrainerPic: BG2 tile (11,2)
 local PLATFORM_X, PLATFORM_Y = 72, 96 -- three 32x32 sprites centred at (88+32i,112)
 local NIDORAN_X, NIDORAN_Y = 64, 64  -- a 64x64 mon sprite centred at (96,96)
+local BALL_X, BALL_Y = 100, 66       -- where the ball opens
 local WHITE = { 1, 1, 1 }
 local DARK = { 0.29, 0.29, 0.29 }
 local LIGHT = { 0.84, 0.84, 0.81 }
@@ -70,7 +71,8 @@ function Speech.new(game, onDone)
   self.picOffset = 0      -- slide left while the name list is up
   self.picScale = 1
   self.picWhite = 0
-  self.nidoAlpha, self.nidoScale = 0, 0
+  self.nidoAlpha, self.nidoScale, self.nidoWhite = 0, 0, 0
+  self.ballAlpha, self.ballFrame = 0, 1
   self.pikaTimer = 0
   self.pic = nil
   return self
@@ -78,8 +80,8 @@ end
 
 -- ---------------------------------------------------------------- assets --
 
-function Speech:image(key)
-  local rec = (self.rec.images or {})[key]
+function Speech:image(key, directPath)
+  local rec = directPath or (self.rec.images or {})[key]
   local path = type(rec) == "table" and rec.path or rec
   if type(path) ~= "string" then return nil end
   local img = self.images[path]
@@ -143,12 +145,22 @@ function Speech:wait(frames)
   coroutine.yield()
 end
 
--- ramp a field toward a value by `step` per frame, waiting until it lands
-function Speech:tween(field, target, step)
+-- ramp a field toward a value by `step` per frame without waiting
+function Speech:ramp(field, target, step)
   self.tweens = self.tweens or {}
   self.tweens[field] = { target = target, step = step }
+end
+
+-- ramp a field toward a value by `step` per frame, waiting until it lands
+function Speech:tween(field, target, step)
+  if self[field] == target then return end
+  self:ramp(field, target, step)
   self.waitTween = field
   coroutine.yield()
+end
+
+function Speech:ballRecord()
+  return (self.game.data.constants or {}).gen3BallAnim or {}
 end
 
 function Speech:waitInput()
@@ -279,16 +291,33 @@ function Speech:run()
   self:say("welcome")
   self:say("thisWorld")
   self:wait(30)
-  -- NIDORAN♀ out of the ball
-  self.nidoAlpha = 1
+  -- NIDORAN♀ out of the ball (CreatePokeballSpriteToReleaseMon at 100,66)
+  local Sound = require("src.core.Sound")
+  local sounds = self:ballRecord().sounds or {}
+  self.ballFrame, self.ballAlpha = 1, 1
+  self:wait(12)
+  self.ballFrame, self.ringT = 3, 0
+  if sounds.open then pcall(Sound.playId, data, sounds.open) end
+  self:ramp("ringT", 1, 1 / 24)
+  self.nidoAlpha, self.nidoWhite = 1, 1
   self:tween("nidoScale", 1, 1 / 16)
-  self:wait(16)
-  pcall(require("src.core.Sound").playCry, data, "NIDORAN")
+  self:ramp("ballAlpha", 0, 1 / 8)
+  self:tween("nidoWhite", 0, 1 / 10)
+  if self.tweens then self.tweens.ringT = nil end
+  self.ringT = nil
+  pcall(Sound.playCry, data, "NIDORAN")
   self:say("inhabited")
   self:say("iStudy")
+  -- ...and back in (CreateTradePokeballSprite)
+  self.ballFrame, self.ballAlpha = 3, 1
+  self:tween("nidoWhite", 1, 1 / 8)
   self:tween("nidoScale", 0, 1 / 16)
   self.nidoAlpha = 0
-  self:wait(48)
+  self.ballFrame = 1
+  if sounds.absorb then pcall(Sound.playId, data, sounds.absorb) end
+  self:wait(24)
+  self:tween("ballAlpha", 0, 1 / 8)
+  self:wait(24)
   self:say("tellMe")
   self:tween("picAlpha", 0, 1 / 48)
   self:wait(48)
@@ -551,12 +580,60 @@ function Speech:drawOak()
       love.graphics.setBlendMode("alpha")
     end
   end
+  self:drawBall()
   local nido = self.nidoAlpha > 0 and self.nidoScale > 0 and self:nidoranPic()
   if nido then
     local w, h = nido:getDimensions()
     local s = self.nidoScale
+    -- grows out of the ball and settles on its own spot
+    local x = BALL_X + (NIDORAN_X + 32 - BALL_X) * s
+    local y = BALL_Y + (NIDORAN_Y + 32 - BALL_Y) * s
     love.graphics.setColor(1, 1, 1, self.nidoAlpha)
-    love.graphics.draw(nido, NIDORAN_X + 32, NIDORAN_Y + 32, 0, s, s, w / 2, h / 2)
+    love.graphics.draw(nido, x, y, 0, s, s, w / 2, h / 2)
+    local white = self.nidoWhite or 0
+    if white > 0 then
+      love.graphics.setBlendMode("add")
+      love.graphics.setColor(white, white, white, 1)
+      love.graphics.draw(nido, x, y, 0, s, s, w / 2, h / 2)
+      love.graphics.setBlendMode("alpha")
+    end
+  end
+  love.graphics.setColor(1, 1, 1, 1)
+end
+
+-- the battle's own Poke Ball sheet (16x16, three frames a row, POKE BALL on
+-- row 0) and its eight-point release ring
+function Speech:drawBall()
+  local rec = self:ballRecord()
+  local images = rec.images or {}
+  if (self.ballAlpha or 0) > 0 then
+    local sheet = images.balls and self:image(nil, images.balls)
+    if sheet then
+      local size = rec.size or 16
+      local iw, ih = sheet:getDimensions()
+      local f = math.max(0, math.min((rec.frames or 3), self.ballFrame or 1) - 1)
+      love.graphics.setColor(1, 1, 1, self.ballAlpha)
+      love.graphics.draw(sheet, love.graphics.newQuad(f * size, 0, size, size, iw, ih),
+                         BALL_X - size / 2, BALL_Y - size / 2)
+    end
+  end
+  if self.ringT then
+    local sheet = images.particles and self:image(nil, images.particles)
+    local t = self.ringT
+    local which = ((rec.balls or {})[1] or {}).particle or 0
+    for i = 0, 7 do
+      local a = i * math.pi / 4
+      local px, py = BALL_X + math.sin(a) * 24 * t, BALL_Y + math.cos(a) * 24 * t
+      love.graphics.setColor(1, 1, 1, 1 - t)
+      if sheet then
+        local iw, ih = sheet:getDimensions()
+        local n = rec.particleFrames or 8
+        love.graphics.draw(sheet, love.graphics.newQuad((which % n) * 8, 0, 8, 8, iw, ih),
+                           px - 4, py - 4)
+      else
+        love.graphics.rectangle("fill", px - 2, py - 2, 4, 4)
+      end
+    end
   end
   love.graphics.setColor(1, 1, 1, 1)
 end
