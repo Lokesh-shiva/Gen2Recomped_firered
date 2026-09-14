@@ -155,6 +155,7 @@ return function(Gen3Commands)
   def(440, function(ctx)                        -- InitElevatorFloorSelectMenuPos
     local c = CURSOR[dynamicMap(ctx) or ""] or { 0, 0 }
     ctx.save.frlgElevatorScroll = c[1]
+    ctx.save.frlgElevatorCursor = c[2]
     return c[2]
   end)
   def(306, function(ctx)                        -- DrawElevatorCurrentFloorWindow
@@ -214,7 +215,12 @@ return function(Gen3Commands)
       setVar(ctx.save, VAR_RESULT, 0x7F)
       return 0x7F
     end
-    local picked = Gen3Commands.listPick(ctx, rows, nil, visible)
+    -- the elevators open on the floor you are on (sElevatorScroll + cursor)
+    local start
+    if which == 1 or which == 2 or which == 3 or which == 6 then
+      start = (ctx.save.frlgElevatorScroll or 0) + (ctx.save.frlgElevatorCursor or 0) + 1
+    end
+    local picked = Gen3Commands.listPick(ctx, rows, nil, visible, start)
     local answer = picked and (picked - 1) or 0x7F
     setVar(ctx.save, VAR_RESULT, answer)
     return answer
@@ -395,6 +401,646 @@ return function(Gen3Commands)
   end)
   def(421, function() end)                      -- DoCredits (run by the ceremony)
   def(93, function(ctx) return 0 end)           -- Field_AskSaveTheGame
+
+  local function buffer(ctx, n, text)
+    local game = ctx.game
+    if not game then return end
+    game.stringBuffers = game.stringBuffers or {}
+    game.stringBuffers[n] = text
+  end
+  local function data_(ctx) return ctx.game and ctx.game.data end
+  local function nameOf(ctx, mon)
+    local d = data_(ctx)
+    local def = d and d.pokemon and d.pokemon[mon.species]
+    return mon.nickname or (def and def.name) or tostring(mon.species)
+  end
+  local function clearFlag(ctx, n)
+    if ctx.save.flags then ctx.save.flags[Gen3Commands.flagKey(n)] = nil end
+  end
+
+  -- ---- links, wireless, e-Reader: nothing to connect to --------------------
+  -- The cable club and the wireless club answer "the link failed" rather than
+  -- walking the player into a colosseum with nobody in it.
+  local LINKUP_FAILED = 5
+  for _, i in ipairs({ 28, 29 }) do          -- TryBattleLinkup / TryTradeLinkup (Emerald slots)
+    if not S[i] then
+      S[i] = function(ctx) setVar(ctx.save, VAR_RESULT, LINKUP_FAILED) return LINKUP_FAILED end
+    end
+  end
+  def(32, function() end)                    -- EnterColosseumPlayerSpot
+  def(33, function() end)                    -- EnterTradeSeat
+  def(248, function() end)                   -- ReducePlayerPartyToThree (link battles)
+  def(235, function() end)                   -- BufferEReaderTrainerGreeting
+  def(96, function() end)                    -- ShowEasyChatMessage (link record corner)
+  for _, i in ipairs({ 249, 324, 287, 418, 420, 421, 422, 423, 424, 429, 431, 511 }) do
+    if not S[i] then S[i] = function() return 0 end end
+  end
+  -- LoadPlayerBag (Emerald 333) restores the bag after a link battle; there
+  -- is never one to restore from.  SetUnlockedPokedexFlags (496) is GameCube
+  -- link bookkeeping.
+  if not S[333] then S[333] = function() end end
+  if not S[496] then S[496] = function() end end
+
+  -- SetHiddenItemFlag (Emerald 153): every hidden item in Kanto is a script
+  -- `setvar 0x8004, FLAG_HIDDEN_ITEM_...; special SetHiddenItemFlag`
+  if not S[153] then
+    S[153] = function(ctx) setFlag(ctx, var(ctx, 0x8004)) end
+  end
+
+  -- ---- purely visual, nothing waits on them --------------------------------
+  def(434, function() end)                   -- BrailleCursorToggle
+  def(437, function() end)                   -- AnimateTeleporterHousing (Bill)
+  def(439, function() end)                   -- AnimateTeleporterCable (Bill)
+  def(395, function() end)                   -- OpenMuseumFossilPic
+  def(396, function() end)                   -- CloseMuseumFossilPic
+  def(428, function() end)                   -- SetDeoxysTrianglePalette
+  def(442, function(ctx) pcall(Commands.play_sound, ctx, "Wing_Attack") end)  -- LoopWingFlapSound
+  def(264, function() end)                   -- ShowDiploma
+  def(167, function() end)                   -- Script_TryLoseFansFromPlayTime
+  def(169, function() end)                   -- Script_UpdateTrainerFanClubGameClear
+  -- StartOldManTutorialBattle: the Viridian old man's catching demo plays
+  -- itself on the cartridge; the script's lines around it still run
+  def(157, function(ctx) ctx.lastBattleResult = "caught" end)
+
+  -- ---- size records: HERACROSS (Two Island) and MAGIKARP (Pewter / Fuchsia)
+  -- pokefirered pokemon_size_record.c: the record starts at 0, and sizes are
+  -- centimetres shown in inches.
+  local BIG_MON_SIZE = {
+    { 290, 1, 0 }, { 300, 1, 10 }, { 400, 2, 110 }, { 500, 4, 310 }, { 600, 20, 710 },
+    { 700, 50, 2710 }, { 800, 100, 7710 }, { 900, 150, 17710 }, { 1000, 150, 32710 },
+    { 1100, 100, 47710 }, { 1200, 50, 57710 }, { 1300, 20, 62710 }, { 1400, 5, 64710 },
+    { 1500, 2, 65210 }, { 1600, 1, 65410 }, { 1700, 1, 65510 },
+  }
+  local function monSize(ctx, species, hash)
+    local d = data_(ctx)
+    local def = d and d.pokemon and d.pokemon[species]
+    local height = math.floor((tonumber(def and def.height) or 0) * 10 + 0.5)
+    local index = 15
+    for i = 1, 14 do
+      if hash < BIG_MON_SIZE[i + 1][3] then index = i - 1 break end
+    end
+    local row = BIG_MON_SIZE[index + 1]
+    local units = row[1] + math.floor((hash - row[3]) / row[2])
+    return math.floor(height * units / 10)
+  end
+  local function formatSize(size)
+    size = math.floor(size * 100 / 254)
+    return ("%d.%d"):format(math.floor(size / 10), size % 10)
+  end
+  local function sizeInfo(ctx, speciesNum, recordVar)
+    local species = Gen3Commands.speciesId(data_(ctx), speciesNum)
+    buffer(ctx, 3, formatSize(monSize(ctx, species, var(ctx, recordVar))))
+    local d = data_(ctx)
+    local def = d and d.pokemon and d.pokemon[species]
+    buffer(ctx, 1, (def and def.name) or tostring(species))
+  end
+  local function compareSize(ctx, speciesNum, recordVar)
+    local slot = var(ctx, VAR_RESULT)
+    if slot >= 6 then return 0 end
+    local mon = party(ctx)[slot + 1]
+    local species = Gen3Commands.speciesId(data_(ctx), speciesNum)
+    if not mon or mon.isEgg or mon.species ~= species then return 1 end
+    local hash = Gen3Commands.monSizeHash(mon)
+    local mine = monSize(ctx, species, hash)
+    local best = monSize(ctx, species, var(ctx, recordVar))
+    buffer(ctx, 3, formatSize(best))
+    buffer(ctx, 2, formatSize(mine))
+    if mine == best then return 4 end
+    if mine < best then return 2 end
+    setVar(ctx.save, recordVar, hash)
+    return 3
+  end
+  def(119, function(ctx) sizeInfo(ctx, 214, 0x403D) end)              -- GetHeracrossSizeRecordInfo
+  def(120, function(ctx) return compareSize(ctx, 214, 0x403D) end)    -- CompareHeracrossSize
+  def(121, function(ctx) sizeInfo(ctx, 129, 0x4040) end)              -- GetMagikarpSizeRecordInfo
+  def(122, function(ctx) return compareSize(ctx, 129, 0x4040) end)    -- CompareMagikarpSize
+
+  -- NameRaterWasNicknameChanged: the nickname before the naming screen is in
+  -- STR_VAR_3 (put there by ChangePokemonNickname)
+  def(123, function(ctx)
+    local mon = party(ctx)[var(ctx, 0x8004) + 1]
+    if not mon then return 0 end
+    local now = nameOf(ctx, mon)
+    buffer(ctx, 1, now)
+    local before = ctx.game and ctx.game.stringBuffers and ctx.game.stringBuffers[3]
+    return (before ~= nil and before == now) and 0 or 1
+  end)
+
+  -- ---- the Route 5 Pokemon day care: one pen, no eggs ----------------------
+  local DayCare = require("src.pokemon.DayCare")
+  local function route5Levels(ctx)
+    local slot = DayCare.slot(ctx.save, DayCare.ROUTE5)
+    if not (slot and slot.mon) then return 0 end
+    local level = DayCare.pendingLevel(data_(ctx), slot)
+    return math.max(0, (level or slot.mon.level or 0) - (slot.depositLevel or slot.mon.level or 0))
+  end
+  def(374, function(ctx)                     -- PutMonInRoute5Daycare
+    local list = party(ctx)
+    local slot = var(ctx, 0x8004) + 1
+    local mon = list[slot]
+    if not mon then return end
+    table.remove(list, slot)
+    DayCare.deposit(ctx.save, DayCare.ROUTE5, mon)
+  end)
+  def(375, function(ctx)                     -- GetCostToWithdrawRoute5DaycareMon
+    local cost = 100 + 100 * route5Levels(ctx)
+    setVar(ctx.save, 0x8005, cost)
+    buffer(ctx, 2, tostring(cost))
+  end)
+  def(376, function(ctx)                     -- IsThereMonInRoute5Daycare
+    return DayCare.mon(ctx.save, DayCare.ROUTE5) and 1 or 0
+  end)
+  def(377, function(ctx)                     -- GetNumLevelsGainedForRoute5DaycareMon
+    local mon = DayCare.mon(ctx.save, DayCare.ROUTE5)
+    local n = route5Levels(ctx)
+    if mon then buffer(ctx, 1, nameOf(ctx, mon)) end
+    buffer(ctx, 2, tostring(n))
+    return n
+  end)
+  def(378, function(ctx)                     -- TakePokemonFromRoute5Daycare
+    local d = data_(ctx)
+    local slot = DayCare.slot(ctx.save, DayCare.ROUTE5)
+    local mon = slot and slot.mon
+    if not mon then return 0 end
+    local startLevel = slot.depositLevel or mon.level or 1
+    local newLevel, exp = DayCare.pendingLevel(d, slot)
+    DayCare.withdraw(ctx.save, DayCare.ROUTE5)
+    local def = d and d.pokemon and d.pokemon[mon.species]
+    if newLevel and def then
+      mon.exp, mon.level = exp, newLevel
+      local okStats, Stats = pcall(require, "src.pokemon.Stats")
+      if okStats and Stats.calc then
+        mon.stats = Stats.calc(def, mon.level, mon.ivs or mon.dvs, mon.statExp, mon.evs, mon.nature)
+        if mon.stats and mon.stats.hp then mon.hp = math.min(mon.hp or mon.stats.hp, mon.stats.hp) end
+      end
+      local okP, Pokemon = pcall(require, "src.pokemon.Pokemon")
+      if okP and Pokemon.learnMovesFromDayCare then
+        pcall(Pokemon.learnMovesFromDayCare, d, mon, def, startLevel, newLevel)
+      end
+    end
+    local list = party(ctx)
+    list[#list + 1] = mon
+    buffer(ctx, 1, nameOf(ctx, mon))
+    local order = d and d.constants and d.constants.speciesOrder or {}
+    for n, id in ipairs(order) do if id == mon.species then return n end end
+    return 0
+  end)
+
+  -- ---- Sevii Island odds and ends ------------------------------------------
+  -- SetIcefallCaveCrackedIceMetatiles: the ice already stepped on (flags 1-9)
+  -- comes back cracked when the room loads
+  local ICEFALL_ICE = { { 8, 3 }, { 10, 5 }, { 15, 5 }, { 8, 9 }, { 9, 9 }, { 16, 9 },
+                        { 8, 10 }, { 9, 10 }, { 8, 14 } }
+  def(309, function(ctx)
+    for i, c in ipairs(ICEFALL_ICE) do
+      if flag(ctx, i) then pcall(Commands.g3_set_metatile, ctx, c[1], c[2], 0x35A, 0) end
+    end
+  end)
+
+  -- SampleResortGorgeousMonAndReward (Five Island): a seen species and a prize
+  local RESORT_REWARDS = { "BIG_PEARL", "PEARL", "STARDUST", "STAR_PIECE", "NUGGET", "RARE_CANDY" }
+  local function itemNumber(ctx, id)
+    local order = (data_(ctx) and data_(ctx).constants or {}).itemOrder or {}
+    for n, name in pairs(order) do if name == id then return n end end
+    return 0
+  end
+  def(349, function(ctx)
+    local d = data_(ctx)
+    local want = var(ctx, 0x4036)
+    if want == 0 or want == 0xFFFF then
+      local seen = {}
+      local order = d and d.constants and d.constants.speciesOrder or {}
+      local dex = (ctx.save.pokedex or {}).seen or {}
+      for n, id in ipairs(order) do if dex[id] then seen[#seen + 1] = n end end
+      want = #seen > 0 and seen[math.random(#seen)] or 1
+      setVar(ctx.save, 0x4036, want)
+      local reward = math.random(100) > 30 and "LUXURY_BALL"
+                     or RESORT_REWARDS[math.random(#RESORT_REWARDS)]
+      setVar(ctx.save, 0x403B, itemNumber(ctx, reward))
+      setVar(ctx.save, 0x4035, 0)
+    end
+    local id = Gen3Commands.speciesId(d, want)
+    local def = d and d.pokemon and d.pokemon[id]
+    buffer(ctx, 1, (def and def.name) or tostring(id))
+  end)
+
+  -- DaisyMassageServices: the massage is a friendship event
+  def(407, function(ctx)
+    local mon = party(ctx)[var(ctx, 0x8004) + 1]
+    if mon then
+      local f = tonumber(mon.friendship or mon.happiness) or 0
+      local gain = f < 100 and 3 or (f < 200 and 2 or 1)
+      mon.friendship = math.min(255, f + gain)
+      mon.happiness = mon.friendship
+    end
+    setVar(ctx.save, 0x4025, 0)
+  end)
+
+  -- UpdateLoreleiDollCollection: a doll comes out for every 25 Hall of Fame entries
+  def(441, function(ctx)
+    local n = tonumber((ctx.save.gameStats or {}).enteredHof or ctx.save.hallOfFameCount) or 0
+    if n < 25 then return end
+    local dolls = { 0x0A5, 0x0A6, 0x0A7, 0x0A8, 0x0A9, 0x0AA, 0x0AB, 0x0AC }
+    for i, f in ipairs(dolls) do
+      if i == 1 or n >= 25 * i then clearFlag(ctx, f) end
+    end
+  end)
+
+  -- PlayerPartyContainsSpeciesWithPlayerID (0x8004 = species)
+  def(436, function(ctx)
+    local want = Gen3Commands.speciesId(data_(ctx), var(ctx, 0x8004))
+    local myId = tonumber((ctx.save.player or {}).id or (ctx.save.player or {}).trainerId)
+    for _, mon in ipairs(party(ctx)) do
+      if mon.species == want and not mon.isEgg then
+        local ot = tonumber(mon.otId or mon.ot and mon.ot.id)
+        if ot == nil or myId == nil or ot == myId then return 1 end
+      end
+    end
+    return 0
+  end)
+
+  -- Cape Brink: the ultimate moves for a fully friendly final starter
+  local CAPE_BRINK = {
+    { species = "VENUSAUR", move = "FRENZY_PLANT", tutor = 15, flag = 0x2DE },
+    { species = "CHARIZARD", move = "BLAST_BURN", tutor = 16, flag = 0x2DF },
+    { species = "BLASTOISE", move = "HYDRO_CANNON", tutor = 17, flag = 0x2E0 },
+  }
+  def(419, function(ctx)                     -- CapeBrinkGetMoveToTeachLeadPokemon
+    local list = party(ctx)
+    local lead = 0
+    for i, mon in ipairs(list) do
+      if not mon.isEgg and (mon.hp or 1) > 0 then lead = i - 1 break end
+    end
+    setVar(ctx.save, 0x8007, lead)
+    local mon = list[lead + 1]
+    if not mon or mon.isEgg then return 0 end
+    local row
+    for _, r in ipairs(CAPE_BRINK) do if mon.species == r.species then row = r end end
+    if not row or (tonumber(mon.friendship or mon.happiness) or 0) ~= 255 then return 0 end
+    local d = data_(ctx)
+    local mdef = d and d.moves and d.moves[row.move]
+    buffer(ctx, 2, (mdef and mdef.name) or row.move)
+    setVar(ctx.save, 0x8005, row.tutor)
+    if flag(ctx, row.flag) then return 0 end
+    setVar(ctx.save, 0x8006, #(mon.moves or {}))
+    return 1
+  end)
+  def(420, function(ctx)                     -- HasLearnedAllMovesFromCapeBrinkTutor
+    local t = var(ctx, 0x8005)
+    for _, r in ipairs(CAPE_BRINK) do if r.tutor == t then setFlag(ctx, r.flag) end end
+    local all = true
+    for _, r in ipairs(CAPE_BRINK) do if not flag(ctx, r.flag) then all = false end end
+    return all and 1 or 0
+  end)
+
+  -- Birth Island: the triangle moves each time it is touched, within a step
+  -- budget, and the tenth touch wakes DEOXYS (FLAG_SYS_DEOXYS_AWAKENED)
+  local DEOXYS_COORDS = { [0] = { 15, 12 }, { 11, 14 }, { 15, 8 }, { 19, 14 }, { 12, 11 },
+                          { 18, 11 }, { 15, 14 }, { 11, 14 }, { 19, 14 }, { 15, 15 }, { 15, 10 } }
+  local DEOXYS_STEPS = { 4, 8, 8, 8, 4, 4, 4, 6, 3, 3 }
+  local function moveRock(ctx, num)
+    local c = DEOXYS_COORDS[num]
+    pcall(Commands.play_sound, ctx, num == 0 and "Confuse_Ray" or "Deoxys_Move")
+    pcall(Commands.g3_place, ctx, 1, c[1], c[2])
+    pcall(Commands.g3_place_perm, ctx, 1, c[1], c[2])
+  end
+  def(427, function(ctx)
+    local awake = 0x800 + 0x48
+    if flag(ctx, awake) then setVar(ctx.save, VAR_RESULT, 3) return 3 end
+    local n, steps = var(ctx, 0x403E), var(ctx, 0x4026)
+    setVar(ctx.save, 0x4026, 0)
+    if n ~= 0 and DEOXYS_STEPS[n] < steps then
+      moveRock(ctx, 0)
+      setVar(ctx.save, 0x403E, 0)
+      setVar(ctx.save, VAR_RESULT, 0)
+      return 0
+    elseif n == 10 then
+      setFlag(ctx, awake)
+      setVar(ctx.save, VAR_RESULT, 2)
+      return 2
+    end
+    n = n + 1
+    moveRock(ctx, n)
+    setVar(ctx.save, 0x403E, n)
+    setVar(ctx.save, VAR_RESULT, 1)
+    return 1
+  end)
+
+  -- berry powder (One Island's Berry Crush shop) lives in the save
+  def(414, function(ctx)                     -- Script_HasEnoughBerryPowder
+    return (tonumber(ctx.save.berryPowder) or 0) >= var(ctx, 0x8004) and 1 or 0
+  end)
+  def(415, function(ctx)                     -- Script_TakeBerryPowder
+    local have, cost = tonumber(ctx.save.berryPowder) or 0, var(ctx, 0x8004)
+    if have < cost then return 0 end
+    ctx.save.berryPowder = have - cost
+    return 1
+  end)
+
+  -- ---- the Pokemon Centre PC (EventScript_PC) ------------------------------
+  alias(215, 218)                            -- AnimatePcTurnOff = DoPCTurnOffEffect
+  alias(251, 254)                            -- ShowTownMap = FieldShowRegionMap
+  def(263, function() end)                   -- HallOfFamePCBeginFade (no HoF PC viewer yet)
+  -- CreatePCMenu (script_menu.c CreatePCMenuWindow): SOMEONE'S / BILL'S PC,
+  -- the player's PC, then PROF. OAK'S PC with the POKeDEX, HALL OF FAME once
+  -- the league is beaten, LOG OFF.  VAR_RESULT is the row, 127 for B.
+  def(262, function(ctx)
+    local t = texts(ctx).pcMenu or {}
+    local player = ((ctx.save or {}).player or {}).name or "RED"
+    local rows = {
+      flag(ctx, 0x834) and (t[2] or Strings("BILL'S PC")) or (t[1] or Strings("SOMEONE'S PC")),
+      ((t[3] or Strings("{PLAYER}'s PC")):gsub("{PLAYER}", player)),
+    }
+    if flag(ctx, 0x82C) then
+      rows[#rows + 1] = t[4] or Strings("PROF. OAK'S PC")
+      rows[#rows + 1] = t[5] or Strings("HALL OF FAME")
+    elseif flag(ctx, 0x829) then
+      rows[#rows + 1] = t[4] or Strings("PROF. OAK'S PC")
+    end
+    rows[#rows + 1] = t[6] or Strings("LOG OFF")
+    local picked = Gen3Commands.listPick(ctx, rows, nil, #rows)
+    local answer = picked and (picked - 1) or 0x7F
+    setVar(ctx.save, VAR_RESULT, answer)
+    return answer
+  end)
+
+  def(433, function(ctx)                     -- IsPlayerNotInTrainerTowerLobby
+    return mapId(ctx) == "MAP_G02_N10" and 0 or 1
+  end)
+
+  -- ---- field step counters FireRed runs from the step (field_control_avatar.c)
+  function Gen3Commands.frlgStep(ctx)
+    local save = ctx.save
+    if not save then return end
+    local n = var(ctx, 0x4023)
+    if n < 1500 then setVar(save, 0x4023, n + 1) end
+    n = var(ctx, 0x4025)
+    if n < 500 then setVar(save, 0x4025, n + 1) end
+    if var(ctx, 0x4036) ~= 0 then
+      n = var(ctx, 0x4035) + 1
+      if n >= 250 then
+        setVar(save, 0x4036, 0xFFFF)
+        setVar(save, 0x4035, 0)
+      else
+        setVar(save, 0x4035, n)
+      end
+    end
+    if mapId(ctx) == "MAP_G02_N56" then
+      n = var(ctx, 0x4026) + 1
+      setVar(save, 0x4026, n > 99 and 0 or n)
+    end
+  end
+
+  -- ---- the Trainer Tower (CallTrainerTowerFunc, 0x8004 = which) ------------
+  -- pokefirered trainer_tower.c, function for function, over the floors the
+  -- import read (constants.gen3FRLGTrainerTower).  The cartridge's timer is a
+  -- VBlank counter; here it is wall time at sixty frames a second, paused the
+  -- same places the cartridge pauses it (the owner, a loss).
+  local TT_MAX_TIME = 60 * 60 * 60 * 10 - 1
+  local function now() return (love and love.timer and love.timer.getTime()) or os.clock() end
+  local function ttTimer(st)
+    if st.running then
+      st.startedAt = st.startedAt or (now() - (st.timer or 0) / 60)
+      st.timer = math.min(TT_MAX_TIME, math.floor((now() - st.startedAt) * 60))
+    end
+    return st.timer or 0
+  end
+  local function ttPause(st)
+    ttTimer(st)
+    st.running, st.startedAt = false, nil
+  end
+  local function tower(ctx)
+    local d = data_(ctx)
+    return d and d.constants and d.constants.gen3FRLGTrainerTower
+  end
+  local function ttState(ctx)
+    ctx.save.frlgTrainerTower = ctx.save.frlgTrainerTower or
+      { challenge = 0, floorsCleared = 0, timer = 0, bestTime = {}, receivedPrize = {} }
+    return ctx.save.frlgTrainerTower
+  end
+  local function floorNumber(ctx)
+    local id = mapId(ctx) or ""
+    local n = tonumber(id:match("^MAP_G02_N0([1-8])$"))
+    return n
+  end
+  local function currentFloor(ctx)
+    local T, st = tower(ctx), ttState(ctx)
+    local n = floorNumber(ctx)
+    local floors = T and T.challenges[(st.challenge or 0) + 1]
+    return floors and n and floors[n], n
+  end
+  local function ttSpeech(ctx, words)
+    local ok, EasyChat = pcall(require, "src.script.EasyChat")
+    local text = ok and EasyChat.phrase(data_(ctx), words, 3) or ""
+    buffer(ctx, 4, text)
+  end
+  local function ttBattle(ctx)
+    local T, st = tower(ctx), ttState(ctx)
+    local floor = currentFloor(ctx)
+    local d = data_(ctx)
+    if not (T and floor and d) then ctx.lastBattleResult = "win" return end
+    local level = 0
+    for _, mon in ipairs(party(ctx)) do
+      if not mon.isEgg and (mon.level or 0) > level then level = mon.level end
+    end
+    local cleared = math.min(7, st.floorsCleared or 0) + 1
+    local trainerIdx = var(ctx, 0x4001)
+    local picks = {}
+    if floor.challengeType == 1 then
+      local idx = T.doubleIdx[cleared]
+      picks = { { floor.trainers[1], idx[1] }, { floor.trainers[2], idx[2] } }
+    elseif floor.challengeType == 2 then
+      local idx = T.knockoutIdx[cleared]
+      picks = { { floor.trainers[trainerIdx + 1], idx[trainerIdx + 1] } }
+    else
+      local idx = T.singleIdx[cleared]
+      local tr = floor.trainers[trainerIdx + 1] or floor.trainers[1]
+      picks = { { tr, idx[1] }, { tr, idx[2] } }
+    end
+    local partyDef = {}
+    for _, p in ipairs(picks) do
+      local m = p[1] and p[1].mons[(p[2] or 0) + 1]
+      local species = m and Gen3Commands.speciesId(d, m.species)
+      if species and d.pokemon[species] then
+        local moves = {}
+        for _, mv in ipairs(m.moves) do
+          local id = (d.constants.moveOrder or {})[mv]
+          if type(id) == "string" then moves[#moves + 1] = id end
+        end
+        partyDef[#partyDef + 1] = { species = species, level = math.max(1, level),
+                                    moves = #moves > 0 and moves or nil }
+      end
+    end
+    if #partyDef == 0 then ctx.lastBattleResult = "win" return end
+    local lead = picks[1][1]
+    local trainerClass = T.classToTrainer[lead.facilityClass]
+    local template
+    for _, tr in pairs(d.trainers or {}) do
+      if type(tr) == "table" and tr.class == trainerClass then template = tr break end
+    end
+    local record = setmetatable({
+      id = "FRLG_TRAINER_TOWER", name = lead.name, parties = { partyDef }, party = partyDef,
+      doubleBattle = floor.challengeType == 1 or nil, trainerTower = true,
+    }, { __index = template or {} })
+    d.trainers.FRLG_TRAINER_TOWER = record
+    ctx.g3Trainer = nil
+    Commands.start_battle(ctx, "trainer", "FRLG_TRAINER_TOWER", 1,
+                          { canLose = true, double = floor.challengeType == 1 or nil })
+    local outcome = (Gen3Commands.GEN3_BATTLE_OUTCOME or {})[ctx.lastBattleResult] or 2
+    setVar(ctx.save, VAR_RESULT, outcome)
+  end
+  local TT = {
+    [0] = function(ctx)                      -- INIT_FLOOR
+      local T = tower(ctx)
+      local floor, n = currentFloor(ctx)
+      if not (T and floor) or n > (T.numFloors or 8) then
+        setVar(ctx.save, VAR_RESULT, 3)
+        return
+      end
+      setVar(ctx.save, VAR_RESULT, floor.challengeType)
+      local function gfxFor(class)
+        local s = T.singles and (T.singles[class] or T.singles[tostring(class)])
+        return s and s.gfx or 7
+      end
+      if floor.challengeType == 0 then
+        setVar(ctx.save, 0x4011, gfxFor(floor.trainers[1].facilityClass))
+      elseif floor.challengeType == 1 then
+        local dd = T.doubles and (T.doubles[floor.trainers[1].facilityClass]
+                                  or T.doubles[tostring(floor.trainers[1].facilityClass)])
+        setVar(ctx.save, 0x4010, dd and dd.gfx1 or 7)
+        setVar(ctx.save, 0x4013, dd and dd.gfx2 or 7)
+      else
+        setVar(ctx.save, 0x4012, gfxFor(floor.trainers[1].facilityClass))
+        setVar(ctx.save, 0x4010, gfxFor(floor.trainers[2].facilityClass))
+        setVar(ctx.save, 0x4011, gfxFor(floor.trainers[3].facilityClass))
+      end
+    end,
+    [1] = function(ctx)                      -- GET_SPEECH (0x8005 which, 0x8006 trainer)
+      local floor = currentFloor(ctx)
+      if not floor then buffer(ctx, 4, "") return end
+      local tr = floor.trainers[var(ctx, 0x8006) + 1] or floor.trainers[1]
+      local which = var(ctx, 0x8005)
+      local words = ({ [0] = tr.speechBefore, tr.speechWin, tr.speechLose, tr.speechAfter })[which]
+      ttSpeech(ctx, words or {})
+    end,
+    [2] = ttBattle,                          -- DO_BATTLE
+    [3] = function(ctx)                      -- GET_CHALLENGE_TYPE
+      local floor = currentFloor(ctx)
+      if var(ctx, 0x8005) == 0 then setVar(ctx.save, VAR_RESULT, floor and floor.challengeType or 0) end
+    end,
+    [4] = function(ctx)                      -- CLEARED_FLOOR
+      local st = ttState(ctx)
+      st.floorsCleared = (st.floorsCleared or 0) + 1
+    end,
+    [5] = function(ctx)                      -- GET_FLOOR_CLEARED
+      local st = ttState(ctx)
+      local floor, n = currentFloor(ctx)
+      local notYet = n and (n - 1) == (st.floorsCleared or 0) and floor and n <= (floor.floorIdx or n)
+      setVar(ctx.save, VAR_RESULT, notYet and 0 or 1)
+    end,
+    [6] = function(ctx)                      -- START_CHALLENGE
+      local st = ttState(ctx)
+      local c = var(ctx, 0x8005)
+      st.challenge = (c < 4) and c or 0
+      st.floorsCleared, st.timer, st.running, st.startedAt = 0, 0, true, now()
+      st.spokeToOwner, st.checkedFinalTime, st.hasLost = false, false, false
+    end,
+    [7] = function(ctx)                      -- GET_OWNER_STATE
+      local st = ttState(ctx)
+      ttPause(st)
+      local r = 0
+      if st.spokeToOwner then r = r + 1 end
+      if st.receivedPrize[st.challenge + 1] and st.checkedFinalTime then r = r + 1 end
+      st.spokeToOwner = true
+      setVar(ctx.save, VAR_RESULT, r)
+    end,
+    [8] = function(ctx)                      -- GIVE_PRIZE
+      local T, st = tower(ctx), ttState(ctx)
+      if st.receivedPrize[st.challenge + 1] then setVar(ctx.save, VAR_RESULT, 2) return end
+      local floors = T and T.challenges[st.challenge + 1]
+      local itemNum = floors and T.prizes[(floors[1].prize or 0) + 1]
+      local d = data_(ctx)
+      local item = itemNum and Gen3Commands.itemId(d, itemNum)
+      local Bag = require("src.inventory.Bag")
+      if item and Bag.add(ctx.save, item, 1, d) then
+        local idef = d.items and d.items[item]
+        buffer(ctx, 2, (idef and idef.name) or item)
+        st.receivedPrize[st.challenge + 1] = true
+        setVar(ctx.save, VAR_RESULT, 0)
+      else
+        setVar(ctx.save, VAR_RESULT, 1)
+      end
+    end,
+    [9] = function(ctx)                      -- CHECK_FINAL_TIME
+      local st = ttState(ctx)
+      local best = st.bestTime[st.challenge + 1] or TT_MAX_TIME
+      local time = ttTimer(st)
+      if st.checkedFinalTime then
+        setVar(ctx.save, VAR_RESULT, 2)
+      elseif best > time then
+        st.bestTime[st.challenge + 1] = time
+        setVar(ctx.save, VAR_RESULT, 0)
+      else
+        setVar(ctx.save, VAR_RESULT, 1)
+      end
+      st.checkedFinalTime = true
+    end,
+    [10] = function(ctx)                     -- RESUME_TIMER
+      local st = ttState(ctx)
+      if not st.spokeToOwner and not st.running and (st.timer or 0) < TT_MAX_TIME then
+        st.running = true
+      end
+    end,
+    [11] = function(ctx) ttState(ctx).hasLost = true end,   -- SET_LOST
+    [12] = function(ctx)                     -- GET_CHALLENGE_STATUS
+      local st = ttState(ctx)
+      if st.hasLost then
+        st.hasLost = false
+        ttPause(st)
+        setVar(ctx.save, VAR_RESULT, 1)
+      else
+        setVar(ctx.save, VAR_RESULT, 0)
+      end
+    end,
+    [13] = function(ctx)                     -- GET_TIME
+      local frames = ttTimer(ttState(ctx))
+      buffer(ctx, 1, ("%2d"):format(math.floor(frames / 3600)))
+      buffer(ctx, 2, ("%2d"):format(math.floor(frames / 60) % 60))
+      buffer(ctx, 3, ("%02d"):format(math.floor((frames % 60) * 168 / 100)))
+    end,
+    [14] = function(ctx)                     -- SHOW_RESULTS
+      local T, st = tower(ctx), ttState(ctx)
+      local lines = { (T and T.timeBoard) or Strings("TIME BOARD") }
+      for i = 1, 4 do
+        local frames = st.bestTime[i] or TT_MAX_TIME
+        lines[#lines + 1] = ("%s  %d min. %02d.%02d sec."):format(
+          (T and T.typeTexts and T.typeTexts[i]) or "", math.floor(frames / 3600),
+          math.floor(frames / 60) % 60, math.floor((frames % 60) * 168 / 100))
+      end
+      Commands.show_text(ctx, table.concat(lines, "\n"))
+    end,
+    [15] = function() end,                   -- CLOSE_RESULTS
+    [16] = function(ctx)                     -- CHECK_DOUBLES
+      local n = 0
+      for _, mon in ipairs(party(ctx)) do
+        if not mon.isEgg and (mon.hp or 0) > 0 then n = n + 1 end
+      end
+      setVar(ctx.save, VAR_RESULT, n >= 2 and 0 or (n == 1 and 1 or 2))
+    end,
+    [17] = function(ctx)                     -- GET_NUM_FLOORS
+      local T = tower(ctx)
+      local n = T and T.numFloors or 8
+      buffer(ctx, 1, tostring(n))
+      setVar(ctx.save, VAR_RESULT, (T and T.challenges[1][1].floorIdx ~= n) and 1 or 0)
+    end,
+    [18] = function(ctx) setVar(ctx.save, VAR_RESULT, 0) end,   -- SHOULD_WARP_TO_COUNTER
+    [19] = function() end,                   -- ENCOUNTER_MUSIC
+    [20] = function(ctx) setVar(ctx.save, VAR_RESULT, ttState(ctx).spokeToOwner and 1 or 0) end,
+  }
+  def(404, function(ctx)
+    local fn = TT[var(ctx, 0x8004)]
+    if fn then return fn(ctx) end
+  end)
 
   Logger.info("gen3: FireRed specials served")
 end

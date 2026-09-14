@@ -4589,7 +4589,7 @@ end
 -- `visible` is how many rows show at once, for a list longer than the box:
 -- the scrolling multichoice carries the cartridge's own number for each of
 -- its thirteen lists, and everything else keeps the six this always used.
-function Gen3Commands.listPick(ctx, labels, cancelLabel, visible)
+function Gen3Commands.listPick(ctx, labels, cancelLabel, visible, startIndex)
   local game, runner = ctx.game, ctx.runner
   if not (game and game.stack and runner and #labels > 0) then return nil end
   local okMenu, Menu = pcall(require, "src.ui.Menu")
@@ -4614,6 +4614,7 @@ function Gen3Commands.listPick(ctx, labels, cancelLabel, visible)
                                 { tx = 0, ty = 0,
                                   maxVisible = math.min(#items,
                                                         visible or 6),
+                                  index = startIndex,
                                   onCancel = function() answer(nil) end }))
   if not pushed then return nil end
   runner:yield()

@@ -3427,7 +3427,19 @@ function OverworldState:handleInput()
   -- whether A or B also count -- and on Gen 2 they do not.
   local braking = (not GameVersion.isGen2())
     and (input:isDown("a") or input:isDown("b")) or false
+  -- FIRERED'S IS A TILE, not a map: BikeInputHandler_Normal rolls you down
+  -- while you stand on MB_CYCLING_ROAD_PULL_DOWN(_GRASS) and B is not held
+  -- (A is not in its test)
+  local frlgPull = self:frlgPullDownHere()
+  if frlgPull ~= nil then braking = input:isDown("b") end
   if Game.save.onBike and not braking and not self.player.moving then
+    if frlgPull then
+      self.player.facing = "down"
+      self.player:tryMove("down", self.map, self.entities)
+      return
+    elseif frlgPull == false then
+      return
+    end
     -- Gen2 arms the same pull from ENGINE_DOWNHILL, set by Route 17's
     -- MAPCALLBACK_NEWMAP alongside ALWAYS_ON_BIKE.  Gen1 named the maps in
     -- field.forcedMovement.slopeMaps instead, and that table is empty on a
@@ -4843,6 +4855,13 @@ function OverworldState:interact()
     return
   end
 
+  -- FireRed's furniture, PC, TV and signs: GetInteractedMetatileScript runs
+  -- right after the bg events, ahead of the water and the field moves
+  if self:tryFRLGMetatileScript(fx, fy) then
+    interacted(self, fx, fy, "metatile")
+    return
+  end
+
   -- Silph Co card key doors (engine/events/card_key.asm)
   if self:tryCardKeyDoor(fx, fy) then
     interacted(self, fx, fy, "door")
@@ -5010,6 +5029,7 @@ function OverworldState:tryGen3MetatileScript(fx, fy)
 end
 
 function OverworldState:tryBookshelf(fx, fy)
+  if self:tryFRLGMetatileScript(fx, fy) then return true end
   if self:tryGen3Furniture(fx, fy) then return true end
   if self:tryGen3MetatileScript(fx, fy) then return true end
   if self.player.facing ~= "up" then return false end
@@ -6384,6 +6404,85 @@ end
 -- the map edge stops the surfer there rather than carrying them into it --
 -- which is the cartridge's DoForcedMovement, whose collision check is the
 -- ordinary one.
+-- FIRERED'S OWN TERRAIN (constants.gen3FRLGBehaviours, written by the
+-- tileset import only on a FireRed cartridge -- see
+-- RomExtractorGen3.FRLG_BEHAVIOUR_OVERRIDES for the slots).
+function OverworldState:frlgBehaviours()
+  local c = Game.data.constants
+  return c and c.gen3FRLGBehaviours or nil
+end
+
+function OverworldState:frlgBehaviourAt(cx, cy)
+  local map = self.map
+  if not (map and map.cellBehaviour and map:inBounds(cx, cy)) then return nil end
+  return map:cellBehaviour(cx, cy)
+end
+
+-- nil: not a FireRed map at all; true/false: on a Cycling Road pull-down tile
+function OverworldState:frlgPullDownHere()
+  local B = self:frlgBehaviours()
+  if not B then return nil end
+  local b = self:frlgBehaviourAt(self.player.cellX, self.player.cellY)
+  return b == B.pullDown or b == B.pullDownGrass
+end
+
+-- THE SPIN TILES (Rocket Hideout, Viridian Gym): TryUpdatePlayerSpinDirection.
+-- A spin tile sets the direction, and the player keeps sliding that way over
+-- ordinary floor until a STOP_SPINNING tile or something in the way; a new
+-- spin tile on the way simply changes the direction.
+local FRLG_SPIN_DIRS = { right = "right", left = "left", up = "up", down = "down" }
+function OverworldState:checkFRLGSpin()
+  local B = self:frlgBehaviours()
+  if not (B and B.spin) then return false end
+  local p = self.player
+  local b = self:frlgBehaviourAt(p.cellX, p.cellY)
+  if self.frlgSpinMap ~= self.map.id then self.frlgSpin = nil end
+  if b == B.stopSpinning then
+    self.frlgSpin, p.spinning = nil, false
+    return false
+  end
+  local way = FRLG_SPIN_DIRS[B.spin[b] or ""] or self.frlgSpin
+  if not way or p.surfing then
+    self.frlgSpin, p.spinning = nil, false
+    return false
+  end
+  if not Collision.canMove(self.map, self.entities, p, way) then
+    self.frlgSpin, p.spinning = nil, false
+    return false
+  end
+  if B.spin[b] then
+    pcall(function() require("src.core.Sound").play(Game.data, "Arrow_Tiles") end)
+  end
+  self.frlgSpin, self.frlgSpinMap = way, self.map.id
+  p.spinning = true
+  p.facing = way
+  self:scriptMove(p, way, 1, function() self:onStepComplete() end)
+  return true
+end
+
+-- the metatile scripts only C names (GetInteractedMetatileScript)
+function OverworldState:tryFRLGMetatileScript(fx, fy)
+  local B = self:frlgBehaviours()
+  if not (B and B.scripts) then return false end
+  local b = self:frlgBehaviourAt(fx, fy)
+  local s = b and B.scripts[b]
+  if not s then return false end
+  -- GetInteractedWaterScript: facing fast water with a SURF mon in the party
+  if s.water and not (self.partyKnows and self:partyKnows("SURF")
+                      and not self.player.surfing) then
+    return false
+  end
+  if s.north and self.player.facing ~= "up" then return false end
+  return self:gen3RunFieldScript(s.label, "metatile") and true or false
+end
+
+-- EventScript_CurrentTooFast: facing Seafoam's fast water with a surfer in
+-- the party says so instead of offering to surf
+function OverworldState:frlgFastWaterAt(fx, fy)
+  local B = self:frlgBehaviours()
+  return B and B.fastWater and self:frlgBehaviourAt(fx, fy) == B.fastWater or false
+end
+
 function OverworldState:checkGen3Current()
   if not GameVersion.isGen3() then return false end
   local map, p = self.map, self.player
@@ -6753,6 +6852,10 @@ function OverworldState:tryFieldMoveOW(fx, fy)
     return false
   end
   if move == "SURF" then
+    local B = self:frlgBehaviours()
+    if B and self:frlgFastWaterAt(fx, fy) and B.scripts and B.scripts[B.fastWater] then
+      return self:gen3RunFieldScript(B.scripts[B.fastWater].label, "fastwater") and true or false
+    end
     -- TrySurfOW (Gen2): check badge + position, then ask yes/no.  Any other
     -- reason is a silent `ret c` in the ROM, so let interact() carry on to
     -- its remaining handlers instead of eating the A press.
@@ -6984,6 +7087,7 @@ function OverworldState:useSurfFieldMove()
   -- starts.  Surf is the fifth.
   if GameVersion.isGen3() then
     if not gen3BadgeHeld("SURF") then return "no_badge" end
+    if not p.surfing and self:frlgFastWaterAt(p:facingCell()) then return "current" end
     if p.surfing then
       return self:facingIsLandDismount() and "dismount" or "no_place"
     end
@@ -8741,6 +8845,12 @@ function OverworldState:onStepComplete()
   -- have shown a region of trainers with nothing to say.
   if GameVersion.isGen3() then
     require("src.script.MatchCall").step(Game.data, Game.save)
+    -- FireRed's own per-step counters (massage, resort, Birth Island, hidden
+    -- item regrowth)
+    local G3 = require("src.script.Gen3Commands")
+    if G3.frlgStep and self:frlgBehaviours() then
+      G3.frlgStep({ save = Game.save, game = Game, overworld = self })
+    end
   end
   -- THE MACH BIKE PICKS UP SPEED, and that speed is the only thing that beats
   -- a mud ramp.
@@ -8949,6 +9059,7 @@ function OverworldState:onStepComplete()
 
   -- spinner arrow tiles (Viridian Gym, Rocket Hideout)
   if self:checkSpinner() then return end
+  if self:checkFRLGSpin() then return end
 
   -- badge-check guards (Route 22 gate / Route 23)
   if self:checkBadgeGate() then return end
@@ -9959,6 +10070,14 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
   Game.stack:push(Transition.new(Game, function()
     self:setMap(mapId, x, y, facing or "down", opts)
     self:noteGen2Spawn(fromId)
+    -- FIRERED'S SIDE STAIRS (ExitStairsMovement): you land ON the stair tile
+    -- facing away from it -- west off a right-hand stair, east off a left one
+    local stairB = self:frlgBehaviours() and self:frlgBehaviourAt(self.player.cellX, self.player.cellY)
+    if stairB == 0xEC or stairB == 0xEE then
+      self.player.facing = "left"
+    elseif stairB == 0xED or stairB == 0xEF then
+      self.player.facing = "right"
+    end
     -- FIRERED: a warp into a dungeon with a preview picture shows it first
     local section = self.map.def and self.map.def.regionMapSection
     if section and section ~= fromSection and GameVersion.get() == "firered" then

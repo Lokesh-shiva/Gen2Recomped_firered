@@ -14769,6 +14769,12 @@ function RomExtractorGen3:extractMapScripts()
     Logger.warn("gen3: no script roots -- run extractMaps first")
     return
   end
+  if self:isFireRedManifest() then
+    -- the metatile scripts only C names (GetInteractedMetatileScript)
+    for _, s in ipairs(RomExtractorGen3.FRLG_METATILE_SCRIPTS) do
+      roots[self:frlgScriptStart(s.at)] = true
+    end
+  end
   local queue = {}
   for ptr in pairs(roots) do queue[#queue + 1] = ptr end
   table.sort(queue)
@@ -18998,6 +19004,12 @@ function RomExtractorGen3:waterfallTerrain(tilesetPairs)
     if n >= 100 and (stacked[b] or 0) == n then candidates[#candidates + 1] = b end
   end
   table.sort(candidates)
+  -- FireRed's waterfalls (Four Island's Icefall Cave, the Sevii routes) are
+  -- too few cells for the count above; MB_WATERFALL is $13 there as here
+  if self:isFireRedManifest() and (seen[0x13] or 0) > 0 then
+    candidates = { 0x13 }
+    stacked[0x13] = stacked[0x13] or seen[0x13]
+  end
   if #candidates ~= 1 then
     Logger.warn("gen3 waterfall: %d behaviours join one body of water to "
                   .. "another at every cell -- wanted exactly one, so "
@@ -20600,6 +20612,15 @@ function RomExtractorGen3:iceBehaviours(tilesetPairs, pads, holes)
   adopt(cracked, addedCracked, "CRACKED_FLOOR")
   table.sort(slide)
   table.sort(cracked)
+  -- FIRERED HAS NO SKY PILLAR OR SOOTOPOLIS GYM for the shape test to find,
+  -- and on its maps the test picks the WATERFALL ($13) as a sheet of ice.
+  -- Its terrain is named in pokefirered metatile_behaviors.h instead:
+  -- MB_ICE (remapped onto $20), and Icefall Cave's MB_THIN_ICE $26 that
+  -- cracks into MB_CRACKED_ICE $27 (field_tasks.c IcefallCaveIcePerStepCallback).
+  if self:isFireRedManifest() then
+    slide, thin, cracked = { 0x20 }, 0x26, {}
+    addedSlide, addedCracked = {}, {}
+  end
 
   -- WHERE YOU LAND WHEN THE FLOOR GIVES WAY.
   --
@@ -22396,6 +22417,86 @@ function RomExtractorGen3:tilesetSheet(tiles, palettes, count)
   return image
 end
 
+-- FIRERED'S OWN BEHAVIOURS, kept rather than flattened.
+--
+-- The manifest remap folds FireRed's numbering onto Emerald's, and 41 of
+-- FireRed's behaviours have no Emerald twin -- they came out as NORMAL, so the
+-- Seafoam/Rocket Hideout spin tiles did nothing, Cycling Road never pulled
+-- the bike downhill, Seafoam's fast current could be surfed and every piece
+-- of furniture in Kanto (the TV, the fridge, the Silph blueprints...) was mute.
+-- These land in slots Emerald never uses, so nothing Emerald-shaped in the
+-- engine reads them as something else.  pokefirered metatile_behaviors.h.
+RomExtractorGen3.FRLG_BEHAVIOUR_OVERRIDES = {
+  [0x0A] = 0x0A,                                  -- MB_RUNNING_DISALLOWED
+  [0x11] = 0x5B,                                  -- MB_FAST_WATER
+  [0x54] = 0x54, [0x55] = 0x55, [0x56] = 0x56,    -- MB_SPIN_RIGHT/LEFT/UP
+  [0x57] = 0x57, [0x58] = 0x58,                   -- MB_SPIN_DOWN, MB_STOP_SPINNING
+  [0xD0] = 0x59,                                  -- MB_CYCLING_ROAD_PULL_DOWN
+  [0xD1] = 0x5A,                                  -- ..._PULL_DOWN_GRASS
+  [0x81] = 0xA4, [0x82] = 0xA5, [0x87] = 0xA6, [0x88] = 0xA7,
+  [0x89] = 0xA8, [0x8A] = 0xA9, [0x8B] = 0xAA, [0x8C] = 0xAB,
+  [0x8D] = 0xAC, [0x8E] = 0xAD, [0x90] = 0xAE, [0x91] = 0xAF,
+  [0x92] = 0xC8, [0x93] = 0xC9, [0x94] = 0xCA, [0x95] = 0xCB,
+  [0x96] = 0xCC, [0x97] = 0xCD, [0x98] = 0xCE, [0x99] = 0xCF,
+  [0x9A] = 0xD7, [0x9B] = 0xD8, [0x9E] = 0xDB, [0x9F] = 0xDC,
+  [0xA0] = 0xDD, [0xA1] = 0xDE, [0xA2] = 0xDF, [0xA3] = 0xEB,
+  -- the directional stair warps: you arrive and stay on them, you do not
+  -- step out south the way a door lets you out (see warpTiles)
+  [0x6C] = 0xEC, [0x6D] = 0xED, [0x6E] = 0xEE, [0x6F] = 0xEF,
+}
+
+-- GetInteractedMetatileScript, keyed by the slot above (or the Emerald value
+-- a behaviour already shares).  `north` is the cartridge's IsPlayerFacing...
+-- test; the rest answer from any side.  Addresses are the FireRed symbols;
+-- a symbol that lands on the previous script's end/return byte is nudged.
+RomExtractorGen3.FRLG_METATILE_SCRIPTS = {
+  { beh = 0xA4, at = 0x1A7606, name = "EventScript_Bookshelf" },
+  { beh = 0xA5, at = 0x1A760E, name = "EventScript_PokeMartShelf" },
+  { beh = 0xA6, at = 0x1A76E6, name = "EventScript_PokecenterSign", north = true },
+  { beh = 0xA7, at = 0x1A76DE, name = "EventScript_PokemartSign", north = true },
+  { beh = 0xA8, at = 0x1A7656, name = "EventScript_Cabinet" },
+  { beh = 0xA9, at = 0x1A7660, name = "EventScript_Kitchen" },
+  { beh = 0xAA, at = 0x1A7668, name = "EventScript_Dresser" },
+  { beh = 0xAB, at = 0x1A7672, name = "EventScript_Snacks" },
+  { beh = 0xAD, at = 0x1BB8A6, name = "CableClub_EventScript_ShowBattleRecords", north = true },
+  { beh = 0xAE, at = 0x1A7618, name = "EventScript_Food" },
+  { beh = 0xAF, at = 0x1A76F0, name = "EventScript_Indigo_UltimateGoal" },
+  { beh = 0xC8, at = 0x1A76F8, name = "EventScript_Indigo_HighestAuthority" },
+  { beh = 0xC9, at = 0x1A763C, name = "EventScript_Blueprints" },
+  { beh = 0xCA, at = 0x1A767A, name = "EventScript_Painting" },
+  { beh = 0xCB, at = 0x1A7684, name = "EventScript_PowerPlantMachine" },
+  { beh = 0xCC, at = 0x1A768C, name = "EventScript_Telephone" },
+  { beh = 0xCD, at = 0x1A762A, name = "EventScript_Computer" },
+  { beh = 0xCE, at = 0x1A7696, name = "EventScript_AdvertisingPoster" },
+  { beh = 0xCF, at = 0x1A769E, name = "EventScript_TastyFood" },
+  { beh = 0xD7, at = 0x1A76A8, name = "EventScript_TrashBin" },
+  { beh = 0xD8, at = 0x1A76B0, name = "EventScript_Cup" },
+  { beh = 0xDB, at = 0x1A76CC, name = "EventScript_BlinkingLights" },
+  { beh = 0xDC, at = 0x1A76D4, name = "EventScript_NeatlyLinedUpTools" },
+  { beh = 0xDD, at = 0x1A7632, name = "EventScript_ImpressiveMachine" },
+  { beh = 0xDE, at = 0x1A7620, name = "EventScript_VideoGame" },
+  { beh = 0xDF, at = 0x1A7644, name = "EventScript_Burglary" },
+  { beh = 0xEB, at = 0x1C549C, name = "TrainerTower_EventScript_ShowTime" },
+  { beh = 0x86, at = 0x1A764E, name = "EventScript_PlayerFacingTVScreen", north = true },
+  { beh = 0x85, at = 0x1A6C32, name = "EventScript_WallTownMap" },
+  { beh = 0x83, at = 0x1A6954, name = "EventScript_PC" },
+  { beh = 0x5B, at = 0x1A6B0C, name = "EventScript_CurrentTooFast", water = true },
+}
+
+-- the script actually starts on the next byte when a symbol sits on the
+-- previous script's `end` (02) or `return` (03)
+function RomExtractorGen3:frlgScriptStart(at)
+  local b = self.rom:u8(at)
+  -- (or on the 0xFF/0xFE end of a string laid just before it)
+  if b == 0x02 or b == 0x03 or b == 0xFE or b == 0xFF then return at + 1 end
+  return at
+end
+
+function RomExtractorGen3:isFireRedManifest()
+  local A = (self.manifest or {}).metatileAttributes
+  return A and A.bytes == 4 or false
+end
+
 function RomExtractorGen3:extractTilesets()
   self:beginStage("Gen3 tilesets")
   local addresses = self._tilesetAddresses
@@ -22464,8 +22565,9 @@ function RomExtractorGen3:extractTilesets()
           if A and A.bytes == 4 then
             local raw32 = rom:u32(attrAt + m * 4)
             local beh = raw32 % ((A.behaviorMask or 0x1FF) + 1)
+            local own = RomExtractorGen3.FRLG_BEHAVIOUR_OVERRIDES[beh]
             local mapped = A.behaviorRemap and A.behaviorRemap[tostring(beh)]
-            beh = tonumber(mapped) or (beh < 256 and beh or 0)
+            beh = own or tonumber(mapped) or (beh < 256 and beh or 0)
             local layer = math.floor(raw32 / 2 ^ (A.layerShift or 29))
                           % ((A.layerMask or 3) + 1)
             av = beh + layer * 4096
@@ -22537,6 +22639,29 @@ function RomExtractorGen3:extractTilesets()
   -- ------------------------------------------------------------------
   local layouts = self._layoutRecords or {}
   local pairs_, pairCount = {}, 0
+  local frlg = self:isFireRedManifest()
+  if frlg then
+    -- what the engine needs to know about the slots FRLG_BEHAVIOUR_OVERRIDES
+    -- filled, and the script each piece of furniture runs
+    local scripts = {}
+    for _, s in ipairs(RomExtractorGen3.FRLG_METATILE_SCRIPTS) do
+      scripts[s.beh] = { label = ("S%07X"):format(self:frlgScriptStart(s.at)),
+                         north = s.north or nil, water = s.water or nil,
+                         name = s.name }
+    end
+    local constants = self._constants or {}
+    constants.gen3FRLGBehaviours = {
+      spin = { [0x54] = "right", [0x55] = "left", [0x56] = "up", [0x57] = "down" },
+      stopSpinning = 0x58,
+      pullDown = 0x59, pullDownGrass = 0x5A,
+      fastWater = 0x5B,
+      runningDisallowed = 0x0A,
+      scripts = scripts,
+      source = "pokefirered metatile_behaviors.h / GetInteractedMetatileScript",
+    }
+    self._constants = constants
+    self:write("constants", constants)
+  end
   for _, lay in pairs(layouts) do
     local key = self:tilesetPairKey(lay.primaryTileset, lay.secondaryTileset)
     if key and not pairs_[key] then
@@ -22644,8 +22769,11 @@ function RomExtractorGen3:extractTilesets()
             [0x38] = "east", [0x39] = "west",
             [0x3A] = "north", [0x3B] = "south",
           },
-          warpTiles = { 0x0E, 0x29, 0x61, 0x62, 0x64, 0x65,
-                        0x67, 0x68, 0x6A, 0x6B, 0x6D, 0x6E },
+          warpTiles = frlg and { 0x0E, 0x29, 0x61, 0x62, 0x64, 0x65,
+                                 0x67, 0x68, 0x6A, 0x6B, 0x6D, 0x6E,
+                                 0xEC, 0xED, 0xEE, 0xEF }
+                      or { 0x0E, 0x29, 0x61, 0x62, 0x64, 0x65,
+                           0x67, 0x68, 0x6A, 0x6B, 0x6D, 0x6E },
           -- ...and the rule the two lists do NOT express: on this cartridge a
           -- warp fires from its EVENT, not from the tile under it.  The
           -- behaviour byte only says what kind of opening it is.  Without
@@ -22682,8 +22810,9 @@ function RomExtractorGen3:extractTilesets()
           -- a hole in the list.  The one exception carries no dry walkable
           -- cell at all: it is an ocean route with a land table it can never
           -- use.
-          grassTiles = { 0x02, 0x03 },
-          encounterTiles = { 0x02, 0x03, 0x06, 0x08, 0x0B, 0x24 },
+          grassTiles = frlg and { 0x02, 0x03, 0x5A } or { 0x02, 0x03 },
+          encounterTiles = frlg and { 0x02, 0x03, 0x06, 0x08, 0x0B, 0x24, 0x5A }
+                           or { 0x02, 0x03, 0x06, 0x08, 0x0B, 0x24 },
           -- 2x2 tiles per metatile, and the metatile IS the collision cell
           blockTiles = 2,
           blockCells = 1,
@@ -37442,11 +37571,124 @@ RomExtractorGen3.FRLG_SPECIAL_TEXTS = {
   floors = { 0x418068, 0x418064, 0x418060, 0x41805C, 0x41803A, 0x41803C, 0x418040, 0x418042,
              0x418046, 0x418048, 0x41804C, 0x41804E, 0x418052, 0x418054, 0x418058, 0x41806C },
   nowOn = 0x418074, exit = 0x4161C8, other = 0x417DEC,
+  -- CreatePCMenuWindow: SOMEONE'S PC, BILL'S PC, {PLAYER}'s PC, PROF. OAK'S
+  -- PC, HALL OF FAME, LOG OFF
+  pcMenu = { 0x417B9E, 0x417BAC, 0x417BB6, 0x417BD2, 0x417BBE, 0x417BCA },
   badges = { 0x417FD8, 0x417FE6, 0x417FF2, 0x418000, 0x41800C, 0x418016, 0x418022, 0x41802E },
   seagallop = { 0x417E46, 0x417DF2, 0x417DFE, 0x417E08, 0x417E16, 0x417E22, 0x417E2E, 0x417E38 },
   rating = { 0x1A6D16, 0x1A6D6C, 0x1A6DDE, 0x1A6E36, 0x1A6EA4, 0x1A6F0A, 0x1A6F70, 0x1A6FAA,
              0x1A6FF0, 0x1A7030, 0x1A7062, 0x1A70A4, 0x1A70D8, 0x1A7108, 0x1A7136, 0x1A7174 },
 }
+
+-- THE TRAINER TOWER (Seven Island), pokefirered trainer_tower.c.  Four
+-- challenges of eight floors each (gTrainerTowerFloors), each floor up to
+-- three trainers with an easy-chat speech set and six BattleTowerPokemon, plus
+-- the prize list, which of a trainer's six a floor sends out, and the tables
+-- that turn a facility class into a trainer class, a pic and an overworld
+-- sprite.
+RomExtractorGen3.FRLG_TRAINER_TOWER = {
+  HEADER = 0x4827AC, FLOORS = 0x4827B4, FLOOR_SIZE = 992, TRAINER_SIZE = 328,
+  MON_SIZE = 44, PRIZES = 0x47A2B4, NUM_PRIZES = 15,
+  SINGLE_IDX = 0x47A2EE, DOUBLE_IDX = 0x47A2FE, KNOCKOUT_IDX = 0x47A30E,
+  SINGLES_INFO = 0x479ED8, NUM_SINGLES = 83, DOUBLES_INFO = 0x47A024, NUM_DOUBLES = 10,
+  CLASS_TO_TRAINER = 0x25393E, CLASS_TO_PIC = 0x2538A8, NUM_CLASSES = 150,
+  TYPE_TEXTS = 0x3FE9C4, TIME_BOARD = 0x3FE982, MIN_SEC = 0x3FE998,
+}
+
+function RomExtractorGen3:extractFireRedTrainerTower()
+  self:beginStage("Gen3 FireRed trainer tower")
+  if not self:isFireRedManifest() then return end
+  local T = RomExtractorGen3.FRLG_TRAINER_TOWER
+  local rom = self.rom
+  local function text(at, max)
+    if rom:u8(at) == 0xFF then at = at + 1 end
+    return self:readText(at, max)
+  end
+  local ok, err = pcall(function()
+    local rec = { numFloors = rom:u8(T.HEADER), challenges = {}, prizes = {},
+                  singleIdx = {}, doubleIdx = {}, knockoutIdx = {},
+                  classToTrainer = {}, classToPic = {}, singles = {}, doubles = {} }
+    for c = 0, 3 do
+      local floors = {}
+      for f = 0, 7 do
+        local at = rom:pointer(T.FLOORS + (c * 8 + f) * 4)
+        if not at then error(("challenge %d floor %d has no pointer"):format(c, f)) end
+        local floor = { floorIdx = rom:u8(at + 1), challengeType = rom:u8(at + 2),
+                        prize = rom:u8(at + 3), trainers = {} }
+        for t = 0, 2 do
+          local tp = at + 4 + t * T.TRAINER_SIZE
+          local function words(off)
+            local w = {}
+            for i = 0, 5 do w[i + 1] = rom:u16(tp + off + i * 2) end
+            return w
+          end
+          local tr = { name = self:readText(tp, 11) or "", facilityClass = rom:u8(tp + 0x0B),
+                       textColor = rom:u8(tp + 0x0C), speechBefore = words(0x0E),
+                       speechWin = words(0x1A), speechLose = words(0x26),
+                       speechAfter = words(0x32), mons = {} }
+          for m = 0, 5 do
+            local mp = tp + 0x40 + m * T.MON_SIZE
+            local ivw = rom:u32(mp + 0x18)
+            local function bits(shift) return math.floor(ivw / 2 ^ shift) % 32 end
+            tr.mons[m + 1] = {
+              species = rom:u16(mp), heldItem = rom:u16(mp + 2),
+              moves = { rom:u16(mp + 4), rom:u16(mp + 6), rom:u16(mp + 8), rom:u16(mp + 10) },
+              ppBonuses = rom:u8(mp + 0x0D),
+              evs = { hp = rom:u8(mp + 0x0E), attack = rom:u8(mp + 0x0F), defense = rom:u8(mp + 0x10),
+                      speed = rom:u8(mp + 0x11), spatk = rom:u8(mp + 0x12), spdef = rom:u8(mp + 0x13) },
+              otId = rom:u32(mp + 0x14),
+              ivs = { hp = bits(0), attack = bits(5), defense = bits(10), speed = bits(15),
+                      spatk = bits(20), spdef = bits(25) },
+              abilityNum = math.floor(ivw / 2 ^ 31) % 2,
+              personality = rom:u32(mp + 0x1C),
+              nickname = self:readText(mp + 0x20, 11),
+              friendship = rom:u8(mp + 0x2B),
+            }
+          end
+          floor.trainers[t + 1] = tr
+        end
+        floors[f + 1] = floor
+      end
+      rec.challenges[c + 1] = floors
+    end
+    for i = 0, T.NUM_PRIZES - 1 do rec.prizes[i + 1] = rom:u16(T.PRIZES + i * 2) end
+    for f = 0, 7 do
+      rec.singleIdx[f + 1] = { rom:u8(T.SINGLE_IDX + f * 2), rom:u8(T.SINGLE_IDX + f * 2 + 1) }
+      rec.doubleIdx[f + 1] = { rom:u8(T.DOUBLE_IDX + f * 2), rom:u8(T.DOUBLE_IDX + f * 2 + 1) }
+      rec.knockoutIdx[f + 1] = { rom:u8(T.KNOCKOUT_IDX + f * 3), rom:u8(T.KNOCKOUT_IDX + f * 3 + 1),
+                                 rom:u8(T.KNOCKOUT_IDX + f * 3 + 2) }
+    end
+    for i = 0, T.NUM_CLASSES - 1 do
+      rec.classToTrainer[i] = rom:u8(T.CLASS_TO_TRAINER + i)
+      rec.classToPic[i] = rom:u8(T.CLASS_TO_PIC + i)
+    end
+    -- the sprite tables: {objGfx, facilityClass, gender} and the doubles'
+    -- {gfx1, gfx2, class, gender1, gender2}, packed without padding
+    for i = 0, T.NUM_SINGLES - 1 do
+      local at = T.SINGLES_INFO + i * 3
+      rec.singles[rom:u8(at + 1)] = { gfx = rom:u8(at), female = rom:u8(at + 2) == 1 }
+    end
+    for i = 0, T.NUM_DOUBLES - 1 do
+      local at = T.DOUBLES_INFO + i * 5
+      rec.doubles[rom:u8(at + 2)] = { gfx1 = rom:u8(at), gfx2 = rom:u8(at + 1) }
+    end
+    rec.typeTexts = {}
+    for i = 0, 3 do
+      local p = rom:pointer(T.TYPE_TEXTS + i * 4)
+      rec.typeTexts[i + 1] = p and self:readText(p, 16) or nil
+    end
+    rec.timeBoard = text(T.TIME_BOARD, 16)
+    rec.minSec = text(T.MIN_SEC, 24)
+    rec.source = "ROM:gTrainerTowerFloors / pokefirered trainer_tower.c"
+    local constants = self._constants or {}
+    constants.gen3FRLGTrainerTower = rec
+    self._constants = constants
+    self:write("constants", constants)
+    Logger.info("Gen3 FireRed trainer tower: 4 challenges, %d floors, first trainer %s",
+                rec.numFloors, tostring(rec.challenges[1][1].trainers[1].name))
+  end)
+  if not ok then Logger.warn("gen3 frlg trainer tower: %s", tostring(err)) end
+end
 
 function RomExtractorGen3:extractFireRedSpecialTexts()
   self:beginStage("Gen3 FireRed special texts")
@@ -44297,6 +44539,7 @@ end
 function RomExtractorGen3:extractHallOfFame()
   self:beginStage("Gen3 hall of fame")
   local H = RomExtractorGen3.HOF
+  if self:isFireRedManifest() then return self:extractFireRedHallOfFame() end
   local art, why = self:hallOfFameArt()
   if not art then
     Logger.warn("gen3 hall of fame: %s -- the ceremony is left out and the "
@@ -44371,6 +44614,77 @@ function RomExtractorGen3:extractHallOfFame()
   Logger.info("Gen3 hall of fame: %s; %s", record.text.welcome, record.source)
 end
 
+
+-- FIRERED'S CEREMONY IS NOT A MOUND.  pokefirered hall_of_fame.c
+-- HallOfFame_LoadBgGfx: BG3 is filled with tile 2 of sHallOfFame_Gfx, and BG1
+-- lays tile 1 over the top two and bottom six rows, alpha-blended 16/7 over
+-- BG3 -- the two dark bands the team and the text sit between.  The words are
+-- the gText_ strings the same file prints.
+RomExtractorGen3.FRLG_HOF = {
+  PAL = 0x40C39C, GFX = 0x40C3BC,
+  TEXT = { welcome = 0x416008, number = 0x4160B4, champion = 0x4160C8,
+           dexNo = 0x4160EC, level = 0x4160F4, name = 0x4160FC,
+           idNo = 0x416104, saving = 0x419F54, time = 0x415CE8 },
+}
+
+function RomExtractorGen3:extractFireRedHallOfFame()
+  local F = RomExtractorGen3.FRLG_HOF
+  local rom = self.rom
+  local text = {}
+  for key, at in pairs(F.TEXT) do
+    local b = rom:u8(at)
+    if b == 0xFF then at = at + 1 end
+    text[key] = self:readText(at, 80)
+  end
+  -- the FRLG name line is "NAME" + the placeholder; keep the Emerald key shape
+  text.name = text.name or "NAME"
+  local record = { text = text, frlg = true,
+                   source = ("ROM:sHallOfFame_Gfx %07X / sHallOfFame_Pal %07X"):format(F.GFX, F.PAL) }
+  local ok, err = pcall(function()
+    local okT, tiles = RomExtractorGen3.lz77ok(rom, F.GFX)
+    if not (okT and type(tiles) == "table" and #tiles >= 32 * 3) then
+      error("tiles unreadable")
+    end
+    local pal = {}
+    for i = 0, 15 do
+      local r, g, b = RomGba.bgr555(rom:u16(F.PAL + i * 2))
+      pal[i] = { r, g, b }
+    end
+    local function px(tile, x, y)
+      local byte = tiles[tile * 32 + y * 4 + math.floor(x / 2) + 1] or 0
+      return (x % 2 == 0) and (byte % 16) or math.floor(byte / 16)
+    end
+    local image = ImageWriter.blank(256, 160)
+    for y = 0, 159 do
+      local row = math.floor(y / 8)
+      local band = row <= 1 or row >= 14
+      for x = 0, 255 do
+        local c = pal[px(2, x % 8, y % 8)]
+        local r, g, b = c[1], c[2], c[3]
+        if band then
+          local i = px(1, x % 8, y % 8)
+          if i ~= 0 then
+            local t = pal[i]
+            r = math.min(255, t[1] + r * 7 / 16)
+            g = math.min(255, t[2] + g * 7 / 16)
+            b = math.min(255, t[3] + b * 7 / 16)
+          end
+        end
+        image:setPixel(x, y, r / 255, g / 255, b / 255, 1)
+      end
+    end
+    self:saveImage(image, "hof/gen3_platform.png")
+    record.background = "assets/generated/hof/gen3_platform.png"
+  end)
+  if not ok then
+    Logger.warn("gen3 frlg hall of fame art: %s -- the words are still written", tostring(err))
+  end
+  local constants = self._constants or {}
+  constants.gen3HallOfFame = record
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 hall of fame (FRLG): %s", tostring(text.welcome))
+end
 
 -- ---------------------------------------------------------------------------
 -- STAGE: THE CREDITS.
@@ -44537,8 +44851,59 @@ function RomExtractorGen3:creditsPages()
   return nil, why
 end
 
+-- FIRERED'S ROLL (pokefirered credits.c): sCreditsScript is 4-byte commands
+-- {cmd, param, u16 duration}; every PRINT names a row of sCreditsTexts
+-- {title*, names*, unused}, and those are the pages.  The map fly-overs and
+-- the three starters between them are scenery this roll does not draw.
+RomExtractorGen3.FRLG_CREDITS = {
+  SCRIPT = 0x410CF4, SCRIPT_COUNT = 66, TEXTS = 0x4145BC, TEXT_STRIDE = 12,
+  TITLE = 0x41D198,
+}
+
+function RomExtractorGen3:extractFireRedCredits()
+  local F = RomExtractorGen3.FRLG_CREDITS
+  local rom = self.rom
+  local function text(p)
+    if not p then return "" end
+    if rom:u8(p) == 0xFF then p = p + 1 end
+    return self:readText(p, 400) or ""
+  end
+  local pages, entries = {}, {}
+  local function page(title, names)
+    local rows = {}
+    if title ~= "" then rows[#rows + 1] = { text = title, title = true } end
+    for line in (names .. "\n"):gmatch("([^\n]*)\n") do
+      if line ~= "" then rows[#rows + 1] = { text = line } end
+    end
+    for _, r in ipairs(rows) do entries[#entries + 1] = r end
+    if #rows > 0 then pages[#pages + 1] = rows end
+  end
+  page((text(F.TITLE):gsub("\n", " ")), "")
+  for i = 0, F.SCRIPT_COUNT - 1 do
+    local at = F.SCRIPT + i * 4
+    local cmd, param = rom:u8(at), rom:u8(at + 1)
+    if cmd == 0 then
+      local t = F.TEXTS + param * F.TEXT_STRIDE
+      page(text(rom:pointer(t)), text(rom:pointer(t + 4)))
+    elseif cmd == 5 then
+      break
+    end
+  end
+  if #pages < 10 then
+    Logger.warn("gen3 frlg credits: only %d pages read -- the game ends without them", #pages)
+    return
+  end
+  local constants = self._constants or {}
+  constants.gen3Credits = { entries = entries, pages = pages, rows = 6,
+                            source = "ROM:sCreditsScript / sCreditsTexts (FireRed)" }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 credits (FRLG): %d pages", #pages)
+end
+
 function RomExtractorGen3:extractCredits()
   self:beginStage("Gen3 credits")
+  if self:isFireRedManifest() then return self:extractFireRedCredits() end
   local got, why = self:creditsPages()
   if not got then
     Logger.warn("gen3 credits: %s -- the game ends without them",
@@ -45085,6 +45450,18 @@ function RomExtractorGen3:easyChatNames(count)
     if t:find("[\n\v\f]") then return nil end
     return t
   end
+  -- FIRERED: sEasyChatGroupNamePointers.  Its names are not the run the scan
+  -- below expects ("POKéMON" ... "POKéMON2" is Emerald's order), so the
+  -- table is read where the symbol puts it.
+  if self:isFireRedManifest() then
+    local names = {}
+    for i = 0, count - 1 do
+      local p = rom:pointer(0x3EDF98 + i * 4)
+      names[i + 1] = p and self:readText(p, E.MAX_TEXT) or nil
+      if not names[i + 1] then names = nil break end
+    end
+    if names then return 0x3EDF98, names end
+  end
   local at = 0
   while at + count * 4 <= rom.size do
     local first = word(rom:pointer(at))
@@ -45167,7 +45544,10 @@ function RomExtractorGen3:extractEasyChat()
       end
     end
   end
-  if blanks > 0 then
+  -- FireRed's groups read back with exactly one blank word record; a single
+  -- blank there is tolerated (it prints as nothing) rather than losing every
+  -- Trainer Tower speech over it
+  if blanks > (self:isFireRedManifest() and 1 or 0) then
     Logger.warn("gen3 easy chat: %d words did not decode -- the groups are "
                   .. "left out rather than half read", blanks)
     return
@@ -45234,6 +45614,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedFieldShadow",
   "extractFireRedMapPreviews",
   "extractFireRedSpecialTexts",
+  "extractFireRedTrainerTower",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",

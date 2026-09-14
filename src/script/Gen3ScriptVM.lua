@@ -281,8 +281,18 @@ L.waitstate = function(_, s) emit(s, { "g3_wait_state" }) end
 -- following `message 0` or `callstd`.  Carrying it on the lowering state and
 -- consuming it at the std is what turns the two-command idiom into one row.
 
+-- `msgbox gStringVar4` and friends: the pointer is a RAM buffer the special
+-- before it filled, not a line in the text table (FireRed's Trainer Tower
+-- speeches, Emerald's frontier lines).  FireRed and Emerald addresses.
+local STRING_VAR_RAM = {
+  [0x02021CD0] = 1, [0x02021CF0] = 2, [0x02021D04] = 3, [0x02021D18] = 4,
+  [0x02021C40] = 1, [0x02021C54] = 2, [0x02021C68] = 3, [0x02021C7C] = 4,
+}
 L.loadword = function(ir, s)
   if ir[2] == 0 and type(ir[3]) == "string" then s.lastText = ir[3] end
+  if ir[2] == 0 and type(ir[3]) == "number" and STRING_VAR_RAM[ir[3]] then
+    s.lastText = ("{RAM:wStringBuffer%d}"):format(STRING_VAR_RAM[ir[3]])
+  end
 end
 
 L.message = function(ir, s)
