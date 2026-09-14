@@ -9659,10 +9659,15 @@ function RomExtractorGen3:extractDexEntries()
   local coords = self:symbol("gMonFrontPicCoords")
   if not (base and self._pokemon) then return end
   local filled = 0
+  -- FireRed's struct carries a second description pointer before the pose
+  -- fields: 36 bytes a row (gPokedexEntries is 0x366C = 387 x 36), and the
+  -- pose pairs sit four bytes later
+  local frlg = (self.manifest or {}).frlgItemMenu ~= nil
+  local stride, poseAt = frlg and 36 or 32, frlg and 26 or 22
   for _, def in pairs(self._pokemon) do
     local dex = def.dex
     if dex and dex > 0 and dex <= 386 then
-      local o = base + dex * 32
+      local o = base + dex * stride
       local ok = pcall(function()
         def.category = self:readString(o, 12)
         def.height = self.rom:u16(o + 12) / 10      -- metres
@@ -9689,10 +9694,10 @@ function RomExtractorGen3:extractDexEntries()
         -- largest thing in the game, is 256 beside a trainer shrunk to 1352,
         -- and WURMPLE is 711 beside a trainer left at 256.
         def.dexPose = {
-          monScale = self.rom:u16(o + 22),
-          monOffset = signed(o + 24),
-          trainerScale = self.rom:u16(o + 26),
-          trainerOffset = signed(o + 28),
+          monScale = self.rom:u16(o + poseAt),
+          monOffset = signed(o + poseAt + 2),
+          trainerScale = self.rom:u16(o + poseAt + 4),
+          trainerOffset = signed(o + poseAt + 6),
         }
       end)
       if ok then filled = filled + 1 end
@@ -36300,6 +36305,153 @@ function RomExtractorGen3:extractFireRedTrainerCard()
               tostring(labels.pokedex), tostring(labels.time))
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S POKeDEX (pokefirered src/pokedex_screen.c)
+--
+-- One small tile sheet (sKantoDexTiles / sNatDexTiles) over a 256-colour
+-- palette, laid out by FillBgTilemapBufferRect: tile 1 is the field, tile
+-- $0E the ordered list's field, tile 3 in palette 15 the top and bottom
+-- bars, and tiles 1-11 the entry page's frame (DexScreen_DexPageZoomEffectFrame
+-- at scale 6: tile (0,2), 28x14 inside, divider on row 11).
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_POKEDEX = {
+  KANTO_TILES = 0x440274, NAT_TILES = 0x4403AC,
+  KANTO_PAL = 0x4404C8, NAT_PAL = 0x4406E0,
+  CAUGHT = 0x443600, FOOTPRINTS = 0x43FAB0, FOOTPRINT_COUNT = 413,
+  TEXT = { listTitle = 0x415F3C, pickOkExit = 0x415F50, pokemon = 0x415F8E,
+           ht = 0x415F98, wt = 0x415F9A, lbs = 0x415FA0, cry = 0x415FAC,
+           nextDataCancel = 0x415FB2, next = 0x415FC8 },
+}
+
+function RomExtractorGen3:extractFireRedPokedex()
+  self:beginStage("Gen3 FireRed pokedex")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local P = RomExtractorGen3.FRLG_POKEDEX
+  local rom = self.rom
+  local images, colors = {}, {}
+  local function palette(at)
+    local raw = rom:bytes(at, 0x200)
+    local out = {}
+    for i = 0, 255 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      out[i] = { r, g, b }
+    end
+    return out
+  end
+  local function build(prefix, tilesAt, palAt)
+    local ok, tiles = RomExtractorGen3.lz77ok(rom, tilesAt)
+    if not ok then return end
+    local pal = palette(palAt)
+    local function tile(img, tid, bank, hflip, px, py, keep0)
+      local base = tid * 32
+      if base + 32 > #tiles then return end
+      for y = 0, 7 do
+        for x = 0, 7 do
+          local sx = hflip and (7 - x) or x
+          local byte = tiles[base + y * 4 + math.floor(sx / 2) + 1]
+          local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+          local c = (v ~= 0 or keep0) and pal[bank * 16 + v]
+          if c then img:setPixel(px + x, py + y, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+        end
+      end
+    end
+    local function fill(tid, bank, rows, keep0)
+      local img = ImageWriter.blank(240, 160)
+      for _, ty in ipairs(rows) do
+        for tx = 0, 29 do tile(img, tid, bank, false, tx * 8, ty * 8, keep0) end
+      end
+      return img
+    end
+    local all = {}
+    for ty = 0, 19 do all[#all + 1] = ty end
+    local function save(key, img)
+      self:saveImage(img, "pokedex_frlg/" .. prefix .. key .. ".png")
+      images[prefix .. key] = "assets/generated/pokedex_frlg/" .. prefix .. key .. ".png"
+    end
+    save("field", fill(1, 0, all, true))
+    save("listField", fill(0x0E, 0, all, true))
+    save("bars", fill(3, 15, { 0, 1, 18, 19 }, true))
+    -- the entry page frame at scale 6
+    local img = ImageWriter.blank(240, 160)
+    local left, top, width, height = 0, 2, 28, 14
+    local divY = (top + 1) + (math.floor(height / 2) + 1)
+    local function at(tid, hflip, tx, ty) tile(img, tid, 0, hflip, tx * 8, ty * 8, true) end
+    at(4, false, left, top); at(4, true, left + 1 + width, top)
+    at(10, false, left, top + 1 + height); at(10, true, left + 1 + width, top + 1 + height)
+    for tx = left + 1, left + width do
+      at(5, false, tx, top); at(11, false, tx, top + 1 + height)
+      for ty = top + 1, divY - 1 do at(1, false, tx, ty) end
+      at(8, false, tx, divY)
+      for ty = divY + 1, top + height do at(2, false, tx, ty) end
+    end
+    for ty = top + 1, divY - 1 do at(6, false, left, ty); at(6, true, left + 1 + width, ty) end
+    at(7, false, left, divY); at(7, true, left + 1 + width, divY)
+    for ty = divY + 1, top + height do at(9, false, left, ty); at(9, true, left + 1 + width, ty) end
+    save("pageFrame", img)
+    colors[prefix] = {
+      ink = pal[1], shadow = pal[3], barInk = pal[15 * 16 + 1], barShadow = pal[15 * 16 + 2],
+      red = pal[5],
+    }
+  end
+  build("kanto_", P.KANTO_TILES, P.KANTO_PAL)
+  build("national_", P.NAT_TILES, P.NAT_PAL)
+  -- the caught marker (8x8 4bpp, uncompressed) in the Kanto palette's bank 0
+  pcall(function()
+    local pal = palette(P.KANTO_PAL)
+    local raw = rom:bytes(P.CAUGHT, 32)
+    local px = RomGba.tiles4bpp(raw, 1, 1)
+    local img = ImageWriter.blank(8, 8)
+    for y = 1, 8 do for x = 1, 8 do
+      local v = px[y][x]
+      local c = v ~= 0 and pal[v]
+      if c then img:setPixel(x - 1, y - 1, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+    end end
+    self:saveImage(img, "pokedex_frlg/caught.png")
+    images.caught = "assets/generated/pokedex_frlg/caught.png"
+  end)
+  -- footprints: 1bpp 16x16, two bits a pixel pair, by species index
+  pcall(function()
+    local cols = 32
+    local rows = math.ceil(P.FOOTPRINT_COUNT / cols)
+    local img = ImageWriter.blank(cols * 16, rows * 16)
+    for i = 0, P.FOOTPRINT_COUNT - 1 do
+      local ptr = rom:pointer(P.FOOTPRINTS + i * 4)
+      if ptr then
+        local cx, cy = (i % cols) * 16, math.floor(i / cols) * 16
+        for b = 0, 31 do
+          local byte = rom:u8(ptr + b)
+          for bit = 0, 7 do
+            if math.floor(byte / 2 ^ bit) % 2 == 1 then
+              -- four 8x8 tiles (top-left, top-right, bottom-left,
+              -- bottom-right), one byte a row, bit k is pixel k
+              local tileIdx = math.floor(b / 8)
+              local px = (tileIdx % 2) * 8 + bit
+              local py = math.floor(tileIdx / 2) * 8 + (b % 8)
+              img:setPixel(cx + px, cy + py, 0.29, 0.29, 0.29, 1)
+            end
+          end
+        end
+      end
+    end
+    self:saveImage(img, "pokedex_frlg/footprints.png")
+    images.footprints = { path = "assets/generated/pokedex_frlg/footprints.png", cols = cols }
+  end)
+  local text = {}
+  for key, a in pairs(P.TEXT) do
+    for _, d in ipairs({ 0, 1, -1 }) do
+      local ok, t = pcall(self.readText, self, a + d, 60)
+      if ok and t and t ~= "" then text[key] = t break end
+    end
+  end
+  local constants = self._constants or {}
+  constants.gen3FRLGPokedex = { images = images, colors = colors, text = text,
+    source = "ROM:pokedex_screen.c sKantoDexTiles/sNatDexTiles and palettes" }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed pokedex: list '%s', controls '%s'", tostring(text.listTitle),
+              tostring(text.nextDataCancel))
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -44048,6 +44200,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedTitle",
   "extractFireRedStartMenu",
   "extractFireRedTrainerCard",
+  "extractFireRedPokedex",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
