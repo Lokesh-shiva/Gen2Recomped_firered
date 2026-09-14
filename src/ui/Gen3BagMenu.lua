@@ -613,15 +613,49 @@ function Gen3BagMenu:choose()
 end
 
 -- The pocket's own action list, as the cartridge lists it, or nil for a
--- dataset imported before that stage existed.
-function Gen3BagMenu:actionsFor(id)
-  local menu = (self.game.data.constants or {}).gen3ItemMenu
+-- dataset imported before that stage existed.  Asked from two places -- the
+-- screen that draws it, and the SELECT button, which wants to know whether
+-- REGISTER is one of the rows -- so the POCKET RULE lives here once.  It is
+-- not BagMenu's: this one folds Emerald's own pocket names onto the engine's
+-- (KEY_ITEMS -> KEY_ITEM), and the action lists are keyed by the folded name.
+function Gen3BagMenu.actionList(game, id)
+  local menu = (game and game.data and game.data.constants or {}).gen3ItemMenu
   if type(menu) ~= "table" then return nil end
-  local def = self.game.data.items and self.game.data.items[id]
+  local def = game.data.items and game.data.items[id]
   local list = menu.pockets and menu.pockets[pocketOf(def, id)]
   if not list then return nil end
+  return list, menu
+end
+
+-- ...and the one question the overworld asks of it: may this item sit on
+-- SELECT?  Emerald asks the POCKET rather than the item -- the whole KEY
+-- ITEMS pocket offers REGISTER and nothing else does -- which is why no Hoenn
+-- item carries a per-item flag for it to be read off.
+function Gen3BagMenu.canRegister(game, id)
+  local list, menu = Gen3BagMenu.actionList(game, id)
+  for _, action in ipairs(list or {}) do
+    if (menu.kinds or {})[action] == "register" then return true end
+  end
+  return false
+end
+
+function Gen3BagMenu:actionsFor(id)
+  local list, menu = Gen3BagMenu.actionList(self.game, id)
+  if not list then return nil end
+  -- ...AND REGISTER TURNS INTO DESELECT ON THE ITEM ALREADY ON THE BUTTON.
+  --
+  -- The cartridge keeps ONE key-item list and overwrites that cell when the
+  -- item under the cursor is the registered one (SetMenuActions); it is not a
+  -- second list, which is why the import records the pair rather than a sixth
+  -- pocket.  Without the swap the row still says REGISTER after you have
+  -- registered something, and pressing it un-registers -- so the menu was
+  -- telling you the opposite of what the button would do.
+  local swap = (menu.deselect and menu.register
+                and id == (self.game.save or {}).registeredItem)
+               and menu.register or nil
   local entries = {}
   for i, action in ipairs(list) do
+    if swap and action == swap then action = menu.deselect end
     entries[i] = { label = menu.labels[action] or "",
                    kind = menu.kinds[action] or "other" }
   end
@@ -658,9 +692,14 @@ function Gen3BagMenu:act(kind, id)
     return
   end
   if kind == "register" then
-    -- ItemMenu_Register says nothing; the list redraws with the item marked
+    -- ItemMenu_Register says nothing: the badge on the row and the DESELECT
+    -- row next time are the whole acknowledgement, so the list has to be
+    -- rebuilt or the screen genuinely does not change.
     game.save.registeredItem = (game.save.registeredItem ~= id) and id or nil
     Sound.play(game.data, "Press_AB")
+    self:rebuild()
+    Logger.info("gen3 bag: SELECT is now %s",
+                tostring(game.save.registeredItem or "empty"))
     return
   end
   if kind == "toss" then
@@ -727,6 +766,26 @@ function Gen3BagMenu:update(dt)
 end
 
 -- THE LIST'S OWN GEOMETRY, off the cartridge's ListMenuTemplate: the item's
+-- The badge itself, loaded once and drawn wherever the registered row is.
+-- Which of the two the player wears is the same question the background asks.
+function Gen3BagMenu:drawRegisteredBadge(win, rowY)
+  local rec = (self:screen() or {}).registered
+  if type(rec) ~= "table" then return end
+  local player = (self.game.save or {}).player or {}
+  local path = (player.gender == "girl" and rec.female)
+               or rec.male or rec.female
+  if type(path) ~= "string" then return end
+  if self._badge == nil or self._badgePath ~= path then
+    local ok, img = pcall(require("src.render.Assets").image, path)
+    self._badge, self._badgePath = (ok and img) or false, path
+  end
+  if not self._badge then return end
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(self._badge,
+                     win.x + (tonumber(rec.x) or 96),
+                     rowY + (tonumber(rec.dy) or -1))
+end
+
 -- x inside the window, the cursor's, the first row's y and the pitch.  The
 -- quantity is right-aligned to `quantityRight` pixels in, which is where the
 -- cartridge puts it -- not to the window's far edge, which is what this drew
@@ -746,6 +805,20 @@ local function drawRows(self, inset)
     if not row then break end
     local y = top + i * pitch + inset
     Font.draw(row.label, itemX, y)
+    -- THE BADGE ON THE ITEM THAT IS ON THE SELECT BUTTON.
+    --
+    -- Reported from play: "Registering still isnt working in gen 3 when
+    -- register is selected it does nothing".  It was working -- the pick
+    -- reached the save and SELECT ran it -- and it LOOKED like nothing,
+    -- because the cartridge acknowledges a registration in two places and
+    -- this screen had neither.  This is the first: the little SEL button it
+    -- blits beside the item (01AB66C), at the list window's own x + 96 and a
+    -- pixel above the row.  There is no message anywhere in the flow, so
+    -- without this and the DESELECT swap below, an unchanged screen is the
+    -- whole of the feedback.
+    if row.id and row.id == (self.game.save or {}).registeredItem then
+      self:drawRegisteredBadge(win, top + i * pitch)
+    end
     if row.qty and row.qty > 1 then
       local qty = Strings("x%d", row.qty)
       Font.draw(qty, qtyRight - Font.width(qty), y)

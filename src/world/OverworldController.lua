@@ -2697,6 +2697,7 @@ function OverworldState:update(dt)
   self.player.acroBike = (kind == "acro") or nil
   self.player.machBike = (kind == "mach") or nil
   self:updateAcroBike()
+  self:updateMachBike()
   -- the rendered neighbor set depends on the view size; zooming out (or
   -- resizing) past what setMap computed re-runs the walk in place
   if self.map and (self.neighborViewW or 0) > 0 then
@@ -3608,8 +3609,18 @@ function OverworldState:handleInput()
     Screens.push(Game, screens.startMenu or "StartMenu")
     return
   end
-  -- SELECT runs the registered key item without opening the pack
-  if input:wasPressed("select") and GameVersion.isGen2()
+  -- SELECT runs the registered key item without opening the pack.
+  --
+  -- HOENN REGISTERS TOO, and this was the line that said it could not.  The
+  -- Gen 3 bag has offered REGISTER for the whole KEY ITEMS pocket for a
+  -- while and writes save.registeredItem exactly as GSC's SEL row does --
+  -- and then SELECT was gated to Gen 2, so the mark was drawn on the item,
+  -- kept on the save, and the button it was drawn for did nothing.
+  --
+  -- Gen 1 needs no gate of its own: nothing there ever writes
+  -- save.registeredItem, so useRegistered answers false on the first line
+  -- and SELECT stays as idle as it always was.
+  if input:wasPressed("select")
      and require("src.ui.BagMenu").useRegistered(Game) then
     return
   end
@@ -4212,8 +4223,9 @@ function OverworldState:crossConnection(dir, conn, scripted)
   -- fresh walk-cycle clock so the seam step always shows leg frames
   -- (mid-cycle stand phase would otherwise look like a slide)
   p.animClock = 0
-  p.stepFramesCur = Game.save.onBike
-    and (FieldDefaults.world(Game.data, "bikeStepFrames") or 8)
+  p.stepFramesCur = (Game.save.onBike and self:bikeFrames())
+    or (Game.save.onBike
+        and (FieldDefaults.world(Game.data, "bikeStepFrames") or 8))
     or (OverworldState.runFrames and OverworldState.runFrames(self))
     or (FieldDefaults.world(Game.data, "stepFrames") or 16)
   require("src.core.FixedStep"):discardCatchup()
@@ -6770,6 +6782,11 @@ end
 -- The direction a mud ramp may be climbed in.  The cartridge stores it as a
 -- movement-direction nibble; the extractor derives the nibble and this is the
 -- one place it becomes a word the rest of the engine speaks.
+-- AcroBikeTransition_WheelieHoppingStanding cycles the rider through one hop
+-- over eight frames; Player:pose draws that period as a whole sine, so the
+-- rider is on the ground at the start of every cycle -- which is also where
+-- the cartridge's own hop sound goes.
+local ACRO_HOP_PERIOD = 8
 local MUDDY_DIRECTIONS = { [1] = "down", [2] = "up", [3] = "left", [4] = "right" }
 local MUDDY_OPPOSITE = { down = "up", up = "down", left = "right", right = "left" }
 
@@ -6796,6 +6813,89 @@ function OverworldState:playerSpeed()
   if p.acroBike then return math.floor(tonumber(rules.acroSpeed) or 3) end
   if p.surfing then return math.floor(tonumber(rules.surfSpeed) or 2) end
   return math.floor(tonumber(rules.footSpeed) or 1)
+end
+
+-- HOW LONG A STEP TAKES ON WHICHEVER BIKE IS UNDER YOU.
+--
+-- Reported from play: "fix the acro and mach bike so they function as they
+-- would in the emerald rom currently they both act the same".  They did.
+-- playerSpeed above was derived, ported, tested -- and read by exactly ONE
+-- thing, the mud ramp.  Nothing ever turned it into a step, so both of
+-- Hoenn's bikes moved at the single bicycle speed the Game Boy games have and
+-- the only difference you could feel between them was which obstacle let you
+-- past.
+--
+-- The cartridge's own numbers are frames per tile (extractBike walks the
+-- chain from GetPlayerSpeed to sStepTimes): speed 1 is 16, 2 is 8, 3 is 6 and
+-- 4 is 4.  So the MACH BIKE pulls away over three steps -- a walk, then the
+-- bicycle's pace, then twice that -- and the ACRO BIKE holds one speed
+-- between the two, forever.  That is the whole difference in how they ride,
+-- and it is why a mud ramp is a RUN on the mach bike and impossible on the
+-- acro one.
+--
+-- Nil for anything but a bike: surfing and walking are left exactly as they
+-- were, because they were not what was reported and the engine's own numbers
+-- for them already agree with the cartridge's first two rungs.
+function OverworldState:bikeFrames()
+  local p = self.player
+  if not (p and (p.machBike or p.acroBike)) then return nil end
+  local rules = self:bikeRules()
+  local frames = rules and rules.speedFrames
+  if type(frames) ~= "table" then return nil end
+  local want = frames[math.floor(self:playerSpeed())]
+  want = math.floor(tonumber(want) or 0)
+  return want > 0 and want or nil
+end
+
+-- ...AND WHAT THE MACH BIKE'S COUNTER LOSES, which nothing here ever took.
+--
+-- Reported from play: "make sure each bike moves at the proper speed, I
+-- believe the mach bike will move faster over time".  It does, and it has
+-- since the ladder was wired to the step -- but it never slowed down again.
+-- The counter was raised on every step in the same direction and cleared only
+-- by a TURN, so three steps anywhere in Hoenn bought top speed for the rest of
+-- the ride: stand still, walk to the mud ramp, climb it from a standstill.
+-- That is not a ramp you have to run at, which is the whole of what the Mach
+-- Bike is for.
+--
+-- THE CARTRIDGE'S OWN THREE ARMS (sMachBikeTransitions, 059744C):
+--
+--   TRY_SPEED_UP    a direction held: move, and raise the counter while it is
+--                   below two (0119316) -- the climb this already had
+--   TRY_SLOW_DOWN   the d-pad released with speed still on the clock: `if
+--                   (bikeSpeed) { bikeSpeed--; bikeFrameCounter = bikeSpeed; }`
+--                   (0119344) -- ONE RUNG PER FRAME, a coast rather than a stop
+--   FACE_DIRECTION  standing, and it calls Bike_ResetCounters (011A128), which
+--                   zeroes the counter and the speed together
+--
+-- and the collision arm of TRY_SPEED_UP calls Bike_ResetCounters too, so
+-- riding into a wall costs the run as well.
+--
+-- The test is the HELD DIRECTION and not `moving`: a step ends one frame
+-- before the next begins, so a rule written on movement would empty the
+-- counter between every pair of steps and the ladder could never leave its
+-- first rung.
+local BIKE_DIRS = { "up", "down", "left", "right" }
+
+function OverworldState:updateMachBike()
+  local p = self.player
+  if not p.machBike then return end
+  p.bikeCounter = math.floor(tonumber(p.bikeCounter) or 0)
+  -- a forced slide is not the rider letting go; it neither earns nor spends,
+  -- exactly as it does not on the step that ends it
+  if self.muddySlide then return end
+  local G = Game or require("src.core.Game")
+  local input = G and G.input
+  if input and input.isDown then
+    for _, dir in ipairs(BIKE_DIRS) do
+      if input:isDown(dir) then return end
+    end
+  end
+  if p.bikeCounter > 0 then
+    p.bikeCounter = p.bikeCounter - 1
+  else
+    p.bikeLastDir = nil
+  end
 end
 
 function OverworldState:updateAcroBike()
@@ -6850,6 +6950,37 @@ function OverworldState:updateAcroBike()
   elseif state == "wheelieStanding" or state == "wheelieMoving" then
     p.acroTrick = "wheelie"
   else p.acroTrick = nil end
+
+  -- THE HOP'S OWN CLOCK, AND THE NOISE IT MAKES.
+  --
+  -- Reported from play: "the acro bike is missing its bunny hop feature".
+  -- The rule reached `bunnyHop` and the draw drew a four-pixel arc, and that
+  -- was the whole of it: two thirds of a second of holding B with NOTHING to
+  -- say it had worked, which is indistinguishable from a button that does
+  -- nothing.  The cartridge says so out loud -- the standing-hop transition
+  -- opens with a PlaySE (see BIKE_RULES.HOP_SE_AT) -- and it says it once per
+  -- hop, which needs an edge rather than an arc.
+  --
+  -- So the clock lives HERE now instead of in Player:pose.  Two reasons and
+  -- both matter: a clock ticked from the draw runs at the display's rate
+  -- rather than the game's, and there is no "a hop just left the ground"
+  -- moment in a draw to hang a sound on.
+  if state == "bunnyHop" then
+    local period = math.max(1, math.floor(tonumber(ACRO_HOP_PERIOD) or 8))
+    local clock = p.acroHopClock
+    clock = (clock == nil) and 0 or ((clock + 1) % period)
+    p.acroHopClock = clock
+    if clock == 0 then
+      local id = rules and tonumber(rules.acroHopSound)
+      if id then
+        pcall(function()
+          require("src.core.Sound").playId(Game and Game.data, id)
+        end)
+      end
+    end
+  else
+    p.acroHopClock = nil
+  end
 end
 
 -- Is the cell the rider is standing on a bumpy slope?  The behaviours come

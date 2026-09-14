@@ -3318,6 +3318,54 @@ Gen3Commands.SPECIALS[40] = function(ctx)
   save.gen3PartyStash = stash
 end
 
+-- ---------------------------------------------------------------------------
+-- 96: SaveGame, WHICH IS THE OTHER HALF OF THE SAME REPORT.
+--
+-- "I get to this point save and then it doesnt take me to the battle tent or
+-- anything" -- and the save is a script command, not the START menu's.
+-- Fourteen places in Hoenn write the save from a script, all of them through
+-- the same two rows (027134F):
+--
+--     special SaveGame        (96)
+--     waitstate
+--
+-- and then compare VAR_RESULT: the cartridge's save dialog answers 1 when the
+-- file was written and 0 when it was not, and the caller's next instruction is
+-- always the branch on that.  With the special unserved the answer was
+-- whatever the last unrelated script left behind -- and after the Frontier
+-- dispatcher above that was a zero, so the Battle Tent, the Battle Tower, the
+-- Battle Dome and the record corner all read "the player declined".
+--
+-- THE WRITE ITSELF IS THE ENGINE'S OWN, not a second save path: Game:writeSave
+-- captures the overworld into the save the way F1 and the START menu do, gives
+-- a tool session its veto, and lets mods snapshot into their namespace on the
+-- way past.  A veto or a failed write answers 0, which is the arm the scripts
+-- already have for "it did not happen" -- the tent attendant says nothing more
+-- and lets you walk away, rather than warping you in on a save that is not
+-- there.
+Gen3Commands.SPECIALS[96] = function(ctx)
+  local game = ctx.game
+  local wrote = false
+  if game and game.writeSave then
+    local ok, result = pcall(game.writeSave, game)
+    wrote = ok and result ~= false
+    if not ok then
+      Logger.warn("gen3 save: the script's save failed: %s", tostring(result))
+    end
+  elseif ctx.save then
+    -- headless: no Game to capture through, so the save table is written as
+    -- it stands.  The scripts still need their answer.
+    local ok, SaveData = pcall(require, "src.core.SaveData")
+    if ok and SaveData and SaveData.save then
+      wrote = pcall(SaveData.save, ctx.save) and true or false
+    end
+  end
+  local answer = wrote and 1 or 0
+  setVar(ctx.save, VAR_RESULT, answer)
+  Logger.info("gen3 save: script save %s", wrote and "written" or "declined")
+  return answer
+end
+
 Gen3Commands.SPECIALS[41] = function(ctx)
   local save = ctx.save
   if not save then return end
@@ -10895,22 +10943,60 @@ end
 -- They answer 0 rather than leaving VAR_RESULT alone deliberately: a script
 -- that branches on a stale VAR_RESULT walks somewhere the player cannot get
 -- out of, and zero is the "no / not yet / none" arm of every one of these.
+-- A FUNCTION THAT ONLY ACTS MUST NOT ANSWER.
+--
+-- Reported from play: "For the gen3 contests i get to this point save and
+-- then it doesnt take me to the battle tent or anything".  The Battle Tent
+-- attendant asks to save, the player says yes, and the script stops dead.
+--
+-- The lobby script (0201954) sets up the challenge with four frontier calls,
+-- saves, and then reads VAR_RESULT to find out whether the save happened:
+--
+--     setvar VAR_0x8004, 2 / setvar VAR_0x8005, 4 / special 234
+--     setvar VAR_0x8004, 0 / special 245        ... and two more
+--     special 41 / call 027134F                 <- special 96, SaveGame
+--     compare VAR_RESULT, 0
+--     goto_if eq -> 0201A1D                     <- give up, release, end
+--
+-- Every one of those four is a SETTER -- frontierUtil 2 writes VAR_0x8006
+-- into the save, verdanturfTent 0 starts the challenge -- and not one of them
+-- touches gSpecialVar_Result on the cartridge.  This answered all four with
+-- the zero below, the compare read it, and the script took the arm that means
+-- the player said no.  Every visit, on all three tents.
+--
+-- SO THE ZERO IS NOW ONLY FOR THE ONES THAT ASK.  `answers` is the arm list
+-- the import derives twice over (RomExtractorGen3:frontierAnswers): a walk of
+-- each arm's own code looking for a store through gSpecialVar_Result, unioned
+-- with every arm some script in the region reads VAR_RESULT straight after.
+-- The union is the point -- an arm goes quiet only when BOTH say it never
+-- answers, so this can make the engine quieter and never staler.
+--
+-- Without the list -- an older dataset -- every arm answers, which is exactly
+-- what this did before, so a stale cache degrades to the old behaviour rather
+-- than to a new one.
 function Gen3Commands.frontierCall(ctx, facility)
   local data = ctx.game and ctx.game.data
   local record = (data and data.constants or {}).gen3Frontier
   local entry = record and record.facilities and record.facilities[facility]
   local arg = math.floor(tonumber(getVar(ctx.save,
     (record and record.argVar) or 0x8004)) or 0)
+  local answers = true
   if entry then
     local known = false
     for _, arm in ipairs(entry.used or {}) do if arm == arg then known = true end end
-    Logger.debug("gen3 frontier: %s function %d is not ported%s",
+    if entry.answers then
+      answers = false
+      for _, arm in ipairs(entry.answers) do if arm == arg then answers = true end end
+    end
+    Logger.debug("gen3 frontier: %s function %d is not ported%s%s",
                  facility, arg,
-                 known and "" or " (and no script in the region asks for it)")
+                 known and "" or " (and no script in the region asks for it)",
+                 answers and "" or " -- it sets rather than asks, so "
+                                   .. "VAR_RESULT is left alone")
   else
     Logger.debug("gen3 frontier: %s function %d is not ported", facility, arg)
   end
-  setVar(ctx.save, VAR_RESULT, 0)
+  if answers then setVar(ctx.save, VAR_RESULT, 0) end
   return 0
 end
 
@@ -11283,13 +11369,22 @@ end
 -- 40 and 41 do around every Frontier challenge, which is why this one is
 -- always preceded by a 40.  With it unimplemented the door opened, the team
 -- was chosen, and six Pokemon walked in.
-Gen3Commands.SPECIALS[251] = function(ctx)
+-- ReducePlayerPartyToSelectedMons itself (00F94E8), which two callers share:
+-- special 251, which is used once and forgets the choice afterwards, and
+-- frontierUtil arm 3, which runs again before every round of a tent challenge
+-- and must not.  `keep` is the difference and it is the whole difference.
+--
+-- The slots are ONE BASED -- 00F94E8 subtracts one before it indexes -- and a
+-- slot with nobody on it is skipped rather than collapsing the party around
+-- it.  A reduce that would empty the party does nothing at all: walking into
+-- a battle with no Pokemon is worse than walking in with six.
+function Gen3Commands.reduceToChosen(ctx, keep)
   local save = ctx.save
   local order = save and save.gen3SelectedOrder
   if not (save and type(order) == "table" and #order > 0) then
     Logger.warn("gen3 party choice: nothing was chosen, so the party is "
                 .. "left as it stands")
-    return
+    return false
   end
   local party, kept = save.party or {}, {}
   for _, slot in ipairs(order) do
@@ -11299,10 +11394,16 @@ Gen3Commands.SPECIALS[251] = function(ctx)
   if #kept == 0 then
     Logger.warn("gen3 party choice: none of the chosen slots holds a "
                 .. "Pokemon -- the party is left as it stands")
-    return
+    return false
   end
   save.party = kept
-  save.gen3SelectedOrder = nil
+  if not keep then save.gen3SelectedOrder = nil end
+  Logger.info("gen3 party choice: the party is the %d that were chosen", #kept)
+  return true
+end
+
+Gen3Commands.SPECIALS[251] = function(ctx)
+  Gen3Commands.reduceToChosen(ctx)
 end
 
 -- ---------------------------------------------------------------------------
@@ -11536,5 +11637,435 @@ function Gen3Commands.goHomeAfterLeague(ctx)
               tostring(home.x), tostring(home.y))
 end
 
+
+-- ---------------------------------------------------------------------------
+-- THE BATTLE TENT, WHICH IS THE FIRST FACILITY THIS PORT ACTUALLY PLAYS.
+--
+-- Reported from play: "now he takes me into the backroom but as soon as the
+-- battle starts he takes me right back out as if i never started it".
+--
+-- The back room's script (0202348) is a loop and every rung of it was a
+-- no-op here:
+--
+--     setvar VAR_0x8004, 1 / VAR_0x8005, 2 / special 234   get battle number
+--     compare VAR_RESULT, 0 / goto_if ne -> done
+--     setvar VAR_0x8004, 3 / special 235                   pick the opponent
+--     addobject 2 ... special 245                          they walk in, speak
+--     call 024FDF7                                         <- the battle
+--     compare VAR_0x8000, 1 / goto_if eq -> won
+--     special 41 / warp 6 0                                <- lost, walk out
+--   won:
+--     ... get battle number, add 1, set it back ...
+--     compare VAR_0x8000, 3 / goto_if eq -> the prize
+--
+-- So three things had to become real, not one: the counter the loop runs on,
+-- the opponent it picks, and the battle itself.  With no counter the loop
+-- could never reach three; with no opponent there was nobody to fight; and
+-- with no battle VAR_RESULT was never 1, which is the arm that walks you out.
+--
+-- ------- what the cartridge does, and what this does
+--
+-- WHICH TENT: VAR_0x40CF, set by the lobby you walked into (Verdanturf's
+-- S0201873 sets 2).  SetTentPtrsGetLevel (0165D78) switches on it and points
+-- at a pair of tables PER TENT -- thirty trainers and forty-five or seventy
+-- teams each -- which is why the tents do not draw on the Frontier's 300 and
+-- 882 at all.  extractFrontierParties carries all four sets.
+--
+-- WHICH TRAINER: 0165D40 is `Random() % 30`, re-rolled against the ones
+-- already fought this challenge, which the cartridge keeps at saveblock+CB4
+-- and this keeps in the same shape on the save.
+--
+-- WHAT LEVEL: the tent is open level with a floor.  SetTentPtrsGetLevel ends
+-- `GetPartyMaxLevel(); cmp #29; bhi; mov #30`, so it is the highest level in
+-- YOUR party, and thirty if that is lower.  Not the Frontier's flat fifty.
+--
+-- WHAT IS STILL NOT THE CARTRIDGE'S: the battle is fought under this engine's
+-- ordinary trainer rules.  DoSpecialTrainerBattle's arm 4 sets
+-- gBattleTypeFlags to 00020008 (0163CC4) and the 20000 is PALACE -- under
+-- which nobody chooses a move and each Pokemon acts on its nature, which is
+-- what makes Verdanturf's tent Verdanturf's.  That is a battle engine of its
+-- own and it is not here yet; the natures ARE carried on every team so it can
+-- be added without touching any of this.  Said plainly in the log, once, so a
+-- player who knows the tent can see which half they are getting.
+-- ---------------------------------------------------------------------------
+
+Gen3Commands.TENT_VAR = 0x40CF          -- which tent, set by its lobby
+Gen3Commands.TENT_ROUNDS = 3            -- the loop stops at three wins
+Gen3Commands.TENT_PARTY = 3             -- ...against three of theirs
+Gen3Commands.TENT_TRAINER_KEY = "TRAINER_G3_TENT"
+
+-- the record the import carries for the tent VAR_0x40CF names, or nil away
+-- from a tent (the Frontier proper still has no teams put on the field)
+function Gen3Commands.tentRecord(ctx)
+  local data = ctx.game and ctx.game.data
+  local parties = (data and data.constants or {}).gen3FrontierParties
+  local tents = parties and parties.tents
+  if not tents then return nil end
+  local which = math.floor(tonumber(getVar(ctx.save,
+    parties.tentVar or Gen3Commands.TENT_VAR)) or 0)
+  local tent = tents[which] or tents[tostring(which)]
+  if type(tent) ~= "table" then return nil end
+  return tent, parties
+end
+
+-- The challenge as it stands: which opponents have been met, who is standing
+-- there now, and the numbers the scripts get and set through frontierUtil.
+-- On the save, because the cartridge's is -- a tent run survives a reload.
+function Gen3Commands.tentState(ctx)
+  local save = ctx.save
+  if not save then return nil end
+  save.gen3Frontier = save.gen3Frontier or {}
+  local state = save.gen3Frontier
+  state.data = state.data or {}
+  state.fought = state.fought or {}
+  return state
+end
+
+-- frontierUtil 1 and 2 are a plain get and set over a handful of numbered
+-- fields (VAR_0x8005 names the field, VAR_0x8006 carries the value), and the
+-- tent's loop lives entirely on field 2.  Serving them is what lets the loop
+-- count to three and stop.
+Gen3Commands.FRONTIER_GET, Gen3Commands.FRONTIER_SET = 1, 2
+-- ...and arm 0 is GetChallengeStatus, which is the rung the whole ending
+-- hangs off.  See installTent.
+Gen3Commands.FRONTIER_STATUS = 0
+Gen3Commands.FIELD_STATUS = 0        -- SetFrontierData field 0 (saveblock+CA8)
+Gen3Commands.CHALLENGE_VAR = 0x4000  -- what the lobby's ON_FRAME table reads
+Gen3Commands.CHALLENGE_NONE = 255    -- ...and the value no row of it matches
+Gen3Commands.TENT_PRIZE_PICK, Gen3Commands.TENT_PRIZE_GIVE = 6, 7
+
+-- THE PRIZE, when the tent you are standing in has one.  Only Verdanturf's
+-- arm 6 names an item (see FRONTIER_PARTIES.PRIZE_AT); the other two tents
+-- do something else entirely with the same arm number, so this answers nil
+-- for them and the call falls through to the dispatcher rather than handing
+-- Fallarbor a Verdanturf prize.
+function Gen3Commands.tentPrize(ctx)
+  local tent, parties = Gen3Commands.tentRecord(ctx)
+  local prize = tent and parties and parties.prize
+  if type(prize) ~= "table" or prize.item == nil then return nil end
+  local which = math.floor(tonumber(getVar(ctx.save,
+    parties.tentVar or Gen3Commands.TENT_VAR)) or 0)
+  if which ~= math.floor(tonumber(prize.var) or -1) then return nil end
+  return prize.item
+end
+
+function Gen3Commands.installTent()
+  local dispatch = Gen3Commands.frontierCall
+
+  Gen3Commands.SPECIALS[234] = function(ctx)
+    local arg = math.floor(tonumber(getVar(ctx.save, 0x8004)) or 0)
+    local state = Gen3Commands.tentRecord(ctx) and Gen3Commands.tentState(ctx)
+    -- ------- ARM 0 IS WHY THE TENT ENDED IN SILENCE.
+    --
+    -- Reported from play: "after defeating 3 in a row it takes me back
+    -- outside of teh arena but no speech plays no reward etc like there is in
+    -- the rom".  The three wins were counted, the warp fired, and then
+    -- nothing -- because the speech and the prize are not in the back room's
+    -- script at all.  The back room's third-win arm (0202501) is four rows
+    -- long: set challenge status 3, heal, warp to the lobby, save.  Every
+    -- word of it is the LOBBY's, out of an ON_FRAME table keyed on
+    -- VAR_0x4000:
+    --
+    --     VAR_0x4000 == 0 -> S0201719   frontierUtil 0, and nothing else
+    --                == 3 -> S0201757   "To achieve a 3-win streak..." + prize
+    --                == 4 -> S02017FD   "I feel privileged..."   (a loss)
+    --
+    -- and the only thing that ever sets that var is arm 0 (01A17A0):
+    -- VarSet(0x4000, 255), then switch on the challenge status byte and, for
+    -- 1, 2, 3 and 4, VarSet(0x4000, status).  So S0201719 is a POLL -- the
+    -- row that runs when nothing is pending, turns the status into the var,
+    -- and lets the next frame match one of the other rows.
+    --
+    -- This port answered nothing to arm 0.  VAR_0x4000 stayed 0, the poll ran
+    -- again, and the lobby had no row to reach: you walked out of a tent you
+    -- had just won with no line and no ball.  It is one rung and it was the
+    -- whole ending.
+    if state and arg == Gen3Commands.FRONTIER_STATUS then
+      local status = math.floor(tonumber(state.data[Gen3Commands.FIELD_STATUS])
+                                or 0)
+      setVar(ctx.save, Gen3Commands.CHALLENGE_VAR,
+             (status >= 1 and status <= 4) and status
+               or Gen3Commands.CHALLENGE_NONE)
+      return 0
+    end
+    if state and arg == Gen3Commands.FRONTIER_GET then
+      local field = math.floor(tonumber(getVar(ctx.save, 0x8005)) or 0)
+      setVar(ctx.save, VAR_RESULT,
+             math.floor(tonumber(state.data[field]) or 0))
+      return 0
+    end
+    if state and arg == Gen3Commands.FRONTIER_SET then
+      local field = math.floor(tonumber(getVar(ctx.save, 0x8005)) or 0)
+      state.data[field] = math.floor(tonumber(getVar(ctx.save, 0x8006)) or 0)
+      return 0
+    end
+    -- ------- ARM 3 IS WHAT MAKES THE TEAM YOU CHOSE THE TEAM YOU FIGHT WITH.
+    --
+    -- Reported from play: "in the battles im able to select all of my pokemon
+    -- still not just the 3 that i selected".  The screen ran and the choice
+    -- was recorded; nothing ever acted on it.
+    --
+    -- The tent does NOT use special 251 (ReducePlayerPartyToSelectedMons),
+    -- which this port has served for a while -- it goes through frontierUtil
+    -- arm 3 (01A1AD4), which is that same reduce with the bookkeeping in
+    -- front of it:
+    --
+    --     memset(gSelectedOrderFromParty, 0, 4);          (01B8558)
+    --     for (i = 0; i < VAR_0x8005; i++)
+    --         gSelectedOrderFromParty[i] =
+    --             frontier.selectedPartyMons[i];          (saveblock2+CAA)
+    --     ReducePlayerPartyToSelectedMons();              (00F94E8)
+    --
+    -- and 00F94E8 subtracts one from every entry before it indexes, so the
+    -- stored slots are ONE BASED -- which is what the chooser here already
+    -- hands back.
+    --
+    -- IT RUNS ONCE PER ROUND, NOT ONCE PER CHALLENGE: the lobby runs it on
+    -- the way in and the back room runs it again after each win, always with
+    -- `special 41` (put the whole party back) and `special 40` (stash it)
+    -- immediately in front, because a reduce applied twice would index the
+    -- three-mon party it made last time.  So the choice has to SURVIVE the
+    -- reduce -- which is the one way this differs from 251, whose caller
+    -- picks once and never comes back.
+    if arg == 3 then
+      Gen3Commands.reduceToChosen(ctx, true)
+      return 0
+    end
+    -- 18 and 21 are the chosen mons' HELD ITEMS, read back off the stashed
+    -- party and put on again around the battle (01A43A8 and 01A447C, both
+    -- through saveblock+CAA; neither touches gSpecialVar_Result).  Nothing
+    -- here ever takes an item off a Pokemon to begin with, so they have
+    -- nothing to do -- but they must do it QUIETLY: 21 runs between the
+    -- battle and the compare that reads whether it was won, and an answer
+    -- there is the win thrown away.
+    if arg == 18 or arg == 21 then return 0 end
+    return dispatch(ctx, "frontierUtil")
+  end
+
+  -- battleTower 3 is SetNextFacilityOpponent, and for a tent that is
+  -- 0165E18: roll a trainer, reject one already met, remember it.
+  Gen3Commands.SPECIALS[235] = function(ctx)
+    local arg = math.floor(tonumber(getVar(ctx.save, 0x8004)) or 0)
+    if arg ~= 3 then return dispatch(ctx, "battleTower") end
+    local tent = Gen3Commands.tentRecord(ctx)
+    local state = Gen3Commands.tentState(ctx)
+    if not (tent and state) then return dispatch(ctx, "battleTower") end
+    local count = #(tent.trainers or {})
+    if count < 1 then return dispatch(ctx, "battleTower") end
+    local met = {}
+    for _, id in ipairs(state.fought) do met[id] = true end
+    local pick
+    for _ = 1, 64 do
+      local n = math.random(count)
+      if not met[n] then pick = n break end
+    end
+    -- every one of the thirty already met: the cartridge cannot reach this
+    -- (the challenge is three battles long) but a save edited into it should
+    -- fight somebody rather than nobody
+    pick = pick or math.random(count)
+    state.opponent = pick
+    state.fought[#state.fought + 1] = pick
+    -- ...and the three they bring, drawn from this trainer's own set
+    local set = tent.trainers[pick] and tent.trainers[pick].set or {}
+    local chosen, taken = {}, {}
+    for _ = 1, math.min(Gen3Commands.TENT_PARTY, #set) do
+      local at
+      for _ = 1, 64 do
+        local n = math.random(#set)
+        if not taken[n] then at = n break end
+      end
+      at = at or 1
+      taken[at] = true
+      chosen[#chosen + 1] = set[at]
+    end
+    state.team = chosen
+    return 0
+  end
+
+  -- The tent's own dispatcher.  Two of its arms are the challenge's ends and
+  -- the rest are the attendant's lines, which have nothing to answer.
+  --
+  --   0  (01B99D4) starts one: clears the run counter at saveblock+CB2 and
+  --      the low bits of the state byte at +CA9.
+  --   5  (01B9ABC) ends one: writes VAR_0x8005 into +CA8 as the outcome,
+  --      puts VAR_0x4000 back to zero, sets bit 2 of +CA9 -- the "this
+  --      challenge is over" bit -- and saves.  The room runs it after three
+  --      wins and the map's ON_TRANSITION runs it when you leave part way
+  --      through, which is how a tent run cannot be walked out of.
+  for _, special in ipairs({ 245, 246, 247 }) do
+    local facility = Gen3Commands.FRONTIER_FACILITIES[special]
+    Gen3Commands.SPECIALS[special] = function(ctx)
+      local arg = math.floor(tonumber(getVar(ctx.save, 0x8004)) or 0)
+      -- only where the import actually carries this tent's teams: without
+      -- them there is no challenge to start, and swallowing the call would
+      -- take away the dispatcher's answer as well as its log line
+      if not Gen3Commands.tentRecord(ctx) then
+        return dispatch(ctx, facility)
+      end
+      local state = Gen3Commands.tentState(ctx)
+      if arg == 0 and state then
+        state.data, state.fought, state.team = {}, {}, nil
+        state.opponent, state.outcome, state.finished = nil, nil, nil
+        return 0
+      end
+      -- ------- AND THE PRIZE, which is arms 6 and 7 of the lobby's script.
+      --
+      --   6 (01B9B00)  Random(); frontier.tentPrize = *(u16 *)086160D4.  The
+      --                roll is the compiler's: the list it indexes has one
+      --                entry, so the index folds and only the side effect is
+      --                left.  The word is 8 -- a NEST BALL.
+      --   7 (01B9B28)  AddBagItem(prize, 1); on success copy its name into
+      --                gStringVar1 and answer 1, otherwise answer 0.  The
+      --                script reads that straight back: 1 prints "{PLAYER}
+      --                received the prize {VAR1}." and plays the fanfare, 0
+      --                prints "You seem to have no space for our prize."
+      --
+      -- So the bag is allowed to refuse, and refusing is not a failure here:
+      -- the cartridge keeps the prize on the save and says so.  That is why
+      -- this does not go through Commands.give_item, which prints its own bag
+      -- full line and halts the script -- the tent has a better one.
+      if arg == Gen3Commands.TENT_PRIZE_PICK and state then
+        local prize = Gen3Commands.tentPrize(ctx)
+        if not prize then return dispatch(ctx, facility) end
+        state.prize = prize
+        Logger.info("gen3 tent: the prize is %s", tostring(prize))
+        return 0
+      end
+      if arg == Gen3Commands.TENT_PRIZE_GIVE and state then
+        local prize = state.prize or Gen3Commands.tentPrize(ctx)
+        if not prize then return dispatch(ctx, facility) end
+        local data = ctx.game and ctx.game.data
+        local ok, put = pcall(require("src.inventory.Bag").add,
+                              ctx.save, prize, 1, data)
+        local added = (ok and put) and true or false
+        if added then
+          -- gStringVar1, which is stringBuffers[1] here -- the line that
+          -- follows is "{PLAYER} received the prize {VAR1}."
+          local game = ctx.game
+          if game then
+            game.stringBuffers = game.stringBuffers or {}
+            local def = data and data.items and data.items[prize]
+            game.stringBuffers[1] = (def and def.name) or tostring(prize)
+          end
+          state.prize = nil
+        end
+        setVar(ctx.save, VAR_RESULT, added and 1 or 0)
+        return added and 1 or 0
+      end
+      if arg == 5 and state then
+        state.outcome = math.floor(tonumber(getVar(ctx.save, 0x8005)) or 0)
+        state.finished = true
+        state.opponent, state.team = nil, nil
+        -- ...AND THE STATUS BYTE, which is the same one field 0 writes.
+        -- 01B9ABC stores gSpecialVar_0x8005 straight into saveblock+CA8
+        -- before it clears the var, so this arm is a SECOND writer of the
+        -- challenge status and every caller means it: the lobby's win and
+        -- loss scripts pass 0 (none), the resume script passes 1 (saving)
+        -- and the back room's save-and-quit passes 2 (paused).  Writing only
+        -- `outcome` left the status wherever the last script put it, which
+        -- on the quit path is a challenge the lobby still thinks is won.
+        state.data[Gen3Commands.FIELD_STATUS] = state.outcome
+        setVar(ctx.save, 0x4000, 0)
+        -- ...and the save, which is the cartridge's own last act here: the
+        -- script prints "Saving the data.  Have patience..." immediately
+        -- before this and prints nothing afterwards, so the writing is this
+        -- call's to do
+        local save = Gen3Commands.SPECIALS[96]
+        if save then save(ctx) end
+        Logger.info("gen3 tent: challenge over (%d)", state.outcome)
+        return 0
+      end
+      return dispatch(ctx, facility)
+    end
+  end
+end
+
+-- THE BATTLE ITSELF.  239 arm 4 is the tent's; every other arm is a Frontier
+-- facility this port still does not play, and those keep the old answer.
+Gen3Commands.SPECIALS[239] = function(ctx)
+  local arg = math.floor(tonumber(getVar(ctx.save, 0x8004)) or 0)
+  local tent, parties = Gen3Commands.tentRecord(ctx)
+  local state = Gen3Commands.tentState(ctx)
+  if arg ~= 4 or not (tent and state and state.opponent) then
+    Logger.debug("gen3 frontier: special battle %d is not ported", arg)
+    return 0
+  end
+  local trainer = tent.trainers[state.opponent]
+  local team = state.team or {}
+  if not (trainer and team[1]) then
+    Logger.warn("gen3 tent: no opponent was picked, so there is nobody to "
+                  .. "fight -- the challenge ends rather than standing still")
+    setVar(ctx.save, VAR_RESULT, 0)
+    return 0
+  end
+
+  -- open level with a floor, which is SetTentPtrsGetLevel's own rule
+  local level = math.floor(tonumber((parties or {}).levelFloor) or 30)
+  for _, mon in ipairs((ctx.save or {}).party or {}) do
+    local at = math.floor(tonumber(mon.level) or 0)
+    if at > level then level = at end
+  end
+
+  local party = {}
+  for _, index in ipairs(team) do
+    local row = tent.mons[index]
+    if row then
+      party[#party + 1] = {
+        species = row.species, level = level, item = row.item,
+        moves = row.moves,
+        -- the cartridge rolls the Frontier's own fixed IVs; this port's
+        -- party builder has no spread of its own, so the mon is built at the
+        -- level above with the moves the set names and nothing invented
+      }
+    end
+  end
+  if not party[1] then
+    setVar(ctx.save, VAR_RESULT, 0)
+    return 0
+  end
+
+  local data = ctx.game and ctx.game.data
+  if not (data and data.trainers) then
+    setVar(ctx.save, VAR_RESULT, 0)
+    return 0
+  end
+  -- A trainer record made for this one fight: the battle screen takes its
+  -- name, its FACE and its team from here and nothing else in the dataset is
+  -- touched.
+  --
+  -- Reported from play: "the enemy trainers all look like the player and dont
+  -- have their trainer sprites in battle".  They did -- this record carried
+  -- no `pic` at all, so BattleState.trainerPicPath answered nil and the
+  -- screen drew the only other face it has.  A facility trainer keeps a
+  -- FACILITY class rather than a picture, and extractFrontierParties turns
+  -- that into the pic index and the trainer class through the cartridge's own
+  -- two tables (see FRONTIER_PARTIES.FACILITY_PIC); the sprite stage then
+  -- writes the path onto the row.  All four fields are the cartridge's, and
+  -- an older cache that has none of them simply fights faceless again rather
+  -- than fighting with a made-up face.
+  data.trainers[Gen3Commands.TENT_TRAINER_KEY] = {
+    id = Gen3Commands.TENT_TRAINER_KEY,
+    name = trainer.name or "TRAINER",
+    pic = trainer.pic, picIndex = trainer.picIndex,
+    class = trainer.class, className = trainer.className,
+    party = party, parties = { party },
+  }
+  Logger.info("gen3 tent: %s %s brings %d at level %d",
+              tostring(trainer.className or ""), tostring(trainer.name),
+              #party, level)
+  if not trainer.pic then
+    Logger.warn("gen3 tent: %s has no face on this dataset -- import the ROM "
+                  .. "again", tostring(trainer.name))
+  end
+  Logger.info("gen3 tent: fought under this engine's ordinary rules -- the "
+                .. "cartridge's PALACE rules (natures choosing the moves) are "
+                .. "not ported yet")
+  Commands.start_battle(ctx, "trainer", Gen3Commands.TENT_TRAINER_KEY, 1, nil)
+  local won = ctx.lastBattleResult == "win"
+  setVar(ctx.save, VAR_RESULT, won and 1 or 0)
+  return won and 1 or 0
+end
+
+Gen3Commands.installTent()
 
 return Gen3Commands

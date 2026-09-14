@@ -8216,6 +8216,26 @@ function RomExtractorGen3:extractTrainerSprites()
     end
     if named > 0 then self:write("trainers", trainers) end
   end
+  -- ...and the facility trainers, off the same pathFor.  Their picture comes
+  -- from gFacilityClassToPicIndex rather than from a gTrainers row, but it
+  -- indexes the very same sheet -- the pic table's largest entry is 92 and
+  -- this loop writes 0..92, which is the check that the two agree.
+  do
+    local facility = self:facilityTrainerRows()
+    local got = 0
+    for _, def in ipairs(facility or {}) do
+      if type(def) == "table" and def.picIndex then
+        def.pic = pathFor[def.picIndex]
+        if def.pic then got = got + 1 end
+      end
+    end
+    if got > 0 then
+      self._constants = self._constants or {}
+      self:write("constants", self._constants)
+      Logger.info("Gen3 trainer sprites: %d facility trainers given a face",
+                  got)
+    end
+  end
   -- ...AND THE PLAYER'S OWN PORTRAIT.
   --
   -- The trainer card and the Birch speech both ask Sprites.playerForm, which
@@ -10351,6 +10371,22 @@ end
 -- STAGE: trainer classes
 -- ---------------------------------------------------------------------------
 
+-- EVERY FACILITY TRAINER THE PARTIES RECORD HOLDS, in one walk: the
+-- Frontier's three hundred and each tent's thirty.  Two stages that run after
+-- extractFrontierParties finish those rows off -- the class stage names their
+-- class and the sprite stage names their picture -- and both want the same
+-- list, so it is made once here rather than nested twice.
+function RomExtractorGen3:facilityTrainerRows()
+  local parties = (self._constants or {}).gen3FrontierParties
+  if type(parties) ~= "table" then return nil end
+  local rows = {}
+  for _, def in ipairs(parties.trainers or {}) do rows[#rows + 1] = def end
+  for _, tent in pairs(parties.tents or {}) do
+    for _, def in ipairs(tent.trainers or {}) do rows[#rows + 1] = def end
+  end
+  return rows[1] and rows or nil, parties
+end
+
 function RomExtractorGen3:extractTrainerClasses()
   self:beginStage("Gen3 trainer classes")
   local base = self:need("gTrainerClassNames", "trainer classes")
@@ -10372,6 +10408,30 @@ function RomExtractorGen3:extractTrainerClasses()
     end
   end
   if named > 0 then self:write("trainers", self._trainers) end
+  -- ...AND THE FACILITY TRAINERS, who are not in gTrainers at all.
+  --
+  -- The Frontier's three hundred and each tent's thirty live in tables of
+  -- their own and carry a facility class, which extractFrontierParties has
+  -- already turned into a class NUMBER out of gFacilityClassToTrainerClass.
+  -- The name is this stage's to add, exactly as it is for the other 855 --
+  -- and without it a tent opponent announces themselves by bare name, which
+  -- is half of "the enemy trainers all look like the player".
+  local facility = self:facilityTrainerRows()
+  if facility then
+    local got = 0
+    for _, def in ipairs(facility) do
+      if type(def) == "table" and def.class then
+        def.className = names[def.class]
+        if def.className then got = got + 1 end
+      end
+    end
+    if got > 0 then
+      self._constants = self._constants or {}
+      self:write("constants", self._constants)
+    end
+    Logger.info("Gen3 trainer classes: %d of %d facility trainers named",
+                got, #facility)
+  end
   Logger.info("Gen3 trainer classes: %d (0 = %s); %d trainers named, %d left "
                 .. "with a number the table does not cover",
               67, tostring(names[0]), named, missed)
@@ -12298,6 +12358,204 @@ function RomExtractorGen3:extractPCMenu()
   Logger.info("Gen3 PC menu: %s / items %s%s", table.concat(main, ", "),
               table.concat(storage, ", "),
               box and (" / boxes " .. table.concat(box.rows, ", ")) or "")
+end
+
+-- ---------------------------------------------------------------------------
+-- STAGE: THE STORAGE SYSTEM'S OWN PANELS.
+--
+-- Reported from play: "the party menu in the box is white background instead
+-- of looking like the rom".  It was the engine's generic text box -- a white
+-- rounded slab -- because the cartridge's is a BG1 tilemap and nothing here
+-- read one.
+--
+-- ------- pinned by reference, not by shape
+--
+-- Guessing this off shape is how you get it wrong: there are a hundred and
+-- forty-three LZ77 blobs in the storage system's neighbourhood and most of
+-- them are the sixteen wallpapers' tiles, maps and palettes.  So it was found
+-- the other way round, from the code that loads it.  Exactly five compressed
+-- blobs are named by a pointer anywhere in the storage system's own code
+-- (0C7000..0D0000), and the function at 00CA744 -- which is also the one that
+-- calls 00CB7E8, the party-slot icon coordinates this screen already uses --
+-- names two of them:
+--
+--     0DD2FE8   LZ77, 4608 bytes -> 144 tiles, the BG1 character data
+--     0DD36C8   LZ77,  528 bytes -> 264 cells, which is 12 x 22
+--     0DD36A8   raw,    32 bytes -> the palette, sitting immediately before
+--                                   the tilemap and loaded beside it
+--
+-- THE BASE IS 256.  The map's entries run 256..362, and the sheet is 144
+-- tiles, so the ids are absolute within the character block and the panel's
+-- own tiles begin a quarter of the way into it.  Read at base 0 every cell is
+-- off the end of the sheet and the panel comes out entirely blank, which is a
+-- failure that looks like "no art in the ROM" rather than like an off-by-256.
+--
+-- The check is that it reads as itself: one wide slot on the left, five
+-- stacked on the right, CANCEL under them and a PARTY POKeMON tab below --
+-- which is also exactly where this screen's own PARTY.slots already put the
+-- six icons, derived separately from 080CB7E8.  Two derivations that never
+-- saw each other agreeing on the same six coordinates is the closure.
+-- ---------------------------------------------------------------------------
+
+-- ------- and the SECOND panel, off the same sheet
+--
+-- Reported from play after the first one landed: "the left pokemon data menu
+-- in the box isnt showing the proper graphics still or text like it does in
+-- the rom".  The left eighty pixels are a panel too -- "PkMn DATA", the frame
+-- whatever the cursor is standing on is described in -- and it was still the
+-- white slab, because only the party half had been ripped.
+--
+-- It comes off the SAME 144-tile sheet, from the loader one function earlier:
+--
+--     00CA044   InitBgsFromTemplates(0, 08572734, 4)
+--               DecompressAndCopyTileDataToVram(bg 1, 08DD2FE8, 0, 0, 0)
+--               LZ77UnCompWram(085722A0, storage + 0x5AC4)
+--               CopyBgTilemapBufferToVram(1)
+--
+-- so the map is 085722A0.  It decompresses to 640 cells, which is a whole
+-- 32-wide BG screen and not a panel -- only the first TEN columns carry one,
+-- and every cell from column ten on is the flat tile 256.  Ten columns by
+-- twenty rows is 80x160: exactly the rectangle this screen has always drawn
+-- its four lines of text into, which is the first check.
+--
+-- ITS PALETTE IS PINNED THE SAME WAY, and it is NOT the party panel's.  All
+-- two hundred of its cells name palette bank 0 where the party panel's name
+-- bank 1, and the storage screen's palette loader at 00CA0D8 says what the
+-- banks are:
+--
+--     LoadPalette(085723DC, 0,    32)   -> bank 0   <- this panel
+--     LoadPalette(085723FC, 0x20, 32)   -> bank 2
+--     LoadPalette(085726F4, 0xF0, 32)   -> bank 15
+--
+-- Read with the party panel's palette the frame comes out teal; read with
+-- 08572734 -- which is the BgTemplate ARRAY that InitBgsFromTemplates takes,
+-- not a palette at all -- it comes out red and yellow.  Both of those are
+-- plausible-looking and both are wrong, which is the whole reason the palette
+-- is taken from the load and not from the neighbourhood.
+--
+-- AND THE PIC WINDOW IS THE CLOSURE.  The art leaves a 64x64 hole at (8, 16),
+-- measured off the rip itself; CreateSprite at 080CA40E puts the mon's FRONT
+-- PIC at (40, 48), which is that hole's centre to the pixel.  Two derivations
+-- that never saw each other, agreeing -- so the hole is the front pic's, and
+-- the 32x32 ICON this screen was drawing into it was never what the cartridge
+-- puts there.
+-- ---------------------------------------------------------------------------
+
+RomExtractorGen3.STORAGE_PANEL = {
+  TILES = 0x0DD2FE8,           -- LZ77, 144 tiles of 4bpp -- BOTH panels' sheet
+  BASE = 256,                  -- what the maps' tile ids are relative to
+  INK_FLOOR = 4,               -- less than a quarter drawn is a wrong base
+  PANELS = {
+    -- the party panel, which slides down over the box grid
+    { key = "party", file = "ui/gen3_pss_party.png",
+      tilemap = 0x0DD36C8, palette = 0x0DD36A8,
+      pitch = 12, cols = 12, rows = 22,
+      named = "00CA744" },
+    -- ...and the PkMn DATA panel, which is always there
+    { key = "data", file = "ui/gen3_pss_data.png",
+      tilemap = 0x05722A0, palette = 0x05723DC,
+      pitch = 32, cols = 10, rows = 20,
+      pic = { x = 8, y = 16, width = 64, height = 64 },
+      named = "00CA044 tiles and map, 00CA0D8 palette bank 0" },
+  },
+}
+
+-- One panel, composed.  Returns the image and how many pixels it drew, or
+-- nil and the reason -- a panel that is half right is not worth shipping.
+function RomExtractorGen3:storagePanel(tiles, sheet, panel)
+  local P = RomExtractorGen3.STORAGE_PANEL
+  local tmap = self.rom:lz77(panel.tilemap)
+  if not tmap then
+    return nil, ("the %s tilemap did not decompress"):format(panel.key)
+  end
+  local cells = math.floor(#tmap / 2)
+  if cells ~= panel.pitch * panel.rows then
+    return nil, ("the %s tilemap is %d cells, not %d x %d")
+                :format(panel.key, cells, panel.pitch, panel.rows)
+  end
+  local raw = self.rom:bytes(panel.palette, 32)
+  if not raw then
+    return nil, ("the %s palette is not there"):format(panel.key)
+  end
+  local colors = RomGba.palette(raw)
+  local image = ImageWriter.blank(panel.cols * 8, panel.rows * 8)
+  local inked = 0
+  for row = 0, panel.rows - 1 do
+    for col = 0, panel.cols - 1 do
+      local at = (row * panel.pitch + col) * 2
+      local e = tmap[at + 1] + tmap[at + 2] * 256
+      local tid = e % 1024 - P.BASE
+      local flipX = math.floor(e / 1024) % 2 == 1
+      local flipY = math.floor(e / 2048) % 2 == 1
+      local cx, cy = col * 8, row * 8
+      if tid >= 0 and tid < sheet then
+        for y = 0, 7 do
+          local sy = flipY and (7 - y) or y
+          for x = 0, 7 do
+            local sx = flipX and (7 - x) or x
+            local byte = tiles[tid * 32 + sy * 4 + math.floor(sx / 2) + 1]
+            local index = byte and ((sx % 2 == 0) and byte % 16
+                                    or math.floor(byte / 16)) or 0
+            local c = index ~= 0 and colors[index + 1]
+            if c then
+              image:setPixel(cx + x, cy + y, c[1] / 255, c[2] / 255,
+                             c[3] / 255, 1)
+              inked = inked + 1
+            end
+          end
+        end
+      end
+    end
+  end
+  -- a panel that came out blank is a base that is wrong, which is the one
+  -- way this fails silently
+  if inked < panel.cols * 8 * panel.rows * 8 / P.INK_FLOOR then
+    return nil, ("the %s panel drew only %d pixels -- the tile base is wrong")
+                :format(panel.key, inked)
+  end
+  return image, inked
+end
+
+function RomExtractorGen3:extractStoragePanels()
+  self:beginStage("Gen3 storage panels")
+  if not (love and love.image and love.image.newImageData) then return end
+  local P = RomExtractorGen3.STORAGE_PANEL
+  local ok, err = pcall(function()
+    local tiles = self.rom:lz77(P.TILES)
+    if not tiles then error("the tile sheet did not decompress") end
+    local sheet = math.floor(#tiles / 32)
+    local record = {
+      source = ("ROM:%07X, %d tiles at base %d -- the sheet both panels are "
+                .. "cut from, named by the loaders at 00CA044 and 00CA744")
+        :format(P.TILES, sheet, P.BASE),
+    }
+    local drew = {}
+    for _, panel in ipairs(P.PANELS) do
+      local image, inked = self:storagePanel(tiles, sheet, panel)
+      if not image then error(inked) end
+      self:saveImage(image, panel.file)
+      record[panel.key] = {
+        image = "assets/generated/" .. panel.file,
+        width = panel.cols * 8, height = panel.rows * 8, inked = inked,
+        pic = panel.pic,
+        source = ("ROM:%07X map (%d of %d columns x %d rows), %07X palette "
+                  .. "-- named by %s"):format(panel.tilemap, panel.cols,
+                  panel.pitch, panel.rows, panel.palette, panel.named),
+      }
+      drew[#drew + 1] = ("%s %dx%d, %d pixels"):format(
+        panel.key, panel.cols * 8, panel.rows * 8, inked)
+    end
+    local constants = self._constants or {}
+    constants.gen3StoragePanels = record
+    self._constants = constants
+    self:write("constants", constants)
+    Logger.info("Gen3 storage panels: %s -- %s", table.concat(drew, ", "),
+                record.source)
+  end)
+  if not ok then
+    Logger.warn("gen3 storage panels: %s -- the box keeps the engine's own "
+                  .. "frame", tostring(err))
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -15986,6 +16244,300 @@ end
 
 
 -- ---------------------------------------------------------------------------
+-- STAGE: THE TEAMS THE FRONTIER FIGHTS YOU WITH.
+--
+-- Reported from play: "now he takes me into the backroom but as soon as the
+-- battle starts he takes me right back out as if i never started it".  The
+-- Verdanturf Battle Tent's back room runs the cartridge's own challenge
+-- script, and the battle in the middle of it is
+--
+--     setvar VAR_0x8004, 4 / setvar VAR_0x8005, 0
+--     special DoSpecialTrainerBattle        (239)
+--     waitstate
+--
+-- with the opponent already standing in gEnemyParty, put there by the calls
+-- above it.  Nothing here could put anybody there: the Frontier stage below
+-- is an INVENTORY -- which facility, which function, how often -- and carries
+-- no trainers and no teams at all.  So the battle never happened, the script
+-- read VAR_RESULT, saw it was not 1, and took its own lose arm, which is a
+-- silent warp back to the lobby.  Being walked in and straight back out IS
+-- the cartridge's "you lost", arrived at without a fight.
+--
+-- ------- the four tables, and how each was pinned
+--
+-- gFacilityTrainers  05D5ACC, 300 entries of 52 bytes.  One byte of facility
+--     class and three of padding, an eight-byte FF-terminated name, three
+--     six-word easy-chat speeches, and a pointer to the trainer's own mon
+--     set.  (The name is at offset 4, not 1: reading it at 1 gives CONNER as
+--     "CONNE" and GRETEL as "GRETE", which still looks like a name, which is
+--     why the padding is called out here.)  Three hundred is Emerald's own
+--     count, and the address is not guessed: it is the literal frontierUtil
+--     function 4 loads (01A1B2A, `ldr r0,=085D5ACC`).
+--
+-- gBattleFrontierMons  05D97BC, 882 entries of 16 bytes.  Species, four
+--     moves, an index into the held-item table, an EV-spread mask and a
+--     nature, then three bytes of padding that are zero in all 882.
+--
+--     THE CLOSURE CHECK IS THE SETS.  Every one of the 300 trainers carries a
+--     list of indices into this table, and the largest index any of them uses
+--     is 881 -- exactly one less than the length the run gives.  A table that
+--     started 127 entries later (which is where a naive scan for "valid
+--     species, valid moves" first locks on, because the early entries are
+--     two-move Caterpies) leaves a quarter of those indices off the end.
+--
+-- gBattleFrontierHeldItems  05CECB0, 61 entries of one item id, which is the
+--     range the mons' itemTableId actually spans (0..60).  Found by
+--     REFERENCE rather than by shape: it sits in the same literal pool
+--     (01A67DC) as the mons table the party filler loads twelve bytes earlier.
+--     Its contents agree -- entries 2, 3 and 4 are Sitrus, Oran and Chesto,
+--     which is what a Frontier team holds.
+--
+-- The monSets themselves are u16 lists ending FFFF, twelve to a hundred
+-- entries each.
+--
+-- WHAT THIS STAGE DOES NOT CARRY.  The speeches are easy-chat word ids and
+-- the port has no easy-chat decoder yet, so they are left in the cartridge
+-- rather than half-read.  Levels are not here either, and that is the
+-- cartridge's doing: a Frontier mon record has no level, because the facility
+-- decides it.
+-- ---------------------------------------------------------------------------
+
+RomExtractorGen3.FRONTIER_PARTIES = {
+  TRAINERS = 0x5D5ACC, TRAINER_COUNT = 300, TRAINER_STRIDE = 52,
+  TRAINER_NAME = 4, TRAINER_NAME_LEN = 8, TRAINER_SET = 48,
+  MONS = 0x5D97BC, MON_COUNT = 882, MON_STRIDE = 16,
+  ITEMS = 0x5CECB0, ITEM_COUNT = 61,
+  SET_MAX = 400,          -- a monSet longer than this is a misread, not a set
+  TERMINATOR = 0xFFFF,
+  -- ...AND THE THREE BATTLE TENTS, WHICH DO NOT USE ANY OF THE ABOVE.
+  --
+  -- This is the part that matters for the report.  SetTentPtrsGetLevel
+  -- (0165D78) reads VAR_0x40CF -- which each tent's own lobby sets, and
+  -- Verdanturf's sets 2 (S0201873: `setvar 16591, 2`) -- and points the two
+  -- table pointers at a pair of tables PER TENT.  Only the fall-through case
+  -- uses the Frontier's 300 and 882.
+  --
+  -- Each pair checks out four ways: the trainer table is exactly 1560 bytes
+  -- before the mon table, which is 30 rows of 52; thirty is what the tent's
+  -- own picker rolls (0165D40: `Random() % 30`); each mon table's rows all
+  -- carry three zero padding bytes; and the largest index any of that tent's
+  -- thirty sets names is exactly its last row.  The three pairs also chain --
+  -- Slateport's mons end where Verdanturf's sets begin, and Verdanturf's end
+  -- where Fallarbor's begin.
+  TENTS = {
+    { var = 2, name = "verdanturf",
+      trainers = 0x5DE610, mons = 0x5DEC28, monCount = 45 },
+    { var = 3, name = "fallarbor",
+      trainers = 0x5DF084, mons = 0x5DF69C, monCount = 45 },
+    { var = 4, name = "slateport",
+      trainers = 0x5DDA14, mons = 0x5DE02C, monCount = 70 },
+  },
+  TENT_VAR = 0x40CF,      -- which tent the lobby you walked into is
+  TENT_TRAINERS = 30,
+  -- ------- WHO THEY LOOK LIKE, AND WHAT THEY ARE CALLED
+  --
+  -- Reported from play: "the enemy trainers all look like the player and dont
+  -- have their trainer sprites in battle".  They did not have one at all --
+  -- the record this stage wrote carried no picture and no class, so the
+  -- battle screen fell back to the only face it had.
+  --
+  -- A facility trainer does not carry a pic or a class.  It carries a
+  -- FACILITY CLASS in its first byte -- which is a THIRD numbering, neither
+  -- of the other two -- and two byte tables turn that into the other two.
+  -- GetFrontierOpponentClass is the proof, and it is unambiguous (0162C3E):
+  --
+  --     if (trainerId <= 299)
+  --         return gFacilityClassToTrainerClass[
+  --                    gFacilityTrainers[trainerId].facilityClass];
+  --
+  -- reading 0831F5CA through a 52-byte stride from offset 0 -- this stage's
+  -- own TRAINER_STRIDE and the byte it was already reading.  Its twin at
+  -- 0162AC4 is the same three instructions against 0831F578 and is the PIC.
+  -- The two tables sit 82 bytes apart, which is their length.
+  --
+  -- AND THE NUMBERS LAND INSIDE TABLES THIS PORT ALREADY READS, which is the
+  -- closure: no facility class in any of the four trainer tables is above 71,
+  -- the pic table's largest entry is 92 and extractTrainerSprites writes
+  -- 0..92, and the class table's largest is 65 where gTrainerClassNames
+  -- covers 0..66.  Three bounds, three separate tables, none of them a fit
+  -- by luck -- and the names read right one by one: RONALD is a RICH BOY,
+  -- ASHLYN a COOLTRAINER, MARQUIS a SAILOR.
+  --
+  -- This byte used to be written out as `class`, which is the one thing it is
+  -- not; it is `facilityClass` now and `class` is the real one.
+  FACILITY_PIC = 0x031F578,
+  FACILITY_CLASS = 0x031F5CA,
+  FACILITY_COUNT = 82,
+  -- ------- AND THE PRIZE
+  --
+  -- Reported in the same breath: "after defeating 3 in a row it takes me back
+  -- outside of teh arena but no speech plays no reward etc".  The speech and
+  -- the prize are the LOBBY's, not the back room's (S0201757), and the prize
+  -- item is a constant: the Verdanturf tent's arm 6 (01B9B00) is
+  --
+  --     Random();  frontier.tentPrize = *(u16 *)0x086160D4;
+  --
+  -- -- the roll is there because the list it indexes has exactly one entry,
+  -- so the index folds away and only the side effect is left.  That word sits
+  -- in the four bytes between the Verdanturf dispatcher's eight-entry arm
+  -- table and Fallarbor's, and it is 8: a NEST BALL.
+  --
+  -- ONLY VERDANTURF'S.  Fallarbor's arm 6 buffers a string and Slateport's
+  -- calls two functions of its own -- the three tents share their trainers
+  -- and their level rule and nothing else about what happens afterwards, so
+  -- the prize is recorded for the one tent whose arm actually names one.
+  PRIZE_VAR = 2,
+  PRIZE_AT = 0x06160D4,
+  -- SetTentPtrsGetLevel ends `GetPartyMaxLevel(); cmp #29; bhi; mov #30` --
+  -- open level with a floor, not the Frontier's flat 50
+  LEVEL_FLOOR = 30,
+}
+
+function RomExtractorGen3:extractFrontierParties()
+  self:beginStage("Gen3 Frontier teams")
+  local P = RomExtractorGen3.FRONTIER_PARTIES
+  local rom = self.rom
+  local order = (self._constants or {}).itemOrder
+
+  -- the held items first: the mons index them, so a mon can carry a real
+  -- item id rather than a number nothing can look up
+  local items = {}
+  for i = 0, P.ITEM_COUNT - 1 do
+    local raw = rom:u16(P.ITEMS + i * 2)
+    items[i + 1] = (raw ~= 0) and ((order and order[raw]) or raw) or false
+  end
+
+  -- one reader for both shapes, because the tents use the same two structs
+  -- as the Frontier and only the addresses and the counts differ
+  local badPad = 0
+  local function readMons(at, count)
+    local out = {}
+    for i = 0, count - 1 do
+      local o = at + i * P.MON_STRIDE
+      local moves = {}
+      for m = 0, 3 do
+        local mv = rom:u16(o + 2 + m * 2)
+        if mv ~= 0 then
+          moves[#moves + 1] = (self._moveIds and self._moveIds[mv]) or mv
+        end
+      end
+      for k = 13, 15 do
+        if rom:u8(o + k) ~= 0 then badPad = badPad + 1 end
+      end
+      local species = rom:u16(o)
+      out[i + 1] = {
+        species = (self._speciesIds and self._speciesIds[species]) or species,
+        moves = moves[1] and moves or nil,
+        item = items[rom:u8(o + 10) + 1] or nil,
+        -- the cartridge's own spread mask and nature, carried as they are:
+        -- which stats take the 510 and how the mon acts under Palace rules
+        ev = rom:u8(o + 11),
+        nature = rom:u8(o + 12),
+      }
+    end
+    return out
+  end
+
+  local function readTrainers(at, count)
+    local out, total, top = {}, 0, -1
+    for i = 0, count - 1 do
+      local o = at + i * P.TRAINER_STRIDE
+      local setAt = rom:pointer(o + P.TRAINER_SET)
+      local set = {}
+      if setAt then
+        local k = 0
+        while k < P.SET_MAX do
+          local v = rom:u16(setAt + k * 2)
+          if v == P.TERMINATOR then break end
+          if v > top then top = v end
+          set[#set + 1] = v + 1        -- one based, like `mons` above
+          k = k + 1
+        end
+      end
+      total = total + #set
+      local facility = rom:u8(o)
+      out[i + 1] = {
+        -- the first byte is the FACILITY class, which is its own numbering;
+        -- the pic and the trainer class come off it through the two tables
+        facilityClass = facility,
+        picIndex = (facility < P.FACILITY_COUNT)
+                   and rom:u8(P.FACILITY_PIC + facility) or nil,
+        class = (facility < P.FACILITY_COUNT)
+                and rom:u8(P.FACILITY_CLASS + facility) or nil,
+        -- the name sits at offset 4, past three bytes of padding
+        name = (self:readString(o + P.TRAINER_NAME, P.TRAINER_NAME_LEN) or "")
+               :gsub("^%s+", ""):gsub("%s+$", ""),
+        set = set[1] and set or nil,
+      }
+    end
+    return out, total, top
+  end
+
+  local mons = readMons(P.MONS, P.MON_COUNT)
+  local trainers, setTotal, topIndex = readTrainers(P.TRAINERS, P.TRAINER_COUNT)
+  if badPad > 0 then
+    Logger.warn("gen3 frontier teams: %d padding bytes are not zero -- the "
+                  .. "mon table may not be 16 bytes a row", badPad)
+  end
+
+  -- THE CHECK THAT THE TWO TABLES BELONG TO EACH OTHER: the largest index any
+  -- trainer names is the last row of the mon table.  One row out either way
+  -- and this stops.
+  if topIndex + 1 ~= P.MON_COUNT then
+    Logger.warn("gen3 frontier teams: the sets reach mon %d and the table "
+                  .. "holds %d -- not recorded", topIndex, P.MON_COUNT)
+    return
+  end
+
+  -- ...and the same again for each tent, which is what the report is about
+  local tents, tentRows = {}, 0
+  for _, spec in ipairs(P.TENTS) do
+    local tMons = readMons(spec.mons, spec.monCount)
+    local tTrainers, tTotal, tTop = readTrainers(spec.trainers, P.TENT_TRAINERS)
+    if tTop + 1 ~= spec.monCount then
+      Logger.warn("gen3 frontier teams: the %s tent's sets reach mon %d and "
+                    .. "its table holds %d -- not recorded",
+                  spec.name, tTop, spec.monCount)
+    else
+      tents[spec.var] = {
+        name = spec.name, trainers = tTrainers, mons = tMons,
+        setEntries = tTotal,
+      }
+      tentRows = tentRows + spec.monCount
+    end
+  end
+
+  local constants = self._constants or {}
+  constants.gen3FrontierParties = {
+    trainers = trainers, mons = mons, items = items,
+    -- keyed by VAR_0x40CF, which is what the lobby you walked into set
+    tents = next(tents) and tents or nil,
+    tentVar = P.TENT_VAR, tentTrainers = P.TENT_TRAINERS,
+    levelFloor = P.LEVEL_FLOOR,
+    -- the one tent whose arm 6 names an item, and the item it names
+    prize = (function()
+      local raw = rom:u16(P.PRIZE_AT)
+      local id = raw ~= 0 and ((order and order[raw]) or raw) or nil
+      if not id then return nil end
+      return { var = P.PRIZE_VAR, item = id,
+               source = ("ROM:%07X, the word 01B9B00 stores -- Verdanturf's "
+                         .. "only prize"):format(P.PRIZE_AT) }
+    end)(),
+    source = ("ROM:%07X %d trainers over %d set entries, %07X %d mons, "
+              .. "%07X %d held items; the sets reach mon %d, which is the "
+              .. "last row.  Three tents on top, %d teams between them, "
+              .. "level max(party, %d)")
+      :format(P.TRAINERS, #trainers, setTotal, P.MONS, #mons, P.ITEMS,
+              P.ITEM_COUNT, topIndex, tentRows, P.LEVEL_FLOOR),
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 Frontier teams: %d trainers, %d mons, %d held items, "
+                .. "%d tents -- %s", #trainers, #mons, P.ITEM_COUNT,
+              #P.TENTS, constants.gen3FrontierParties.source)
+end
+
+-- ---------------------------------------------------------------------------
 -- STAGE: THE BATTLE FRONTIER, MAPPED.
 --
 -- The Frontier is the largest thing left in Hoenn and the census that says so
@@ -16039,7 +16591,108 @@ RomExtractorGen3.FRONTIER = {
   MAX_ARMS = 128,
   MIN_ARMS = 2,
   CODE = 0x400000,      -- the code half of the cartridge
+  -- gSpecialVars[13], out of the sixteen EWRAM pointers at 01DBA0C: the one
+  -- a script means by VAR_RESULT.  See frontierAnswers.
+  RESULT_AT = 0x020375F0,
+  WALK = 600,           -- halfwords of one function
+  DEPTH = 2,            -- ...and of the calls it makes
+  BUDGET = 400000,      -- halfwords for the whole stage, so a bad read stops
 }
+
+-- ---------------------------------------------------------------------------
+-- WHICH FRONTIER FUNCTIONS ANSWER, AND WHICH ONLY ACT.
+--
+-- Reported from play: "For the gen3 contests i get to this point save and then
+-- it doesnt take me to the battle tent or anything" -- the Verdanturf Battle
+-- Tent's attendant asks to save, the player says yes, and the script ends
+-- there.
+--
+-- The lobby script (0201954) is
+--
+--     setvar VAR_0x8004, 2 / setvar VAR_0x8005, 4 / special 234
+--     setvar VAR_0x8004, 0 / special 245
+--     ... two more frontier calls ...
+--     special 41                      LoadPlayerParty
+--     call 027134F                    special 96 (SaveGame) / waitstate
+--     compare VAR_RESULT, 0
+--     goto_if eq -> 0201A1D           give up, release, end
+--     ... "Good. Now, follow me." ... warp 6 1
+--
+-- and this port's Frontier dispatcher wrote VAR_RESULT = 0 on EVERY call, for
+-- the reason the Trainer Hill note below gives: zero is the "no, none, not
+-- yet" arm of a QUESTION, and answering a question with a stale value is the
+-- worse bug.  But most of these are not questions.  Four of them here are
+-- setters, they ran after the yes and before the save, and they left the
+-- compare above reading zero -- so the script took the arm that means "the
+-- player declined", every time, on all three tents.
+--
+-- WHICH ARE WHICH IS IN THE IMAGE.  A Frontier function that answers does it
+-- the same way every time:
+--
+--     ldr r1, =gSpecialVar_Result     (020375F0)
+--     ...
+--     strh r0, [r1]
+--
+-- so this walks each arm of each dispatcher's table and looks for a store
+-- through that address, following the calls it makes two deep.  The closure
+-- check is the pair: verdanturfTent arm 1 reads saveblock+E6A INTO
+-- gSpecialVar_Result, and arm 2 writes VAR_0x8006 back OUT to the same field
+-- and touches the result not at all -- a getter and a setter on one number,
+-- which is exactly the distinction being drawn.  The four Trainer Hill
+-- functions derived by hand for src/script/Gen3Commands.lua (6, 8, 9 and 16)
+-- all come back as answerers here, off a different method.
+--
+-- A function this cannot walk -- one that jumps through a table of its own --
+-- is left on the ANSWERING side, because that is the behaviour the port
+-- already had and this may only ever make it quieter, never staler.
+function RomExtractorGen3:frontierAnswers(entry, depth, budget)
+  local F = RomExtractorGen3.FRONTIER
+  local seen = {}
+  local function walk(at, left)
+    at = at - (at % 2)
+    if seen[at] or at <= 0 or at >= (self.rom.size or 0) then return false end
+    seen[at] = true
+    local holds, calls = {}, {}
+    local a = at
+    for _ = 1, F.WALK do
+      if budget[1] <= 0 then return true end
+      budget[1] = budget[1] - 1
+      local ok, op = pcall(self.rom.u16, self.rom, a)
+      if not ok then break end
+      if op >= 0x4800 and op < 0x5000 then          -- ldr rD, [pc, #imm]
+        local rd = math.floor(op / 256) % 8
+        local pool = (a + 4) - ((a + 4) % 4) + (op % 256) * 4
+        local okW, word = pcall(self.rom.u32, self.rom, pool)
+        holds[rd] = okW and word or nil
+      elseif (op >= 0x8000 and op < 0x8800)         -- strh rS, [rN, #imm]
+          or (op >= 0x6000 and op < 0x6800)         -- str
+          or (op >= 0x7000 and op < 0x7800) then    -- strb
+        if holds[math.floor(op / 8) % 8] == F.RESULT_AT then return true end
+      elseif op >= 0xF000 and op < 0xF800 then      -- bl, first half
+        local okN, nxt = pcall(self.rom.u16, self.rom, a + 2)
+        if okN and nxt >= 0xF800 then
+          local off = (op % 2048) * 4096 + (nxt % 2048) * 2
+          if off >= 0x400000 then off = off - 0x800000 end
+          calls[#calls + 1] = a + 4 + off
+          a = a + 4
+        else
+          a = a + 2
+        end
+      elseif op == 0x4770 then break                -- bx lr
+      elseif op >= 0xBD00 and op < 0xBE00 then break -- pop {.., pc}
+      elseif op >= 0x4700 and op < 0x4780 then break -- bx rN / an indirect jump
+      end
+      if not (op >= 0xF000 and op < 0xF800) then a = a + 2 end
+    end
+    if left > 0 then
+      for _, target in ipairs(calls) do
+        if walk(target, left - 1) then return true end
+      end
+    end
+    return false
+  end
+  return walk(entry, depth or F.DEPTH)
+end
 
 -- A dispatcher's jump table: the one ROM pointer in its literal pool.
 function RomExtractorGen3:frontierTable(special)
@@ -16079,9 +16732,35 @@ function RomExtractorGen3:frontierUses()
   local want = {}
   for _, row in ipairs(F.DISPATCHERS) do want[row.special] = row.name end
   local uses = {}
+  -- ...AND WHICH OF THEM THE SCRIPT THEN BRANCHES ON.  This is the second
+  -- opinion on frontierAnswers: if any script in the region reads VAR_RESULT
+  -- straight after an arm, that arm ANSWERS whatever a walk of its code
+  -- concluded, and the engine must keep answering it.  A walk that missed a
+  -- store -- a function that jumps through a table of its own, a result
+  -- written four calls down -- would otherwise turn a served question back
+  -- into a stale one, which is the bug the zero was put there to stop.
+  local function readsResult(rows, from)
+    for j = from + 1, math.min(from + 6, #rows) do
+      local op = rows[j][1]
+      -- anything that could write the result itself ends the window
+      if op == "special" or op == "specialvar" or op == "call"
+         or op == "goto" or op == "callstd" then return false end
+      if op == "setvar"
+         and math.floor(tonumber(rows[j][2]) or -1) == 0x800D then return false end
+      if (op == "compare_var_to_value"
+            and math.floor(tonumber(rows[j][2]) or -1) == 0x800D)
+         or (op == "copyvar"
+               and math.floor(tonumber(rows[j][3]) or -1) == 0x800D)
+         or (op == "addvar"
+               and math.floor(tonumber(rows[j][2]) or -1) == 0x800D) then
+        return true
+      end
+    end
+    return false
+  end
   for _, rows in pairs(scripts) do
     local arg
-    for _, ir in ipairs(rows) do
+    for index, ir in ipairs(rows) do
       if ir[1] == "setvar" and math.floor(tonumber(ir[2]) or -1) == F.ARG_VAR then
         arg = math.floor(tonumber(ir[3]) or 0)
       end
@@ -16090,10 +16769,14 @@ function RomExtractorGen3:frontierUses()
       elseif ir[1] == "specialvar" then id = math.floor(tonumber(ir[3]) or -1) end
       local name = id and want[id]
       if name then
-        uses[name] = uses[name] or { calls = 0, arms = {}, blind = 0 }
+        uses[name] = uses[name] or { calls = 0, arms = {}, blind = 0,
+                                     branched = {} }
         uses[name].calls = uses[name].calls + 1
         if arg then
           uses[name].arms[arg] = (uses[name].arms[arg] or 0) + 1
+          if ir[1] == "special" and readsResult(rows, index) then
+            uses[name].branched[arg] = true
+          end
         else
           uses[name].blind = uses[name].blind + 1
         end
@@ -16113,6 +16796,8 @@ function RomExtractorGen3:extractBattleFrontier()
   end
 
   local facilities, arms, calls, reached = {}, 0, 0, 0
+  local answering = 0
+  local budget = { RomExtractorGen3.FRONTIER.BUDGET }
   local missing = {}
   for _, row in ipairs(F.DISPATCHERS) do
     local found, why = self:frontierTable(row.special)
@@ -16132,9 +16817,28 @@ function RomExtractorGen3:extractBattleFrontier()
                       .. "its table holds %d -- not recorded",
                     row.name, top, found.arms)
       else
+        -- ...AND WHICH OF THOSE ARMS ANSWERS.  See frontierAnswers: an arm
+        -- that stores to gSpecialVar_Result is a question, and the engine's
+        -- dispatcher answers it with the zero that means "no, none, not yet";
+        -- an arm that only acts is left alone, because writing a result it
+        -- never wrote is what stopped all three Battle Tents.
+        local answers, branched = {}, (use or {}).branched or {}
+        for arm = 0, found.arms - 1 do
+          local okA, word = pcall(self.rom.u32, self.rom, found.at + arm * 4)
+          local fn = okA and RomExtractorGen3.romOffset(word)
+          -- the union of the two opinions, deliberately: an arm goes quiet
+          -- only when the code has no store to the result AND no script in
+          -- the region reads one, so this can make the engine quieter and
+          -- never staler than it already was
+          if branched[arm]
+             or (fn and self:frontierAnswers(fn, nil, budget)) then
+            answers[#answers + 1] = arm
+          end
+        end
+        answering = answering + #answers
         facilities[row.name] = {
           special = row.special, at = found.at, arms = found.arms,
-          used = used, calls = (use or {}).calls or 0,
+          used = used, calls = (use or {}).calls or 0, answers = answers,
         }
         arms = arms + found.arms
         reached = reached + #used
@@ -16147,10 +16851,13 @@ function RomExtractorGen3:extractBattleFrontier()
   local constants = self._constants or {}
   constants.gen3Frontier = {
     facilities = facilities, argVar = F.ARG_VAR,
-    arms = arms, reached = reached, calls = calls,
+    arms = arms, reached = reached, calls = calls, answering = answering,
+    resultAt = F.RESULT_AT,
     source = ("ROM:%d dispatchers, %d functions between them, %d of which "
-              .. "the region's scripts reach over %d call sites")
-      :format(F.DISPATCHERS and #F.DISPATCHERS or 0, arms, reached, calls),
+              .. "the region's scripts reach over %d call sites; %d store to "
+              .. "gSpecialVar_Result (%07X) and the rest only act")
+      :format(F.DISPATCHERS and #F.DISPATCHERS or 0, arms, reached, calls,
+              answering, F.RESULT_AT),
   }
   self._constants = constants
   self:write("constants", constants)
@@ -21770,7 +22477,130 @@ RomExtractorGen3.BIKE_RULES = {
   HOP_STATE = 3,       -- ACRO_STATE_BUNNY_HOP, written to gPlayerAvatar +8
   STATE_FIELD = 8,
   MEMCPY_MAX = 32,
+  -- ------- AND HOW LONG A STEP TAKES AT EACH OF THOSE SPEEDS.
+  --
+  -- Reported from play: "fix the acro and mach bike so they function as they
+  -- would in the emerald rom currently they both act the same".  They did:
+  -- GetPlayerSpeed was derived, ported and read by exactly one thing -- the
+  -- mud ramp -- so the number existed and never reached a step.  Both bikes
+  -- moved at the one bicycle speed the Game Boy games have.
+  --
+  -- The number GetPlayerSpeed returns is not a duration; it is an index into
+  -- a chain, and the chain is four hops long.  Taking the mach bike's:
+  --
+  --   sMachBikeSpeedCallbacks  0859745C  three functions, one per rung
+  --   GetWalk*MovementAction   0850DBAA / ..AF / ..B4 / ..B9, five bytes
+  --                            each: the movement action per direction
+  --   gMovementActionFuncs     the action's own function list; the first
+  --                            entry is the init, and it ends
+  --                            `mov r2,#1 / mov r3,#<speed>`
+  --   sStepTimes               0850E768, {16, 8, 6, 4, 2} -- FRAMES PER TILE
+  --
+  -- so speed 1 is 16 frames, 2 is 8, 3 is 6 and 4 is 4.  THE FIRST TWO ARE
+  -- THE CLOSURE: this engine's own walk is 16 frames and its own bicycle is
+  -- 8, both written years before any of this was read, and the cartridge's
+  -- chain lands on exactly those two.  A mapping that was off by one would
+  -- make walking 8 frames and the fastest mach rung 2 -- eight pixels a
+  -- frame, half a tile -- which is not a thing the cartridge does.
+  --
+  -- The Acro Bike's 6 is its own: AcroBikeTransition_Moving (01198B4) is the
+  -- ONLY caller of the speed-3 mover in the whole cartridge.
+  STEP_TIMES = 0x050E768,
+  STEP_COUNT = 5,
+  -- one per GetPlayerSpeed value, 1..4, each a five-byte per-direction table
+  WALK_ACTIONS = { 0x050DBAA, 0x050DBAF, 0x050DBB4, 0x050DBB9 },
+  ACTION_FUNCS = 0x050DC50,   -- gMovementActionFuncs, when the manifest is mute
+  INIT_SHAPE = 0x2201,        -- `mov r2,#1`, four halfwords in...
+  INIT_SPEED = 0x2300,        -- ...and `mov r3,#<speed>` in the fifth
+  WALK_FRAMES = 16,           -- what step time 0 has to be
+  STEP_MAX = 64,
+  -- ------- AND THE NOISE A BUNNY HOP MAKES.
+  --
+  -- Reported in the same breath: "the acro bike is missing its bunny hop
+  -- feature".  The rule was here and so was the arc, and pressing B still
+  -- produced NOTHING you could hear for the two-thirds of a second the
+  -- cartridge makes you hold it -- which is indistinguishable from a button
+  -- that does not work.
+  --
+  -- The cartridge makes a noise, and it makes it on the transition rather
+  -- than in the animation: sAcroBikeTransitions[6], the standing hop, is
+  -- 0119974, and the mover it ends in (008B8F0) opens `mov r0,#<sound> / bl
+  -- PlaySE` before it asks for the hop's own movement action.  The id is read
+  -- out of that instruction rather than typed, and a byte there that is not a
+  -- `mov r0,#imm` followed by a call means no sound rather than a wrong one.
+  HOP_SE_AT = 0x008B8F8,
+  HOP_SE_OP = 0x2000,         -- mov r0,#imm
 }
+
+-- The sound the standing bunny hop plays, or nil if that instruction has
+-- moved.  One halfword, checked before it is believed.
+function RomExtractorGen3:acroHopSound()
+  local P = RomExtractorGen3.BIKE_RULES
+  local rom = self.rom
+  local op = rom:u16(P.HOP_SE_AT)
+  if not op or math.floor(op / 256) * 256 ~= P.HOP_SE_OP then
+    return nil, "the hop does not open with a sound"
+  end
+  local call = rom:u16(P.HOP_SE_AT + 2)
+  if not (call and call >= 0xF000 and call < 0xF800) then
+    return nil, "the hop's sound is not handed to anything"
+  end
+  local id = op % 256
+  return id > 0 and id or nil, "the sound is zero"
+end
+
+-- FRAMES PER TILE FOR EACH OF GetPlayerSpeed's ANSWERS, walked rather than
+-- asserted: every hop of the chain above is checked as it is taken, and a
+-- hop that does not look like itself stops the derivation rather than
+-- guessing the rest.
+function RomExtractorGen3:bikeSpeedFrames()
+  local P = RomExtractorGen3.BIKE_RULES
+  local rom = self.rom
+  local times = {}
+  for i = 0, P.STEP_COUNT - 1 do
+    local v = rom:u16(P.STEP_TIMES + i * 2)
+    if not (v and v > 0 and v <= P.STEP_MAX) then
+      return nil, ("sStepTimes[%d] is %s, which is not a frame count")
+                  :format(i, tostring(v))
+    end
+    if i > 0 and v >= times[i] then
+      return nil, "sStepTimes does not get shorter, so it is not step times"
+    end
+    times[i + 1] = v
+  end
+  if times[1] ~= P.WALK_FRAMES then
+    return nil, ("the slowest step is %d frames and walking is %d")
+                :format(times[1], P.WALK_FRAMES)
+  end
+  local actions = self:symbol("gMovementActionFuncs") or P.ACTION_FUNCS
+  local frames = {}
+  for speed, at in ipairs(P.WALK_ACTIONS) do
+    -- entry 0 of each table repeats DOWN; entry 1 IS down
+    local action = rom:u8(at + 1)
+    local list = action and rom:pointer(actions + action * 4)
+    local fn = list and rom:pointer(list)
+    if not fn then
+      return nil, ("speed %d names no movement action"):format(speed)
+    end
+    fn = fn - 1                               -- a THUMB function pointer
+    if rom:u16(fn + 6) ~= P.INIT_SHAPE then
+      return nil, ("speed %d's action %d does not start a movement")
+                  :format(speed, action)
+    end
+    local word = rom:u16(fn + 8)
+    if math.floor(word / 256) * 256 ~= P.INIT_SPEED then
+      return nil, ("speed %d's action %d names no step speed")
+                  :format(speed, action)
+    end
+    local t = times[word % 256 + 1]
+    if not t then
+      return nil, ("speed %d asks for step time %d of %d")
+                  :format(speed, word % 256, P.STEP_COUNT)
+    end
+    frames[speed] = t
+  end
+  return frames, times
+end
 
 -- MetatileBehavior_Is<x>: `push {lr} / lsl r0,r0,#24 / lsr r0,r0,#24 /
 -- cmp r0,#<behaviour>`, which is four halfwords and cannot be anything else.
@@ -22047,6 +22877,11 @@ function RomExtractorGen3:bikeBehaviours(tilesetPairs)
   -- ...AND HOW THE TWO BIKES RIDE, which the behaviours above do not say.
   local rules, ruleWhy = self:bikeRules(constants.gen3Bike)
   local hop, hopWhy = self:acroHopFrames(constants.gen3Bike)
+  local frames, frameWhy = self:bikeSpeedFrames()
+  if not frames then
+    Logger.warn("gen3 bike: how long a step takes at each speed was not read "
+                  .. "(%s) -- the two bikes will ride alike", tostring(frameWhy))
+  end
   if rules and hop then
     -- THE CLOSURE: the threshold a mud ramp asks for has to be cleared by the
     -- LAST rung of the mach ladder and by nothing else in the game -- not the
@@ -22074,11 +22909,18 @@ function RomExtractorGen3:bikeBehaviours(tilesetPairs)
         muddyMinSpeed = rules.minSpeed,
         muddyDirection = rules.direction,
         acroHopFrames = hop,
+        -- ...and what each of those speeds COSTS, which is what makes the
+        -- mach bike a mach bike on the screen rather than only on a ramp
+        speedFrames = frames,
+        acroHopSound = self:acroHopSound(),
         source = ("ROM:ForcedMovement_%07X (push south unless facing %d "
                   .. "above speed %d), GetPlayerSpeed ladder %07X {%s}, "
-                  .. "wheelie becomes a hop after %d frames")
+                  .. "wheelie becomes a hop after %d frames, step times {%s} "
+                  .. "through %07X")
           :format(rules.handler, rules.direction, rules.minSpeed,
-                  rules.ladderAt, table.concat(rules.ladder, ","), hop),
+                  rules.ladderAt, table.concat(rules.ladder, ","), hop,
+                  frames and table.concat(frames, ",") or "-",
+                  RomExtractorGen3.BIKE_RULES.STEP_TIMES),
       }
       Logger.info("Gen3 bike rules: %s",
                   constants.gen3Bike.rules.source)
@@ -27794,10 +28636,22 @@ function RomExtractorGen3:itemMenuActions(constants)
     elseif i == checkTag then kinds[i] = "checkTag"
     else kinds[i] = "other" end
   end
-  -- DESELECT is REGISTER seen from the other side, and shares its function
+  -- DESELECT is REGISTER seen from the other side, and shares its function.
+  --
+  -- AND WHICH OF THE TWO IS WHICH MATTERS, which is why the id is kept and
+  -- not only the kind.  The cartridge does not carry a second key-item list:
+  -- it copies the one list and overwrites the REGISTER cell with DESELECT
+  -- when the item under the cursor is the one already on the button
+  -- (SetMenuActions).  Without that swap, and without the badge the bag draws
+  -- beside the item, registering something looks exactly like registering
+  -- nothing -- which is what was reported.
+  local deselect
   if registerGroup and register then
     for _, i in ipairs(registerGroup) do
-      if kinds[i] == "other" then kinds[i] = "register" end
+      if kinds[i] == "other" then
+        kinds[i] = "register"
+        deselect = deselect or i
+      end
     end
   end
 
@@ -27813,6 +28667,9 @@ function RomExtractorGen3:itemMenuActions(constants)
     columns = 2,
     cancel = best.cancel,
     blank = blank,
+    -- the pair the key-item list swaps between
+    register = register,
+    deselect = deselect,
     source = ("ROM:sItemMenuActions %07X, %d actions"):format(at, n),
   }
 
@@ -33169,6 +34026,7 @@ RomExtractorGen3.DATA_STAGES = {
   "extractItemEffects",
   "extractTypeChart", "extractTrainers", "extractMachines",
   "extractBerries", "extractTrades", "extractMultichoice",
+  "extractFrontierParties", "extractStoragePanels",
   "extractEncounters", "extractEggMoves", "extractDexEntries",
   "extractTrainerClasses", "extractTrainerMoney", "extractTutorMoves", "extractBattleTables",
   "extractBattlerCoords",
@@ -36222,6 +37080,31 @@ RomExtractorGen3.BAG_SCREEN = {
   -- four shapes plus the message, the two YES/NO places, two quantity boxes
   -- and the money window
   CONTEXT = 0x6141AC, CONTEXT_COUNT = 10,
+  -- ------- THE BADGE ON THE REGISTERED KEY ITEM.
+  --
+  -- Reported from play: "Registering still isnt working in gen 3 when
+  -- register is selected it does nothing".  It was working -- the pick was
+  -- recorded on the save and SELECT ran it -- and it LOOKED like nothing,
+  -- because the cartridge's own two acknowledgements were both missing: the
+  -- badge it draws beside the item, and the REGISTER row turning into
+  -- DESELECT.  There is no message either, so with neither of those an
+  -- unchanged screen is the whole of the feedback.
+  --
+  -- The blit is one call and it names everything (01AB66C):
+  --
+  --     if (gSaveBlock1Ptr->registeredItem
+  --         && gSaveBlock1Ptr->registeredItem == itemId)
+  --         BlitBitmapToWindow(listWindow, 086140A4, 96, y - 1, 24, 16);
+  --
+  -- and BlitBitmapRect4Bit reads its source TILED, not as a linear bitmap --
+  -- read flat it comes out as noise, which is the one way this fails while
+  -- still producing an image.  The x is inside the LIST window, so the badge
+  -- lands at that window's own left edge plus 96; the palette is the list
+  -- window's own, out of its template rather than typed here.
+  SELECT_GFX = 0x06140A4,
+  SELECT_W = 24, SELECT_H = 16,
+  SELECT_X = 96, SELECT_DY = -1,
+  SELECT_WINDOW = "list",
   -- ListMenuTemplate: the item's x inside the list window, the cursor's, and
   -- the first row's y.  A row is sixteen tall, so the window's height says
   -- how many there are rather than a number chosen here.
@@ -36308,6 +37191,38 @@ function RomExtractorGen3:extractBagScreen()
     end
   end
 
+  -- ---- the badge the registered key item wears ---------------------------
+  --
+  -- A tiled 4bpp bitmap, read the way BlitBitmapRect4Bit reads one:
+  -- ((x>>1)&3) + ((x>>3)<<5) + ((y>>3) * (w>>3) << 5) + ((y&7)<<2).  Index 0
+  -- is left transparent so the badge sits ON the list rather than punching a
+  -- hole in it.
+  local function selectBadge(colours, key)
+    local raw = rom:bytes(B.SELECT_GFX, B.SELECT_W * B.SELECT_H / 2)
+    if not raw or #raw < B.SELECT_W * B.SELECT_H / 2 then return nil end
+    local img = ImageWriter.blank(B.SELECT_W, B.SELECT_H)
+    local inked = 0
+    for y = 0, B.SELECT_H - 1 do
+      for x = 0, B.SELECT_W - 1 do
+        local at = math.floor(x / 2) % 4
+                   + math.floor(x / 8) * 32
+                   + math.floor(y / 8) * math.floor(B.SELECT_W / 8) * 32
+                   + (y % 8) * 4
+        local byte = raw[at + 1] or 0
+        local index = (x % 2 == 0) and byte % 16 or math.floor(byte / 16)
+        local c = index ~= 0 and colours[index + 1]
+        if c then
+          img:setPixel(x, y, c[1] / 255, c[2] / 255, c[3] / 255, 1)
+          inked = inked + 1
+        end
+      end
+    end
+    -- a badge that came out empty is a source that is not this one
+    if inked < B.SELECT_W * B.SELECT_H / 8 then return nil end
+    self:saveImage(img, "ui/bag_select_" .. key .. ".png")
+    return "assets/generated/ui/bag_select_" .. key .. ".png", inked
+  end
+
   -- ---- and every window's rectangle --------------------------------------
   local function windows(at, count, keys)
     local out = {}
@@ -36335,6 +37250,35 @@ function RomExtractorGen3:extractBagScreen()
                   .. "do not sit side by side -- not the bag's array",
                 win.list.x, win.description.x)
     return
+  end
+
+  -- ...and now that the list window has named its own palette bank, the badge
+  -- can be cut with it.  Both genders, for the same reason both backgrounds
+  -- are: it is one sheet and only the palette changes.
+  local badges, badgeInked = {}, 0
+  if love and love.image and love.image.newImageData then
+    local bank = math.floor(tonumber(win.list.palette) or 0)
+    for _, row in ipairs({ { key = "male", at = B.PAL_MALE },
+                           { key = "female", at = B.PAL_FEMALE } }) do
+      local okP, palRaw = pcall(rom.lz77, rom, row.at)
+      if okP and #palRaw >= (bank + 1) * 32 then
+        local colours = {}
+        for i = 0, 15 do
+          local o = bank * 32 + i * 2
+          colours[i + 1] = { RomGba.bgr555(palRaw[o + 1] + palRaw[o + 2] * 256) }
+        end
+        local okB, path, inked = pcall(selectBadge, colours, row.key)
+        if okB and path then
+          badges[row.key] = path
+          badgeInked = math.max(badgeInked, inked or 0)
+        end
+      end
+    end
+  end
+  if not next(badges) then
+    Logger.warn("gen3 bag screen: the registered-item badge at %07X did not "
+                  .. "come out -- a registered key item goes unmarked",
+                B.SELECT_GFX)
   end
 
   -- ---- WHICH POCKET YOU ARE IN, derived rather than drawn by hand ---------
@@ -36499,6 +37443,18 @@ function RomExtractorGen3:extractBagScreen()
     bag = { x = B.BAG_CENTRE.x - B.BAG_SIZE / 2,
             y = B.BAG_CENTRE.y - B.BAG_SIZE / 2, size = B.BAG_SIZE },
     itemIcon = B.ITEM_ICON,
+    -- the badge, and where the blit puts it: x inside the LIST window, y one
+    -- pixel above the row's own top
+    registered = next(badges) and {
+      male = badges.male, female = badges.female,
+      x = B.SELECT_X, dy = B.SELECT_DY,
+      width = B.SELECT_W, height = B.SELECT_H,
+      window = B.SELECT_WINDOW, palette = win.list.palette, inked = badgeInked,
+      source = ("ROM:%07X blitted at (%d, y%+d) %dx%d into the %s window by "
+                .. "01AB66C, in that window's own palette %d")
+        :format(B.SELECT_GFX, B.SELECT_X, B.SELECT_DY, B.SELECT_W, B.SELECT_H,
+                B.SELECT_WINDOW, win.list.palette),
+    } or nil,
     pocketDots = {
       x = B.POCKET_DOTS.x, y = B.POCKET_DOTS.y,
       step = B.POCKET_DOTS.step, count = B.POCKET_DOTS.count,
