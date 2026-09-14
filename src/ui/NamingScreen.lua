@@ -749,8 +749,12 @@ function NamingScreen:drawFireRed(rec)
       end
     end
   end
-  local label = self:frlgImage(FRLG_LABEL[nextPage.name] or "label_others")
-  if label then g.draw(label, 192, 76) end
+  -- the plate (a 32x16 OBJ at 204,83) and its label (24x8 at 204,84)
+  local which = (FRLG_LABEL[nextPage.name] or "label_others"):gsub("^label_", "")
+  local plate = self:frlgImage("swap_" .. which)
+  if plate then g.draw(plate, 204 - 16, 83 - 8) end
+  local label = self:frlgImage("label_" .. which)
+  if label then g.draw(label, 204 - 12, 84 - 4) end
 
   -- the cursor, on a key
   local cursor = self:frlgImage("cursor")

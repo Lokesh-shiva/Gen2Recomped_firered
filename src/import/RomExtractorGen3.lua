@@ -36704,6 +36704,7 @@ end
 -- ---------------------------------------------------------------------------
 RomExtractorGen3.FRLG_REGION_MAP = {
   TILES = 0x3EF61C, PAL = 0x3EF2DC, TOPBAR_PAL = 0x3EF23C,
+  EDGE_GFX = 0x3F0330, EDGE_MAP = 0x3F0E0C,
   MAPS = { kanto = 0x3F089C, sevii123 = 0x3F0AFC, sevii45 = 0x3F0C0C, sevii67 = 0x3F0CF0 },
   SECTIONS = { kanto = 0x3F2490, sevii123 = 0x3F2724, sevii45 = 0x3F29B8, sevii67 = 0x3F2C4C },
   CURSOR = 0x3EF4E0, CURSOR_PAL = 0x3EF25C,
@@ -36731,11 +36732,51 @@ function RomExtractorGen3:extractFireRedRegionMap()
   local okT, tiles = RomExtractorGen3.lz77ok(rom, R.TILES)
   if not okT then Logger.warn("gen3 frlg region map: tiles did not decompress") return end
   local pal = colours(R.PAL, 80)
+  -- after the open animation palettes 0-4 take sTopBar_Pal[15] as colour 0,
+  -- which is the backdrop the edges and the map show through to
+  local top15 = colours(R.TOPBAR_PAL, 16)[15]
+  for b = 0, 4 do pal[b * 16] = top15 end
   local images = {}
   local function save(key, img)
     self:saveImage(img, "regionmap_frlg/" .. key .. ".png")
     images[key] = "assets/generated/regionmap_frlg/" .. key .. ".png"
   end
+  -- BG1: the map edges' tilemap that stays behind the map, with the strip
+  -- Task_MapOpenAnim writes into row 1 (tiles 2, 3, 3D.., 3E, 3F in palette 2)
+  pcall(function()
+    local okG, edgeTiles = RomExtractorGen3.lz77ok(rom, R.EDGE_GFX)
+    local okM, map = RomExtractorGen3.lz77ok(rom, R.EDGE_MAP)
+    if not (okG and okM) then return end
+    local cols = (#map % 60 == 0 and #map <= 1200) and 30 or 32
+    local entry = {}
+    for cy = 0, 19 do
+      for cx = 0, 29 do
+        local c = cy * cols + cx
+        entry[cy * 30 + cx] = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+      end
+    end
+    entry[30] = 0x2002; entry[31] = 0x2003; entry[58] = 0x203E; entry[59] = 0x203F
+    for cx = 2, 27 do entry[30 + cx] = 0x203D end
+    local img = ImageWriter.blank(240, 160)
+    for cy = 0, 19 do
+      for cx = 0, 29 do
+        local e = entry[cy * 30 + cx]
+        local tid, bank = e % 1024, math.floor(e / 4096) % 16
+        local hflip, vflip = math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1
+        for y = 0, 7 do
+          for x = 0, 7 do
+            local sx = hflip and (7 - x) or x
+            local sy = vflip and (7 - y) or y
+            local byte = edgeTiles[tid * 32 + sy * 4 + math.floor(sx / 2) + 1] or 0
+            local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+            local col = v == 0 and top15 or pal[bank * 16 + v]
+            if col then img:setPixel(cx * 8 + x, cy * 8 + y, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
+          end
+        end
+      end
+    end
+    save("edges", img)
+  end)
   for key, at in pairs(R.MAPS) do
     pcall(function()
       local ok, map = RomExtractorGen3.lz77ok(rom, at)
@@ -36756,7 +36797,7 @@ function RomExtractorGen3:extractFireRedRegionMap()
                 local sy = vflip and (7 - y) or y
                 local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
                 local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
-                local col = pal[bank * 16 + v]
+                local col = v ~= 0 and pal[bank * 16 + v]
                 if col then
                   img:setPixel(cx * 8 + x, cy * 8 + y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
                 end
@@ -37170,7 +37211,10 @@ RomExtractorGen3.FRLG_NAMING = {
   MENU_PAL = 0xE98024, KB_PAL = 0xE97FE4,
   SPRITES = {
     back = { 0xE98858, 40, 24, 4 }, ok = { 0xE98A38, 40, 24, 4 },
-    frame = { 0xE985D8, 40, 32, 4 }, swap_button = { 0xE98FD8, 64, 8, 1 },
+    frame = { 0xE985D8, 40, 32, 4 },
+    -- the plate behind the page label, in the next page's own palette
+    swap_upper = { 0xE98FD8, 32, 16, 1 }, swap_lower = { 0xE98FD8, 32, 16, 2 },
+    swap_others = { 0xE98FD8, 32, 16, 3 },
     label_upper = { 0xE98C18, 24, 8, 4 }, label_lower = { 0xE98CB8, 24, 8, 4 },
     label_others = { 0xE98D58, 24, 8, 4 },
     cursor = { 0xE98DF8, 16, 16, 5 }, cursor_filled = { 0xE98F38, 16, 16, 5 },

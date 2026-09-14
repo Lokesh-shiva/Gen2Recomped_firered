@@ -1718,6 +1718,21 @@ function Gen3SummaryMenu:drawFireRed(r)
     frlgText(mark, 105, 18, mark == "\u{2640}" and (colors.female or header) or (colors.male or header))
   end
 
+  -- the move-detail page swaps the pic for the party icon, centred on (24,32)
+  -- (PokeSum_CreateMonIconSprite)
+  if detail then
+    local ok, img, frameH = pcall(require("src.ui.Gen3PartyMenu").iconFor, { game = self.game }, mon)
+    if ok and img then
+      local iw, ih = img:getDimensions()
+      frameH = math.min(frameH or ih, ih)
+      local frame = (math.floor(love.timer.getTime() / 0.32) % math.max(1, math.floor(ih / frameH)))
+      self._iconQuads = self._iconQuads or {}
+      local key = ("%d:%d:%d"):format(iw, frameH, frame)
+      self._iconQuads[key] = self._iconQuads[key] or g.newQuad(0, frame * frameH, iw, frameH, iw, ih)
+      g.draw(img, self._iconQuads[key], 24 - math.floor(iw / 2), 32 - math.floor(frameH / 2))
+    end
+  end
+
   -- the Pokemon, centred on (60,65)
   if self.pic and not detail then
     local frame = self.picAnim and self.picAnim.image and self.picAnim:image() or self.pic

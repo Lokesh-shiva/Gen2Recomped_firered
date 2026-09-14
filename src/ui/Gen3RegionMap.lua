@@ -594,6 +594,8 @@ function Gen3RegionMap:drawFireRed()
   g.setColor(0, 0, 0, 1)
   g.rectangle("fill", 0, 0, 240, 160)
   g.setColor(1, 1, 1, 1)
+  local edges = self:frlgImage("edges")
+  if edges then g.draw(edges, 0, 0) end
   local bg = self:frlgImage(self.page)
   if bg then g.draw(bg, 0, 0) end
 

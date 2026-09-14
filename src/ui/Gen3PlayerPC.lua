@@ -75,8 +75,12 @@ local function itemStorage(game, onCancel)
       onSelect = flow and function() flow(game) end or nil,
     }
   end
-  game.stack:push(Menu.new(game, rows, { noSound = true,
-                                         onCancel = onCancel }))
+  -- sWindowTemplate_ItemStorageSubmenu: (1,1), 14 wide inside its frame
+  local sub = Menu.new(game, rows, { noSound = true, tx = 0, ty = 0, tw = 16,
+                                     onCancel = onCancel })
+  -- placed on the GBA's own 240x160, not the Game Boy's centred 160x144
+  function sub:uiSize() return 240, 160 end
+  game.stack:push(sub)
 end
 
 -- DECORATION -- the same screen the secret base's PC opens.
@@ -178,8 +182,11 @@ function Gen3PlayerPC.new(game, opts)
   menu = Menu.new(game, rows, {
     -- PlayersPCMenu holds BIT_NO_MENU_BUTTON_SOUND on both cartridges
     noSound = true,
+    -- sWindowTemplate_TopMenu_*: (1,1), 13 wide inside its frame
+    tx = 0, ty = 0, tw = 15,
     onCancel = close,
   })
+  function menu:uiSize() return 240, 160 end
   return menu
 end
 
