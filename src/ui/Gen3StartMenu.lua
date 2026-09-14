@@ -202,8 +202,16 @@ function Gen3StartMenu:buildRows(game, labels, playerName)
     end
   end
 
-  if #((game.save or {}).party or {}) > 0 then
+  local frlg = ((game.data.constants or {}).gen3StartMenu or {}).layout == "frlg"
+  if #((game.save or {}).party or {}) > 0 and not frlg then
     insertBeforeExit({ label = Strings("LINK"), key = "link" })
+  end
+  -- FireRed's help bar describes each row; remember which cartridge row
+  -- each one is
+  for _, row in ipairs(self.rows) do
+    for i, action in ipairs(ACTIONS) do
+      if action.key == row.key then row.slot = i end
+    end
   end
 
   local status = game.modStatus
@@ -227,7 +235,7 @@ function Gen3StartMenu:buildRows(game, labels, playerName)
   -- `boot.startMenuQuit = false` takes it away again for a dataset that wants
   -- the cartridge's menu and nothing else.
   local boot = game.data.field and game.data.field.boot
-  if not (boot and boot.startMenuQuit == false) then
+  if not (boot and boot.startMenuQuit == false) and not frlg then
     self.rows[#self.rows + 1] = { label = Strings("QUIT GAME"), key = "quit" }
   end
 end
@@ -440,9 +448,58 @@ function Gen3StartMenu:drawSavePanel(inset)
   love.graphics.setColor(1, 1, 1, 1)
 end
 
+-- FIRERED: the window at tile column 22, rows 15 pixels apart
+-- (CreateStartMenuWindow / PrintStartMenuItems), and the help bar across
+-- rows 15-19 describing the highlighted row (help_message.c).
+function Gen3StartMenu:drawFireRed(record)
+  local g = love.graphics
+  local n = #self.rows
+  local innerH = math.ceil((n * 15) / 8) + 1
+  local left = 22
+  local width = 7
+  -- widen for the port's own rows (QUIT GAME) so nothing spills
+  for _, row in ipairs(self.rows) do
+    width = math.max(width, math.ceil((Font.width(row.label) + 10) / 8))
+  end
+  left = math.min(left, 29 - width)
+  Font.drawBox(left - 1, 0, width + 2, innerH + 2)
+  g.setColor(0, 0, 0, 1)
+  for i, row in ipairs(self.rows) do
+    local y = 8 + (i - 1) * 15
+    Font.draw(row.label, left * 8 + 8, y)
+    if i == self.index then Font.drawCode(Theme.cursor, left * 8, y) end
+  end
+  g.setColor(1, 1, 1, 1)
+  local row = self.rows[self.index]
+  local desc = row and row.slot and (record.descriptions or {})[row.slot]
+  if not desc then return end
+  local ok, bar = false, nil
+  if record.helpBar then ok, bar = pcall(require("src.render.Assets").image, record.helpBar) end
+  if ok and bar then
+    local iw, ih = bar:getDimensions()
+    local quads = { g.newQuad(0, 0, 8, 8, iw, ih), g.newQuad(0, 8, 8, 8, iw, ih),
+                    g.newQuad(0, 16, 8, 8, iw, ih) }
+    for ty = 15, 19 do
+      local q = (ty == 15 and quads[1]) or (ty == 19 and quads[3]) or quads[2]
+      for tx = 0, 29 do g.draw(bar, q, tx * 8, ty * 8) end
+    end
+  end
+  local ink = record.helpInk or { 1, 1, 1 }
+  local two = Font.beginTwoTone({ ink[1], ink[2], ink[3], 1 }, { 0.38, 0.38, 0.38, 1 })
+  local line = 0
+  for text in (desc .. "\n"):gmatch("([^\n]*)\n") do
+    Font.draw(text, 2, 15 * 8 + 5 + line * 14)
+    line = line + 1
+  end
+  if two then Font.endTwoTone() end
+  g.setColor(1, 1, 1, 1)
+end
+
 function Gen3StartMenu:draw()
   local inset = textInsetY()
   if self.savePanel then return self:drawSavePanel(inset) end
+  local record = (self.game.data.constants or {}).gen3StartMenu
+  if record and record.layout == "frlg" then return self:drawFireRed(record) end
   local th = #self.rows * ROW_STEP + 2
   Font.drawBox(BOX_TX, BOX_TY, BOX_TW, th)
   love.graphics.setColor(0, 0, 0, 1)

@@ -36089,6 +36089,68 @@ function RomExtractorGen3:extractFireRedTitle()
   Logger.info("Gen3 FireRed title: %d images, flame x run %s", n, table.concat(flameX, ","))
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S START MENU (pokefirered src/start_menu.c, help_message.c)
+--
+-- The labels in sStartMenuActionTable order laid onto the port's eight-slot
+-- row table (FireRed has no POKeNAV slot), the per-row descriptions the help
+-- bar prints, and the bar's three tile rows out of gHelpMessageWindow_Gfx in
+-- sTextWindowPalettes[2].
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_START_MENU = {
+  LABELS = { 0x41627C, 0x415A66, 0x416284, false, 0x41628E, 0x416290, 0x416296, 0x41629C },
+  DESCS = { 0x419F76, 0x419FBA, 0x41A000, false, 0x41A048, 0x41A06E, 0x41A0B6, 0x41A0F8 },
+  HELP_GFX = 0x4566A8, HELP_PAL = 0x471E2C, HELP_TILES = { 0, 5, 14 },
+}
+
+function RomExtractorGen3:extractFireRedStartMenu()
+  self:beginStage("Gen3 FireRed start menu")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local S = RomExtractorGen3.FRLG_START_MENU
+  local function text(at)
+    if not at then return false end
+    for _, d in ipairs({ 0, 1, -1 }) do
+      local ok, t = pcall(self.readText, self, at + d, 200)
+      if ok and t and t ~= "" then return t end
+    end
+    return false
+  end
+  local items, descs = {}, {}
+  for i = 1, 8 do
+    items[i] = text(S.LABELS[i]) or nil
+    descs[i] = text(S.DESCS[i]) or nil
+  end
+  local record = { items = items, descriptions = descs,
+                   pokedexFlag = "FLAG_G3_0829", layout = "frlg" }
+  local ok, err = pcall(function()
+    local colors = RomGba.palette(self.rom:bytes(S.HELP_PAL, 32))
+    local image = ImageWriter.blank(8, 24)
+    for row, tile in ipairs(S.HELP_TILES) do
+      local px = RomGba.tiles4bpp(self.rom:bytes(S.HELP_GFX + tile * 32, 32), 1, 1)
+      for y = 1, 8 do
+        for x = 1, 8 do
+          local v = px[y][x]
+          local c = v ~= 0 and colors[v + 1]
+          if c then
+            image:setPixel(x - 1, (row - 1) * 8 + y - 1, c[1] / 255, c[2] / 255, c[3] / 255, 1)
+          end
+        end
+      end
+    end
+    self:saveImage(image, "ui/frlg_help_bar.png")
+    record.helpBar = "assets/generated/ui/frlg_help_bar.png"
+    local ink = colors[2]
+    record.helpInk = { ink[1] / 255, ink[2] / 255, ink[3] / 255 }
+  end)
+  if not ok then Logger.warn("gen3 frlg start menu: help bar did not compose (%s)", tostring(err)) end
+  local constants = self._constants or {}
+  constants.gen3StartMenu = record
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed start menu: %s", table.concat((function()
+    local t = {} for i = 1, 8 do t[#t + 1] = tostring(items[i]) end return t end)(), " / "))
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -43835,6 +43897,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedIntro",
   "extractFireRedOakSpeech",
   "extractFireRedTitle",
+  "extractFireRedStartMenu",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
