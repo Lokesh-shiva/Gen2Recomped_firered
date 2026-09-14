@@ -220,6 +220,26 @@ function Dex:drawList()
     end
     if id and (dex.owned or {})[id] and caught then g.draw(caught, ox + 40, y + 3) end
     text(name, ox + 56, y, ink, shadow)
+    -- ItemPrintFunc_OrderedListMenu: a caught species' type badges at 120/152
+    if id and (dex.owned or {})[id] then
+      local sum = (self.game.data.constants or {}).gen3FRLGSummary
+      local sheetPath = sum and sum.images and sum.images.menu_info
+      local okS, sheet = false, nil
+      if sheetPath then okS, sheet = pcall(Assets.image, sheetPath) end
+      local def = (self.game.data.pokemon or {})[id] or {}
+      local t1 = def.type1 or (def.types and def.types[1])
+      local t2 = def.type2 or (def.types and def.types[2])
+      if okS and sheet then
+        local iw, ih = sheet:getDimensions()
+        for k, tname in ipairs({ t1, (t2 ~= t1) and t2 or nil }) do
+          local off = tname and (sum.typeIcons or {})[tostring(tname):upper()]
+          if off then
+            g.draw(sheet, g.newQuad((off % 16) * 8, math.floor(off / 16) * 8, 32, 12, iw, ih),
+                   ox + (k == 1 and 120 or 152), y + 2)
+          end
+        end
+      end
+    end
     if n == self.index then Font.drawCode(require("src.ui.Theme").cursor, ox + 4 - 2, y) end
   end
   local t = self.rec.text or {}
