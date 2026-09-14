@@ -820,6 +820,11 @@ function Data:seedDefaults()
       if boot.screens.newGame == "BirchSpeech" then
         boot.screens.newGame = "Gen3OakSpeechFRLG"
       end
+      local frlgTitle = (self.constants or {}).gen3FRLGTitle
+      if boot.screens.title == "Gen3Title" and type(frlgTitle) == "table"
+         and type(frlgTitle.images) == "table" and frlgTitle.images.mon then
+        boot.screens.title = "Gen3TitleFRLG"
+      end
       if boot.playerName == "BRENDAN" then boot.playerName = "RED" end
       if boot.rivalName == "MAY" then boot.rivalName = "GREEN" end
     end

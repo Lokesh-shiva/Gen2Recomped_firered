@@ -35962,6 +35962,117 @@ function RomExtractorGen3:frlgIntroSpriteSheet(def, label)
   return strip, frames
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S TITLE SCREEN (pokefirered src/title_screen.c CB2_InitTitleScreen)
+--
+--   BG0  the POKeMON / FireRed logo, 8bpp, palettes 0-12 loaded as one run
+--   BG1  Charizard (the box-art mon), palette 13
+--   BG2  copyright and PRESS START, palette 15 -- PRESS START blinks by
+--        overwriting colours 1-5 with colour 6
+--   BG3  the dark border field, palette 14 (the same colours)
+-- plus the embers Task_FlameSpawner throws up from the bottom.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_TITLE = {
+  LOGO = { PAL = 0xEAB6C4, PALSIZE = 0x200, TILES = 0xEAB8C4, MAP = 0xEAD390, BPP = 8 },
+  MON = { PAL = 0xEAD5E8, TILES = 0xEAD608, MAP = 0xEADEE4 },
+  COPYRIGHT = { PAL = 0xEAE094, TILES = 0xEAE0B4, MAP = 0xEAE374 },
+  BORDER = { PAL = 0xEAE094, TILES = 0x3BF58C, MAP = 0x3BF5A8 },
+  FLAMES = { GFX = 0x3BF79C, PAL = 0x3BF77C, COLS = 2, ROWS = 2 },
+  FLAME_X = 0x3BFBD4, -- sFlameXPositions, 15 u8
+}
+
+-- A 30x20 screen from a 32-column tilemap, honouring flips.  `blink` swaps
+-- colours 1-5 for colour 6 (Task_TitleScreen_BlinkPressStart).
+function RomExtractorGen3:frlgTitleLayer(def, blink)
+  local rom = self.rom
+  local okT, tiles = RomExtractorGen3.lz77ok(rom, def.TILES)
+  local okM, map = RomExtractorGen3.lz77ok(rom, def.MAP)
+  if not (okT and okM) then return nil end
+  local raw = rom:bytes(def.PAL, def.PALSIZE or 0x20)
+  local colors = {}
+  for i = 0, math.floor(#raw / 2) - 1 do
+    local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+    colors[i] = { r, g, b }
+  end
+  if blink then for i = 1, 5 do colors[i] = colors[6] end end
+  local bpp8 = def.BPP == 8
+  local tileBytes = bpp8 and 64 or 32
+  local image = ImageWriter.blank(240, 160)
+  for cy = 0, 19 do
+    for cx = 0, 29 do
+      local c = cy * 32 + cx
+      local entry = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+      local tid = entry % 1024
+      local hflip = math.floor(entry / 1024) % 2 == 1
+      local vflip = math.floor(entry / 2048) % 2 == 1
+      local base = tid * tileBytes
+      if base + tileBytes <= #tiles then
+        for py = 0, 7 do
+          for px = 0, 7 do
+            local sx = hflip and (7 - px) or px
+            local sy = vflip and (7 - py) or py
+            local idx
+            if bpp8 then
+              idx = tiles[base + sy * 8 + sx + 1]
+            else
+              local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+              idx = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+            end
+            local col = idx and idx ~= 0 and colors[idx]
+            if col then
+              image:setPixel(cx * 8 + px, cy * 8 + py,
+                             col[1] / 255, col[2] / 255, col[3] / 255, 1)
+            end
+          end
+        end
+      end
+    end
+  end
+  return image, colors[0]
+end
+
+function RomExtractorGen3:extractFireRedTitle()
+  self:beginStage("Gen3 FireRed title")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local T = RomExtractorGen3.FRLG_TITLE
+  local images, backdrop = {}, nil
+  local function layer(key, def, blink)
+    local ok, img, c0 = pcall(self.frlgTitleLayer, self, def, blink)
+    if ok and img then
+      self:saveImage(img, "title_frlg/" .. key .. ".png")
+      images[key] = "assets/generated/title_frlg/" .. key .. ".png"
+      return c0
+    end
+    Logger.warn("gen3 frlg title: %s did not compose (%s)", key, tostring(img))
+  end
+  layer("logo", T.LOGO)
+  layer("mon", T.MON)
+  layer("copyright", T.COPYRIGHT)
+  layer("copyrightBlink", T.COPYRIGHT, true)
+  backdrop = layer("border", T.BORDER)
+  local okF, strip, frames = pcall(self.frlgIntroSpriteSheet, self, T.FLAMES, "flames")
+  if okF and strip then
+    self:saveImage(strip, "title_frlg/flames.png")
+    images.flames = { path = "assets/generated/title_frlg/flames.png", frames = frames,
+                      size = 16 }
+  end
+  local flameX = {}
+  for i = 0, 14 do
+    flameX[#flameX + 1] = self.rom:u8(T.FLAME_X + i) or 0
+  end
+  local constants = self._constants or {}
+  constants.gen3FRLGTitle = {
+    images = images, flameX = flameX,
+    backdrop = backdrop and { backdrop[1], backdrop[2], backdrop[3] } or nil,
+    source = "ROM:gGraphics_TitleScreen_* and title_screen.c sBorderBg/sFlames",
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(images) do n = n + 1 end
+  Logger.info("Gen3 FireRed title: %d images, flame x run %s", n, table.concat(flameX, ","))
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -43707,6 +43818,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractBerryPouchScreen",
   "extractFireRedIntro",
   "extractFireRedOakSpeech",
+  "extractFireRedTitle",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
