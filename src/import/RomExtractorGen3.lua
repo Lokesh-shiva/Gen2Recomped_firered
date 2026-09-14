@@ -7553,7 +7553,9 @@ function RomExtractorGen3:extractTrainerSprites()
   -- which indexes actually produced a file, so a trainer whose art failed is
   -- left with no path rather than one pointing at nothing
   local pathFor = {}
-  for i = 0, 92 do
+  -- FireRed's table runs to 148 pictures (0x4A0 bytes), Emerald's to 93
+  local frlg = (self.manifest or {}).frlgItemMenu ~= nil
+  for i = 0, (frlg and 147 or 92) do
     local ok = pcall(function()
       local raw, colors = self:decodeSprite(pics, i, pals)
       if not raw then return end
@@ -7602,9 +7604,24 @@ function RomExtractorGen3:extractTrainerSprites()
   -- gTrainers -- the PKMN TRAINER rows called BRENDAN and MAY.  Reading the
   -- index off those rows means the cartridge names its own portraits, and a
   -- ROM that renumbered the pic table still lands right.
+  -- FIRERED: TRAINER_PIC_RED and TRAINER_PIC_LEAF (PlayerGenderToFrontTrainerPicId)
+  if frlg and pathFor[135] and pathFor[136] then
+    local field = self._field or {}
+    local forms = field.playerForms or {}
+    for who, idx in pairs({ boy = 135, girl = 136 }) do
+      forms[who] = forms[who] or {}
+      forms[who].card, forms[who].intro, forms[who].picIndex = pathFor[idx], pathFor[idx], idx
+    end
+    field.playerForms = forms
+    self._field = field
+    self:write("field", field)
+  end
   do
     local want = { BRENDAN = "boy", MAY = "girl" }
     local forms, found = {}, 0
+    -- FireRed keeps Ruby's BRENDAN and MAY rows for link battles; its own
+    -- player is RED / LEAF, set just above
+    if frlg then want = {} end
     for _, def in pairs(type(trainers) == "table" and trainers or {}) do
       if type(def) == "table" then
         local who = want[def.name]
@@ -36151,6 +36168,138 @@ function RomExtractorGen3:extractFireRedStartMenu()
     local t = {} for i = 1, 8 do t[#t + 1] = tostring(items[i]) end return t end)(), " / "))
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S TRAINER CARD (pokefirered src/trainer_card.c, CARD_TYPE_FRLG)
+--
+-- BG2 the card's surround (sKantoTrainerCardBg_Tilemap), BG0 the card face
+-- or back, both out of gKantoTrainerCard_Gfx in three palettes picked by
+-- star count (sKantoTrainerCardPals; a girl's card swaps palette 1 for
+-- sKantoTrainerCardFemaleBg_Pal).  BG3 carries the badges (16x16 each,
+-- sKantoTrainerCardBadges_Gfx) and the stars (card tile 143, star palette).
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_TRAINER_CARD = {
+  TILES = 0xE991F8, PAL_TABLE = 0x3CD8CC, FEMALE_PAL = 0x3CD2A0,
+  BG_MAP = 0x3CCEC8, FRONT_MAP = 0x3CC6F0, BACK_MAP = 0x3CC984,
+  BADGES = 0x3CD5E8, BADGE_PAL = 0x3CD2E0, STAR_PAL = 0x3CD300, STAR_TILE = 143,
+  LABELS = { name = 0x419CDA, id = 0x419CE0, money = 0x419CE6, yen = 0x419CEC,
+             pokedex = 0x419CEE, time = 0x419CFC },
+}
+
+function RomExtractorGen3:extractFireRedTrainerCard()
+  self:beginStage("Gen3 FireRed trainer card")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local C = RomExtractorGen3.FRLG_TRAINER_CARD
+  local rom = self.rom
+  local function colours(at, n)
+    local raw = rom:bytes(at, n * 2)
+    local out = {}
+    for i = 0, n - 1 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      out[i] = { r, g, b }
+    end
+    return out
+  end
+  local okT, tiles = RomExtractorGen3.lz77ok(rom, C.TILES)
+  local maps = {}
+  for key, at in pairs({ bg = C.BG_MAP, front = C.FRONT_MAP, back = C.BACK_MAP }) do
+    local ok, m = RomExtractorGen3.lz77ok(rom, at)
+    if ok then maps[key] = m end
+  end
+  if not (okT and maps.bg and maps.front and maps.back) then
+    Logger.warn("gen3 frlg trainer card: art did not decompress")
+    return
+  end
+  local images = {}
+  local function tile4(img, colors, tid, bank, hflip, vflip, px, py, opaque0, srcTiles)
+    local base = tid * 32
+    local src = srcTiles or tiles
+    if base + 32 > #src then return end
+    for y = 0, 7 do
+      for x = 0, 7 do
+        local sx = hflip and (7 - x) or x
+        local sy = vflip and (7 - y) or y
+        local byte = src[base + sy * 4 + math.floor(sx / 2) + 1]
+        local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+        local c
+        if v == 0 then c = opaque0 else c = colors[bank * 16 + v] end
+        if c then img:setPixel(px + x, py + y, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+      end
+    end
+  end
+  local function compose(map, colors, opaque)
+    local img = ImageWriter.blank(240, 160)
+    for cy = 0, 19 do
+      for cx = 0, 29 do
+        local c = cy * 30 + cx
+        local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+        tile4(img, colors, e % 1024, math.floor(e / 4096) % 16,
+              math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1,
+              cx * 8, cy * 8, opaque and colors[0] or nil)
+      end
+    end
+    return img
+  end
+  local female = colours(C.FEMALE_PAL, 16)
+  for stars = 0, 4 do
+    local palAt = rom:pointer(C.PAL_TABLE + stars * 4)
+    if palAt then
+      for _, gender in ipairs({ "boy", "girl" }) do
+        local colors = colours(palAt, 48)
+        if gender == "girl" then for i = 0, 15 do colors[16 + i] = female[i] end end
+        for _, layer in ipairs({ "bg", "front", "back" }) do
+          local key = ("%s_%s_%d"):format(layer, gender, stars)
+          local ok, err = pcall(function()
+            local img = compose(maps[layer], colors, layer == "bg")
+            self:saveImage(img, "trainer_card_frlg/" .. key .. ".png")
+          end)
+          if ok then images[key] = "assets/generated/trainer_card_frlg/" .. key .. ".png"
+          else Logger.warn("gen3 frlg trainer card: %s (%s)", key, tostring(err)) end
+        end
+      end
+    end
+  end
+  -- the badges: tiles 2i, 2i+1, 16+2i, 17+2i of the badge sheet
+  pcall(function()
+    local okB, badgeTiles = RomExtractorGen3.lz77ok(rom, C.BADGES)
+    if not okB then return end
+    local pal = colours(C.BADGE_PAL, 16)
+    local img = ImageWriter.blank(16 * 8, 16)
+    for i = 0, 7 do
+      local x = i * 16
+      tile4(img, pal, 2 * i, 0, false, false, x, 0, nil, badgeTiles)
+      tile4(img, pal, 2 * i + 1, 0, false, false, x + 8, 0, nil, badgeTiles)
+      tile4(img, pal, 16 + 2 * i, 0, false, false, x, 8, nil, badgeTiles)
+      tile4(img, pal, 17 + 2 * i, 0, false, false, x + 8, 8, nil, badgeTiles)
+    end
+    self:saveImage(img, "trainer_card_frlg/badges.png")
+    images.badges = "assets/generated/trainer_card_frlg/badges.png"
+  end)
+  pcall(function()
+    local pal = colours(C.STAR_PAL, 16)
+    local img = ImageWriter.blank(8, 8)
+    tile4(img, pal, C.STAR_TILE, 0, false, false, 0, 0, nil)
+    self:saveImage(img, "trainer_card_frlg/star.png")
+    images.star = "assets/generated/trainer_card_frlg/star.png"
+  end)
+  local labels = {}
+  for key, at in pairs(C.LABELS) do
+    for _, d in ipairs({ 0, 1, -1 }) do
+      local ok, t = pcall(self.readText, self, at + d, 40)
+      if ok and t and t ~= "" then labels[key] = t break end
+    end
+  end
+  local constants = self._constants or {}
+  constants.gen3FRLGTrainerCard = { images = images, labels = labels,
+    source = "ROM:gKantoTrainerCard_Gfx and trainer_card.c tilemaps/palettes" }
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(images) do n = n + 1 end
+  Logger.info("Gen3 FireRed trainer card: %d images; labels %s/%s/%s/%s/%s", n,
+              tostring(labels.name), tostring(labels.id), tostring(labels.money),
+              tostring(labels.pokedex), tostring(labels.time))
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -43898,6 +44047,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedOakSpeech",
   "extractFireRedTitle",
   "extractFireRedStartMenu",
+  "extractFireRedTrainerCard",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
