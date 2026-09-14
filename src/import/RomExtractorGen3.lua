@@ -37432,6 +37432,51 @@ function RomExtractorGen3:extractFireRedMapPreviews()
   Logger.info("Gen3 FireRed map previews: %d pictures", drawn)
 end
 
+-- ---------------------------------------------------------------------------
+-- THE WORDS FIRERED'S OWN SPECIALS PRINT (src/script/Gen3SpecialsFRLG.lua):
+-- the elevator floor names and "Now on:", the ListMenu labels, the Seagallop
+-- destinations and Prof. Oak's Pokedex ratings.  All of them are referenced
+-- from C, not from scripts, so the script text pass never reads them.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_SPECIAL_TEXTS = {
+  floors = { 0x418068, 0x418064, 0x418060, 0x41805C, 0x41803A, 0x41803C, 0x418040, 0x418042,
+             0x418046, 0x418048, 0x41804C, 0x41804E, 0x418052, 0x418054, 0x418058, 0x41806C },
+  nowOn = 0x418074, exit = 0x4161C8, other = 0x417DEC,
+  badges = { 0x417FD8, 0x417FE6, 0x417FF2, 0x418000, 0x41800C, 0x418016, 0x418022, 0x41802E },
+  seagallop = { 0x417E46, 0x417DF2, 0x417DFE, 0x417E08, 0x417E16, 0x417E22, 0x417E2E, 0x417E38 },
+  rating = { 0x1A6D16, 0x1A6D6C, 0x1A6DDE, 0x1A6E36, 0x1A6EA4, 0x1A6F0A, 0x1A6F70, 0x1A6FAA,
+             0x1A6FF0, 0x1A7030, 0x1A7062, 0x1A70A4, 0x1A70D8, 0x1A7108, 0x1A7136, 0x1A7174 },
+}
+
+function RomExtractorGen3:extractFireRedSpecialTexts()
+  self:beginStage("Gen3 FireRed special texts")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local T = RomExtractorGen3.FRLG_SPECIAL_TEXTS
+  local function read(at, max)
+    for _, d in ipairs({ 0, 1, -1 }) do
+      local ok, s = pcall(self.readText, self, at + d, max or 32)
+      if ok and type(s) == "string" and s ~= "" then return s end
+    end
+    return nil
+  end
+  local out = {}
+  for key, v in pairs(T) do
+    if type(v) == "table" then
+      out[key] = {}
+      for i, at in ipairs(v) do out[key][i] = read(at, key == "rating" and 200 or 32) end
+    else
+      out[key] = read(v)
+    end
+  end
+  local constants = self._constants or {}
+  constants.gen3FRLGSpecialTexts = out
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed special texts: floors '%s'..'%s', rating 1 '%s'",
+              tostring(out.floors[1]), tostring(out.floors[16]),
+              tostring(out.rating[1]):sub(1, 30))
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -45188,6 +45233,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedNaming",
   "extractFireRedFieldShadow",
   "extractFireRedMapPreviews",
+  "extractFireRedSpecialTexts",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",

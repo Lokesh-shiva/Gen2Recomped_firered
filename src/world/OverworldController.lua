@@ -12459,6 +12459,21 @@ function OverworldState:drawUI()
     love.graphics.setColor(1, 1, 1, 1)
   end
 
+  -- FIRERED'S ELEVATOR PANEL (DrawElevatorCurrentFloorWindow): window (22,1)
+  -- 7x4 in its frame, "Now on:" at (0,2) and the floor right-aligned to 56
+  if self.frlgFloorWindow then
+    local Font = require("src.render.Font")
+    local w = self.frlgFloorWindow
+    Font.drawBox(21, 0, 9, 6)
+    local ink, shadow = { 98 / 255, 98 / 255, 98 / 255, 1 }, { 214 / 255, 214 / 255, 206 / 255, 1 }
+    local two = Font.beginTwoTone and Font.beginTwoTone(ink, shadow)
+    if not two then love.graphics.setColor(ink) end
+    Font.draw(w.nowOn, 22 * 8, 8 + 2)
+    Font.draw(w.floor, 22 * 8 + 56 - Font.width(w.floor), 8 + 16)
+    if two then Font.endTwoTone() end
+    love.graphics.setColor(1, 1, 1, 1)
+  end
+
   if self.brailleBox then self:drawBrailleBox() end
 
   -- TalkToPikachu's picture box (engine/pikachu/pikachu_pic_animation.asm

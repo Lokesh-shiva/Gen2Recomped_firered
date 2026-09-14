@@ -11379,5 +11379,8 @@ function Gen3Commands.goHomeAfterLeague(ctx)
               tostring(home.x), tostring(home.y))
 end
 
+-- FireRed's own specials (0x1000 + their FireRed index) and the aliases onto
+-- the Emerald handlers above that do the same job under another name
+require("src.script.Gen3SpecialsFRLG")(Gen3Commands)
 
 return Gen3Commands
