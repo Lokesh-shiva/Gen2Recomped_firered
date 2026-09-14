@@ -24120,6 +24120,17 @@ function RomExtractorGen3:extractPlayerBackPicFireRed()
     forms[who].backIndex = k
     forms[who].trueColor = true
   end
+  -- ...and the overworld sheets, which Emerald derives from its own avatar
+  -- table but FireRed lays out as two fixed runs of seven:
+  -- OBJ_EVENT_GFX_RED_NORMAL..RED_VS_SEEKER_BIKE (0..6) and GREEN_* (7..13),
+  -- in the order normal, bike, surf, field move (sPlayerAvatarGfxIds)
+  local function gfx(id) return ("SPRITE_G3_%03d"):format(id) end
+  for who, first in pairs({ boy = 0, girl = 7 }) do
+    forms[who].walk = gfx(first)
+    forms[who].bike = gfx(first + 1)
+    forms[who].surf = gfx(first + 2)
+    forms[who].fieldMove = gfx(first + 3)
+  end
   field.playerForms = forms
   if images[FRLG_BACK.OLD_MAN] then
     local pics = field.playerPics or {}
@@ -35965,6 +35976,183 @@ function RomExtractorGen3:extractFireRedIntro()
               ok and "" or " (some missing -- the screen fills gaps in)")
 end
 
+-- ---------------------------------------------------------------------------
+-- STAGE: FireRed's NEW GAME -- the controls guide, Pikachu's pages and
+-- Professor Oak's speech (oak_speech.c).
+--
+-- Reported from play: "there is no prof oak introducing the game to us and
+-- then no way to choose rival name". FireRed was booting Emerald's Birch
+-- speech, which has neither. Everything this screen shows is read here from
+-- the addresses pret names: the lines, both preset name lists, the four
+-- 8bpp portraits, the platform, Pikachu, and the backgrounds.
+-- ---------------------------------------------------------------------------
+
+RomExtractorGen3.FRLG_OAK_SPEECH = {
+  TEXT = {
+    welcome = 0x1C5C78, thisWorld = 0x1C5D06, inhabited = 0x1C5D12,
+    iStudy = 0x1C5D4A, tellMe = 0x1C5DBC, askGender = 0x1C59D4,
+    yourName = 0x1C5DEA, soYourName = 0x1C5E12, whatWasHisName = 0x1C5E2E,
+    rivalNameAgain = 0x1C5E90, confirmRival = 0x1C5EB4,
+    rememberRival = 0x1C5EC4, letsGo = 0x1C5EF4,
+    guideIntro = 0x1C582C, guideDPad = 0x1C5874, guideA = 0x1C58BA,
+    guideB = 0x1C58F8, guideStart = 0x1C592A, guideSelect = 0x1C594E,
+    guideLR = 0x1C5980,
+    controls = 0x415D2C, aNext = 0x415D48, aNextBBack = 0x415D50,
+    boy = 0x415D92, girl = 0x415D96, newName = 0x1C574E,
+  },
+  PIKACHU_PAGES = 0x462EF0,            -- sPikachuIntro_Strings (3 pointers)
+  MALE_NAMES = { 0x46308C, 19 },       -- pointer tables
+  FEMALE_NAMES = { 0x4630D8, 19 },
+  RIVAL_NAMES = { 0x463124, 4 },
+  BG_PALS = 0x460568,                  -- 4 banks, raw
+  GUIDE_TILES = 0x4605E8, PIKACHU_MAP = 0x460BA8,
+  OAK_TILES = 0x460CA4, OAK_MAP = 0x460CE8,
+  GUIDE_PAGE2 = 0x460D94, GUIDE_PAGE3 = 0x460E34,
+  PICS = {                             -- {pal, tiles, palette bank}
+    red = { 0x4615FC, 0x46163C, 4 }, leaf = { 0x460ED4, 0x460F14, 4 },
+    oak = { 0x461CD4, 0x461D14, 6 }, rival = { 0x4623AC, 0x4623EC, 6 },
+  },
+  PLATFORM = { GFX = 0x462A10, PAL = 0x4629D0, PALSIZE = 0x20, COLS = 4, ROWS = 4 },
+  PIKACHU_BODY = { GFX = 0x462B74, PAL = 0x4629F0, PALSIZE = 0x20, COLS = 4, ROWS = 4 },
+  PIKACHU_EARS = { GFX = 0x462D34, PAL = 0x4629F0, PALSIZE = 0x20, COLS = 4, ROWS = 2 },
+  PIKACHU_EYES = { GFX = 0x462E18, PAL = 0x4629F0, PALSIZE = 0x20, COLS = 2, ROWS = 1 },
+}
+
+function RomExtractorGen3:extractFireRedOakSpeech()
+  self:beginStage("Gen3 FireRed Oak speech")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local S = RomExtractorGen3.FRLG_OAK_SPEECH
+  local rom = self.rom
+  local record = { text = {}, maleNames = {}, femaleNames = {},
+                   rivalNames = {}, pikachuPages = {}, images = {} }
+
+  -- firered3d's string labels are sometimes a byte early (on the previous
+  -- string's terminator), which reads back as ""
+  for key, at in pairs(S.TEXT) do
+    for _, delta in ipairs({ 0, 1, -1 }) do
+      local ok, text = pcall(self.readText, self, at + delta, 600)
+      if ok and text and text ~= "" then
+        record.text[key] = text
+        break
+      end
+    end
+  end
+  for i = 0, 2 do
+    local ptr = rom:pointer(S.PIKACHU_PAGES + i * 4)
+    local ok, text = pcall(self.readText, self, ptr or 0, 600)
+    if ptr and ok and text then record.pikachuPages[i + 1] = text end
+  end
+  local function names(spec, into)
+    for i = 0, spec[2] - 1 do
+      local ptr = rom:pointer(spec[1] + i * 4)
+      local ok, text = pcall(self.readText, self, ptr or 0, 16)
+      if ptr and ok and text then into[#into + 1] = text end
+    end
+  end
+  names(S.MALE_NAMES, record.maleNames)
+  names(S.FEMALE_NAMES, record.femaleNames)
+  names(S.RIVAL_NAMES, record.rivalNames)
+
+  local function colours(raw)
+    local out = {}
+    for i = 0, math.floor(#raw / 2) - 1 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      out[i + 1] = { r, g, b }
+    end
+    return out
+  end
+  local bgColors = colours(rom:bytes(S.BG_PALS, 0x80))
+  local function save(key, img)
+    self:saveImage(img, "oak_speech_frlg/" .. key .. ".png")
+    record.images[key] = "assets/generated/oak_speech_frlg/" .. key .. ".png"
+  end
+
+  -- a 4bpp tilemap, `cols` wide, placed at a tile offset on a 240x160 canvas
+  local function compose(key, tiles, map, cols, rows, ox, oy)
+    local img = ImageWriter.blank(240, 160)
+    for ty = 0, rows - 1 do
+      for tx = 0, cols - 1 do
+        local c = ty * cols + tx
+        local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+        local tid, bank = e % 1024, math.floor(e / 4096) % 16
+        local px, py = (tx + ox) * 8, (ty + oy) * 8
+        if px < 240 and py < 160 and tid * 32 + 32 <= #tiles then
+          RomExtractorGen3.partyTile(img, tiles, bgColors, tid, bank, px, py)
+        end
+      end
+    end
+    save(key, img)
+  end
+  local okG, guideTiles = RomExtractorGen3.lz77ok(rom, S.GUIDE_TILES)
+  local okP, pikaMap = RomExtractorGen3.lz77ok(rom, S.PIKACHU_MAP)
+  if okG and okP then
+    compose("pikachuBg", guideTiles, pikaMap, 30, 19, 0, 2)
+    compose("guidePage2", guideTiles, rom:bytes(S.GUIDE_PAGE2, 0xA0), 5, 16, 1, 3)
+    compose("guidePage3", guideTiles, rom:bytes(S.GUIDE_PAGE3, 0xA0), 5, 16, 1, 3)
+  else
+    Logger.warn("gen3 frlg oak speech: the guide tiles did not decompress")
+  end
+  local okT, oakTiles = RomExtractorGen3.lz77ok(rom, S.OAK_TILES)
+  local okM, oakMap = RomExtractorGen3.lz77ok(rom, S.OAK_MAP)
+  if okT and okM then
+    compose("oakBg", oakTiles, oakMap, 32, math.floor(#oakMap / 64), 0, 0)
+  else
+    Logger.warn("gen3 frlg oak speech: the Oak background did not decompress")
+  end
+  -- the backdrop is palette 0 colour 0 of the scene's own palettes
+  record.backdrop = bgColors[1]
+
+  -- 8bpp portraits: a pixel is an absolute palette index into the bank the
+  -- pic's own 32 colours are loaded at (LoadTrainerPic)
+  for key, p in pairs(S.PICS) do
+    local okPic, px = RomExtractorGen3.lz77ok(rom, p[2])
+    if okPic and #px >= 64 * 96 then
+      local pal = colours(rom:bytes(p[1], 0x40))
+      local base = p[3] * 16
+      local img = ImageWriter.blank(64, 96)
+      -- the tiles are 8x12 laid row-major, 64 bytes each
+      for ty = 0, 11 do
+        for tx = 0, 7 do
+          local t = ty * 8 + tx
+          for y = 0, 7 do
+            for x = 0, 7 do
+              local v = px[t * 64 + y * 8 + x + 1] or 0
+              local c = v ~= 0 and pal[v - base + 1]
+              if c then
+                img:setPixel(tx * 8 + x, ty * 8 + y, c[1] / 255, c[2] / 255,
+                             c[3] / 255, 1)
+              end
+            end
+          end
+        end
+      end
+      save(key, img)
+    else
+      Logger.warn("gen3 frlg oak speech: the %s portrait did not decompress", key)
+    end
+  end
+
+  for key, def in pairs({ platform = S.PLATFORM, pikachuBody = S.PIKACHU_BODY,
+                          pikachuEars = S.PIKACHU_EARS, pikachuEyes = S.PIKACHU_EYES }) do
+    local img, frames = self:frlgIntroSpriteSheet(def, key)
+    if img then
+      save(key, img)
+      record.images[key] = { path = record.images[key], frames = frames,
+                             cols = def.COLS, rows = def.ROWS }
+    end
+  end
+
+  local constants = self._constants or {}
+  constants.gen3FRLGOakSpeech = record
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(record.text) do n = n + 1 end
+  Logger.info("Gen3 FireRed Oak speech: %d lines, %d/%d/%d names, %d pikachu pages",
+              n, #record.maleNames, #record.femaleNames, #record.rivalNames,
+              #record.pikachuPages)
+end
+
 function RomExtractorGen3:extractBagScreen()
   self:beginStage("Gen3 bag screen")
   local B = RomExtractorGen3.BAG_SCREEN
@@ -43435,6 +43623,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractTMCaseScreen",
   "extractBerryPouchScreen",
   "extractFireRedIntro",
+  "extractFireRedOakSpeech",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",

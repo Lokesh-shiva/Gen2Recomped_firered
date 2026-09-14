@@ -812,6 +812,17 @@ function Data:seedDefaults()
     if boot.screens.newGame == BOOT_DEFAULTS.screens.newGame then
       boot.screens.newGame = "BirchSpeech"
     end
+    -- FIRERED IS OAK'S, not Birch's: its own guide, Pikachu card and
+    -- professor, and a rival the player names rather than the other gender.
+    local frlgOak = (self.constants or {}).gen3FRLGOakSpeech
+    if type(frlgOak) == "table" and type(frlgOak.text) == "table"
+       and frlgOak.text.welcome then
+      if boot.screens.newGame == "BirchSpeech" then
+        boot.screens.newGame = "Gen3OakSpeechFRLG"
+      end
+      if boot.playerName == "BRENDAN" then boot.playerName = "RED" end
+      if boot.rivalName == "MAY" then boot.rivalName = "GREEN" end
+    end
     -- THE START MENU IS NOT THE GEN 2 ONE WITH DIFFERENT WORDS.  Its rows
     -- come off the cartridge (sStartMenuText, whose run IS the order), its
     -- fourth entry is a device Johto does not have, and it is drawn on a
