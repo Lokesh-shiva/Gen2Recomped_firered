@@ -1755,7 +1755,21 @@ function Gen3Battle.drawField(battle)
   local ground = Gen3Battle.backdrop(battle)
   if ground then
     g.setColor(1, 1, 1, 1)
-    g.draw(ground, 0, 0)
+    local slide = battle.frlgIntro and (battle.introSlide or 0) * 2 or 0
+    if slide > 0 then
+      -- BattleIntroSlide1's scanline split: the foe's half (rows 0-79) comes
+      -- in from the left, the player's half from the right
+      local W, H = Gen3Battle.WIDTH, Gen3Battle.HEIGHT
+      local top = g.newQuad(0, 0, W, 80, ground:getDimensions())
+      local bottom = g.newQuad(0, 80, W, H - 80, ground:getDimensions())
+      -- the background layer wraps, so the far side is never bare paper
+      g.draw(ground, top, -slide, 0)
+      g.draw(ground, top, W - slide, 0)
+      g.draw(ground, bottom, slide, 80)
+      g.draw(ground, bottom, slide - W, 80)
+    else
+      g.draw(ground, 0, 0)
+    end
   end
   Gen3Battle.drawWeather(battle)
 end
@@ -2283,6 +2297,20 @@ function Gen3Battle.draw(battle)
   shaken(function() Gen3Battle.drawBall(battle) end)
   battle:drawAnimLayer()
   shaken(function() battle:drawTextArea() end)
+
+  -- the window opening out of the middle: 1 row a side for 32 frames, then 4
+  -- (BattleIntroSlide1 cases 2 and 3); nothing shows outside it
+  local fi = battle.frlgIntro
+  if fi and fi.t < 60 then
+    local half = fi.t <= 32 and fi.t or (32 + (fi.t - 32) * 4)
+    if half < 80 then
+      local W, H = Gen3Battle.WIDTH, Gen3Battle.HEIGHT
+      g.setColor(0, 0, 0, 1)
+      g.rectangle("fill", 0, 0, W, 80 - half)
+      g.rectangle("fill", 0, 80 + half, W, H - 80 - half)
+      g.setColor(1, 1, 1, 1)
+    end
+  end
 
   if fx and fx.flash and fx.flash > 0 and battle.frame % 4 < 2 then
     g.setColor(1, 1, 1, 0.85)

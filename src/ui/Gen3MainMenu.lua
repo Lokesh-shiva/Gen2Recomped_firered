@@ -89,8 +89,12 @@ function Gen3MainMenu.new(game, opts)
     items[#items + 1] = { key = "continue", label = Strings("CONTINUE") }
   end
   items[#items + 1] = { key = "newGame", label = Strings("NEW GAME") }
-  items[#items + 1] = { key = "option", label = Strings("OPTION") }
-  items[#items + 1] = { key = "exit", label = Strings("EXIT GAME") }
+  -- FireRed's menu is CONTINUE and NEW GAME only (OPTION lives in the START
+  -- menu); B goes back to the title
+  if GameVersion.get() ~= "firered" then
+    items[#items + 1] = { key = "option", label = Strings("OPTION") }
+    items[#items + 1] = { key = "exit", label = Strings("EXIT GAME") }
+  end
   local hooked = Runtime.call("ui.title_menu.items", sameItems, game, items)
   if type(hooked) == "table" then
     items = hooked
