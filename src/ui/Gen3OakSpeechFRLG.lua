@@ -498,11 +498,26 @@ function Speech:drawTopBar(right)
   if self.phase == "guide" and self.page == 1 then
     drawLines(clean(self.text.controls) or "CONTROLS", 4, 1, 14, DARK, WHITE, 1)
   end
-  local a = clean(self.text.aNext) or " NEXT"
-  local ab = clean(self.text.aNextBBack) or a
-  local label = (self.page > 1) and ab or a
-  local w = Font.width and Font.width(label) or (#label * 6)
-  drawLines(label, GBA_W - w - 6, 1, 14, DARK, WHITE, 1)
+  -- {A_BUTTON} NEXT / {B_BUTTON} BACK: the button glyphs are control codes the
+  -- text reader drops, so they are drawn here as the small keypad icons
+  local function icon(letter, x)
+    love.graphics.setColor(DARK[1], DARK[2], DARK[3], 1)
+    love.graphics.rectangle("fill", x, 3, 11, 10, 3, 3)
+    love.graphics.setColor(1, 1, 1, 1)
+    drawLines(letter, x + 3, 1, 14, WHITE, DARK, 1)
+    return x + 13
+  end
+  local nextWord = ((clean(self.text.aNext) or "NEXT"):gsub("^%s+", ""))
+  local parts = { { "A", nextWord } }
+  if self.page > 1 then parts[2] = { "B", "BACK" } end
+  local width = 0
+  for _, p in ipairs(parts) do width = width + 13 + Font.width(p[2]) + 6 end
+  local x = GBA_W - width - 2
+  for _, p in ipairs(parts) do
+    x = icon(p[1], x)
+    drawLines(p[2], x, 1, 14, DARK, WHITE, 1)
+    x = x + Font.width(p[2]) + 6
+  end
 end
 
 function Speech:drawGuide()
