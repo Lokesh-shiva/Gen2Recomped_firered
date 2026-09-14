@@ -5211,6 +5211,38 @@ function RomExtractorGen3:extractFont()
     end
   end
 
+  -- FIRERED'S DIALOGUE BOX IS NOT A USER FRAME.  DrawDialogueFrame lays
+  -- eighteen tiles of gMenuMessageWindow_Gfx two tiles deep at each end (the
+  -- rounded caps) in sTextWindowPalettes[0]; the user frames only border
+  -- menus.  Baked as one 18-tile strip for Font.drawDialogueBox.
+  local dialogueRecord = nil
+  if (self.manifest or {}).frlgItemMenu ~= nil then
+    local ok, err = pcall(function()
+      local GFX, PAL, N = 0x41F1C8, 0x471DEC, 18
+      local colors = RomGba.palette(self.rom:bytes(PAL, 32))
+      local raw = self.rom:bytes(GFX, N * 32)
+      local px = RomGba.tiles4bpp(raw, N, 1)
+      local image = ImageWriter.blank(N * 8, 8)
+      for y = 1, 8 do
+        for x = 1, N * 8 do
+          local v = px[y][x]
+          local c = v ~= 0 and colors[v + 1]
+          if c then
+            image:setPixel(x - 1, y - 1, c[1] / 255, c[2] / 255, c[3] / 255, 1)
+          end
+        end
+      end
+      self:saveImage(image, "fonts/frlg_dialogue.png")
+      local fill = colors[2]
+      dialogueRecord = {
+        image = "assets/generated/fonts/frlg_dialogue.png", tile = 8, tiles = N,
+        fill = { fill[1] / 255, fill[2] / 255, fill[3] / 255 },
+        source = ("ROM:gMenuMessageWindow_Gfx %07X, sTextWindowPalettes %07X"):format(GFX, PAL),
+      }
+    end)
+    if not ok then Logger.warn("gen3 frlg dialogue frame: %s", tostring(err)) end
+  end
+
   local count = math.floor(tonumber(font.count) or 512)
   local perRow = 16
   local cellW = math.floor(tonumber(font.cellWidth) or 8)
@@ -5577,6 +5609,7 @@ function RomExtractorGen3:extractFont()
     frame = frameRecord and "sheet" or "drawn",
     -- the twenty border sets the OPTION screen's FRAME row picks between
     frames = frameRecord,
+    dialogueFrame = dialogueRecord,
     -- the cursor and the more-below marker, which are drawn shapes in cells
     -- the cartridge leaves blank; see the note above extractFont's page pass
     symbols = { cursor = SYMBOLS.cursor,
@@ -7644,6 +7677,10 @@ function RomExtractorGen3:extractTrainerMoney()
   end
   local classCount = 0
   for _ in pairs(classes) do classCount = classCount + 1 end
+  -- FireRed's classes run to $6B (it keeps Ruby's alongside its own), past
+  -- the names this cache read; `used` below still ties every row to a class
+  -- a real trainer has
+  if (self.manifest or {}).frlgItemMenu ~= nil then classCount = 256 end
 
   -- which classes trainers really have, which is what turns a plausible run
   -- into the right one
@@ -33162,6 +33199,52 @@ function RomExtractorGen3:extractBattleBackgrounds()
     local praw = tmap and lzOf(rom:pointer(o + 16), GEN3_TERRAIN_PAL_BYTES)
     if not praw then return nil end
     return { at = o, tiles = tiles, map = tmap, palette = praw }
+  end
+
+  -- FIRERED'S TABLE IS NOT EMERALD'S SHAPE: twenty rows (the last ten are the
+  -- link room, gyms and the Elite Four sharing the indoor sheets under their
+  -- own palettes), and its tile sheets are cut to what they use rather than a
+  -- full 256 tiles -- so the size test above never matches a row.  Read the
+  -- table where pokefirered puts it (sBattleTerrainTable).
+  if (self.manifest or {}).frlgItemMenu ~= nil then
+    local FRLG_TABLE = 0x24EE34
+    local FRLG_NAMES = {
+      "GRASS", "LONG_GRASS", "SAND", "UNDERWATER", "WATER", "POND", "MOUNTAIN",
+      "CAVE", "BUILDING", "PLAIN", "LINK", "GYM", "LEADER", "INDOOR_2",
+      "INDOOR_1", "LORELEI", "BRUNO", "AGATHA", "LANCE", "CHAMPION",
+    }
+    local images, written = {}, 0
+    for i, name in ipairs(FRLG_NAMES) do
+      local o = FRLG_TABLE + (i - 1) * 20
+      local ok = pcall(function()
+        local okT, tiles = RomExtractorGen3.lz77ok(rom, rom:pointer(o))
+        local okM, tmap = RomExtractorGen3.lz77ok(rom, rom:pointer(o + 4))
+        local okP, praw = RomExtractorGen3.lz77ok(rom, rom:pointer(o + 16))
+        if not (okT and okM and okP) then return end
+        local colors = {}
+        for k = 0, math.floor(#praw / 2) - 1 do
+          local r, g, b = RomGba.bgr555(praw[k * 2 + 1] + praw[k * 2 + 2] * 256)
+          colors[GEN3_TERRAIN_PAL_SLOT * 16 + k + 1] = { r, g, b }
+        end
+        local image = self:battleBackgroundImage(tiles, tmap, colors)
+        if not image then return end
+        self:saveImage(image, ("battle/bg/%s.png"):format(name:lower()))
+        images[name] = ("assets/generated/battle/bg/%s.png"):format(name:lower())
+        written = written + 1
+      end)
+      if not ok then Logger.warn("gen3 battle backgrounds (FRLG): %s did not compose", name) end
+    end
+    if written > 0 then
+      local constants = self._constants or {}
+      constants.gen3BattleTerrain = {
+        order = FRLG_NAMES, images = images, paletteSlot = GEN3_TERRAIN_PAL_SLOT,
+        source = ("ROM:sBattleTerrainTable %07X, %d rows"):format(FRLG_TABLE, #FRLG_NAMES),
+      }
+      self._constants = constants
+      self:write("constants", constants)
+    end
+    Logger.info("Gen3 battle backgrounds (FRLG): %d of %d terrains", written, #FRLG_NAMES)
+    return
   end
 
   local starts = {}

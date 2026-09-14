@@ -616,11 +616,15 @@ L.playse = function(ir, s)
   if song then emit(s, { "play_sound", song }) end
 end
 L.waitse = L.nop
+-- A FANFARE STARTS AND THE SCRIPT KEEPS GOING: `playfanfare / message /
+-- waitmessage / waitfanfare` prints "received" while the jingle plays.
+-- Lowered to a blocking play_once, the box only appeared after the whole
+-- rendered song -- trailing silence included -- had run out.
 L.playfanfare = function(ir, s)
   local song = songLabel(ir[2])
-  if song then emit(s, { "play_once", song }) end
+  if song then emit(s, { "g3_play_fanfare", song, tonumber(ir[2]) }) end
 end
-L.waitfanfare = L.nop
+L.waitfanfare = function(_, s) emit(s, { "g3_wait_fanfare" }) end
 L.playbgm = function(ir, s)
   local song = songLabel(ir[2])
   if song then emit(s, { "play_music", song }) end

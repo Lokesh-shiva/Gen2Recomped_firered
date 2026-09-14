@@ -1589,13 +1589,39 @@ function FadeOverlay:update(dt)
       for i = #states, 1, -1 do
         if states[i] == self then table.remove(states, i) break end
       end
+      self:releaseVeil()
       if ow then ow.fadeOverlay = nil end
     end
     if ramp.onDone then ramp.onDone() end
   end
 end
 
+-- ...AND ON THE WHOLE SURFACE'S ORIGIN.  A state with no uiSize is centred as
+-- Game Boy furniture (Game:draw's classicOffset), which slid the 240x160
+-- rectangle 40 right and 8 down and left an unfaded L down the left and top
+-- through Mom's heal.
+function FadeOverlay:uiSize()
+  return require("src.ui.Theme").uiSize()
+end
+
+function FadeOverlay:releaseVeil()
+  local r = self.game and self.game.renderer
+  if self.ownsVeil and r then r.screenVeil = nil end
+  self.ownsVeil = nil
+end
+
 function FadeOverlay:draw()
+  -- A PALETTE FADE HAS NO OUTSIDE.  When nothing is drawn over the fade it is
+  -- painted as the renderer's whole-window veil, so the world bleeding past
+  -- the 240x160 surface darkens with it; with a box above it, it stays a
+  -- rectangle in the surface so the box remains readable.
+  local r = self.game and self.game.renderer
+  if r and self.game.stack:top() == self then
+    r.screenVeil = { self.color == "white" and 1 or 0, self.alpha or 0 }
+    self.ownsVeil = true
+    return
+  end
+  self:releaseVeil()
   if self.color == "white" then
     love.graphics.setColor(1, 1, 1, self.alpha)
   else

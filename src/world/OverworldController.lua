@@ -1520,6 +1520,13 @@ function OverworldState:sgbPalettes()
     end
     return zones
   end
+  -- A TRUE-COLOUR MAP'S BOXES ARE TRUE COLOUR TOO: the same exemption
+  -- sgbWorldZones makes for the world pass.  Without it the dialogue frame
+  -- and its letters went through the four-shade remap and came out green.
+  if not PaletteFX.monoMode() and self.map and self.map.renderer
+      and self.map.renderer.isTrueColor and self.map.renderer:isTrueColor() then
+    return {}
+  end
   return PaletteFX.wholeNamed(Game.data, mapName)
 end
 
