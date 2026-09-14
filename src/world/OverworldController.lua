@@ -1706,6 +1706,8 @@ function OverworldState:pushBattleTransition(battle, opts, onDone)
   end, {
     trainer = battle and battle.kind == "trainer",
     stronger = lead ~= nil and enemyLevel >= lead.level + 3,
+    -- FireRed picks on a plain comparison (GetWildBattleTransition)
+    weaker = lead ~= nil and enemyLevel < lead.level,
     dungeon = self:isDungeonTransitionMap(),
     tutorial = opts and opts.tutorial or nil,
     contest = opts and opts.contest or nil,
