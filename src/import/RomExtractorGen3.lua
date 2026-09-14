@@ -36681,6 +36681,153 @@ function RomExtractorGen3:extractFireRedSummary()
               tostring(text.pageInfo), tostring(text.pageSkills), tostring(text.pageMoves))
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S TOWN MAP (pokefirered src/region_map.c)
+--
+-- One 4bpp sheet (sRegionMap_Gfx) in five palette rows (sRegionMap_Pal), four
+-- BG0 tilemaps -- Kanto and the three Sevii pages -- and the section grids
+-- the cursor reads: [layer MAP, layer DUNGEON][15 rows][22 columns] per page,
+-- a cell centred on screen at (8x + 36, 8y + 36).  Names are sMapNames,
+-- indexed by mapsec - KANTO_MAPSEC_START.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_REGION_MAP = {
+  TILES = 0x3EF61C, PAL = 0x3EF2DC, TOPBAR_PAL = 0x3EF23C,
+  MAPS = { kanto = 0x3F089C, sevii123 = 0x3F0AFC, sevii45 = 0x3F0C0C, sevii67 = 0x3F0CF0 },
+  SECTIONS = { kanto = 0x3F2490, sevii123 = 0x3F2724, sevii45 = 0x3F29B8, sevii67 = 0x3F2C4C },
+  CURSOR = 0x3EF4E0, CURSOR_PAL = 0x3EF25C,
+  ICON_RED = 0x3EF524, ICON_RED_PAL = 0x3EF27C,
+  ICON_LEAF = 0x3EF59C, ICON_LEAF_PAL = 0x3EF29C,
+  NAMES = 0x3F1CAC, NAME_COUNT = 109, MAPSEC_START = 0x58,
+  TEXT = { dpadMove = 0x418EB4, aGuide = 0x418E8C, aCancel = 0x418E94,
+           aSwitch = 0x418EA6, aOk = 0x418EB0 },
+}
+
+function RomExtractorGen3:extractFireRedRegionMap()
+  self:beginStage("Gen3 FireRed region map")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local R = RomExtractorGen3.FRLG_REGION_MAP
+  local rom = self.rom
+  local function colours(at, n)
+    local raw = rom:bytes(at, n * 2)
+    local out = {}
+    for i = 0, n - 1 do
+      local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+      out[i] = { r, g, b }
+    end
+    return out
+  end
+  local okT, tiles = RomExtractorGen3.lz77ok(rom, R.TILES)
+  if not okT then Logger.warn("gen3 frlg region map: tiles did not decompress") return end
+  local pal = colours(R.PAL, 80)
+  local images = {}
+  local function save(key, img)
+    self:saveImage(img, "regionmap_frlg/" .. key .. ".png")
+    images[key] = "assets/generated/regionmap_frlg/" .. key .. ".png"
+  end
+  for key, at in pairs(R.MAPS) do
+    pcall(function()
+      local ok, map = RomExtractorGen3.lz77ok(rom, at)
+      if not ok then return end
+      local cols = (#map % 60 == 0 and #map <= 1200) and 30 or 32
+      local img = ImageWriter.blank(240, 160)
+      for cy = 0, 19 do
+        for cx = 0, 29 do
+          local c = cy * cols + cx
+          local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+          local tid, bank = e % 1024, math.floor(e / 4096) % 16
+          local hflip, vflip = math.floor(e / 1024) % 2 == 1, math.floor(e / 2048) % 2 == 1
+          local base = tid * 32
+          if base + 32 <= #tiles then
+            for y = 0, 7 do
+              for x = 0, 7 do
+                local sx = hflip and (7 - x) or x
+                local sy = vflip and (7 - y) or y
+                local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+                local v = (sx % 2 == 0) and byte % 16 or math.floor(byte / 16)
+                local col = pal[bank * 16 + v]
+                if col then
+                  img:setPixel(cx * 8 + x, cy * 8 + y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+                end
+              end
+            end
+          end
+        end
+      end
+      save(key, img)
+    end)
+  end
+  -- sprites: LZ77 4bpp frames of 16x16, stacked into a strip
+  local function sprite(key, at, palAt)
+    pcall(function()
+      local ok, raw = RomExtractorGen3.lz77ok(rom, at)
+      if not ok then return end
+      local p = colours(palAt, 16)
+      local frames = math.max(1, math.floor(#raw / 128))      local img = ImageWriter.blank(16 * frames, 16)
+      for f = 0, frames - 1 do
+        for y = 0, 15 do
+          for x = 0, 15 do
+            local byte = raw[f * 128 + y * 8 + math.floor(x / 2) + 1] or 0
+            local v = (x % 2 == 0) and byte % 16 or math.floor(byte / 16)
+            local col = v ~= 0 and p[v]
+            if col then img:setPixel(f * 16 + x, y, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
+          end
+        end
+      end
+      save(key, img)
+    end)
+  end
+  sprite("cursor", R.CURSOR, R.CURSOR_PAL)
+  sprite("icon_red", R.ICON_RED, R.ICON_RED_PAL)
+  sprite("icon_leaf", R.ICON_LEAF, R.ICON_LEAF_PAL)
+  local sections = {}
+  for key, at in pairs(R.SECTIONS) do
+    local layers = {}
+    for layer = 0, 1 do
+      local rows = {}
+      for y = 0, 14 do
+        local row = {}
+        for x = 0, 21 do row[x + 1] = rom:u8(at + layer * 330 + y * 22 + x) end
+        rows[y + 1] = row
+      end
+      layers[layer + 1] = rows
+    end
+    sections[key] = layers
+  end
+  local names = {}
+  for i = 0, R.NAME_COUNT - 1 do
+    local ptr = rom:pointer(R.NAMES + i * 4)
+    if ptr then
+      local ok, t = pcall(self.readText, self, ptr, 24)
+      if ok and t then names[R.MAPSEC_START + i] = t end
+    end
+  end
+  local text = {}
+  for key, a in pairs(R.TEXT) do
+    local ok, t = pcall(self.readText, self, a, 12)
+    if ok and t then text[key] = t end
+  end
+  -- MAPSEC_NONE: whatever fills most of Kanto's dungeon layer
+  local counts, none, best = {}, nil, -1
+  for _, row in ipairs((sections.kanto or {})[2] or {}) do
+    for _, v in ipairs(row) do counts[v] = (counts[v] or 0) + 1 end
+  end
+  for v, c in pairs(counts) do if c > best then none, best = v, c end end
+  local top = colours(R.TOPBAR_PAL, 16)
+  local constants = self._constants or {}
+  constants.gen3FRLGRegionMap = {
+    images = images, sections = sections, names = names, text = text,
+    none = none,
+    colors = { white = top[1], shadow = top[2], bar = top[15] },
+    source = "ROM:region_map.c sRegionMap_Gfx, sKanto/Sevii tilemaps, sRegionMapSections, sMapNames",
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  local n = 0
+  for _ in pairs(names) do n = n + 1 end
+  Logger.info("Gen3 FireRed region map: %d names; %s / %s", n,
+              tostring(names[0x58]), tostring(text.dpadMove))
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -44431,6 +44578,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedTrainerCard",
   "extractFireRedPokedex",
   "extractFireRedSummary",
+  "extractFireRedRegionMap",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
