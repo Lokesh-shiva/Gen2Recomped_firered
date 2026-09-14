@@ -5161,7 +5161,9 @@ function RomExtractorGen3:frameSheet(at, count)
     local px = RomGba.tiles4bpp(raw, 3, 3)
     for y = 1, CELL do
       for x = 1, CELL do
-        local c = colors[px[y][x] + 1]
+        -- colour 0 is transparent on the GBA; baking it in put a green halo
+        -- (the palette's key colour) round every framed window
+        local c = px[y][x] ~= 0 and colors[px[y][x] + 1]
         if c then
           image:setPixel(x - 1, frame * CELL + y - 1,
                          c[1] / 255, c[2] / 255, c[3] / 255, 1)
@@ -33986,10 +33988,17 @@ function RomExtractorGen3:extractTilesetAnimations()
       if clash then
         clashes = clashes + 1
       else
+      -- FireRed's cadences, by destination tile (tileset_anims.c: sand edge
+      -- every 8, water and flowers 16, Celadon fountain 12, Silph 10, Mt.
+      -- Ember steam 16, Vermilion Gym door 2, Celadon Gym flowers 16)
+      local frlgStep = (self.manifest or {}).frlgItemMenu ~= nil and ({
+        [464] = 8, [416] = 16, [508] = 16, [744] = 12, [976] = 10,
+        [896] = 16, [880] = 2, [739] = 16,
+      })[hit.tile] or nil
       ts.animations[#ts.animations + 1] = {
         tile = hit.local_,
         count = math.floor(hit.size / 32),
-        step = A.STEP,
+        step = frlgStep or A.STEP,
         frames = hit.frames,
         source = ("ROM:%07X x%d, to tile %d%s")
                  :format(hit.array, #hit.frames, hit.tile,
@@ -34006,6 +34015,13 @@ function RomExtractorGen3:extractTilesetAnimations()
 
   local movingCount = 0
   for _ in pairs(moving) do movingCount = movingCount + 1 end
+  -- a tileset this stage looked at and found still says so, so the renderer
+  -- can tell "holds still" from "imported before this stage existed"
+  for key, ts in pairs(sets) do
+    if key ~= "_romInfo" and type(ts) == "table" and ts.animations == nil then
+      ts.animations = {}
+    end
+  end
   self:write("map_tilesets", sets)
   Logger.info("Gen3 tileset animations: %d found, %d identified by a shipped "
                 .. "frame, %d by a pool neighbour, %d by the tileset's own "
