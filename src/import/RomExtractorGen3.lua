@@ -6664,6 +6664,11 @@ end
 
 function RomExtractorGen3:surfBlob()
   local runs = self:fieldEffectTemplates()
+  -- FIRERED: gFieldEffectObjectTemplatePointers is known (36 entries), and
+  -- the shape scan does not isolate it there, so read it where it is
+  if (self.manifest or {}).frlgItemMenu ~= nil then
+    runs = { { at = 0x3A0010, count = 36 } }
+  end
   -- SEVERAL RUNS OF TEMPLATES ARE LONG ENOUGH -- the cartridge has other
   -- template tables, one of them 141 entries -- so the run is not chosen by
   -- LENGTH.  It is chosen by holding the thing being looked for: exactly one
@@ -37308,6 +37313,40 @@ function RomExtractorGen3:extractFireRedNaming()
   Logger.info("Gen3 FireRed naming screen: %d images", n)
 end
 
+-- ---------------------------------------------------------------------------
+-- FIRERED'S LEDGE-HOP SHADOW (field_effect_helpers.c FldEff_Shadow): the
+-- medium shadow, two raw 8x8 tiles in gFieldEffectObjectPalette0, centred
+-- (height/2 - 4) below the jumper's own centre, which the hop's y2 never moves.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_FIELD_SHADOW = { PIC = 0x398068, PAL = 0x398FA8 }
+
+function RomExtractorGen3:extractFireRedFieldShadow()
+  self:beginStage("Gen3 FireRed field shadow")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local S = RomExtractorGen3.FRLG_FIELD_SHADOW
+  local rom = self.rom
+  local ok, err = pcall(function()
+    local raw = rom:bytes(S.PAL, 32)
+    local pal = {}
+    for i = 0, 15 do pal[i] = { RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256) } end
+    local px = RomGba.tiles4bpp(rom:bytes(S.PIC, 64), 2, 1)
+    local img = ImageWriter.blank(16, 8)
+    for y = 1, 8 do
+      for x = 1, 16 do
+        local c = px[y][x] ~= 0 and pal[px[y][x]]
+        if c then img:setPixel(x - 1, y - 1, c[1] / 255, c[2] / 255, c[3] / 255, 1) end
+      end
+    end
+    self:saveImage(img, "field_frlg/shadow_medium.png")
+  end)
+  if not ok then Logger.warn("gen3 frlg field shadow: %s", tostring(err)) return end
+  local constants = self._constants or {}
+  constants.gen3FieldShadow = { path = "assets/generated/field_frlg/shadow_medium.png",
+                                offsetY = -4, source = "ROM:gFieldEffectObjectPic_ShadowMedium" }
+  self._constants = constants
+  self:write("constants", constants)
+end
+
 function RomExtractorGen3:extractFireRedIntro()
   self:beginStage("Gen3 FireRed intro")
   if (self.manifest or {}).frlgItemMenu == nil then
@@ -45062,6 +45101,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedStorage",
   "extractFireRedPocketArt",
   "extractFireRedNaming",
+  "extractFireRedFieldShadow",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
