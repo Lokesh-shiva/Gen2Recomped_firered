@@ -1169,6 +1169,32 @@ function Map:currentAt(cx, cy)
   return b and currents[b] or nil
 end
 
+-- THE TILES THAT WALK YOU FOR YOU, as one row: { way = "down", slide = true }.
+--
+-- sForcedMovementTestFuncs / sForcedMovementFuncs, paired by index and read
+-- in RomExtractorGen3:forcedMovementBehaviours.  The record covers the water
+-- currents and the waterfall as well as the eight walk/slide floors, because
+-- the cartridge really does answer all thirteen out of the same two tables --
+-- the caller decides which of them are its business.
+function Map:forcedMovementAt(cx, cy)
+  if not self.tileset.behaviourBytes then return nil end
+  local rows = self.tileset.forcedMovement
+  if not rows then return nil end
+  local b = self:cellBehaviour(cx, cy)
+  return b and rows[b] or nil
+end
+
+-- Lavaridge's two holes, as one row: { kind = "sink"|"launch", ... }.  Both
+-- are ordinary fall-through holes to the warp code; this says which of the
+-- gym's two animations the cell asks for.
+function Map:lavaridgeWarpAt(cx, cy)
+  if not self.tileset.behaviourBytes then return nil end
+  local rows = self.tileset.lavaridgeWarps
+  if not rows then return nil end
+  local b = self:cellBehaviour(cx, cy)
+  return b and rows[b] or nil
+end
+
 -- "up"/"down" when the cell is an escalator, nil otherwise.
 --
 -- Every escalator in Hoenn already carries a warp EVENT, so the player was

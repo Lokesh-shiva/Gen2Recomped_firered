@@ -2218,6 +2218,16 @@ function Commands.g3_set_flash_level(ctx, level)
   require("src.world.Gen3Flash").setLevel(game, valueOf(ctx, level))
 end
 
+-- animateflash: the same level, reached one pixel at a time.  AnimateFlash
+-- (0B009C) hands the two radii to a task whose step is 1 and then blocks the
+-- script on it; the block is left out here, because the window is drawn from
+-- the save and nothing a script does next depends on it having arrived.
+function Commands.g3_animate_flash(ctx, level)
+  local game = ctx.game
+  if not game then return end
+  require("src.world.Gen3Flash").animateTo(game, valueOf(ctx, level))
+end
+
 function Commands.g3_set_layout(ctx, layoutId)
   local ow = ctx.overworld
   if ow and ow.map then ow.map.gen3LayoutOverride = tonumber(layoutId) end
@@ -4051,6 +4061,109 @@ Gen3Commands.SPECIALS[147] = function(ctx)
     map:setBlock(at[1], at[2], M.PRESSED_SWITCH, false)
   end
   return mauvilleSweep(ctx, MAUVILLE_OFF, false)
+end
+
+-- ---------------------------------------------------------------------------
+-- PETALBURG GYM: 148 AND 149, AND THE DOORS THAT NEVER OPENED.
+--
+-- Norman's gym is eight rooms behind eight sliding doors, and the two specials
+-- that open them were never written, so every door in the gym stayed shut in
+-- the picture for the whole game.  The gym is still crossable without them --
+-- what actually lets you THROUGH is the eight `setmetatile` sub-scripts the
+-- same room blocks call, which write 528/529 passable over the doorway the
+-- door leads to, and those are ordinary opcodes this VM has always lowered --
+-- so this is the half you can see rather than the half you can walk.
+--
+-- PetalburgGymSetDoorMetatiles (0138978) is the whole of both specials: a
+-- jump table on room - 1 (0x01389A0, eight arms), each arm naming that room's
+-- door cells, and then one tail (0138A40) that writes TWO cells a door --
+--
+--     (x, y)     <- the frame's metatile
+--     (x, y + 1) <- that metatile PLUS EIGHT
+--
+-- because a Hoenn tileset is eight metatiles to a row, so +8 is the tile
+-- directly beneath.  Both cells are written with 0xC00 OR'd in, which is the
+-- collision mask: A DOOR CELL IS IMPASSABLE IN EVERY FRAME, the open one
+-- included.  That is not a bug to fix -- the shipped map already has those
+-- cells blocked, and the doorway you walk through is a different cell.
+--
+-- 148 SlideOpenRoomDoors plays SE 44 and hands the job to a task (0138910)
+-- that walks five frames with the delay list at 0x085B2B78 -- {0,1,1,1,1} --
+-- redrawing the whole map view after each, and calls
+-- EnableBothScriptContexts when it retires, which is what the script's
+-- `waitstate` is waiting for.  149 UnlockRoomDoors does the same write ONCE
+-- with the last frame and does not wait: it is the instant form the gym's
+-- ON_LOAD uses to put back the doors you already opened.
+--
+-- The room number is VAR_0x8004 and the mode is VAR_0x8005 (0 slides, 1
+-- snaps), both set by the room block that calls these.
+-- ---------------------------------------------------------------------------
+
+Gen3Commands.PETALBURG_DOORS = {
+  -- raw map coordinates, off the eight jump-table arms at 0x01389A0; every
+  -- one of the twelve was checked back against the shipped layout, which has
+  -- metatile 0x218 at (x,y) and 0x220 at (x,y+1) on all of them
+  ROOMS = {
+    [1] = { { 1, 104 }, { 7, 104 } },
+    [2] = { { 1, 78 },  { 7, 78 } },
+    [3] = { { 1, 91 },  { 7, 91 } },
+    [4] = { { 7, 39 } },
+    [5] = { { 1, 52 },  { 7, 52 } },
+    [6] = { { 1, 65 } },
+    [7] = { { 7, 13 } },
+    [8] = { { 1, 26 } },
+  },
+  -- 0x085B2B7E, five halfwords: the slide, closed to open
+  FRAMES = { 0x218, 0x219, 0x21A, 0x21B, 0x21C },
+  -- 0x085B2B78, one delay a frame
+  DELAYS = { 0, 1, 1, 1, 1 },
+  BELOW = 8,             -- the tail's own `metatile + 8`
+  SOUND = 44,            -- `mov r0,#44 / bl PlaySE` at 01388F0
+}
+
+-- One frame of the slide, written into the map.  Shared by both specials,
+-- exactly as the cartridge shares 0138978.
+function Gen3Commands.petalburgDoorFrame(map, room, frame)
+  local P = Gen3Commands.PETALBURG_DOORS
+  local cells = P.ROOMS[math.floor(tonumber(room) or 0)]
+  local tile = P.FRAMES[math.floor(tonumber(frame) or 0) + 1]
+  if not (map and map.setBlock and cells and tile) then return false end
+  for _, at in ipairs(cells) do
+    -- impassable on both halves and in every frame -- the tail ORs 0xC00
+    map:setBlock(at[1], at[2], tile, true)
+    map:setBlock(at[1], at[2] + 1, tile + P.BELOW, true)
+  end
+  return true
+end
+
+-- 148: slide them open, over nine frames, with the script held at waitstate
+Gen3Commands.SPECIALS[148] = function(ctx)
+  local ow = ctx.overworld
+  local map = ow and ow.map
+  local room = math.floor(tonumber(getVar(ctx.save, 0x8004)) or 0)
+  if not (map and Gen3Commands.PETALBURG_DOORS.ROOMS[room]) then return end
+  pcall(function()
+    require("src.core.Sound").playId(ctx.game and ctx.game.data,
+                                     Gen3Commands.PETALBURG_DOORS.SOUND)
+  end)
+  if not (ow.startGymDoorSlide and ow:startGymDoorSlide(room, ctx)) then
+    -- no clock to run it on: snap to the open frame rather than leave the
+    -- door half shut for the rest of the game
+    Gen3Commands.petalburgDoorFrame(map, room, #Gen3Commands.PETALBURG_DOORS.FRAMES - 1)
+    map.blocksDirty = true
+  end
+end
+
+-- 149: the same doors, already open, with nothing to wait for
+Gen3Commands.SPECIALS[149] = function(ctx)
+  local ow = ctx.overworld
+  local map = ow and ow.map
+  local room = tonumber(getVar(ctx.save, 0x8004))
+  local P = Gen3Commands.PETALBURG_DOORS
+  if not map then return end
+  if Gen3Commands.petalburgDoorFrame(map, room, #P.FRAMES - 1) then
+    map.blocksDirty = true
+  end
 end
 
 -- 183: DID YOU WIN?

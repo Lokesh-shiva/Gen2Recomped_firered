@@ -6163,11 +6163,23 @@ function BattleState:executeAction(user, target, action)
     -- trainer class AI actions (engine/battle/trainer_ai.asm)
     if action.special == "aiItem" then
       self.aiUses = (self.aiUses or 1) - 1
+      -- a Gen 3 trainer spends a SLOT, not a per-Pokemon allowance: the
+      -- cartridge nulls the entry in trainerItems as it emits the action, so
+      -- three FULL RESTOREs are three heals in the whole battle
+      if action.slot then
+        self.gen3ItemsUsed = self.gen3ItemsUsed or {}
+        self.gen3ItemsUsed[action.slot] = true
+      end
       for _, m in ipairs(TrainerAI.useItem(self, action.item)) do
         self:sayNext(prefixEnemy(m, self.enemy))
       end
       self:drainNext()
-      require("src.core.Sound").play(self.data, "Heal_Ailment")
+      -- the Gen 3 arm of useItem runs the item through ItemEffects, which
+      -- plays the cartridge's own fanfare for it; playing this one too would
+      -- put two heal sounds on the same frame
+      if not action.slot then
+        require("src.core.Sound").play(self.data, "Heal_Ailment")
+      end
       return
     end
     if action.special == "aiSwitch" then

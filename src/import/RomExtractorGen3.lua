@@ -8502,10 +8502,84 @@ end
 --
 -- struct Trainer is 40 bytes.  The party is behind `partyFlags`: bit 0 means
 -- each member carries a held item, bit 1 means it carries its own moves, and
--- the four combinations give four different member strides (8, 16, 16, 16).
--- Reading the wrong one gives a party of plausible-looking nonsense rather
--- than an error, so the flag is honoured rather than assumed.
+-- the combination decides how wide a member is.  Reading the wrong width
+-- gives a party of plausible-looking nonsense rather than an error, so the
+-- widths are MEASURED rather than reasoned about -- see partyStrides below.
+--
+-- THE HELD ITEM DOES NOT MAKE A MEMBER WIDER, and assuming it did is what
+-- this stage used to do.
+--
+-- Reported from play, of Route 110: "after defeating their first two pokemon
+-- they're throwing out a lvl 26 plusle which is way above the level I'm
+-- currently at".  POKeFAN ISABEL is gTrainers[302], partyFlags 2 -- a held
+-- item and the species' own moves -- and her two members were read sixteen
+-- bytes apart when they are eight, so her MINUN was fetched from the middle
+-- of gTrainers[303]: her own REMATCH entry, whose PLUSLE is level 26.
+--
+-- Every one of the thirty-one flag-2 trainers in Hoenn with more than one
+-- Pokemon had the same hole, and each of them was reading somebody else's
+-- team through it.
 -- ---------------------------------------------------------------------------
+
+-- HOW WIDE A PARTY MEMBER IS, counted off the cartridge's own layout.
+--
+-- The party blocks are laid out back to back in one run, so the distance from
+-- one trainer's party to the NEXT one that starts after it, divided by the
+-- first one's size, is that flag combination's member width -- and every
+-- trainer in the table votes.  A width is only used when its flag's vote is
+-- unanimous; anything less falls back to the shape rule at the call site,
+-- because a disagreement means the run is not a run on this dump and a
+-- majority would be a guess with a number on it.
+--
+-- On Emerald the four answers are 8, 16, 8 and 16 over 671, 87, 31 and 64
+-- votes -- so the held item rides in the halfword the no-item form leaves as
+-- padding, and only the four custom MOVES make a member wider.
+function RomExtractorGen3:partyStrides(base, count)
+  local rom = self.rom
+  local rows = {}
+  for i = 0, count - 1 do
+    local o = base + i * 40
+    local ptr = rom:pointer(o + 36)
+    local size = rom:u8(o + 32)
+    if ptr and size > 0 and size <= 6 then
+      rows[#rows + 1] = { at = ptr, flags = rom:u8(o), size = size }
+    end
+  end
+  table.sort(rows, function(a, b) return a.at < b.at end)
+
+  local votes = {}
+  for k = 1, #rows - 1 do
+    local row, nextAt = rows[k], rows[k + 1].at
+    local gap = nextAt - row.at
+    if gap > 0 and gap % row.size == 0 then
+      local width = gap / row.size
+      votes[row.flags] = votes[row.flags] or {}
+      votes[row.flags][width] = (votes[row.flags][width] or 0) + 1
+    end
+  end
+
+  local out, parts = {}, {}
+  for flags = 0, 3 do
+    local tally = votes[flags]
+    local only, n, total = nil, 0, 0
+    for width, seen in pairs(tally or {}) do
+      n = n + 1; only = width; total = total + seen
+    end
+    if n == 1 and total >= 2 then
+      out[flags] = only
+      parts[#parts + 1] = ("%d:%d(%d)"):format(flags, only, total)
+    else
+      parts[#parts + 1] = ("%d:?"):format(flags)
+      if tally then
+        Logger.warn("gen3 trainers: flag %d's party blocks do not agree on a "
+                    .. "member width -- falling back to the shape rule", flags)
+      end
+    end
+  end
+  Logger.info("Gen3 trainer parties: member widths %s",
+              table.concat(parts, " "))
+  return out
+end
 
 function RomExtractorGen3:extractTrainers()
   self:beginStage("Gen3 trainers")
@@ -8520,6 +8594,7 @@ function RomExtractorGen3:extractTrainers()
   -- species, item, move and ability bridges.
   local trainerOrder = {}
   local count = 855
+  local strides = self:partyStrides(base, count)
   for i = 0, count - 1 do
     local o = base + i * 40
     local flags = self.rom:u8(o)
@@ -8528,9 +8603,22 @@ function RomExtractorGen3:extractTrainers()
     trainerOrder[i] = id
     local partySize = self.rom:u8(o + 32)
     local partyPtr = self.rom:pointer(o + 36)
-    local hasItems = (flags % 2) == 1
-    local hasMoves = (math.floor(flags / 2) % 2) == 1
-    local stride = (hasMoves and 16) or (hasItems and 16) or 8
+    -- ...AND WHICH BIT IS WHICH, which the widths above settle.
+    --
+    -- Bit 0 was being read as the held item and bit 1 as the moves, and it is
+    -- the other way round.  The measured widths are the proof and they do not
+    -- need a header to agree with: flag 1 is SIXTEEN bytes and flag 2 is
+    -- EIGHT, and only four custom moves can make a member eight bytes wider
+    -- -- a held item is one halfword and fits in the padding the plain form
+    -- already has.  So bit 0 is the MOVES.
+    --
+    -- Swapped, every one of the 87 + 64 custom-move trainers in Hoenn fought
+    -- with its species' default moves and a "held item" that was really its
+    -- first move read as an item number, and every one of the 31 + 64
+    -- held-item trainers held nothing.
+    local hasMoves = (flags % 2) == 1
+    local hasItems = (math.floor(flags / 2) % 2) == 1
+    local stride = strides[flags] or (hasMoves and 16) or 8
     local party = {}
     if partyPtr and partySize > 0 and partySize <= 6 then
       for k = 0, partySize - 1 do
@@ -8584,6 +8672,37 @@ function RomExtractorGen3:extractTrainers()
       -- extractTrainerSprites fills `pic` in with the file it writes.
       picIndex = self.rom:u8(o + 3),
       doubleBattle = self.rom:u8(o + 24) ~= 0 or nil,
+      -- THE FOUR BATTLE ITEMS AND THE AI FLAGS -- struct Trainer.items[4] at
+      -- +0x10 and .aiFlags at +0x1C, the last two fields of the record that
+      -- were being read past.
+      --
+      -- 141 of Hoenn's 855 trainers carry one, and the ones that do are the
+      -- ones it shows on: every gym leader's rematch team carries THREE FULL
+      -- RESTOREs, Steven and Wallace carry FOUR, Tate & Liza four HYPER
+      -- POTIONs.  Unread, not one of them ever healed.
+      --
+      -- The slots are packed from 0 with no holes in all 855 records, so the
+      -- count is just the run of non-zero halfwords; `ShouldUseItem` reads
+      -- that count (battleHistory->itemsNo) to decide how many of them the
+      -- trainer is allowed to spend while its bench is still deep.
+      items = (function()
+        local list = {}
+        for k = 0, 3 do
+          local n = self.rom:u16(o + 16 + k * 2)
+          if n == 0 then break end
+          local order = (self._constants or {}).itemOrder
+          list[#list + 1] = order and order[n] or n
+        end
+        return #list > 0 and list or nil
+      end)(),
+      -- AI_FLAG_* bitfield: bit 0 CHECK_BAD_MOVE, 1 TRY_TO_FAINT, 2
+      -- CHECK_VIABILITY, 3 SETUP_FIRST_TURN, 4 RISKY.  Hoenn uses seven
+      -- distinct sets -- $1 x640, $7 x173, $0 x16, $B x13, $3 x7, $17 x5,
+      -- $F x1 -- and nothing above bit 4.
+      aiFlags = (function()
+        local f = self.rom:u32(o + 28)
+        return f ~= 0 and f or nil
+      end)(),
       -- BattleState.newTrainer reads `parties[n]`, a LIST of parties, because
       -- Gen 1 and Gen 2 both give a trainer class several numbered teams.  A
       -- Gen 3 trainer is one record with one team, so it becomes a list of
@@ -14823,6 +14942,7 @@ end
 RomExtractorGen3.START_MENU = {
   BUILD_FN = 0x9F4E8,
   CMP_R0 = 0x2800, MOV_R0 = 0x2000,
+  BX_R = 0x4700,              -- `bx rN`, which is where a predicate ends
   ROWS = {
     { key = "pokedexFlag", name = "POKeDEX",
       atFlag = -0x1A, atCmp = -0x10, atRow = -0x0C, row = 0 },
@@ -23207,6 +23327,288 @@ function RomExtractorGen3:weatherNames()
   return GEN3_WEATHER_NAMES
 end
 
+-- ---------------------------------------------------------------------------
+-- THE TILES THAT WALK YOU, which is a pair of tables and nothing else.
+--
+-- Reported from play, about Sootopolis: the gym's three barriers are cells
+-- you were walking straight through.  They are not walls -- their collision
+-- bits are zero -- they are MB_SLIDE_SOUTH, and the cartridge answers a step
+-- onto one by shoving you back off it.  Nothing in this port did.
+--
+-- GetForcedMovementByMetatileBehavior (08AB38) walks sForcedMovementTestFuncs
+-- from 0x084973FC, one predicate a row, and returns `index + 1` for the first
+-- that answers yes; DoPlayerAvatarTransition's caller (08AB14) then calls
+-- sForcedMovementFuncs[that] from 0x08497444.  So a row is a PAIR -- a
+-- predicate and an action -- and both halves say what they are in one
+-- instruction each:
+--
+--     the predicate opens `lsl/lsr r0,#24` and then `cmp r0,#behaviour`
+--     the action opens `mov r0,#direction` and then calls its driver
+--
+-- and there are exactly two drivers.  DoForcedMovement (08ABE0) is the walk.
+-- 08AD60 is the SLIDE, and it is the walk with two bits set first: bit 1 of
+-- the object's flag byte is facingDirectionLocked -- the same lock the Acro
+-- Bike's side jump uses -- and bit 2 is disableAnim.  So a slide is a walk
+-- you take without turning and without moving your legs, which is exactly
+-- what an ice-like floor should look like.
+--
+-- Nothing here is named.  A row whose predicate does not have exactly one
+-- `cmp` of its own, or whose action does not open with a direction and one of
+-- those two drivers, is DROPPED rather than guessed -- which is what keeps
+-- the three odd rows at the end of the table (a waterfall, two secret-base
+-- entrances and the muddy slope, all of which have their own handling) out of
+-- a record that is meant to be one rule.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FORCED_MOVEMENT = {
+  DISPATCH = 0x08AB38,        -- GetForcedMovementByMetatileBehavior
+  AT_COUNT = 0x4E,            -- its own `cmp r4,#imm`, the last index
+  CMP_R4 = 0x2C00,
+  TESTS = 0x4973FC,           -- sForcedMovementTestFuncs
+  FUNCS = 0x497444,           -- sForcedMovementFuncs, one longer at the front
+  WALK_DRIVER = 0x08ABE0,
+  SLIDE_DRIVER = 0x08AD60,
+  CMP_R0 = 0x2800, MOV_R0 = 0x2000,
+  BX_R = 0x4700,              -- `bx rN`, which is where a predicate ends
+  SCAN = 24,                  -- halfwords to look through for the opener
+  -- 1 = south, 2 = north, 3 = west, 4 = east, which is this cartridge's
+  -- direction numbering everywhere (GetPlayerMovementDirection, 0119DF8)
+  WAYS = { [1] = "down", [2] = "up", [3] = "left", [4] = "right" },
+}
+
+-- ---------------------------------------------------------------------------
+-- LAVARIDGE'S TWO HOLES, which are not the same hole.
+--
+-- Both floors of Flannery's gym are made of openings you fall through, and
+-- this port teleported you through either of them in silence.  The cartridge
+-- has a different animation for each, and the two are opposites: on 1F you
+-- SINK -- four beats of walking on the spot, each with its own sound, and
+-- then you drop -- and on B1F the steam ERUPTS and throws you up to the floor
+-- above, which opens with the room shaking.
+--
+-- Which hole is which is not guessed.  ForcedMovement's neighbour at 09CCF8
+-- is a chain of eight identical eight-instruction entries --
+--
+--     add r0,r4,#0 / bl <predicate> / lsl / lsr / cmp r0,#1 / bne / bl
+--     <starter> / mov r0,#1 / b
+--
+-- -- and the two Lavaridge starters are named in it by address.  So the
+-- behaviour comes out of the predicate the chain pairs with the starter, and
+-- a chain that has stopped looking like a chain records nothing rather than
+-- pairing the wrong two.
+--
+-- What is read out of each task is only what this port can actually show: the
+-- sound, and how long the beat or the shake lasts.  The sinking sprite and
+-- the geyser are field effects with art of their own and are not reproduced.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.LAVARIDGE_WARP = {
+  DISPATCH = 0x09CCF8, STRIDE = 0x16, ENTRIES = 8,
+  AT_PRED = 0x02, AT_CMP1 = 0x0A, AT_START = 0x0E,
+  CMP_R0_1 = 0x2801, ADD_R0_R4 = 0x1C20,
+  -- DoLavaridgeGymB1FWarp: the geyser
+  LAUNCH = { START = 0x0AF828, SHAKE_AT = 0x0B76A2,
+             RUMBLE_AT = 0x0B76EA, LAND_AT = 0x0B7998 },
+  -- DoLavaridgeGym1FWarp: the sink
+  SINK = { START = 0x0AF838, BEATS_AT = 0x0B7B32, SE_AT = 0x0B7B86 },
+  MOV_R0 = 0x2000, CMP_R0 = 0x2800, BX_R = 0x4700, SCAN = 24,
+}
+
+function RomExtractorGen3:lavaridgeWarps(tilesetPairs)
+  local L = RomExtractorGen3.LAVARIDGE_WARP
+  local rom = self.rom
+  if not rom then return end
+
+  local function imm(at, opcode)
+    local w = rom:u16(at)
+    if not w or w - w % 256 ~= opcode then return nil end
+    return w % 256
+  end
+  -- the behaviour a predicate tests, bounded by its own return
+  local function behaviourOf(at)
+    local found
+    for k = at, at + L.SCAN * 2, 2 do
+      local w = rom:u16(k)
+      if not w then return nil end
+      if w >= L.BX_R and w < L.BX_R + 0x80 and w % 8 == 0 then return found end
+      if w - w % 256 == L.CMP_R0 then
+        if found then return nil end
+        found = w % 256
+      end
+    end
+    return nil
+  end
+
+  -- walk the chain and keep the two entries whose starter this knows
+  local byStart = {}
+  for i = 0, L.ENTRIES - 1 do
+    local at = L.DISPATCH + i * L.STRIDE
+    if rom:u16(at) == L.ADD_R0_R4 and rom:u16(at + L.AT_CMP1) == L.CMP_R0_1 then
+      local pred = self:blTargets(at + L.AT_PRED, 2)[1]
+      local start = self:blTargets(at + L.AT_START, 2)[1]
+      local behaviour = pred and behaviourOf(pred)
+      if behaviour and start then byStart[start] = behaviour end
+    end
+  end
+
+  local sink, launch = byStart[L.SINK.START], byStart[L.LAUNCH.START]
+  if not (sink and launch) then
+    Logger.warn("gen3 Lavaridge: the warp chain at %07X does not name both "
+                .. "of the gym's starters -- nothing recorded", L.DISPATCH)
+    return
+  end
+
+  local beats = imm(L.SINK.BEATS_AT, L.CMP_R0)
+  local sinkSe = imm(L.SINK.SE_AT, L.MOV_R0)
+  local shake = imm(L.LAUNCH.SHAKE_AT, L.CMP_R0)
+  local rumble = imm(L.LAUNCH.RUMBLE_AT, L.MOV_R0)
+  local land = imm(L.LAUNCH.LAND_AT, L.MOV_R0)
+  if not (beats and sinkSe and shake and rumble and land) then
+    Logger.warn("gen3 Lavaridge: one of the two tasks does not open its beat "
+                .. "or its sound where this expects -- nothing recorded")
+    return
+  end
+
+  -- both counters are `cmp <count>, #n` against a value that has ALREADY been
+  -- raised, so the number of beats is n + 1
+  local rows = {
+    [sink] = { kind = "sink", beats = beats + 1, sound = sinkSe },
+    [launch] = { kind = "launch", shake = shake + 1,
+                 rumble = rumble, land = land },
+  }
+
+  local n = 0
+  for _, pair_ in pairs(tilesetPairs or {}) do
+    if type(pair_) == "table" and pair_.collision then
+      pair_.lavaridgeWarps = rows
+      n = n + 1
+    end
+  end
+  local constants = self._constants or {}
+  constants.gen3LavaridgeWarp = rows
+  self._constants = constants
+
+  Logger.info("Gen3 Lavaridge: $%02X sinks over %d beats on SE %d; $%02X "
+              .. "erupts after %d frames of shake, SE %d then %d -- %d "
+              .. "tileset pairs",
+              sink, beats + 1, sinkSe, launch, shake + 1, rumble, land, n)
+  return rows
+end
+
+function RomExtractorGen3:forcedMovementBehaviours(tilesetPairs)
+  local F = RomExtractorGen3.FORCED_MOVEMENT
+  local rom = self.rom
+  if not rom then return end
+
+  -- the count comes out of the loop itself rather than being typed
+  local cmp = rom:u16(F.DISPATCH + F.AT_COUNT)
+  if not cmp or cmp - cmp % 256 ~= F.CMP_R4 then
+    Logger.warn("gen3 forced movement: the dispatch does not end in a `cmp "
+                .. "r4,#n` where this expects -- nothing recorded")
+    return
+  end
+  local count = cmp % 256 + 1
+
+  -- ONE `cmp r0,#imm` INSIDE THE PREDICATE'S OWN BODY, and the body ends at
+  -- its `bx` -- these are eleven-instruction functions and the one after it
+  -- starts immediately, so a fixed byte window reads the NEXT predicate's
+  -- behaviour as a second answer and throws the row away.  The return is the
+  -- bound that cannot be off by a function.
+  local addr = {}
+  for i = 0, count - 1 do
+    addr[i] = (rom:u32(F.TESTS + i * 4) or 0) % 0x08000000 - 1
+  end
+  local function behaviourOf(i)
+    local at = addr[i]
+    if not at or at < 0 then return nil end
+    local found
+    for k = at, at + F.SCAN * 2, 2 do
+      local w = rom:u16(k)
+      if not w then return nil end
+      if w >= F.BX_R and w < F.BX_R + 0x80 and w % 8 == 0 then
+        return found
+      end
+      if w - w % 256 == F.CMP_R0 then
+        if found then return nil end        -- more than one: not a plain row
+        found = w % 256
+      end
+    end
+    return nil                              -- no return in sight: not a row
+  end
+
+  local rows, keys = {}, {}
+  for i = 0, count - 1 do
+    local behaviour = behaviourOf(i)
+    local at = (rom:u32(F.FUNCS + (i + 1) * 4) or 0) % 0x08000000 - 1
+    if behaviour and at >= 0 then
+      local mov
+      for k = 0, 6, 2 do
+        local w = rom:u16(at + k)
+        if w and w - w % 256 == F.MOV_R0 and not mov then mov = w % 256 end
+      end
+      local driver = self:blTargets(at, 8)[1]
+      local way = mov and F.WAYS[mov]
+      local slide = (driver == F.SLIDE_DRIVER) or nil
+      local walks = (driver == F.WALK_DRIVER)
+      if way and (walks or slide) then
+        rows[behaviour] = { way = way, slide = slide }
+        keys[#keys + 1] = behaviour
+      end
+    end
+  end
+
+  table.sort(keys)
+  if #keys == 0 then
+    Logger.warn("gen3 forced movement: no row read as a direction and a "
+                .. "driver -- nothing recorded")
+    return
+  end
+
+  -- ...and only the ones this REGION actually lays down, counted the way
+  -- every other behaviour derivation here counts
+  local maps = self._maps
+  local stat = {}
+  if type(maps) == "table" and type(tilesetPairs) == "table" then
+    for id, def in pairs(maps) do
+      local ts = type(def) == "table" and def.tileset and tilesetPairs[def.tileset]
+      if ts and ts.collision and def.blocks and def.width and def.height then
+        for i = 0, def.width * def.height - 1 do
+          local lo, hi = def.blocks:byte(i * 2 + 1), def.blocks:byte(i * 2 + 2)
+          local b = lo and ts.collision[(hi * 256 + lo) % 1024 + 1]
+          if b and rows[b] then
+            local r = stat[b]
+            if not r then r = { cells = 0, maps = {}, nmaps = 0 }; stat[b] = r end
+            r.cells = r.cells + 1
+            if not r.maps[id] then r.maps[id] = true; r.nmaps = r.nmaps + 1 end
+          end
+        end
+      end
+    end
+  end
+
+  local n = 0
+  for _, pair_ in pairs(tilesetPairs or {}) do
+    if type(pair_) == "table" and pair_.collision then
+      pair_.forcedMovement = rows
+      n = n + 1
+    end
+  end
+
+  local constants = self._constants or {}
+  constants.gen3ForcedMovement = rows
+  self._constants = constants
+
+  local parts = {}
+  for _, b in ipairs(keys) do
+    local r, st = rows[b], stat[b]
+    parts[#parts + 1] = ("$%02X(%s%s %d cells/%d maps)")
+      :format(b, r.way, r.slide and " sliding" or "",
+              st and st.cells or 0, st and st.nmaps or 0)
+  end
+  Logger.info("Gen3 forced movement: %d rows off %07X/%07X -- %s -- %d "
+              .. "tileset pairs", #keys, F.TESTS, F.FUNCS,
+              table.concat(parts, " "), n)
+  return rows, keys
+end
+
 function RomExtractorGen3:currentBehaviours(tilesetPairs)
   local maps = self._maps
   if not (type(maps) == "table" and type(tilesetPairs) == "table") then return end
@@ -24315,6 +24717,8 @@ function RomExtractorGen3:extractTilesets()
   local muddySlope, acroObstacles = self:bikeBehaviours(pairs_)
   local _, escalators = self:escalatorBehaviours(pairs_)
   local _, currentKeys = self:currentBehaviours(pairs_)
+  self:forcedMovementBehaviours(pairs_)
+  self:lavaridgeWarps(pairs_)
   local noRun = self:noRunBehaviours(pairs_)
   local acroKeys = {}
   for b in pairs(acroObstacles or {}) do acroKeys[#acroKeys + 1] = b end
