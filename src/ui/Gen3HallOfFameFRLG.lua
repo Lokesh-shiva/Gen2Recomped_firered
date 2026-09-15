@@ -26,6 +26,11 @@ local HOF = {}
 HOF.__index = HOF
 HOF.isOpaque = true
 function HOF:uiSize() return W, H end
+function HOF:wantsFillScale() return true end
+function HOF:sgbPalettes()
+  local P = require("src.render.PaletteFX")
+  return { P.trueColorZone(0, 0, math.ceil(W / 8) - 1, math.ceil(H / 8) - 1) }
+end
 
 local FULL = { { 120, 210, 120, 40 }, { 326, 220, 56, 40 }, { -86, 220, 184, 40 },
                { 120, -62, 120, 88 }, { -70, -92, 200, 88 }, { 310, -92, 40, 88 } }

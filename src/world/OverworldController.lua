@@ -2293,8 +2293,17 @@ function OverworldState:update(dt)
   -- floors rocks longer than a trip of one without rocking any faster.  See
   -- Gen3Commands.SPECIALS[276]; the script is parked on `waitstate` until the
   -- count runs out.
+  -- small per-frame field tasks a special starts and forgets (FireRed's
+  -- teleporter lights and cable); each returns true when it is finished
+  if self.fieldTasks and #self.fieldTasks > 0 then
+    for i = #self.fieldTasks, 1, -1 do
+      local ok, finished = pcall(self.fieldTasks[i])
+      if not ok or finished then table.remove(self.fieldTasks, i) end
+    end
+  end
   local lift = self.gen3Elevator
   if lift then
+    if lift.onFrame then lift.onFrame() end
     lift.frames = (lift.frames or 0) + 1
     if lift.frames >= (lift.period or 3) then
       lift.frames = 0

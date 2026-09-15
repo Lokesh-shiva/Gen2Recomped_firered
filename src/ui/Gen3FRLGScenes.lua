@@ -33,6 +33,11 @@ local Diploma = {}
 Diploma.__index = Diploma
 Diploma.isOpaque = true
 function Diploma:uiSize() return W, H end
+function Diploma:wantsFillScale() return true end
+function Diploma:sgbPalettes()
+  local P = require("src.render.PaletteFX")
+  return { P.trueColorZone(0, 0, math.ceil(W / 8) - 1, math.ceil(H / 8) - 1) }
+end
 
 function Diploma.new(game, opts)
   local a = art(game)
@@ -95,6 +100,8 @@ local Seagallop = {}
 Seagallop.__index = Seagallop
 Seagallop.isOpaque = true
 function Seagallop:uiSize() return W, H end
+function Seagallop:wantsFillScale() return true end
+Seagallop.sgbPalettes = Diploma.sgbPalettes
 
 function Seagallop.new(game, opts)
   local a = art(game)

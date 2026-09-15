@@ -174,14 +174,36 @@ return function(Gen3Commands)
   def(273, function(ctx)
     local ow, runner = ctx.overworld, ctx.runner
     if not (ow and runner) then return end
-    local n = math.min(8, math.abs(var(ctx, 0x8005) - var(ctx, 0x8006)))
+    local from, to = var(ctx, 0x8005), var(ctx, 0x8006)
+    local n = math.min(8, math.abs(from - to))
     local done = false
+    -- AnimateElevatorWindowView: the 3x3 window at (1..3, 0..2) cycles its
+    -- three frames every six frames, upward or downward, for 3n+3 steps
+    local goingDown = from > to
+    local ROWS = { { 0x2E8, 0x2E9, 0x2EA }, { 0x2F0, 0x2F1, 0x2F2 }, { 0x2F8, 0x2F9, 0x2FA } }
+    local win = { tick = 0, step = 0, steps = (n + 1) * 3 }
+    local function windowFrame()
+      if win.step >= win.steps then return end
+      win.tick = win.tick + 1
+      if win.tick < 6 then return end
+      win.tick = 0
+      win.step = win.step + 1
+      local f = win.step % 3
+      if goingDown and f ~= 0 then f = 3 - f end
+      for i = 0, 2 do
+        for j = 0, 2 do
+          pcall(Commands.g3_set_metatile, ctx, j + 1, i, ROWS[i + 1][f + 1], 1)
+        end
+      end
+    end
     ow.gen3Elevator = { shakes = ELEVATOR_SHAKES[n + 1], frames = 0, period = 3, amplitude = 1,
+                        onFrame = windowFrame,
                         resume = function()
                           if done then return end
                           done = true
                           ow.gen3Elevator = nil
                           ow.bgShakeY = 0
+                          pcall(Commands.play_sound, ctx, "SE_DING_DONG")
                           runner:resume()
                         end }
     runner:yield()
@@ -329,7 +351,43 @@ return function(Gen3Commands)
   end)
   -- DoSSAnneDepartureCutscene: the horn and the wake behind the boat; the
   -- script moves the ship itself
-  def(401, function(ctx) pcall(Commands.play_sound, ctx, "SS_Anne_Horn") end)
+  -- ss_anne.c: horn, a 50-frame pause, then the ship (local id 1) slides
+  -- left a pixel every five frames until it is 120px off the left edge,
+  -- horn again, 40 frames, and the script carries on
+  def(401, function(ctx)
+    pcall(Commands.play_sound, ctx, "SE_SS_ANNE_HORN")
+    local ow, runner = ctx.overworld, ctx.runner
+    if not (ow and runner) then return end
+    local boat
+    for _, e in ipairs(ow.entities or {}) do
+      if e.def and e.def.localId == 1 and e ~= ow.player then boat = e break end
+    end
+    if not boat then return end
+    ow.fieldTasks = ow.fieldTasks or {}
+    local wait, moved, tail, startPx = 50, 0, nil, boat.px
+    local resumed = false
+    ow.fieldTasks[#ow.fieldTasks + 1] = function()
+      if wait > 0 then wait = wait - 1 return false end
+      if tail then
+        tail = tail - 1
+        if tail <= 0 then
+          if not resumed then resumed = true runner:resume() end
+          return true
+        end
+        return false
+      end
+      moved = moved + 1
+      boat.px = startPx - math.floor(moved / 5)
+      boat.shiftPx = -math.floor(moved / 5)
+      local screenX = boat.px - (ow.player.px - 112)
+      if screenX < -120 - 64 or moved > 5 * 600 then
+        pcall(Commands.play_sound, ctx, "SE_SS_ANNE_HORN")
+        tail = 40
+      end
+      return false
+    end
+    runner:yield()
+  end)
 
   -- ---- Pokedex, starter, party --------------------------------------------
   def(354, function(ctx)                        -- GetStarterSpecies
@@ -472,8 +530,59 @@ return function(Gen3Commands)
 
   -- ---- purely visual, nothing waits on them --------------------------------
   def(434, function() end)                   -- BrailleCursorToggle
-  def(437, function() end)                   -- AnimateTeleporterHousing (Bill)
-  def(439, function() end)                   -- AnimateTeleporterCable (Bill)
+  -- Bill's SEA COTTAGE teleporter (special_field_anim.c): the light blinks
+  -- yellow/red and the door glows for 13 beats of 16 frames, then goes green;
+  -- the cable ball runs four cells left, a cell every four frames
+  local function fieldTask(ctx, fn)
+    local ow = ctx.overworld
+    if not ow then return end
+    ow.fieldTasks = ow.fieldTasks or {}
+    ow.fieldTasks[#ow.fieldTasks + 1] = fn
+  end
+  local function setTile(ctx, x, y, id)
+    pcall(Commands.g3_set_metatile, ctx, x, y, id, 1)
+  end
+  def(437, function(ctx)                     -- AnimateTeleporterHousing
+    local p = ctx.overworld and ctx.overworld.player
+    if not p then return end
+    local tx = var(ctx, 0x8004) == 0 and p.cellX + 6 or p.cellX - 1
+    local ty = p.cellY - 5
+    local timer, state = 0, 0
+    fieldTask(ctx, function()
+      if timer == 0 then
+        if state % 2 == 0 then
+          setTile(ctx, tx, ty, 0x2B5) setTile(ctx, tx, ty + 2, 0x2B7)
+        else
+          setTile(ctx, tx, ty, 0x2B6) setTile(ctx, tx, ty + 2, 0x2B8)
+        end
+      end
+      timer = timer + 1
+      if timer ~= 16 then return false end
+      timer, state = 0, state + 1
+      if state ~= 13 then return false end
+      setTile(ctx, tx, ty, 0x28A) setTile(ctx, tx, ty + 2, 0x296)
+      return true
+    end)
+  end)
+  def(439, function(ctx)                     -- AnimateTeleporterCable
+    local p = ctx.overworld and ctx.overworld.player
+    if not p then return end
+    local tx, ty = p.cellX + 4, p.cellY - 5
+    local timer, state = 0, 0
+    fieldTask(ctx, function()
+      if timer == 0 then
+        if state ~= 0 then
+          setTile(ctx, tx, ty, 0x285) setTile(ctx, tx, ty + 1, 0x2B4)
+          if state == 4 then return true end
+          tx = tx - 1
+        end
+        setTile(ctx, tx, ty, 0x2B9) setTile(ctx, tx, ty + 1, 0x2BA)
+      end
+      timer = timer + 1
+      if timer == 4 then timer, state = 0, state + 1 end
+      return false
+    end)
+  end)
   -- OpenMuseumFossilPic: 0x8004 KABUTOPS or AERODACTYL, the picture's window
   -- at tile (0x8005, 0x8006) -- the same framed box showmonpic uses
   def(395, function(ctx)
