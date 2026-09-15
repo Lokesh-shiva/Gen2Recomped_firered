@@ -509,6 +509,9 @@ end
 -- as their overworld walker. Vanilla trainers preserve the hardware-faithful
 -- MEWMON fallback used during the battle introduction.
 function BattleState.trainerPalette(data, trainer)
+  -- A GBA trainer pic is already in colour: the SGB MEWMON remap would squash
+  -- it to four shades (Trainer Tower's challengers came out purple and orange)
+  if require("src.core.GameVersion").isGen3() then return nil end
   local source = trainer and trainer.paletteSource
   if source then
     local PaletteFX = require("src.render.PaletteFX")

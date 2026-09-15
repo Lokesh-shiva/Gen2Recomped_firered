@@ -65,6 +65,10 @@ end
 function Gen3HallOfFame.new(game, onDone)
   local record = Gen3HallOfFame.record(game)
   if not record then return nil end
+  -- FireRed runs its own ceremony (fly-in team, confetti, the player's walk)
+  if record.frlg then
+    return require("src.ui.Gen3HallOfFameFRLG").new(game, record, onDone)
+  end
   local self = setmetatable({}, Gen3HallOfFame)
   self.game = game
   self.onDone = onDone

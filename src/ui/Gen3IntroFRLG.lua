@@ -126,8 +126,57 @@ function Gen3IntroFRLG.new(game, onDone)
   self.finished = false
   self.assets = ((game.data.constants or {}).gen3FRLGIntro or {}).images or {}
   self.imageCache = {}
-  self:startGameFreak()
+  self:startCard()
   return self
+end
+
+-- ---------------------------------------------------------------------------
+-- THE PORT'S OWN CARD, before the cartridge's GAME FREAK logo.
+--
+-- Emerald opens on this engine's studio card; FireRed opens on one that also
+-- says who ported it.  It names the engine and the port and says it is a fan
+-- project -- it does not borrow any GAME FREAK or Nintendo mark, and every
+-- word is overridable (data.field.boot.studio: credit / author / portAuthor /
+-- year / notice) so a mod can put its own name here.
+-- ---------------------------------------------------------------------------
+local CARD_IN, CARD_HOLD, CARD_OUT = 20, 110, 20
+
+function Gen3IntroFRLG:startCard()
+  self.phase = "card"
+  self.cardFrame = 0
+end
+
+function Gen3IntroFRLG:stepCard()
+  self.cardFrame = self.cardFrame + 1
+  if self.cardFrame >= CARD_IN + CARD_HOLD + CARD_OUT then self:startGameFreak() end
+end
+
+function Gen3IntroFRLG:drawCard()
+  local g = love.graphics
+  g.setColor(0, 0, 0, 1)
+  g.rectangle("fill", 0, 0, W, H)
+  local f = self.cardFrame or 0
+  local alpha = 1
+  if f < CARD_IN then alpha = f / CARD_IN
+  elseif f > CARD_IN + CARD_HOLD then alpha = 1 - (f - CARD_IN - CARD_HOLD) / CARD_OUT end
+  local boot = (self.game.data.field or {}).boot or {}
+  local studio = boot.studio or {}
+  local Font = require("src.render.Font")
+  local function centre(text, y, r, gg, b)
+    g.setColor(1, 1, 1, math.max(0, alpha))
+    Font.pushStyle({ text = { r or 1, gg or 1, b or 1 }, shadow = { 0.25, 0.25, 0.3 } })
+    Font.draw(text, math.floor((W - Font.width(text)) / 2), y)
+    Font.popStyle()
+  end
+  centre(studio.year or "2026", 36, 0.72, 0.72, 0.72)
+  centre(studio.credit or "Gen2Recomped", 56, 1, 0.42, 0.30)
+  centre("engine by " .. (studio.author or "UNDERdecodedHD"), 72)
+  centre("FireRed port by " .. (studio.portAuthor or "Lokesh"), 92)
+  local faced = Font.pushFace and Font.pushFace("small")
+  centre(studio.notice or "A fan project. Not affiliated with", 124, 0.6, 0.6, 0.6)
+  centre(studio.notice2 or "Nintendo, GAME FREAK or The Pokemon Company.", 136, 0.6, 0.6, 0.6)
+  if faced and Font.popFace then Font.popFace() end
+  g.setColor(1, 1, 1, 1)
 end
 
 function Gen3IntroFRLG:finish()
@@ -145,7 +194,8 @@ function Gen3IntroFRLG:update()
     self:finish()
     return
   end
-  if self.phase == "gf" then self:stepGameFreak()
+  if self.phase == "card" then self:stepCard()
+  elseif self.phase == "gf" then self:stepGameFreak()
   elseif self.phase == "scene1" then self:stepScene1()
   elseif self.phase == "scene2" then self:stepScene2()
   elseif self.phase == "scene3" then self:stepScene3()
@@ -1031,7 +1081,8 @@ end
 
 function Gen3IntroFRLG:draw()
   love.graphics.setColor(1, 1, 1, 1)
-  if self.phase == "gf" then self:drawGameFreak()
+  if self.phase == "card" then self:drawCard()
+  elseif self.phase == "gf" then self:drawGameFreak()
   elseif self.phase == "scene1" then self:drawScene1()
   elseif self.phase == "scene2" then self:drawScene2()
   elseif self.phase == "scene3" then self:drawScene3()

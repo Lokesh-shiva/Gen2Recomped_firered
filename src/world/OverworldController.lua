@@ -234,6 +234,13 @@ local function objectInTimeOfDay(obj)
 end
 
 local function objectVisible(save, mapId, obj)
+  -- FIRERED'S CLONE OBJECTS (kind 255, "type": "clone" in pokefirered's map
+  -- json) are a neighbour map's object repeated just past this map's edge so
+  -- the cartridge can show it across the seam.  This engine already draws the
+  -- neighbour's own object as a ghost, so a clone is never an object of its
+  -- own: spawned, it stood frozen and walk-through beside the real one (the
+  -- "duplicated" Pallet fat man, Route 9's cut tree seen from Cerulean).
+  if obj.kind == 255 then return false end
   local toggles = save.objectToggles and save.objectToggles[mapId] or {}
   local toggleKey = objectToggleKey(obj)
   -- constants/event_flags.asm, "Sprite visibility flags": when the event is
@@ -1386,10 +1393,24 @@ function OverworldState:rebuildNeighbors()
   -- lines, triggers, dialogue or player collision.  Instances are
   -- shared with the real-NPC pool, so positions carry across the seam.
   self.ghosts = {}
+  -- OBJECTS PLACED OUTSIDE THEIR OWN MAP ARE STAND-INS FOR A NEIGHBOUR'S.
+  --
+  -- Reported from play: "in pallet town a fat male npc is duplicated.. he has
+  -- no motion and we can pass through him".  FireRed gives Route 21 North a
+  -- CLONE of Pallet's fat man at y = -3 -- off its top edge -- so that he can
+  -- be seen across the seam while you stand on the route.  Ghosting every
+  -- neighbour object drew that clone over Pallet as well, frozen at his spawn
+  -- beside the real one.  Clones never spawn (objectVisible), and an off-map
+  -- neighbour object is never a ghost: the neighbour's real object already is.
+  local function offMap(def, obj)
+    local cells = blockPx(def) / 16
+    return obj.x and obj.y and (obj.x < 0 or obj.y < 0
+      or obj.x >= (def.width or 0) * cells or obj.y >= (def.height or 0) * cells)
+  end
   for _, nb in ipairs(self.neighbors) do
     local peers = {}
     for _, obj in ipairs(nb.map.def.objects or {}) do
-      if objectVisible(Game.save, nb.map.id, obj) then
+      if objectVisible(Game.save, nb.map.id, obj) and not offMap(nb.map.def, obj) then
         local npc = pooledNPC(self.npcPool, Game.data, nb.map.id, obj)
         table.insert(peers, npc)
         table.insert(self.ghosts,
@@ -1917,6 +1938,15 @@ function OverworldState:drainPendingScripts()
      and not (self.player and self.player.moving) then
     local pending = table.remove(queue, 1)
     self.runner:run(pending.script, pending.extra)
+    -- A SCRIPT THAT FINISHES INSIDE run() NEVER LOOKS "JUST FINISHED" to the
+    -- sweep in update(), which only sees a runner that was busy last frame.
+    -- Trainer Tower's ON_TRANSITION is that shape: it fills a graphics slot
+    -- and sets the hide flags in one pass, and the challenger it was placing
+    -- was never spawned -- the floor stood empty while the battle trigger
+    -- still fired.
+    if not self.runner:isRunning() and (GameVersion.isGen2() or GameVersion.isGen3()) then
+      self:syncObjectVisibility()
+    end
   end
 end
 
@@ -3468,7 +3498,13 @@ function OverworldState:checkBoulderPush(dir)
   local p = self.player
   local fx, fy = Collision.target(p.cellX, p.cellY, dir)
   local npc = self:npcAtCell(fx, fy)
-  if not npc or not Map.isPushable(npc.def) or npc.moving then
+  -- FireRed's boulder is OBJ_EVENT_GFX_PUSHABLE_BOULDER (97), and the push is
+  -- armed by FLAG_SYS_USE_STRENGTH (SYS_FLAGS + 0x05), which the boulder's own
+  -- EventScript_StrengthBoulder sets -- neither is derived for this cartridge
+  local frlg = self:frlgBehaviours() ~= nil
+  local pushable = npc and (Map.isPushable(npc.def)
+                            or (frlg and npc.def and npc.def.graphicsId == 97))
+  if not npc or not pushable or npc.moving then
     self.boulderTried = nil -- pokered resets when no boulder is in front
     return false
   end
@@ -3493,6 +3529,7 @@ function OverworldState:checkBoulderPush(dir)
   local armed = self.strengthActive
   if not armed and GameVersion.isGen3() then
     local flag = Game.data.constants and Game.data.constants.gen3StrengthFlag
+    if flag == nil and frlg then flag = 0x805 end
     armed = flag ~= nil and Game.save.flags ~= nil
             and Game.save.flags[("FLAG_G3_%04X"):format(flag)] == true
   end
@@ -6254,6 +6291,8 @@ function OverworldState:clearGen3TempFlags()
       cleared = cleared + 1
     end
   end
+  -- FireRed's ClearTempFieldEventData also puts STRENGTH down on every map load
+  if self:frlgBehaviours() then flags[VM.flagName(0x805)] = nil end
   return cleared
 end
 
@@ -7153,11 +7192,29 @@ end
 
 -- One of the cartridge's own field-move lines, or nil when the import did
 -- not place it (an older cache) -- every caller has a fallback.
+-- FireRed's own field-move lines (pokefirered data/text/field_moves.inc and
+-- surf.inc), by the address the text pool keys them under
+local FRLG_FIELD_MOVE_TEXT = {
+  SURF = { ask = 0x1A556E, used = 0x1A55A4 },
+  WATERFALL = { ask = 0x1BE33E, used = 0x1BE378 },
+  STRENGTH = { ask = 0x1BE19A, used = 0x1BE1FA },
+  ROCK_SMASH = { ask = 0x1BE09C },
+  CUT = { ask = 0x1BDFE2, used = 0x1BDF94 },
+}
+
 function OverworldState:gen3FieldText(moveId, slot)
   local placed = Game.data.constants and Game.data.constants.gen3FieldMoveText
   local record = placed and placed[moveId]
   local key = record and record[slot]
-  return key and Game.data.text and Game.data.text[key] or nil
+  local line = key and Game.data.text and Game.data.text[key] or nil
+  if not line and self:frlgBehaviours() then
+    local at = (FRLG_FIELD_MOVE_TEXT[moveId] or {})[slot]
+    local text = Game.data.text or {}
+    if at then
+      line = text[("TEXT_%X"):format(at)] or text[("TEXT_%X"):format(at + 1)]
+    end
+  end
+  return line
 end
 
 -- TrySetDiveWarp: which way this cell goes, and where to.  The tile the

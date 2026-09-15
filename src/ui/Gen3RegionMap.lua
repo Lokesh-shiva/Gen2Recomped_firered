@@ -486,7 +486,27 @@ end
 -- ---------------------------------------------------------------------------
 local FRLG_W, FRLG_H = 22, 15
 local FRLG_CANCEL = { x = 21, y = 13 }
+local FRLG_SWITCH = { x = 21, y = 11 }
 local FRLG_PAGES = { "kanto", "sevii123", "sevii45", "sevii67" }
+
+local function frlgFlag(game, id)
+  local flags = (game.save or {}).flags or {}
+  return flags[("FLAG_G3_%04X"):format(id)] == true
+end
+
+function Gen3RegionMap:frlgCanSwitch()
+  return not self.area and frlgFlag(self.game, 0x845)
+end
+
+function Gen3RegionMap:frlgSwitchPages()
+  local rows = { { page = "kanto", label = "KANTO" },
+                 { page = "sevii123", label = "ISLANDS 1-2-3" } }
+  if frlgFlag(self.game, 0x846) then
+    rows[#rows + 1] = { page = "sevii45", label = "ISLANDS 4-5" }
+    rows[#rows + 1] = { page = "sevii67", label = "ISLANDS 6-7" }
+  end
+  return rows
+end
 
 function Gen3RegionMap:initFireRed(frlg)
   self.frlg = frlg
@@ -508,6 +528,7 @@ function Gen3RegionMap:initFireRed(frlg)
   end
   if found then
     self.page = found.page
+    self.playerPage = found.page
     self.cx, self.cy = found.x, found.y
     self.iconAt = { x = found.x, y = found.y }
   else
@@ -563,6 +584,25 @@ function Gen3RegionMap:updateFireRed()
     if self.cx == FRLG_CANCEL.x and self.cy == FRLG_CANCEL.y then
       Sound.play(game.data, "Press_AB")
       return self:close()
+    end
+    -- the SWITCH button (region_map.c SWITCH_BUTTON_X/Y): Kanto and the
+    -- Sevii pages the save has earned (FLAG_SYS_SEVII_MAP_123 / _4567)
+    if self.cx == FRLG_SWITCH.x and self.cy == FRLG_SWITCH.y and self:frlgCanSwitch() then
+      Sound.play(game.data, "Press_AB")
+      local labels, pages = {}, {}
+      for _, row in ipairs(self:frlgSwitchPages()) do
+        labels[#labels + 1], pages[#pages + 1] = row.label, row.page
+      end
+      local Menu = require("src.ui.Menu")
+      local items = {}
+      for i, label in ipairs(labels) do
+        items[i] = { label = label, onSelect = function()
+          self.page = pages[i]
+          self.lastSec = nil
+        end }
+      end
+      game.stack:push(Menu.new(game, items, { tx = 6, ty = 6, maxVisible = #items }))
+      return
     end
     if self.fly then return self:pick() end
     return
@@ -636,8 +676,15 @@ function Gen3RegionMap:drawFireRed()
   -- the player's head
   local player = (self.game.save or {}).player
   local icon = self:frlgImage((player and player.gender == "girl") and "icon_leaf" or "icon_red")
-  if icon and self.iconAt and not self.area then
+  if icon and self.iconAt and not self.area and (self.playerPage or "kanto") == self.page then
     g.draw(icon, 8 * self.iconAt.x + 28, 8 * self.iconAt.y + 28)
+  end
+  -- the SWITCH button, once the Sevii pages are earned
+  if self:frlgCanSwitch() then
+    g.setColor(0, 0, 0, 0.55)
+    g.rectangle("fill", 8 * FRLG_SWITCH.x + 20, 8 * FRLG_SWITCH.y + 30, 40, 12)
+    g.setColor(1, 1, 1, 1)
+    text("SWITCH", 8 * FRLG_SWITCH.x + 22, 8 * FRLG_SWITCH.y + 31, white, true)
   end
 
   -- the cursor: two 16x16 frames of twenty

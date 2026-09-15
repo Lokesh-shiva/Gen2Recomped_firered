@@ -296,8 +296,31 @@ return function(Gen3Commands)
     { "MAP_G37_N02", 8, 5 }, { "MAP_G31_N06", 8, 5 }, { "MAP_G03_N08", 0x15, 7 },
     { "MAP_G02_N59", 8, 5 }, { "MAP_G02_N58", 8, 5 },
   }
+  -- push a scene and park the script until it leaves (the cartridge's
+  -- SetMainCallback2 + waitstate)
+  local function runScene(ctx, make)
+    local game, runner = ctx.game, ctx.runner
+    if not (game and runner) then return false end
+    local resumed = false
+    local scene = make(function()
+      if resumed then return end
+      resumed = true
+      runner:resume()
+    end)
+    if not scene then return false end
+    game.stack:push(scene)
+    runner:yield()
+    return true
+  end
+  Gen3Commands.frlgRunScene = runScene
+
   def(379, function(ctx)                        -- DoSeagallopFerryScene
     local dest = HARBORS[var(ctx, 0x8006)] or HARBORS[0]
+    local Scenes = require("src.ui.Gen3FRLGScenes")
+    runScene(ctx, function(onDone)
+      return Scenes.Seagallop.new(ctx.game, { origin = var(ctx, 0x8004), dest = var(ctx, 0x8006),
+                                              onDone = onDone })
+    end)
     Commands.warp(ctx, dest[1], dest[2], dest[3])
   end)
   def(429, function(ctx)                        -- IsPlayerLeftOfVermilionSailor
@@ -451,16 +474,74 @@ return function(Gen3Commands)
   def(434, function() end)                   -- BrailleCursorToggle
   def(437, function() end)                   -- AnimateTeleporterHousing (Bill)
   def(439, function() end)                   -- AnimateTeleporterCable (Bill)
-  def(395, function() end)                   -- OpenMuseumFossilPic
-  def(396, function() end)                   -- CloseMuseumFossilPic
+  -- OpenMuseumFossilPic: 0x8004 KABUTOPS or AERODACTYL, the picture's window
+  -- at tile (0x8005, 0x8006) -- the same framed box showmonpic uses
+  def(395, function(ctx)
+    local d = data_(ctx)
+    local a = d and d.constants and d.constants.gen3FRLGArt
+    local species = Gen3Commands.speciesId(d, var(ctx, 0x8004))
+    local path = a and a.fossils and ((species == "KABUTOPS" and a.fossils.kabutops)
+                                      or (species == "AERODACTYL" and a.fossils.aerodactyl))
+    local ow, game = ctx.overworld, ctx.game
+    if not (path and ow and game) then return 0 end
+    if ow.pokepicBox then ow.pokepicBox:remove() end
+    local tx, ty = var(ctx, 0x8005), var(ctx, 0x8006)
+    local box = require("src.ui.PicBox").new(game, {
+      path = path, trueColor = true, passive = true, overworld = ow,
+      box = { x = tx, y = ty, w = 10, h = 10 }, picTiles = 8,
+    })
+    ow.pokepicBox = box
+    game.stack:push(box)
+    return 1
+  end)
+  def(396, function(ctx)                     -- CloseMuseumFossilPic
+    local ow = ctx.overworld
+    if ow and ow.pokepicBox then
+      ow.pokepicBox:remove()
+      ow.pokepicBox = nil
+      return 1
+    end
+    return 0
+  end)
   def(428, function() end)                   -- SetDeoxysTrianglePalette
   def(442, function(ctx) pcall(Commands.play_sound, ctx, "Wing_Attack") end)  -- LoopWingFlapSound
-  def(264, function() end)                   -- ShowDiploma
+  def(264, function(ctx)                     -- ShowDiploma
+    local Scenes = require("src.ui.Gen3FRLGScenes")
+    local _, owned = Gen3Commands.dexCounts(ctx, true)
+    Gen3Commands.frlgRunScene(ctx, function(onDone)
+      return Scenes.Diploma.new(ctx.game, { national = (owned or 0) >= 386, onDone = onDone })
+    end)
+  end)
   def(167, function() end)                   -- Script_TryLoseFansFromPlayTime
   def(169, function() end)                   -- Script_UpdateTrainerFanClubGameClear
-  -- StartOldManTutorialBattle: the Viridian old man's catching demo plays
-  -- itself on the cartridge; the script's lines around it still run
-  def(157, function(ctx) ctx.lastBattleResult = "caught" end)
+  -- StartOldManTutorialBattle (battle_setup.c): the Viridian old man's demo
+  -- against a level 5 male WEEDLE, run by the engine's scripted catch demo
+  -- with FireRed's OLD MAN back pic (field.playerPics.demoBack)
+  def(157, function(ctx)
+    local d = data_(ctx)
+    local BattleState = require("src.battle.BattleState")
+    local runner = ctx.runner
+    if not (d and runner and d.pokemon and d.pokemon.WEEDLE) then
+      ctx.lastBattleResult = "caught"
+      return
+    end
+    local ok, battle = pcall(BattleState.newWild, ctx.game, "WEEDLE", 5)
+    if not (ok and battle) then
+      ctx.lastBattleResult = "caught"
+      return
+    end
+    battle:makeOldManDemo()
+    battle.onFinish = function(result)
+      ctx.lastBattleResult = result or "caught"
+      runner:resume()
+    end
+    if ctx.overworld and ctx.overworld.pushBattle then
+      ctx.overworld:pushBattle(battle)
+    else
+      ctx.game.stack:push(battle)
+    end
+    runner:yield()
+  end)
 
   -- ---- size records: HERACROSS (Two Island) and MAGIKARP (Pewter / Fuchsia)
   -- pokefirered pokemon_size_record.c: the record starts at 0, and sizes are
@@ -874,13 +955,23 @@ return function(Gen3Commands)
     if #partyDef == 0 then ctx.lastBattleResult = "win" return end
     local lead = picks[1][1]
     local trainerClass = T.classToTrainer[lead.facilityClass]
+    -- the class's name, money and music come from a FireRed trainer of the
+    -- same class; the PIC comes from gFacilityClassToPicIndex, never from
+    -- that trainer (a template picked by class alone wore the wrong face)
+    local picIndex = T.classToPic[lead.facilityClass] or T.classToPic[tostring(lead.facilityClass)]
     local template
     for _, tr in pairs(d.trainers or {}) do
-      if type(tr) == "table" and tr.class == trainerClass then template = tr break end
+      if type(tr) == "table" and tr.class == trainerClass and tr.picIndex
+         and type(tr.pic) == "string" and tr.pic:find("battle/trainers/", 1, true) then
+        template = tr
+        if tr.picIndex == picIndex then break end
+      end
     end
+    local pic = picIndex and ("assets/generated/battle/trainers/%03d.png"):format(picIndex) or nil
     local record = setmetatable({
       id = "FRLG_TRAINER_TOWER", name = lead.name, parties = { partyDef }, party = partyDef,
       doubleBattle = floor.challengeType == 1 or nil, trainerTower = true,
+      pic = pic, picIndex = picIndex, female = nil,
     }, { __index = template or {} })
     d.trainers.FRLG_TRAINER_TOWER = record
     ctx.g3Trainer = nil

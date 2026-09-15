@@ -37663,13 +37663,14 @@ function RomExtractorGen3:extractFireRedTrainerTower()
       rec.classToPic[i] = rom:u8(T.CLASS_TO_PIC + i)
     end
     -- the sprite tables: {objGfx, facilityClass, gender} and the doubles'
-    -- {gfx1, gfx2, class, gender1, gender2}, packed without padding
+    -- {gfx1, gfx2, class, gender1, gender2} -- padded to 4 and 8 bytes in the
+    -- ROM (read back: 1C 03 01 00 | 38 04 00 00 ...)
     for i = 0, T.NUM_SINGLES - 1 do
-      local at = T.SINGLES_INFO + i * 3
+      local at = T.SINGLES_INFO + i * 4
       rec.singles[rom:u8(at + 1)] = { gfx = rom:u8(at), female = rom:u8(at + 2) == 1 }
     end
     for i = 0, T.NUM_DOUBLES - 1 do
-      local at = T.DOUBLES_INFO + i * 5
+      local at = T.DOUBLES_INFO + i * 8
       rec.doubles[rom:u8(at + 2)] = { gfx1 = rom:u8(at), gfx2 = rom:u8(at + 1) }
     end
     rec.typeTexts = {}
@@ -37688,6 +37689,264 @@ function RomExtractorGen3:extractFireRedTrainerTower()
                 rec.numFloors, tostring(rec.challenges[1][1].trainers[1].name))
   end)
   if not ok then Logger.warn("gen3 frlg trainer tower: %s", tostring(err)) end
+end
+
+-- ---------------------------------------------------------------------------
+-- FIRERED'S ONE-SCENE ART: the museum fossil pictures (script_menu.c), the
+-- diploma (diploma.c), the Seagallop crossing (seagallop.c), the Hall of Fame
+-- confetti (hall_of_fame.c) and the credits' closing pictures and running
+-- sprites (credits.c).  Every address is the pokefirered symbol; every layout
+-- is the one the named C file draws with.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_ART = {
+  FOSSILS = { kabutops = { TILES = 0x3E0FA0, PAL = 0x3E17A0 },
+              aerodactyl = { TILES = 0x3E0780, PAL = 0x3E0F80 } },
+  DIPLOMA = { GFX = 0x4147C0, MAP = 0x4154E8, PAL = 0x415954, PALSIZE = 0x40,
+              TEXT = { player = 0x41B60E, document = 0x41B618, gameFreak = 0x41B684,
+                       national = 0x41B68E, kanto = 0x41B698 } },
+  SEAGALLOP = { WATER = 0x468C98, WATER_TILES = 41, WATER_PAL = 0x4691B8,
+                MAP_WB = 0x4691D8, MAP_EB = 0x4699D8, FERRY = 0x46A1D8, FERRY_TILES = 40,
+                FERRY_PAL = 0x46A6D8, WAKE = 0x46A6F8, MATRIX = 0x46AF28 },
+  CONFETTI = { SHEET = 0xD2D5FC, PAL = 0xD2D71C },
+  CREDITS = {
+    THE_END = { TILES = 0x410B20, MAP = 0x410B94, PAL = 0x410B00 },
+    COPYRIGHT = { TILES = 0xEAE548, MAP = 0xEAE900, PAL = 0xEAE528 },
+    POKEBALL = { TILES = 0xEAAB98, MAP = 0xEAB30C, PALS = 0xEAAB18 },
+    PLAYER_MALE = { TILES = 0x410E30, PAL = 0x410E10 },
+    PLAYER_FEMALE = { TILES = 0x411C18, PAL = 0x411BF8 },
+    RIVAL = { TILES = 0x4129C0, PAL = 0x4129A0 },
+    GROUND_GRASS = { TILES = 0x413338, PAL = 0x413318 },
+    GROUND_DIRT = { TILES = 0x413874, PAL = 0x413854 },
+    GROUND_CITY = { TILES = 0x413DB8, PAL = 0x413D98 },
+    SPRITE_PARAMS = 0x41431C,
+  },
+}
+
+function RomExtractorGen3.frlgColors(rom, at, count, lz)
+  local raw
+  if lz then
+    local ok, got = RomExtractorGen3.lz77ok(rom, at)
+    raw = ok and got or nil
+  else
+    raw = rom:bytes(at, count * 2)
+  end
+  if not raw then return nil end
+  local colors = {}
+  for i = 0, math.floor(#raw / 2) - 1 do
+    local r, g, b = RomGba.bgr555(raw[i * 2 + 1] + raw[i * 2 + 2] * 256)
+    colors[i] = { r, g, b }
+  end
+  return colors
+end
+
+-- Tiles laid one after another into frames of fw x fh tiles, `frames` wide.
+function RomExtractorGen3.frlgSheet(tiles, fw, fh, frames, colors, base)
+  local image = ImageWriter.blank(fw * 8 * frames, fh * 8)
+  for f = 0, frames - 1 do
+    for ty = 0, fh - 1 do
+      for tx = 0, fw - 1 do
+        local t = (base or 0) + f * fw * fh + ty * fw + tx
+        for py = 0, 7 do
+          for px = 0, 7 do
+            local byte = tiles[t * 32 + py * 4 + math.floor(px / 2) + 1]
+            local idx = byte and ((px % 2 == 0) and byte % 16 or math.floor(byte / 16))
+            local c = idx and idx ~= 0 and colors[idx]
+            if c then
+              image:setPixel(f * fw * 8 + tx * 8 + px, ty * 8 + py, c[1] / 255, c[2] / 255, c[3] / 255, 1)
+            end
+          end
+        end
+      end
+    end
+  end
+  return image
+end
+
+-- A tilemap of mapCols columns composed over w x h tiles, flips and palette
+-- banks honoured (bank n reads colors[16n + index] of the loaded run).
+function RomExtractorGen3.frlgTilemap(tiles, map, mapCols, w, h, colors, opts)
+  opts = opts or {}
+  local image = ImageWriter.blank(w * 8, h * 8)
+  local bpp8 = opts.bpp8
+  local tb = bpp8 and 64 or 32
+  for cy = 0, h - 1 do
+    for cx = 0, w - 1 do
+      local c = cy * mapCols + cx
+      local e = (map[c * 2 + 1] or 0) + (map[c * 2 + 2] or 0) * 256
+      local tid = e % 1024
+      local hf = math.floor(e / 1024) % 2 == 1
+      local vf = math.floor(e / 2048) % 2 == 1
+      local bank = math.floor(e / 4096) % 16 - (opts.bankBase or 0)
+      local base = tid * tb
+      if base + tb <= #tiles and bank >= 0 then
+        for py = 0, 7 do
+          for px = 0, 7 do
+            local sx, sy = hf and (7 - px) or px, vf and (7 - py) or py
+            local idx
+            if bpp8 then
+              idx = tiles[base + sy * 8 + sx + 1]
+            else
+              local byte = tiles[base + sy * 4 + math.floor(sx / 2) + 1]
+              idx = byte and ((sx % 2 == 0) and byte % 16 or math.floor(byte / 16))
+            end
+            local col = idx and (opts.opaque or idx ~= 0)
+                        and colors[(bpp8 and 0 or bank * 16) + idx]
+            if col then
+              image:setPixel(cx * 8 + px, cy * 8 + py, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+            end
+          end
+        end
+      end
+    end
+  end
+  return image
+end
+
+function RomExtractorGen3:extractFireRedExtraArt()
+  self:beginStage("Gen3 FireRed extra art")
+  if not self:isFireRedManifest() then return end
+  local A = RomExtractorGen3.FRLG_ART
+  local rom = self.rom
+  local frlgColors, frlgSheet, frlgTilemap = RomExtractorGen3.frlgColors, RomExtractorGen3.frlgSheet, RomExtractorGen3.frlgTilemap
+  local rec = { source = "pokefirered script_menu.c / diploma.c / seagallop.c / hall_of_fame.c / credits.c" }
+  local function save(image, name)
+    self:saveImage(image, "frlg_art/" .. name .. ".png")
+    return "assets/generated/frlg_art/" .. name .. ".png"
+  end
+  local function text(at, max)
+    if rom:u8(at) == 0xFF then at = at + 1 end
+    return self:readText(at, max or 120)
+  end
+  local function try(label, fn)
+    local ok, err = pcall(fn)
+    if not ok then Logger.warn("gen3 frlg art: %s: %s", label, tostring(err)) end
+  end
+
+  try("fossils", function()
+    rec.fossils = {}
+    for key, d in pairs(A.FOSSILS) do
+      local tiles = rom:bytes(d.TILES, 64 * 32)
+      rec.fossils[key] = save(frlgSheet(tiles, 8, 8, 1, frlgColors(rom, d.PAL, 16)), "fossil_" .. key)
+    end
+  end)
+
+  try("diploma", function()
+    local D = A.DIPLOMA
+    local okG, tiles = RomExtractorGen3.lz77ok(rom, D.GFX)
+    local okM, map = RomExtractorGen3.lz77ok(rom, D.MAP)
+    if not (okG and okM) then error("did not decompress") end
+    Logger.info("gen3 frlg diploma: %d tile bytes, %d map bytes", #tiles, #map)
+    local colors = frlgColors(rom, D.PAL, 32)
+    local full = frlgTilemap(tiles, map, 64, 64, 20, colors, { opaque = true })
+    local function crop(x)
+      local out = ImageWriter.blank(240, 160)
+      out:paste(full, 0, 0, x, 0, 240, 160)
+      return out
+    end
+    rec.diploma = { kanto = save(crop(0), "diploma_kanto"), national = save(crop(256), "diploma_national"),
+                    text = {} }
+    -- these carry {DYNAMIC n} (0xF7 n), which readText refuses; walk them here
+    local map = self:charmap()
+    local function dynText(at)
+      if rom:u8(at) == 0xFF then at = at + 1 end
+      local out, i = {}, 0
+      while i < 200 do
+        local b = rom:u8(at + i)
+        if b == 0xFF then break
+        elseif b == 0xFE then out[#out + 1] = "\n"; i = i + 1
+        elseif b == 0xF7 then out[#out + 1] = ("{DYNAMIC %d}"):format(rom:u8(at + i + 1)); i = i + 2
+        else out[#out + 1] = map[b] or ""; i = i + 1 end
+      end
+      return table.concat(out)
+    end
+    for k, at in pairs(D.TEXT) do rec.diploma.text[k] = dynText(at) end
+  end)
+
+  try("seagallop", function()
+    local S = A.SEAGALLOP
+    local water = rom:bytes(S.WATER, S.WATER_TILES * 32)
+    local wpal = frlgColors(rom, S.WATER_PAL, 16)
+    local colors = {}
+    for i = 0, 15 do colors[4 * 16 + i] = wpal[i] end
+    rec.seagallop = {
+      west = save(frlgTilemap(water, rom:bytes(S.MAP_WB, 0x800), 32, 32, 32, colors, { opaque = true }), "seagallop_west"),
+      east = save(frlgTilemap(water, rom:bytes(S.MAP_EB, 0x800), 32, 32, 32, colors, { opaque = true }), "seagallop_east"),
+    }
+    local fpal = frlgColors(rom, S.FERRY_PAL, 16)
+    local ferryTiles = rom:bytes(S.FERRY, 64 * 32)
+    for i = S.FERRY_TILES * 32 + 1, 64 * 32 do ferryTiles[i] = 0 end
+    rec.seagallop.ferry = save(frlgSheet(ferryTiles, 8, 8, 1, fpal), "seagallop_ferry")
+    rec.seagallop.wake = save(frlgSheet(rom:bytes(S.WAKE, 64 * 32), 4, 4, 3, fpal), "seagallop_wake")
+    rec.seagallop.matrix = {}
+    for i = 0, 10 do rec.seagallop.matrix[i + 1] = rom:u16(S.MATRIX + i * 2) end
+  end)
+
+  try("confetti", function()
+    local ok, sheet = RomExtractorGen3.lz77ok(rom, A.CONFETTI.SHEET)
+    if not ok then error("sheet did not decompress") end
+    rec.confetti = { image = save(frlgSheet(sheet, 1, 1, 17, frlgColors(rom, A.CONFETTI.PAL, 16, true)), "hof_confetti"),
+                     frames = 17 }
+  end)
+
+  try("credits", function()
+    local C = A.CREDITS
+    rec.credits = {}
+    for _, key in ipairs({ "THE_END", "COPYRIGHT" }) do
+      local d = C[key]
+      local okT, tiles = RomExtractorGen3.lz77ok(rom, d.TILES)
+      local okM, map = RomExtractorGen3.lz77ok(rom, d.MAP)
+      if okT and okM then
+        rec.credits[key:lower()] = save(frlgTilemap(tiles, map, 32, 30, 20, frlgColors(rom, d.PAL, 16),
+                                                    { opaque = true }), "credits_" .. key:lower())
+      end
+    end
+    do
+      local d = C.POKEBALL
+      local okT, tiles = RomExtractorGen3.lz77ok(rom, d.TILES)
+      local okM, map = RomExtractorGen3.lz77ok(rom, d.MAP)
+      if okT and okM then
+        rec.credits.pokeball = {}
+        for m = 0, 3 do
+          local pal = frlgColors(rom, d.PALS + m * 32, 16)
+          rec.credits.pokeball[m + 1] = save(frlgTilemap(tiles, map, 32, 30, 20, pal, { opaque = true }),
+                                             "credits_pokeball_" .. m)
+        end
+      end
+    end
+    local function character(key, name)
+      local d = C[key]
+      local ok, tiles = RomExtractorGen3.lz77ok(rom, d.TILES)
+      if not ok then return nil end
+      local frames = math.max(1, math.floor(#tiles / (64 * 32)))
+      return { image = save(frlgSheet(tiles, 8, 8, frames, frlgColors(rom, d.PAL, 16)), name), frames = frames }
+    end
+    local function ground(key, name)
+      local d = C[key]
+      local ok, tiles = RomExtractorGen3.lz77ok(rom, d.TILES)
+      if not ok then return nil end
+      local frames = math.max(1, math.floor(#tiles / (32 * 32)))
+      return { image = save(frlgSheet(tiles, 8, 4, frames, frlgColors(rom, d.PAL, 16)), name), frames = frames }
+    end
+    rec.credits.playerMale = character("PLAYER_MALE", "credits_player_male")
+    rec.credits.playerFemale = character("PLAYER_FEMALE", "credits_player_female")
+    rec.credits.rival = character("RIVAL", "credits_rival")
+    rec.credits.groundGrass = ground("GROUND_GRASS", "credits_ground_grass")
+    rec.credits.groundDirt = ground("GROUND_DIRT", "credits_ground_dirt")
+    rec.credits.groundCity = ground("GROUND_CITY", "credits_ground_city")
+    rec.credits.spriteParams = {}
+    for i = 0, 4 do
+      local at = C.SPRITE_PARAMS + i * 6
+      rec.credits.spriteParams[i + 1] = { rom:u16(at), rom:u16(at + 2), rom:u16(at + 4) }
+    end
+  end)
+
+  local constants = self._constants or {}
+  constants.gen3FRLGArt = rec
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed extra art: fossils %s, diploma %s, seagallop %s, confetti %s, credits %s",
+              tostring(rec.fossils ~= nil), tostring(rec.diploma ~= nil), tostring(rec.seagallop ~= nil),
+              tostring(rec.confetti ~= nil), tostring(rec.credits ~= nil))
 end
 
 function RomExtractorGen3:extractFireRedSpecialTexts()
@@ -44879,12 +45138,16 @@ function RomExtractorGen3:extractFireRedCredits()
     if #rows > 0 then pages[#pages + 1] = rows end
   end
   page((text(F.TITLE):gsub("\n", " ")), "")
+  local script, texts = {}, {}
   for i = 0, F.SCRIPT_COUNT - 1 do
     local at = F.SCRIPT + i * 4
     local cmd, param = rom:u8(at), rom:u8(at + 1)
+    script[#script + 1] = { cmd = cmd, param = param, duration = rom:u16(at + 2) }
     if cmd == 0 then
       local t = F.TEXTS + param * F.TEXT_STRIDE
-      page(text(rom:pointer(t)), text(rom:pointer(t + 4)))
+      local title, names = text(rom:pointer(t)), text(rom:pointer(t + 4))
+      texts[param] = { title = title, names = names }
+      page(title, names)
     elseif cmd == 5 then
       break
     end
@@ -44895,6 +45158,8 @@ function RomExtractorGen3:extractFireRedCredits()
   end
   local constants = self._constants or {}
   constants.gen3Credits = { entries = entries, pages = pages, rows = 6,
+                            frlg = { script = script, texts = texts,
+                                     title = (text(F.TITLE):gsub("\n", " ")) },
                             source = "ROM:sCreditsScript / sCreditsTexts (FireRed)" }
   self._constants = constants
   self:write("constants", constants)
@@ -45615,6 +45880,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedMapPreviews",
   "extractFireRedSpecialTexts",
   "extractFireRedTrainerTower",
+  "extractFireRedExtraArt",
   "extractItemIcons",
   "extractPokenav",
   "extractBattleTextbox",
