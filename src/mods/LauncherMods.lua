@@ -921,7 +921,8 @@ function LauncherMods.installFromRelease(modId, release)
     local ModUpdate = require("src.mods.ModUpdate")
     local tmpName = ("mod_update_%s_%s.zip"):format(
       tostring(modId), tostring(release.version or os.time()))
-    local localPath, dlErr = ModUpdate.downloadZip(release.zip.url, tmpName)
+    local localPath, dlErr = ModUpdate.downloadZip(release.zip.url, tmpName,
+      release.zip.size)
     if not localPath then return nil, dlErr end
     local installed, res, version = LauncherMods.installZip(localPath, {
       replace = true, expectId = modId,
