@@ -771,6 +771,27 @@ function LauncherMods.adoptStrays() return scanStrays(true) end
 -- Returns true, id, installedVersion  |  nil, errString.  The version is the
 -- one the INSTALLED manifest.json declares, which is not always the one the
 -- release it came from claims -- see installFromRelease.
+-- WHERE A MOD THIS MACHINE HAS NEVER SEEN SHOULD GO.
+--
+-- `mods/<id>` normally, and that is what every install has used -- but the
+-- name may already be taken by a tree that is NOT this mod: a folder whose id
+-- differs only in case (see folderFor), a hand-unzipped folder with no
+-- manifest at all, or a leftover from a mod that was renamed.  Refusing there
+-- is what locked the second mod out; taking the folder would be worse.
+--
+-- So: find a free name.  The folder is an implementation detail -- discover()
+-- lists a mod by the id its manifest declares and folderFor finds it by
+-- reading manifests, so nothing downstream cares what the directory is called.
+local function freeInstallPath(fs, id)
+  local base = "mods/" .. id
+  if not fs.getInfo(base) then return base end
+  for n = 2, 99 do
+    local candidate = ("%s-%d"):format(base, n)
+    if not fs.getInfo(candidate) then return candidate end
+  end
+  return nil, ("could not find a free folder for '%s' under mods/"):format(id)
+end
+
 function LauncherMods.installZip(source, opts)
   local ok, result, err, version = pcall(LauncherMods._installZipInner, source, opts)
   if not ok then return nil, "import failed: " .. tostring(result) end
@@ -975,7 +996,21 @@ function LauncherMods._installZipInner(source, opts)
   -- id, which discover() resolves by taking whichever it reaches first and the
   -- loader reports as a duplicate.  An update would have done worse: it would
   -- have removed a folder that was not there and left the old version loading.
-  local dest = LauncherMods.folderFor(manifest.id) or ("mods/" .. manifest.id)
+  -- ...and "already installed" means a tree that DECLARES THIS ID, not a
+  -- folder that happens to share its name.  See folderFor: on Windows
+  -- `mods/Dramatic_shape` and `mods/DRAMATIC_SHAPE` are one directory, so an
+  -- unrelated mod was being told it was already here and could not be
+  -- installed at all.  A name that is taken by somebody else simply gets a
+  -- different one (freeInstallPath).
+  local dest = LauncherMods.folderFor(manifest.id)
+  if not dest then
+    local free, freeErr = freeInstallPath(fs, manifest.id)
+    if not free then
+      cleanup()
+      return nil, freeErr
+    end
+    dest = free
+  end
   if fs.getInfo(dest) then
     if not opts.replace then
       cleanup()
@@ -1144,6 +1179,33 @@ end
 --
 -- A folder whose name IS the id still wins first, so nothing the launcher put
 -- there changes path; only a mismatch pays for the scan.
+--
+-- ...BUT THE FAST PATH HAS TO PROVE ITSELF, and that is the second half of the
+-- same confusion.  Reported from play: with DRAMATIC_SHAPE installed, another
+-- author's mod would not install at all -- "a mod named 'Dramatic_shape' is
+-- already installed" -- for a mod that was not this one and had never been
+-- installed.
+--
+-- `getInfo("mods/Dramatic_shape")` answered TRUE, because the folder on disk
+-- is `mods/DRAMATIC_SHAPE` and Windows (and macOS by default) does not
+-- distinguish the two.  So a folder belonging to somebody else was handed back
+-- as this id's home, and the installer read that as "you already have this".
+-- Two mods whose ids differ only in case are two mods, and one of them was
+-- locked out of the machine by the other's folder name.
+--
+-- Reading the manifest costs one small file on the path that used to cost
+-- nothing, and only for a hit -- a miss still falls straight through to the
+-- scan below, which has always confirmed the id.
+local function folderDeclares(fs, path, id)
+  local info = fs.getInfo(path)
+  if not (info and (info.type == "directory" or info.type == "symlink")) then
+    return false
+  end
+  local raw = fs.read(path .. "/manifest.json")
+  local manifest = raw and decodeManifest(raw, path) or nil
+  return manifest ~= nil and manifest.id == id
+end
+
 function LauncherMods.folderFor(id)
   local fs = love and love.filesystem
   if not (fs and fs.getInfo and fs.getDirectoryItems) then return nil end
@@ -1151,16 +1213,11 @@ function LauncherMods.folderFor(id)
   -- direct hit or the scan can see anything (#330)
   CacheFs.root()
   local direct = "mods/" .. id
-  if fs.getInfo(direct) then return direct end
+  if folderDeclares(fs, direct, id) then return direct end
   if not fs.getInfo("mods") then return nil end
   for _, name in ipairs(fs.getDirectoryItems("mods")) do
     local path = "mods/" .. name
-    local info = fs.getInfo(path)
-    if info and (info.type == "directory" or info.type == "symlink") then
-      local raw = fs.read(path .. "/manifest.json")
-      local manifest = raw and decodeManifest(raw, path) or nil
-      if manifest and manifest.id == id then return path end
-    end
+    if folderDeclares(fs, path, id) then return path end
   end
   return nil
 end

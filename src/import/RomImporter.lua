@@ -2547,6 +2547,10 @@ function RomImporter:focus(f)
     and love.filesystem.read("pick_error.flag")
   if pickError then
     love.filesystem.remove("pick_error.flag")
+    if self._pickMany then
+      self:_pickManyTally(false)
+      self:_pickManyFinish()
+    end
     -- WHAT THE FLAG CARRIES NOW. Line 1 is the destination basename (which is
     -- what the branches below match on, so it has to stay first); the rest is
     -- the native side's account of why nothing could be read -- which app
@@ -2594,8 +2598,13 @@ function RomImporter:focus(f)
   local modName = findPendingMod(false, self.pickSkip)
   if modName then
     self:_installMod(modName)
-    consumePick(self, modName, "picked_mod.zip",
-      self.modNotice and self.modNotice.ok)
+    local installed = self.modNotice and self.modNotice.ok
+    consumePick(self, modName, "picked_mod.zip", installed)
+    -- ...and if this is a run, count it and open the picker again.
+    if self:_pickManyActive("mod") then
+      self:_pickManyTally(installed)
+      self:_pickManyAgain()
+    end
     return
   end
   local savName = findPendingSav(false, self.pickSkip)
@@ -2612,12 +2621,19 @@ function RomImporter:focus(f)
       local name, data = findPendingRom(self.ready)
       if name then
         self:startData(data, name)
-      else
-        consumePickedRomError(self)
+      elseif consumePickedRomError(self) then
+        if self:_pickManyActive("rom") then self:_pickManyTally(false) end
+      elseif self:_pickManyActive("rom") then
+        -- came back from the picker with nothing: that is Back, and the end
+        -- of the run (see _pickManyBegin)
+        self:_pickManyFinish()
       end
       return
     end
   end
+  -- ...and the same signal for a mod run: every branch above has declined, so
+  -- the player returned from the picker without choosing anything.
+  if self._pickMany then self:_pickManyFinish() end
 end
 
 function RomImporter:setError(message, version)
@@ -2631,10 +2647,11 @@ function RomImporter:setError(message, version)
   self.progress = 0
   self.worker = nil
   self.romData = nil
-  -- The other way a run ends.  Deferred rather than called straight from here:
+  -- The other way a run ends -- for a desktop queue and for a mobile
+  -- keep-picking run alike.  Deferred rather than called straight from here:
   -- setError is reached from inside the worker coroutine, and starting the next
   -- import on that stack would resume a coroutine from within itself.
-  if self._romQueue then self._romQueueResume = true end
+  if self._romQueue or self._pickMany then self._romQueueResume = true end
 end
 
 -- draw() may leave the system hand cursor set while hovering a Play /
@@ -2977,20 +2994,49 @@ function RomImporter:_advanceRomQueue()
   end
 end
 
+-- WHAT HAPPENS AFTER ONE CARTRIDGE FINISHES, on a phone.
+--
+-- A desktop batch is a queue of paths the dialog already handed over, so
+-- _advanceRomQueue owns it.  A mobile one cannot be: the bridge gives one file
+-- per trip, so the next trip can only be asked for once this extraction has
+-- ended -- and an extraction is the one thing here that takes minutes.
+--
+-- Both endings reach this: the worker going dead, and setError's deferred
+-- wake.  `workState` says which, and a cartridge that failed is counted as
+-- failed rather than stopping the run -- the player picked six and one of them
+-- being a bad dump is not a reason to make them start again.
+function RomImporter:_romPickContinue()
+  if self._romQueue then return end        -- a desktop queue still has work
+  if self.workState == "working" then return end
+  if self._romPickAfterQueue then
+    self._romPickAfterQueue = nil
+    self:_pickManyBegin("rom")
+    return
+  end
+  if not self:_pickManyActive("rom") then return end
+  self:_pickManyTally(self.workState == "complete")
+  self:_pickManyAgain()
+end
+
 -- The button.  One press: pick, sort, queue.
 function RomImporter:chooseRomBatch()
   if self.workState == "working" then return end
   self.romBatch = nil
   local paths
   if self.android or self.ios then
-    -- neither bridge picks more than one file, so the inbox IS the batch
+    -- THE INBOX FIRST, THEN THE PICKER -- and the picker is the part this used
+    -- to skip entirely.  Reported from play: "Import ROMs on Android says no
+    -- ROMs waiting and doesn't popup with a file picker."  It refused instead
+    -- of asking, which on a phone is the only way in: a USB copy is a desktop
+    -- move and the save directory lives under Android/data, where the stock
+    -- Files app cannot browse at all.
     paths = pendingRomPaths()
     if #paths == 0 then
-      self.romBatch = { ok = false, at = love.timer.getTime(), text =
-        Strings("No ROMs waiting. Copy them into %s/imports/ first.",
-          love.filesystem.getSaveDirectory()) }
+      self:_pickManyBegin("rom")
       return
     end
+    -- ...and once the waiting ones are in, keep asking for more.
+    self._romPickAfterQueue = true
   else
     paths = chooseRoms()
     if not paths then
@@ -3116,6 +3162,130 @@ function RomImporter:_installMod(source, opts)
   end
 end
 
+-- ---------------------------------------------------------------------------
+-- MASS IMPORT ON A PHONE, where there is no multi-select to ask for.
+--
+-- Reported from play: "Import ROMs on Android says no ROMs waiting and doesn't
+-- popup with a file picker, and on Android the import many button pulls up the
+-- file picker but won't let me select many files."  Both are the same wall:
+-- the desktop pickers are shell dialogs this file drives and can ask for a
+-- multiple selection, and the mobile one is a NATIVE BRIDGE
+-- (love.system.pickFile) that starts a system document activity and copies
+-- exactly ONE file back under a fixed basename.  There is no argument for
+-- "several", and adding one means changing the native side, not this file.
+--
+-- So a run is a LOOP rather than a list: pick, install, and open the picker
+-- again -- and the player ends it by pressing Back instead of picking.  That
+-- costs one tap per file instead of one round trip through the launcher per
+-- file, which is the part that made adding six mods unreasonable.
+--
+-- HOW A RUN ENDS, and it has to be something the OS actually tells us.  The
+-- picker is a separate activity, so returning from it raises love.focus(true)
+-- -- and RomImporter:focus already runs every branch that could consume a
+-- pick.  Falling through all of them means the player came back with nothing,
+-- which is a cancel.  That is the only end signal here; a timer would have to
+-- guess how long somebody takes to find a file.
+--
+-- IOS DOES NOT LOOP.  Its bridge answers through love.system.getPickedFile in
+-- update() rather than a focus event, so there is no "came back empty" moment
+-- to read -- an armed run would simply sit armed for ever.  One pick there,
+-- the same as before, and the notice says so.
+-- ---------------------------------------------------------------------------
+
+function RomImporter:_pickManyActive(kind)
+  local run = self._pickMany
+  return run ~= nil and (kind == nil or run.kind == kind) and run or nil
+end
+
+-- Open the picker for the kind this run is collecting.  Answers false when the
+-- bridge refuses (no picker on this build), which ends the run.
+function RomImporter:_pickManyArm()
+  local run = self._pickMany
+  if not run then return false end
+  if run.kind == "rom" then
+    if self.ios then
+      self.iosPendingKind = "rom"
+      if not pickFile("rom") then return false end
+    elseif not pickFile() then
+      return false
+    end
+  else
+    if self.ios then
+      self.iosPendingKind = "mod"
+      if not pickFile("mod") then return false end
+    elseif not pickFile("mod") then
+      return false
+    end
+  end
+  self.pickPending = true
+  self.pickTimer = 0
+  -- the cancel watchdog in _pollPickedFiles counts focused polls; a fresh arm
+  -- starts it over or the previous trip's count would end this one early
+  self._pickIdle = nil
+  return true
+end
+
+function RomImporter:_pickManyBegin(kind)
+  self._pickMany = { kind = kind, taken = 0, failed = 0 }
+  if not self:_pickManyArm() then
+    self._pickMany = nil
+    return false
+  end
+  -- Say what Back does BEFORE they are looking at a system file browser: the
+  -- loop is only obvious once it has looped, and by then they have already
+  -- wondered why the picker came back.
+  local hint = self.ios
+    and Strings("Choose a file to import.")
+    or Strings("Choose one, then keep choosing -- press Back when you are done.")
+  if kind == "rom" then
+    self.romBatch = { ok = true, at = love.timer.getTime(), text = hint }
+  else
+    self.modNotice = { ok = true, text = hint }
+  end
+  return true
+end
+
+function RomImporter:_pickManyTally(ok)
+  local run = self._pickMany
+  if not run then return end
+  if ok then run.taken = run.taken + 1 else run.failed = run.failed + 1 end
+end
+
+-- One more, unless this is iOS (see the note above) or the bridge has stopped
+-- answering.
+function RomImporter:_pickManyAgain()
+  local run = self._pickMany
+  if not run then return end
+  if self.ios or not self:_pickManyArm() then
+    self:_pickManyFinish()
+  end
+end
+
+function RomImporter:_pickManyFinish()
+  local run = self._pickMany
+  if not run then return end
+  self._pickMany = nil
+  self.pickPending = nil
+  local text
+  if run.taken == 0 and run.failed == 0 then
+    text = run.kind == "rom" and Strings("No ROMs imported.")
+      or Strings("No mods installed.")
+  elseif run.failed > 0 then
+    text = run.kind == "rom"
+      and Strings("Imported %d, %d failed.", run.taken, run.failed)
+      or Strings("Installed %d, %d failed.", run.taken, run.failed)
+  else
+    text = run.kind == "rom" and Strings("Imported %d.", run.taken)
+      or Strings("Installed %d.", run.taken)
+  end
+  local ok = run.taken > 0 and run.failed == 0
+  if run.kind == "rom" then
+    self.romBatch = { ok = ok, at = love.timer.getTime(), text = text }
+  else
+    self.modNotice = { ok = ok, text = text }
+  end
+end
+
 -- MASS IMPORT: a list of sources through one install pass and one notice.
 --
 -- `sources` is whatever LauncherMods.installZip takes -- absolute paths from
@@ -3146,11 +3316,27 @@ end
 -- thing a player on that machine most wants and could not do.
 function RomImporter:chooseMods()
   if self.workState == "working" then return end
-  -- The mobile pickers are single-file bridges (love.system.pickFile takes a
-  -- kind, not a count), so there is nothing to mass about: fall through to the
-  -- ordinary import rather than offering a button that behaves differently
-  -- from its label.
-  if self.android or self.ios then return self:chooseMod() end
+  -- MOBILE KEEPS PICKING.  The bridge takes a kind, not a count, so a run
+  -- there is a loop the player ends with Back -- see _pickManyBegin.  What is
+  -- already waiting in the inbox comes first, because a USB or MTP copy is a
+  -- whole batch that costs no taps at all.
+  if self.android or self.ios then
+    local waiting = self:_inboxMods()
+    if #waiting > 0 then
+      -- Reinstall rather than refuse: an inbox zip is not consumed (it stays
+      -- for MTP recovery), so a second press finds the same files and a plain
+      -- install would call every one of them "already installed".
+      self:_installMods(waiting, { replace = true })
+    end
+    if not self:_pickManyBegin("mod") then
+      if #waiting == 0 then
+        self.modNotice = { ok = false, text =
+          Strings("Could not open the file picker. Copy your mod .zip files "
+                  .. "into imports/mods/ instead.") }
+      end
+    end
+    return
+  end
   local picks = chooseZips()
   if picks then
     -- A single pick through the multi picker is still a single install; going
@@ -3768,6 +3954,10 @@ function RomImporter:_pollPickedFiles(dt)
   if pickError then
     love.filesystem.remove("pick_error.txt")
     self.pickPending = nil
+    if self._pickMany then
+      self:_pickManyTally(false)
+      self:_pickManyFinish()
+    end
     self.modNotice = { ok = false, text = pickError }
     self.notice = { version = self.chooseVersion or "red",
                     status = "File import failed:", detail = pickError }
@@ -3784,8 +3974,31 @@ function RomImporter:_pollPickedFiles(dt)
     end
   end
   if found then
+    self._pickIdle = nil
     self.pickPending = nil
     self:focus(true)
+    return
+  end
+  -- A RUN NOBODY CANCELLED OUT LOUD.
+  --
+  -- love.focus(true) is the clean end of a keep-picking run (see
+  -- _pickManyBegin), and Android is free to destroy the activity while the
+  -- picker is up -- the app RESTARTS instead of resuming and that event never
+  -- arrives.  A run left armed there would poll for a file for ever.
+  --
+  -- So: while THIS window has focus the picker is not in front of it, and a
+  -- run that has sat through several focused polls with nothing to show for
+  -- itself has been backed out of.  Three seconds, because the picker takes a
+  -- moment to come up and the copy takes a moment to land.
+  if self._pickMany and love.window and love.window.hasFocus
+      and love.window.hasFocus() then
+    self._pickIdle = (self._pickIdle or 0) + 1
+    if self._pickIdle >= 6 then
+      self._pickIdle = nil
+      self:_pickManyFinish()
+    end
+  else
+    self._pickIdle = nil
   end
 end
 
@@ -3799,6 +4012,7 @@ function RomImporter:update(dt)
   if self._romQueueResume then
     self._romQueueResume = nil
     self:_advanceRomQueue()
+    self:_romPickContinue()
   end
   if self.ios and love.system.getPickedFile and self.workState ~= "working" then
     local path = love.system.getPickedFile()
@@ -3809,6 +4023,12 @@ function RomImporter:update(dt)
       self.iosPendingVersion = nil
       if kind == "mod" then
         self:_installMod(path)
+        -- iOS does not loop (see _pickManyBegin), so this both counts the pick
+        -- and closes the run.
+        if self:_pickManyActive("mod") then
+          self:_pickManyTally(self.modNotice and self.modNotice.ok)
+          self:_pickManyAgain()
+        end
       elseif kind == "sav" then
         self:_importSave(version or self:_savedropTarget(), path)
       else
@@ -3821,6 +4041,12 @@ function RomImporter:update(dt)
         local version = self.iosPendingVersion or self:_savedropTarget()
         self.iosPendingKind = nil
         self.iosPendingVersion = nil
+        -- a rejected pick ends a run rather than leaving it armed for a
+        -- second file that is never asked for
+        if self._pickMany then
+          self:_pickManyTally(false)
+          self:_pickManyFinish()
+        end
         if kind == "mod" then
           self.modNotice = { ok = false, text = errorText }
         elseif kind == "sav" then
@@ -3858,6 +4084,7 @@ function RomImporter:update(dt)
       -- known to have finished successfully; setError is the other ending, and
       -- pumps the queue itself.
       self:_advanceRomQueue()
+      self:_romPickContinue()
       return
     end
   until love.timer.getTime() - started >= 0.008
