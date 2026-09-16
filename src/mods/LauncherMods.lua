@@ -32,6 +32,7 @@
 
 local Manifest = require("src.mods.Manifest")
 local ManagerState = require("src.mods.ManagerState")
+local ModGens = require("src.mods.ModGens")
 local Semver = require("src.mods.Semver")
 local Version = require("src.core.Version")
 local SaveData = require("src.core.SaveData")
@@ -92,18 +93,19 @@ function LauncherMods.deriveList(manifests, options)
   for _, m in ipairs(manifests) do ordered[#ordered + 1] = m end
   table.sort(ordered, function(a, b) return a.id < b.id end)
 
-  local byId, enabledSet = {}, {}
+  local byId, enabledSet, genSet = {}, {}, {}
   for _, m in ipairs(ordered) do
     byId[m.id] = m
-    -- missing entry means enabled, matching the loader -- except experimental
-    -- mods, which stay off until the player opts in
-    if mods[m.id] == false then
-      -- stay off
-    elseif mods[m.id] == true then
-      enabledSet[m.id] = true
-    elseif not m.experimental then
-      enabledSet[m.id] = true
-    end
+    -- THE MASTER SWITCH, which is the one the dependency and conflict
+    -- resolution below asks about.  A mod narrowed to one generation is still
+    -- "on" for that purpose: two mods that conflict conflict wherever they
+    -- both run, and answering per generation here would need the panel to
+    -- know which game the player is about to start -- which it does not.
+    -- The chips are carried alongside so the row can draw them.
+    local on = ModGens.active(mods[m.id], nil)
+    if on == nil then on = not m.experimental end
+    if on then enabledSet[m.id] = true end
+    genSet[m.id] = ModGens.gensOf(mods[m.id])
   end
 
   local out = {}
@@ -162,6 +164,10 @@ function LauncherMods.deriveList(manifests, options)
       badge = badge,
       description = m.description or "",
       enabled = enabled,
+      -- Which generations this mod reaches while it is on (see ModGens).  All
+      -- three unless the player has said otherwise, so a row that has never
+      -- been touched draws three lit chips and behaves exactly as it used to.
+      gens = genSet[m.id] or { true, true, true },
       status = status,
       statusDetail = detail,
       github = m.github,
@@ -405,7 +411,33 @@ end
 function LauncherMods.setEnabled(id, enabled)
   local options = SaveData.loadOptions()
   options.mods = options.mods or {}
-  options.mods[id] = enabled and true or false
+  -- ...through ModGens, so flicking the master switch KEEPS the per-generation
+  -- chips.  Writing a bare boolean here would reset them every time, which is
+  -- exactly what "off and on again" must not cost the player.
+  options.mods[id] = ModGens.withEnabled(options.mods[id], enabled)
+  SaveData.saveOptions(options)
+  return true
+end
+
+-- setGeneration(id, generation, want): one of the three chips under a mod's
+-- switch.  Same single-write shape as setEnabled, and ModGens decides what
+-- the master does about it (turning a generation on turns the mod on).
+function LauncherMods.setGeneration(id, generation, want)
+  local options = SaveData.loadOptions()
+  options.mods = options.mods or {}
+  options.mods[id] = ModGens.withGen(options.mods[id], generation, want)
+  SaveData.saveOptions(options)
+  return true
+end
+
+-- setAllGenerations(rows, generation, want): the per-generation bulk buttons.
+-- `rows` is a list of ids; one options write for the lot, like setAllEnabled.
+function LauncherMods.setAllGenerations(ids, generation, want)
+  local options = SaveData.loadOptions()
+  options.mods = options.mods or {}
+  for _, id in ipairs(ids or {}) do
+    options.mods[id] = ModGens.withGen(options.mods[id], generation, want)
+  end
   SaveData.saveOptions(options)
   return true
 end
@@ -419,7 +451,7 @@ function LauncherMods.setAllEnabled(ids, enabled)
   local options = SaveData.loadOptions()
   options.mods = options.mods or {}
   for _, id in ipairs(ids or {}) do
-    options.mods[id] = enabled and true or false
+    options.mods[id] = ModGens.withEnabled(options.mods[id], enabled)
   end
   SaveData.saveOptions(options)
   return true
@@ -743,6 +775,114 @@ function LauncherMods.installZip(source, opts)
   local ok, result, err, version = pcall(LauncherMods._installZipInner, source, opts)
   if not ok then return nil, "import failed: " .. tostring(result) end
   return result, err, version
+end
+
+-- MANY AT ONCE.
+--
+-- Asked for directly: "add a way to mass import mods".  Installing a folder of
+-- releases one dialog at a time is the shape of the complaint, and it gets
+-- worse the more mods somebody has -- reinstalling a whole collection after
+-- moving machines was a dozen round trips through a file picker.
+--
+-- ONE SUMMARY, NOT N NOTICES.  Each source is installed by exactly the path a
+-- single import takes (installZip, magic bytes and manifest validation and
+-- all), and the results are collected rather than announced: a run of twelve
+-- that installs eleven wants one line saying which one did not, not eleven
+-- lines that scroll the failure off the panel.
+--
+-- ALREADY-INSTALLED IS NOT A FAILURE HERE.  A mass import is nearly always
+-- "give me everything in this folder", and half of it being present already is
+-- the normal case rather than a mistake, so those are counted separately and
+-- reported as skipped.  `opts.replace` turns them into reinstalls for a caller
+-- that means it.
+--
+-- Returns { installed = {names}, skipped = {names}, failed = {{name, err}} }.
+function LauncherMods.installMany(sources, opts)
+  opts = opts or {}
+  local out = { installed = {}, skipped = {}, failed = {} }
+  for _, source in ipairs(sources or {}) do
+    local label = type(source) == "string"
+      and (source:match("[^/\\]+$") or source)
+      or (source.getFilename and source:getFilename()) or "archive"
+    local okOne, name, err = pcall(LauncherMods.installZip, source, opts)
+    if okOne and name then
+      out.installed[#out.installed + 1] = tostring(name)
+    else
+      local why = tostring((okOne and err) or name or "import failed")
+      -- "a mod named 'x' is already installed" is the one refusal that means
+      -- the player already has what they asked for
+      if why:find("already installed", 1, true) then
+        out.skipped[#out.skipped + 1] = label
+      else
+        out.failed[#out.failed + 1] = { name = label, err = why }
+      end
+    end
+  end
+  return out
+end
+
+-- The .zip files directly inside a folder, and one level under it -- so both
+-- "a folder of zips" and "a folder of per-mod folders each holding its
+-- release" work, which are the two ways anybody actually keeps them.
+--
+-- An EXTERNAL absolute path, so this cannot use love.filesystem: the folder a
+-- player points at is on their disk, not on the physfs read path.  CacheFs's
+-- scoped mount is how the stray-adoption scan already reaches outside, and
+-- this borrows it rather than opening a second door.
+function LauncherMods.zipsInFolder(path)
+  if type(path) ~= "string" or path == "" then return nil, "no folder given" end
+  if not (love and love.filesystem) then return nil, "needs LOVE" end
+  local mount = "mod_bulk_mount"
+  if not love.filesystem.mount(path, mount) then
+    return nil, "that folder could not be opened: " .. tostring(path)
+  end
+  local found = {}
+  local sep = path:find("\\", 1, true) and "\\" or "/"
+  local okScan = pcall(function()
+    for _, entry in ipairs(love.filesystem.getDirectoryItems(mount)) do
+      local info = love.filesystem.getInfo(mount .. "/" .. entry)
+      if info and info.type == "file" and entry:lower():match("%.zip$") then
+        found[#found + 1] = path .. sep .. entry
+      elseif info and info.type == "directory" then
+        for _, sub in ipairs(
+            love.filesystem.getDirectoryItems(mount .. "/" .. entry)) do
+          local si = love.filesystem.getInfo(mount .. "/" .. entry .. "/" .. sub)
+          if si and si.type == "file" and sub:lower():match("%.zip$") then
+            found[#found + 1] = path .. sep .. entry .. sep .. sub
+          end
+        end
+      end
+    end
+  end)
+  love.filesystem.unmount(mount)
+  if not okScan then return nil, "that folder could not be read" end
+  table.sort(found)
+  if #found == 0 then return nil, "no .zip files in " .. tostring(path) end
+  return found
+end
+
+-- One line describing an installMany result, for the panel's notice.
+function LauncherMods.summarize(res)
+  if not res then return false, "nothing to import" end
+  local parts = {}
+  if #res.installed > 0 then
+    parts[#parts + 1] = ("Installed %d: %s"):format(#res.installed,
+      table.concat(res.installed, ", "))
+  end
+  if #res.skipped > 0 then
+    parts[#parts + 1] = ("%d already installed"):format(#res.skipped)
+  end
+  if #res.failed > 0 then
+    local names = {}
+    for _, f in ipairs(res.failed) do names[#names + 1] = f.name end
+    parts[#parts + 1] = ("%d failed: %s"):format(#res.failed,
+      table.concat(names, ", "))
+    -- the FIRST reason, in full: a list of names with no cause is a support
+    -- thread, and one cause usually explains all of them
+    parts[#parts + 1] = tostring(res.failed[1].err)
+  end
+  if #parts == 0 then return false, "nothing was imported" end
+  return #res.installed > 0 and #res.failed == 0, table.concat(parts, "\n")
 end
 
 function LauncherMods._installZipInner(source, opts)

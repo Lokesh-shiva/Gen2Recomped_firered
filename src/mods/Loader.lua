@@ -21,6 +21,7 @@ local Events = require("src.mods.Events")
 local Hooks = require("src.mods.Hooks")
 local ModStorage = require("src.mods.Storage")
 local Runtime = require("src.mods.Runtime")
+local ModGens = require("src.mods.ModGens")
 -- Module-name aliases for mods written against the Gold port's per-generation
 -- layout (src.world.gen2.Player and friends).  Installed here because this is
 -- the module that loads mods: the searcher has to be in place before the
@@ -162,11 +163,29 @@ function Loader.new(opts)
   return self
 end
 
+-- WHICH GENERATION THIS BOOT IS.
+--
+-- The loader runs inside a game that has already been chosen, so "is this mod
+-- on" has a generation to be answered for -- see src/mods/ModGens.lua.  Read
+-- through a pcall and answered as nil when nothing is set: a headless harness
+-- constructs a Loader with no version selected, and there the per-generation
+-- chips simply do not apply and every mod resolves on its master switch.
+function Loader:_generation()
+  local okV, GameVersion = pcall(require, "src.core.GameVersion")
+  if not okV then return nil end
+  local okG, gen = pcall(GameVersion.generation)
+  return okG and gen or nil
+end
+
 function Loader:_loadState()
   self.disabled = {}
   local options = SaveData.loadOptions(self.fs)
-  for id, enabled in pairs(options.mods or {}) do
-    if enabled == false then self.disabled[id] = true end
+  local gen = self:_generation()
+  for id, value in pairs(options.mods or {}) do
+    -- `false` still means off, and a bare `true` still means on -- ModGens
+    -- only has anything to say about the record form, which is written the
+    -- moment a player unticks one of a mod's generation chips.
+    if ModGens.active(value, gen) == false then self.disabled[id] = true end
   end
   -- mod.options reads through this; M11 owns writing it back
   self.modOptions = options.modOptions or {}
@@ -192,13 +211,39 @@ function Loader:_loadState()
   end
 end
 
+-- THE IN-GAME SWITCH IS STILL THE MASTER SWITCH -- with one asymmetry.
+--
+-- The manager has no per-generation chips of its own (they live in the
+-- launcher), so its switch has to keep meaning what its label says:
+--
+--   OFF  writes the master, which is off EVERYWHERE, exactly as it always
+--        was -- and with every chip ticked that is still the plain `false` the
+--        loader has written since it was written.  The chips are kept, so
+--        turning it back on in the launcher restores the selection.
+--   ON   writes the master AND this generation's chip, because the other way
+--        round is a switch that cannot be switched: a mod the player narrowed
+--        to Gen 1 shows here as disabled under Emerald, and flipping only the
+--        master would leave it not loading and the switch snapping back.
+--
+-- ONLY WHAT CHANGED, which matters more than it looks.  This used to restate
+-- every mod's flag on every save, and doing that through ModGens would rewrite
+-- the record of mods nobody touched -- losing chips the player set in the
+-- launcher as a side effect of toggling something else.  Comparing against the
+-- stored resolution first means an unchanged mod is not written at all.
 function Loader:_saveState()
   -- a read-only injected fs keeps enable toggles in-memory only
   if not self.fs.write then return end
   local options = SaveData.loadOptions(self.fs)
   options.mods = options.mods or {}
-  for id in pairs(self.mods) do
-    options.mods[id] = not self.disabled[id]
+  local gen = self:_generation()
+  for id, mod in pairs(self.mods) do
+    local want = not self.disabled[id]
+    local experimental = mod.manifest and mod.manifest.experimental
+    if ModGens.resolve(options.mods[id], gen, experimental) ~= want then
+      options.mods[id] = want
+        and ModGens.withGen(options.mods[id], gen, true)
+        or ModGens.withEnabled(options.mods[id], false)
+    end
   end
   SaveData.saveOptions(options, self.fs)
 end
@@ -1055,9 +1100,10 @@ function Loader:load(data)
   do
     local options = SaveData.loadOptions(self.fs)
     local modsOpt = options.mods or {}
+    local gen = self:_generation()
     for id, mod in pairs(self.mods) do
-      if not self.disabled[id] and modsOpt[id] == nil
-          and mod.manifest.experimental then
+      if not self.disabled[id] and mod.manifest.experimental
+          and ModGens.active(modsOpt[id], gen) ~= true then
         self.disabled[id] = true
       end
     end
