@@ -478,12 +478,41 @@ end
 -- tile / entity), so the hook stays a single-value middleware
 local function passthrough(allowed) return allowed end
 
--- Returns true when the mover may step from (cx,cy) toward dir.
--- Out-of-bounds is blocked here; the OverworldController handles map
--- connections and edge warps before asking.  Per-step hot path: with an
--- empty chain this costs one table lookup and no ctx allocation.
-function Collision.canMove(map, entities, mover, dir)
-  local tx, ty = Collision.target(mover.cellX, mover.cellY, dir)
+-- THE SAME VERDICT, ASKED ABOUT A CELL INSTEAD OF A DIRECTION.
+--
+-- MOTIVATED BY THE CLIFF BESIDE ROUTE 114'S METEOR FALLS MOUTH, which a
+-- free-walking camera could climb.  Reported from play: "when using first and
+-- third person into caves im getting an issue where it makes me move on top
+-- of the cliff instead of going into the cave entrance. shouldnt be able to
+-- climb on top of cliffs either in first or third person".
+--
+-- `verdict` has always taken an explicit target -- canMove merely derives one
+-- from a direction -- and everything above it is the real step test: the
+-- one-way walls, the bounds, the passability, the ELEVATION, the acro tiles
+-- and rails, the tile pairs, the occupancy.  What there was no way to do from
+-- outside this file was ask that question about a cell you name yourself.
+--
+-- A caller that moves CONTINUOUSLY has to.  A grid step is always one cell in
+-- one of four directions, so a direction IS a target; a body with a radius
+-- sliding along a wall overlaps up to two cells per axis, and has to ask about
+-- each of them.  Without this, such a caller has no choice but to restate the
+-- test -- and a restatement is a copy that stops being true the day a clause
+-- is added here.  That is exactly what had happened: the voxel mod's free walk
+-- reimplemented four of these seven tests and silently lost the other three,
+-- so in first and third person Hoenn had no elevation at all -- 4,376 cliff
+-- steps and 3,704 water steps across 107 maps that the grid walk refuses.
+--
+-- `dir` is the AXIS BEING CROSSED, not the bearing to the cell: a body sliding
+-- east asks "right" about every cell on its leading edge, including the one
+-- diagonally ahead, because east is the way it is going through that
+-- boundary.  That is the reading sideWallBlocked and railHolds want -- both
+-- are about which SIDE is fenced -- and it is the only one a diagonal probe
+-- has, since the mover crosses one axis at a time.  A caller with no axis to
+-- name may pass nil: the two direction-keyed tests then look up a nil key,
+-- find nothing, and the other five answer in full.
+--
+-- Returns the same pair `verdict` does: true, or false plus the reason.
+function Collision.mayEnter(map, entities, mover, tx, ty, dir)
   local allowed, why = verdict(map, entities, mover, dir, tx, ty)
   if Runtime.wantsHook("movement.collision") then
     local ctx = { map = map, mover = mover, dir = dir,
@@ -492,6 +521,16 @@ function Collision.canMove(map, entities, mover, dir)
     allowed = Runtime.call("movement.collision", passthrough, allowed, ctx)
     why = ctx.reason
   end
+  return allowed, why
+end
+
+-- Returns true when the mover may step from (cx,cy) toward dir.
+-- Out-of-bounds is blocked here; the OverworldController handles map
+-- connections and edge warps before asking.  Per-step hot path: with an
+-- empty chain this costs one table lookup and no ctx allocation.
+function Collision.canMove(map, entities, mover, dir)
+  local tx, ty = Collision.target(mover.cellX, mover.cellY, dir)
+  local allowed, why = Collision.mayEnter(map, entities, mover, tx, ty, dir)
   if allowed then return true end
   return false, why
 end

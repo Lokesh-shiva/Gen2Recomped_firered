@@ -351,6 +351,39 @@ function TrainerAI.chooseMove(battler, rng, battle)
   local encourageTurn = (battler.aiLayer2 or 0) == 1
   battler.aiLayer2 = (battler.aiLayer2 or 0) + 1
 
+  -- HOENN HAS ITS OWN PROGRAM FOR THIS, and it is the cartridge's, not a
+  -- layer stack: gTrainers[].aiFlags names bytecode scripts, the importer
+  -- decodes them and src/battle/Gen3AI.lua runs them.  It answers nil for a
+  -- trainer the cartridge gave no flags, for a build with no decoded program,
+  -- and for a script this engine cannot run end to end yet -- and nil means
+  -- "no opinion", so everything below is exactly what it was.
+  if battle then
+    local okAI, Gen3AI = pcall(require, "src.battle.Gen3AI")
+    if okAI and type(Gen3AI) == "table" then
+      local foes = battle.foesOf and battle:foesOf(battler) or nil
+      if foes and #foes > 1 then
+        -- TWO OF THEM TO AIM AT, so the answer is a move AND a target: the
+        -- cartridge scores every pair and takes the best one.  The target is
+        -- left where the player's own answer is left, so the move resolves
+        -- through exactly the same path a chosen target already does.
+        local okPick, move, target =
+          pcall(Gen3AI.chooseAction, battle, battler, usable, foes)
+        if okPick and move then
+          if target and battler.position then
+            battle.chosenTargets = battle.chosenTargets or {}
+            battle.chosenTargets[battler.position] = target
+          end
+          return move
+        end
+      else
+        local target = (foes and foes[1]) or battle.player
+        local okPick, picked = pcall(Gen3AI.chooseMove, battle, battler, target,
+                                     usable)
+        if okPick and picked then return picked end
+      end
+    end
+  end
+
   local mods = battle and battle.enemyAIMods or nil
   if not mods or #mods == 0 or not battle then
     return usable[rng(1, #usable)]

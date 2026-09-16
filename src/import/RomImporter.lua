@@ -992,7 +992,7 @@ end
 -- (Groudon's 31, Kyogre's 47) that each handler animates through a table at
 -- $0D85CD0 -- black, blue, purple, magenta, RED -- so the markings are composed
 -- as their own mask and wear that colour at run time.
-local CACHE_FORMAT = "rom-cache-v306:"
+local CACHE_FORMAT = "rom-cache-v309:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"

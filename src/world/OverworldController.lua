@@ -2965,6 +2965,7 @@ function OverworldState:update(dt)
   end
   self:poseBerryTrees()
   self:updateRipples()
+  self:updateSparkles()
   -- every body on screen, home and foreign alike, in this map's cells
   self:updateCast()
   local cast = self.cast or self.entities
@@ -12160,6 +12161,139 @@ function OverworldState:drawRipples(camX, camY)
   end
 end
 
+
+-- ---- THE SPARKLE OVER A TILE SOMEBODY IS HIDING ON ------------------------
+--
+-- Reported from play: "the ui sparkle that appears in the rom when you go
+-- into the room and it says you being watched ... doesnt appear".  The TRICK
+-- HOUSE entrance is the one place in Hoenn that asks for it: the Trick Master
+-- hides on one of three tiles, the coord script sets that tile in the field
+-- effect's arguments and starts effect 54 there, and the sparkle is the only
+-- thing that tells the player which tile to press A on.
+--
+-- NOT AN NPC'S EMOTE, which is why it does not go through self.emote: every
+-- other raised icon in the port hangs off an object and follows it, and this
+-- one is nailed to a map cell that has nothing standing on it -- the Trick
+-- Master is there, but he is invisible, which is the whole puzzle.
+--
+-- THE TWO CLOCKS ARE NOT THE SAME LENGTH, and that is the cartridge's doing
+-- rather than a nicety.  UpdateSparkleFieldEffect plays the animation, sets
+-- the sprite INVISIBLE the frame it ends, and only then starts counting
+-- towards FieldEffectStop -- so the effect outlives its own picture by the
+-- `linger` read off that comparison at import.  `waitfieldeffect` waits for
+-- the effect, not the picture, and the Trick House script's own `delay 10`
+-- comes after that: shortening this to the animation would run the two
+-- together and the scene would read as a flicker.
+function OverworldState:gen3SparkleSet()
+  return Game and Game.data and Game.data.constants
+         and Game.data.constants.gen3Sparkle or nil
+end
+
+-- how long the picture is on screen
+function OverworldState:sparkleShow()
+  local set = self:gen3SparkleSet()
+  if not (set and set.order) then return 0 end
+  if self._sparkleShow then return self._sparkleShow end
+  local total = 0
+  for _, step in ipairs(set.order) do total = total + (step.hold or 5) end
+  self._sparkleShow = total
+  return total
+end
+
+-- ...and how long the effect is ALIVE, which is what holds the script
+function OverworldState:sparkleLife()
+  local set = self:gen3SparkleSet()
+  if not set then return 0 end
+  local show = self:sparkleShow()
+  if show <= 0 then return 0 end
+  return show + (set.linger or 35)
+end
+
+-- Which picture this many ticks in, or nil once it has gone invisible.
+function OverworldState:sparkleFrame(clock)
+  local set = self:gen3SparkleSet()
+  local order = set and set.order
+  if not order then return nil end
+  local t = clock
+  for _, step in ipairs(order) do
+    local hold = step.hold or 5
+    if t < hold then return step.frame or 0 end
+    t = t - hold
+  end
+  return nil
+end
+
+function OverworldState:startSparkle(cx, cy)
+  if not (cx and cy) then return false end
+  if self:sparkleLife() <= 0 then return false end
+  self.sparkles = self.sparkles or {}
+  self.sparkles[#self.sparkles + 1] = { px = cx * 16, py = cy * 16, clock = 0 }
+  return true
+end
+
+-- Is any still running?  `waitfieldeffect` asks this and nothing else, so an
+-- effect the port never started answers false and the script walks straight
+-- past it rather than hanging.
+function OverworldState:sparkleBusy()
+  return self.sparkles ~= nil and #self.sparkles > 0
+end
+
+-- How many ticks the longest-lived one still has, which is what
+-- `waitfieldeffect` turns into a frame wait.
+function OverworldState:sparkleRemaining()
+  local live = self.sparkles
+  if not (live and #live > 0) then return 0 end
+  local life = self:sparkleLife()
+  local worst = 0
+  for _, s in ipairs(live) do
+    local left = life - (s.clock or 0)
+    if left > worst then worst = left end
+  end
+  return worst
+end
+
+function OverworldState:updateSparkles()
+  local live = self.sparkles
+  if not (live and #live > 0) then return end
+  local life = self:sparkleLife()
+  if life <= 0 then
+    self.sparkles = nil
+    return
+  end
+  for i = #live, 1, -1 do
+    live[i].clock = live[i].clock + 1
+    if live[i].clock >= life then table.remove(live, i) end
+  end
+end
+
+function OverworldState:sparkleSprite()
+  local set = self:gen3SparkleSet()
+  local key = set and set.key
+  local def = key and Game.data.sprites and Game.data.sprites[key]
+  if not def then return nil end
+  if self._sparkleSprite == nil then
+    local SR = require("src.render.SpriteRenderer")
+    local ok, made = pcall(SR.new, def)
+    self._sparkleSprite = ok and made or false
+  end
+  return self._sparkleSprite or nil
+end
+
+function OverworldState:drawSparkles(camX, camY)
+  local live = self.sparkles
+  if not (live and #live > 0) then return end
+  local sprite = self:sparkleSprite()
+  if not sprite then return end
+  for _, s in ipairs(live) do
+    local frame = self:sparkleFrame(s.clock)
+    -- the sheet's own four-pixel lift, added back the way drawRippleRing
+    -- adds it back
+    if frame then
+      sprite:drawFixedFrame(s.px, s.py + 4, camX, camY, frame)
+    end
+  end
+end
+
 -- The cells the rings cover, so the map's own layers can be put back over
 -- them exactly as they are over a reflection.
 function OverworldState:rippleCells(out, seen)
@@ -12500,6 +12634,30 @@ function OverworldState:drawWorld()
   end
 
   -- the "!" bubble above a trainer who spotted the player
+  -- the tile-anchored sparkle: an OAM sprite in the cartridge, so it rides
+  -- the camera the way a body does rather than the background's shake
+  local function fxSparkle()
+    love.graphics.setColor(1, 1, 1, 1)
+    self:drawSparkles(cam.x, cam.y)
+  end
+
+  -- ...and ONE of them, for the two paths that cannot draw the set in screen
+  -- space: each sparkle sits on its own cell, so a projected scene has to
+  -- anchor each one separately.  The upvalue is set immediately before each
+  -- call and cleared after, which is the same shape the emote path uses for
+  -- the one NPC it belongs to.
+  local sparkleOne = nil
+  local function fxSparkleOne()
+    local s = sparkleOne
+    if not s then return end
+    local sprite = self:sparkleSprite()
+    if not sprite then return end
+    local frame = self:sparkleFrame(s.clock)
+    if not frame then return end
+    love.graphics.setColor(1, 1, 1, 1)
+    sprite:drawFixedFrame(s.px, s.py + 4, cam.x, cam.y, frame)
+  end
+
   local function fxEmote()
     if not (self.emote and self.emote.npc) then return end
     -- bubble = false is a silent hold (a Pikachu emotion that plays a
@@ -12828,6 +12986,11 @@ function OverworldState:drawWorld()
       if self.fishing then
         at(fxRod, self.player.px + 8, self.player.py + 16)
       end
+      for _, sp in ipairs(self.sparkles or {}) do
+        sparkleOne = sp
+        at(fxSparkleOne, sp.px + 8, sp.py + 16)
+      end
+      sparkleOne = nil
     end
     override = Pipelines.drawWorld(pipelineId, ctx)
     -- world post-processes (a miniature-diorama blur, a colour grade) fold
@@ -13110,6 +13273,7 @@ function OverworldState:drawWorld()
     fxCutTree()
     fxWater()
     fxEmote()
+    fxSparkle()
     fxBird()
     fxRod()
   else
@@ -13201,6 +13365,14 @@ function OverworldState:drawWorld()
       local fy = self.player.py - cam.y + 16
       self:billboard(fx, fy, vw, vh, zoneColorsAt(zones, fx, fy), false, fxRod)
     end
+    for _, sp in ipairs(self.sparkles or {}) do
+      sparkleOne = sp
+      local fx = sp.px - cam.x + 8
+      local fy = sp.py - cam.y + 16
+      self:billboard(fx, fy, vw, vh, zoneColorsAt(zones, fx, fy), false,
+                     fxSparkleOne)
+    end
+    sparkleOne = nil
 
     Game.renderer:endUprightPass()
   end

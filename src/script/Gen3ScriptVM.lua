@@ -443,11 +443,13 @@ L.addobject = function(ir, s) emit(s, { "g3_show_object", ir[2] }) end
 L.addobjectat = function(ir, s)
   emit(s, { "g3_show_object", ir[2], ir[3], ir[4] })
 end
+-- ...and these two are NOT that pair: they write the loaded object's
+-- invisible bit and nothing else -- see Commands.g3_object_invisible.
 L.hideobjectat = function(ir, s)
-  emit(s, { "g3_hide_object", ir[2], ir[3], ir[4] })
+  emit(s, { "g3_object_invisible", ir[2], ir[3], ir[4] })
 end
 L.showobjectat = function(ir, s)
-  emit(s, { "g3_show_object", ir[2], ir[3], ir[4] })
+  emit(s, { "g3_object_visible", ir[2], ir[3], ir[4] })
 end
 L.turnobject = function(ir, s) emit(s, { "g3_turn", ir[2], ir[3] }) end
 L.setobjectxy = function(ir, s) emit(s, { "g3_place", ir[2], ir[3], ir[4] }) end
@@ -678,7 +680,14 @@ L.setflashlevel = function(ir, s) emit(s, { "g3_set_flash_level", ir[2] }) end
 L.animateflash = function(ir, s) emit(s, { "g3_animate_flash", ir[2] }) end
 L.dofieldeffect = function(ir, s) emit(s, { "g3_field_effect", ir[2] }) end
 L.setfieldeffectargument = function(ir, s) emit(s, { "g3_field_effect_arg", ir[2], ir[3] }) end
-L.waitfieldeffect = L.nop
+-- `waitfieldeffect` HOLDS THE SCRIPT, for the effects the port actually
+-- raises.  It lowered to nothing, which is right for an effect that never
+-- appears and wrong for one that does: the TRICK HOUSE entrance starts its
+-- sparkle, waits for it, and then delays ten frames -- run those together and
+-- the mark on the Trick Master's tile is a flicker.  See
+-- Commands.g3_field_effect_wait, which answers instantly for every effect
+-- that is not running.
+L.waitfieldeffect = function(ir, s) emit(s, { "g3_field_effect_wait", ir[2] }) end
 L.setstepcallback = L.nop
 L.incrementgamestat = function(ir, s) emit(s, { "g3_game_stat", ir[2] }) end
 L.getplayerxy = function(ir, s) emit(s, { "g3_player_xy", ir[2], ir[3] }) end
