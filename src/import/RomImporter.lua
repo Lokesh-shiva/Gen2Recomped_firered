@@ -1916,6 +1916,113 @@ local function chooseRom(promptName)
   return nil
 end
 
+-- WHAT A MULTI-SELECT DIALOG ACTUALLY SAID, and nothing else.
+--
+-- Every one of these pickers is a shell command whose stdout is trusted as a
+-- list of paths, and that trust is what turned one broken PowerShell script
+-- into twenty-six "failed" imports named after the lines of a parser error.
+-- So a line only counts as a pick if it OPENS: a real chooser answers with
+-- files that exist, and anything else -- a diagnostic, a usage message, a
+-- shell complaint about a missing zenity -- does not.
+--
+-- Answering nil when nothing survives is deliberate: to every caller that is
+-- "the dialog was cancelled", which is already handled and already harmless,
+-- rather than an error the player has to read.
+-- DID A DIALOG EVEN RUN?
+--
+-- The difference between "the player said no" and "there is nothing here to
+-- ask with", which the pickers cannot tell apart on their own -- both answer
+-- nil.  It decides whether an empty answer falls back to the save-dir inbox
+-- (a console, where the inbox is the only way in) or is simply taken as no (a
+-- desktop, where quietly importing a folder somebody did not choose would be
+-- the surprise).
+local function hasNativePicker()
+  local platform = love.system.getOS()
+  return platform == "OS X" or platform == "Windows" or platform == "Linux"
+end
+
+local function pickedFileList(out)
+  if not out or out == "" then return nil end
+  local paths = {}
+  for line in tostring(out):gmatch("[^\r\n]+") do
+    local trimmed = line:match("^%s*(.-)%s*$")
+    if trimmed ~= "" then
+      local probe = io.open(trimmed, "rb")
+      if probe then
+        probe:close()
+        paths[#paths + 1] = trimmed
+      end
+    end
+  end
+  if #paths == 0 then return nil end
+  return paths
+end
+
+-- ...AND THE SAME THING FOR CARTRIDGES.
+--
+-- Asked for directly: "add in a button to mass import roms for those
+-- available in our game next to the gen select button".  Nine games are
+-- registered now and each one was its own trip through a file dialog, on a
+-- tab you had to find first -- and the tab is not even the thing that decides
+-- which game a ROM becomes, because startData routes by SHA-1.
+--
+-- Same per-OS multi-select as chooseZips, with the ROM filter chooseRom uses.
+local function chooseRoms()
+  local prompt = Strings("Choose your Pokemon ROMs")
+  local platform = love.system.getOS()
+  local out
+  if platform == "OS X" then
+    out = commandOutput(
+      ([[osascript -e 'set AppleScript'"'"'s text item delimiters to linefeed' ]]
+       .. [[-e 'set f to choose file with prompt "%s" of type {"gb", "gbc", "gba"} with multiple selections allowed' ]]
+       .. [[-e 'set p to {}' -e 'repeat with x in f' ]]
+       .. [[-e 'set end of p to POSIX path of x' -e 'end repeat' ]]
+       .. [[-e 'p as text' 2>/dev/null]]):format(prompt))
+  elseif platform == "Windows" then
+    local script = table.concat({
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      "$d=New-Object System.Windows.Forms.OpenFileDialog;",
+      "$d.Title='" .. prompt .. "';",
+      "$d.Multiselect=$true;",
+      "$d.Filter='Pokemon ROM (*.gb;*.gbc;*.gba)|*.gb;*.gbc;*.gba|All files (*.*)|*.*';",
+      -- NOT copied to a temp name, unlike the mod picker: a batch of these is
+      -- up to sixteen megabytes apiece and copying them all before reading any
+      -- of them is a doubling of disk for nothing.  A non-ASCII path is the
+      -- cost (io.open on Windows needs ANSI bytes) and it is reported per file
+      -- as "could not be read" rather than taking the run down.
+      "if($d.ShowDialog() -eq 'OK'){",
+      "[Console]::OutputEncoding=[Text.Encoding]::UTF8;",
+      -- [char]10, NOT "`n".  The whole script is handed to powershell inside
+      -- `-Command "..."`, so every double quote in it is eaten before
+      -- PowerShell ever sees the text -- `$o -join "`n"` arrives as
+      -- `$o -join `n` and dies at the parse ("You must provide a value
+      -- expression following the '-join' operator"), which is a dialog that
+      -- never opens and an error where the file list should be.  Nothing else
+      -- in this file quotes with " for the same reason; these two were the
+      -- exception and the exception was the bug.
+      "[Console]::Write($d.FileNames -join [char]10)}",
+    })
+    out = commandOutput(
+      'powershell -NoProfile -STA -Command "' .. script .. '"')
+  elseif platform == "Linux" then
+    out = commandOutput(
+      -- `--separator="\n"` hands zenity a literal backslash-n (the shell does
+      -- not expand escapes inside double quotes), so the list came back as one
+      -- long line.  Ask for zenity's own default separator and turn it into
+      -- newlines with tr, which needs nothing of the shell.
+      ([[zenity --file-selection --multiple --separator="|" --title="%s" --file-filter="Pokemon ROM | *.gb *.gbc *.gba" 2>/dev/null | tr '|' '\n']])
+        :format(prompt))
+    if not out then
+      local kd = commandOutput(
+        [[kdialog --getopenfilename "$HOME" "*.gb *.gbc *.gba|Pokemon ROM" --multiple 2>/dev/null]])
+      -- kdialog joins with spaces and quotes nothing, so a path with a space
+      -- in it cannot be recovered; one file back is still one file
+      if kd then out = kd:gsub("%s+", "\n") end
+    end
+  end
+  return pickedFileList(out)
+end
+
 -- Open a native picker for a mod .zip (mirrors chooseRom's per-OS dialogs).
 -- Returns the chosen absolute path or nil.  Android uses love.system.pickFile
 -- ("mod") instead -- see RomImporter:chooseMod.
@@ -1998,13 +2105,15 @@ local function chooseZips()
       "Copy-Item -LiteralPath $f -Destination $t -Force;",
       "$o+=$t;$i++};",
       "[Console]::OutputEncoding=[Text.Encoding]::UTF8;",
-      "[Console]::Write($o -join \"`n\")}",
+      -- see chooseRoms: a double quote cannot survive the -Command wrapper
+      "[Console]::Write($o -join [char]10)}",
     })
     out = commandOutput(
       'powershell -NoProfile -STA -Command "' .. script .. '"')
   elseif platform == "Linux" then
     out = commandOutput(
-      ([[zenity --file-selection --multiple --separator="\n" --title="%s" --file-filter="Mod archive | *.zip" 2>/dev/null]])
+      -- see chooseRoms on the separator
+      ([[zenity --file-selection --multiple --separator="|" --title="%s" --file-filter="Mod archive | *.zip" 2>/dev/null | tr '|' '\n']])
         :format(prompt))
     if not out then
       local kd = commandOutput(
@@ -2014,14 +2123,7 @@ local function chooseZips()
       if kd then out = kd:gsub("%s+", "\n") end
     end
   end
-  if not out or out == "" then return nil end
-  local paths = {}
-  for line in tostring(out):gmatch("[^\r\n]+") do
-    local trimmed = line:match("^%s*(.-)%s*$")
-    if trimmed ~= "" then paths[#paths + 1] = trimmed end
-  end
-  if #paths == 0 then return nil end
-  return paths
+  return pickedFileList(out)
 end
 
 -- ...and a FOLDER, for the other half of the same request: point at where the
@@ -2529,6 +2631,10 @@ function RomImporter:setError(message, version)
   self.progress = 0
   self.worker = nil
   self.romData = nil
+  -- The other way a run ends.  Deferred rather than called straight from here:
+  -- setError is reached from inside the worker coroutine, and starting the next
+  -- import on that stack would resume a coroutine from within itself.
+  if self._romQueue then self._romQueueResume = true end
 end
 
 -- draw() may leave the system hand cursor set while hovering a Play /
@@ -2703,6 +2809,255 @@ function RomImporter:startPath(path)
   self:startData(data, path:match("[^/\\]+$") or path)
 end
 
+-- ---------------------------------------------------------------------------
+-- MASS ROM IMPORT
+--
+-- "add in a button to mass import roms for those available in our game next to
+-- the gen select button".
+--
+-- THE SORTING IS THE FEATURE, and it is the part the player cannot do
+-- themselves.  A folder of dumps is a pile of files with whatever names
+-- somebody gave them; what decides which game each one becomes is its SHA-1,
+-- which is what startData has always routed on.  So this reads each file ONCE
+-- up front, hashes it, and answers three questions before importing anything:
+-- is it one of ours, do we already have it, and have we already seen this same
+-- cartridge earlier in the same pick.
+--
+-- READ, HASHED, THROWN AWAY.  The queue holds paths, not bytes.  Emerald alone
+-- is sixteen megabytes and a pick of nine would be well over sixty held at
+-- once for no reason: each one is read again when its turn comes, which costs
+-- a second read and keeps the high-water mark at one cartridge.
+--
+-- ONE AT A TIME, because an extraction is a coroutine pumped by update() and
+-- there is exactly one of it.  _advanceRomQueue is the pump: it is called
+-- wherever a run ENDS -- the worker going dead, and setError -- records what
+-- happened, and starts the next.
+-- ---------------------------------------------------------------------------
+
+-- What a pick turns into: the entries worth importing, and one line about
+-- everything that was left out.  `paths` may be absolute (a picker) or
+-- save-dir relative (the console inbox); `read` remembers which.
+function RomImporter:_scanRomSources(paths)
+  local queue, rejects = {}, { unknown = {}, present = {}, duplicate = {},
+                               unreadable = {} }
+  local seen = {}
+  for _, path in ipairs(paths or {}) do
+    local name = path:match("[^/\\]+$") or path
+    local data = readExternalPath(path)
+    local fromSaveDir = false
+    if not data and love.filesystem then
+      data = love.filesystem.read(path)
+      fromSaveDir = data ~= nil
+    end
+    if type(data) ~= "string" then
+      rejects.unreadable[#rejects.unreadable + 1] = name
+    elseif not isSupportedRomSize(#data) then
+      rejects.unknown[#rejects.unknown + 1] = name
+    else
+      local version = GameVersion.forSha1(sha1(data))
+      if not version then
+        rejects.unknown[#rejects.unknown + 1] = name
+      elseif self.ready[version] and not self.returning[version] then
+        -- ALREADY IMPORTED IS NOT A FAILURE.  Pointing at the folder you keep
+        -- your dumps in when you already have half of them is the normal case,
+        -- and re-extracting a cartridge costs minutes -- the game's own
+        -- "Re-import ROM" button is where that decision belongs.
+        rejects.present[#rejects.present + 1] = GameVersion.info(version).displayName
+      elseif seen[version] then
+        rejects.duplicate[#rejects.duplicate + 1] = name
+      else
+        seen[version] = true
+        queue[#queue + 1] = { path = path, name = name, version = version,
+                              saveDir = fromSaveDir }
+      end
+    end
+    data = nil
+    collectgarbage("step")
+  end
+  -- import in the row's own order, so the launcher walks left to right through
+  -- the chips rather than in whatever order the dialog handed them over
+  local rank = {}
+  for i, v in ipairs(GameVersion.ORDER) do rank[v] = i end
+  table.sort(queue, function(a, b)
+    return (rank[a.version] or 99) < (rank[b.version] or 99)
+  end)
+  return queue, rejects
+end
+
+local function countLine(label, list)
+  if #list == 0 then return nil end
+  return ("%d %s (%s)"):format(#list, label, table.concat(list, ", "))
+end
+
+function RomImporter:_romBatchSummary(q)
+  local parts = {}
+  if #q.done > 0 then
+    local names = {}
+    for _, e in ipairs(q.done) do
+      names[#names + 1] = GameVersion.info(e.version).displayName
+    end
+    parts[#parts + 1] = ("Imported %d: %s"):format(#q.done,
+      table.concat(names, ", "))
+  end
+  local r = q.rejects or {}
+  local more = {
+    countLine("already imported", r.present or {}),
+    countLine("not recognised", r.unknown or {}),
+    countLine("duplicate", r.duplicate or {}),
+    countLine("unreadable", r.unreadable or {}),
+  }
+  for _, line in ipairs(more) do
+    if line then parts[#parts + 1] = line end
+  end
+  if #q.failed > 0 then
+    local names = {}
+    for _, e in ipairs(q.failed) do names[#names + 1] = e.name end
+    parts[#parts + 1] = ("%d failed: %s"):format(#q.failed,
+      table.concat(names, ", "))
+    -- the first reason in full: a list of names with no cause is a support
+    -- thread, and one cause usually explains all of them
+    parts[#parts + 1] = tostring(q.failed[1].err)
+  end
+  if #parts == 0 then return false, Strings("Nothing to import.") end
+  return #q.done > 0 and #q.failed == 0, table.concat(parts, "  -  ")
+end
+
+-- Begin (or continue) a queued run.  Called once when the queue is built and
+-- again every time an extraction ends.
+function RomImporter:_advanceRomQueue()
+  -- Taken here rather than where it is set, so the deferred wake and the
+  -- direct call after a refusal cannot both fire for the same ending.
+  self._romQueueResume = nil
+  local q = self._romQueue
+  if not q then return end
+  if self.workState == "working" then return end
+
+  -- WHAT HAPPENED TO THE ONE THAT JUST RAN, judged by the only thing that
+  -- settles it: whether that version is ready now.  `workState` is not enough
+  -- on its own -- setError can fire for a reason that is nothing to do with
+  -- this cartridge -- and `ready` is what the rest of the launcher believes.
+  local active = q.active
+  if active then
+    q.active = nil
+    if self.ready[active.version] then
+      q.done[#q.done + 1] = active
+    else
+      q.failed[#q.failed + 1] = { name = active.name,
+        err = self.detail or Strings("that ROM could not be imported") }
+    end
+  end
+
+  local nextUp = table.remove(q.pending, 1)
+  if not nextUp then
+    self._romQueue = nil
+    local ok, text = self:_romBatchSummary(q)
+    self.romBatch = { ok = ok, text = text, at = love.timer.getTime() }
+    return
+  end
+
+  q.index = (q.index or 0) + 1
+  local data = nextUp.saveDir and love.filesystem.read(nextUp.path)
+    or readExternalPath(nextUp.path)
+  if type(data) ~= "string" then
+    q.failed[#q.failed + 1] = { name = nextUp.name,
+      err = Strings("could not be read a second time") }
+    -- straight on to the next rather than stopping: a batch that gives up on
+    -- one unreadable file is a batch that has to be started again
+    return self:_advanceRomQueue()
+  end
+  q.active = nextUp
+  -- `workState` is "error" or "complete" from the previous run; startData only
+  -- refuses while one is actually working, so nothing has to be cleared.
+  self:startData(data, nextUp.name)
+  -- ...unless startData refused it outright (a file that changed underneath
+  -- the scan), in which case there is no worker to end and nothing would ever
+  -- call this again.
+  if self.workState ~= "working" then
+    return self:_advanceRomQueue()
+  end
+end
+
+-- The button.  One press: pick, sort, queue.
+function RomImporter:chooseRomBatch()
+  if self.workState == "working" then return end
+  self.romBatch = nil
+  local paths
+  if self.android or self.ios then
+    -- neither bridge picks more than one file, so the inbox IS the batch
+    paths = pendingRomPaths()
+    if #paths == 0 then
+      self.romBatch = { ok = false, at = love.timer.getTime(), text =
+        Strings("No ROMs waiting. Copy them into %s/imports/ first.",
+          love.filesystem.getSaveDirectory()) }
+      return
+    end
+  else
+    paths = chooseRoms()
+    if not paths then
+      self:ensureImportsDir()
+      local waiting = pendingRomPaths()
+      -- A CANCELLED DIALOG IS A NO.  On a machine with a picker, falling
+      -- through to the inbox would start importing cartridges the player had
+      -- just backed out of choosing -- and an extraction is minutes, not
+      -- something to start by accident.  Where there is no dialog at all
+      -- (a console, a handheld with neither zenity nor kdialog) the inbox is
+      -- the only way in and this button is how it is reached.
+      if hasNativePicker() then
+        self.romBatch = { ok = false, at = love.timer.getTime(), text =
+          #waiting > 0
+            and Strings("No ROMs chosen. %d are waiting in %s/imports/ if you meant those.",
+                  #waiting, love.filesystem.getSaveDirectory())
+            or Strings("No ROMs chosen.") }
+        return
+      end
+      paths = waiting
+      if #paths == 0 then
+        self.romBatch = { ok = false, at = love.timer.getTime(), text =
+          Strings("No file picker here. Copy your ROMs into %s/imports/ and press this again.",
+            love.filesystem.getSaveDirectory()) }
+        return
+      end
+    end
+  end
+
+  local queue, rejects = self:_scanRomSources(paths)
+  self._romQueue = { pending = queue, done = {}, failed = {},
+                     rejects = rejects, total = #queue, index = 0 }
+  if #queue == 0 then
+    local q = self._romQueue
+    self._romQueue = nil
+    local ok, text = self:_romBatchSummary(q)
+    self.romBatch = { ok = ok, text = text, at = love.timer.getTime() }
+    return
+  end
+  self:_advanceRomQueue()
+end
+
+-- The line under the tab bar while a batch is running or has just finished.
+-- Returns text, ok -- or nil when there is nothing to say, which is what
+-- reserves no band in the layout.
+function RomImporter:_romBatchLine()
+  local q = self._romQueue
+  if q then
+    local active = q.active
+    local name = active and GameVersion.info(active.version).displayName
+      or Strings("cartridge")
+    return Strings("Importing %d of %d  -  %s", q.index or 1, q.total or 1,
+                   name), true
+  end
+  local b = self.romBatch
+  if not b then return nil end
+  -- It clears itself: a summary that stays for ever becomes furniture, and
+  -- this one is about something that just happened.  Generous, because an
+  -- import the player walked away from is exactly when they want to come back
+  -- and read it.
+  if love.timer.getTime() - (b.at or 0) > 90 then
+    self.romBatch = nil
+    return nil
+  end
+  return b.text, b.ok
+end
+
 function RomImporter:filedropped(file)
   if self.workState == "working" then return end
   -- A dropped .zip is a mod archive: hand it straight to the mods installer
@@ -2803,7 +3158,18 @@ function RomImporter:chooseMods()
     self:_installMods(picks)
     return
   end
+  -- NOTHING PICKED MEANS NOTHING, on a machine that has a dialog to pick with.
+  -- Falling through to the inbox there would install a folder of mods somebody
+  -- had just cancelled out of choosing.
+  self:ensureModsInboxDir()
   local inbox = self:_inboxMods()
+  if hasNativePicker() then
+    self.modNotice = { ok = false, text = #inbox > 0
+      and Strings("No mod .zip files chosen. %d are waiting in %s/imports/mods/ if you meant those.",
+            #inbox, love.filesystem.getSaveDirectory())
+      or Strings("No mod .zip files chosen.") }
+    return
+  end
   if #inbox > 0 then
     -- Reinstall rather than refuse: an inbox zip is not consumed (it stays in
     -- imports/mods/ for MTP recovery), so a second press finds the same files
@@ -2811,7 +3177,6 @@ function RomImporter:chooseMods()
     self:_installMods(inbox, { replace = true })
     return
   end
-  self:ensureModsInboxDir()
   self.modNotice = { ok = false, text =
     Strings("No file picker here. Copy your mod .zip files into:\n%s/imports/mods/\nthen press Import many again.",
       love.filesystem.getSaveDirectory()) }
@@ -3431,6 +3796,10 @@ function RomImporter:update(dt)
   -- file per call and gives no "that was the last one", so the first update
   -- after the calls is where the whole set becomes knowable.
   self:_flushDroppedMods()
+  if self._romQueueResume then
+    self._romQueueResume = nil
+    self:_advanceRomQueue()
+  end
   if self.ios and love.system.getPickedFile and self.workState ~= "working" then
     local path = love.system.getPickedFile()
     if path then
@@ -3485,6 +3854,10 @@ function RomImporter:update(dt)
     if self.worker ~= worker then return end
     if coroutine.status(worker) == "dead" then
       self.worker = nil
+      -- A QUEUED RUN CONTINUES HERE.  This is the one place an extraction is
+      -- known to have finished successfully; setError is the other ending, and
+      -- pumps the queue itself.
+      self:_advanceRomQueue()
       return
     end
   until love.timer.getTime() - started >= 0.008
@@ -3948,6 +4321,9 @@ function RomImporter:_resetFrameRects()
   -- on a narrow window.  The MENU's rows are rebuilt only while it is open.
   self.genDropdownRect = nil
   self.genMenuRects = nil
+  -- Drawn beside the dropdown and dropped on a narrow row for the same reason,
+  -- so it gets the same treatment: a stale rect would keep taking clicks.
+  self.romBatchRect = nil
   -- Same rule as the toggles above, and it started to bite once FIND MODS gave
   -- the mods tab a neighbour: these two were rebuilt by the mods panel but
   -- never cleared, so switching tabs left the last mod row's Update / Versions
@@ -4174,9 +4550,28 @@ function RomImporter:draw()
   local bannerActive = upStatus ~= nil
   local bannerH = 46 * s
 
+  -- THE MASS-IMPORT LINE, between the chips and the panel.
+  --
+  -- It needs its own band rather than a corner of somebody else's: a queued
+  -- run walks from game to game, so there is no one tab its progress belongs
+  -- on, and its summary is about files that may have become no game at all.
+  -- Measured here so `contentTop` below moves with it and the panel is never
+  -- drawn under it.
+  local batchText, batchOk = self:_romBatchLine()
+  local batchH, batchLines = 0, 1
+  if batchText then
+    -- Measured for the same reason the mods notice is (see _drawModsPanel): a
+    -- summary that names four cartridges and two rejects is not one line, and
+    -- a band sized for one would run down through the panel below it.
+    local _, wrapped = self.hintFont:getWrap(batchText, appW - 2 * padH - 24 * s)
+    batchLines = math.max(1, math.min(#wrapped, 4))
+    batchH = batchLines * self.hintFont:getHeight() + 16 * s
+  end
+  local batchBand = batchText and (batchH + 10 * s) or 0
+
   -- Content region: from below the tab bar down to the footer, minus the
   -- updater band when one is showing.
-  local contentTop = tabBarY + tabBarH + 16 * s
+  local contentTop = tabBarY + tabBarH + 16 * s + batchBand
   local bannerBand = bannerActive and (bannerH + 20 * s) or 6 * s
   local cX = appX + padH
   local cW = appW - 2 * padH
@@ -4262,6 +4657,19 @@ function RomImporter:draw()
       self:_drawGenDropdown(cX + cW - dw, tabBarY + (tabBarH - dh) / 2, dw, dh,
                             short)
       cW = cW - dw - 10 * s
+      -- MASS ROM IMPORT, immediately left of it ("next to the gen select
+      -- button").  Dropped before the dropdown is on a narrow row, because the
+      -- dropdown is the control that makes a nine-chip row usable at all and
+      -- every game's own panel still has its own Import ROM button.
+      local label = Strings("IMPORT ROMS")
+      local rw = self.hintFont:getWidth(label) + 26 * s
+      if cW > rw + 110 * s then
+        self.romBatchRect = self:_chipButton(cX + cW - rw,
+          tabBarY + (tabBarH - dh) / 2, label,
+          { w = rw, h = dh, kind = "accent" })
+        self.romBatchRect.pinned = true
+        cW = cW - rw - 10 * s
+      end
     else
       -- NO DROPDOWN MEANS NO FILTER, or the player is left looking at one
       -- generation's chips with nothing on screen that could put the rest
@@ -4276,6 +4684,24 @@ function RomImporter:draw()
   -- tab bar (rebuilds self.tabRects).  Pinned: it is the launcher's navigation,
   -- and it sits above the scrolling viewport.
   self:_drawTabBar(cX, tabBarY, cW, tabBarH, chip)
+
+  if batchText then
+    local by = tabBarY + tabBarH + 10 * s
+    local bw = appW - 2 * padH
+    local tint = batchOk and PAL.playTop or PAL.chooseTop
+    col(tint, 0.12)
+    love.graphics.rectangle("fill", cX, by, bw, batchH, 8 * s, 8 * s)
+    love.graphics.setLineWidth(math.max(1, s))
+    col(tint, 0.5)
+    love.graphics.rectangle("line", cX, by, bw, batchH, 8 * s, 8 * s)
+    love.graphics.setFont(self.hintFont)
+    col(batchOk and PAL.playTop or PAL.warning)
+    -- the whole block centred, not one line's worth: batchH was measured off
+    -- the wrap above and a summary is routinely two or three lines
+    love.graphics.printf(batchText, cX + 12 * s,
+      by + (batchH - batchLines * self.hintFont:getHeight()) / 2,
+      bw - 24 * s, "left")
+  end
 
   local panelY = contentTop - (paged and self.pageScroll or 0)
   if paged then
@@ -5102,6 +5528,10 @@ function RomImporter:mousepressed(x, y, button)
     self._genMenuOpen = true
     return
   end
+  if inside(self.romBatchRect, x, y) then
+    self:chooseRomBatch()
+    return
+  end
   -- Any press that is not the second click on an armed Delete disarms it, so
   -- take the arm off self up front and let the Delete loops below re-arm.
   local armed = self._confirmDelete
@@ -5684,12 +6114,24 @@ end
 -- The tab ids on screen right now, in row order, honouring the filter.  One
 -- list, so the chips, the gamepad's tab cycling and the "which tab do I land
 -- on" rule after a filter change cannot disagree.
+-- THE FILTER AS IT ACTUALLY APPLIES, which is not always what is stored.
+--
+-- Two things switch it off without touching the player's choice:
+--
+--   * a window too narrow to carry the dropdown (`_genFilterSuppressed`, set
+--     by draw) -- a filtered row with no control to unfilter it is a trap;
+--   * A MASS ROM IMPORT IN PROGRESS.  A queued run walks from game to game and
+--     brings the launcher to each one's tab as it starts, so a filter set to
+--     GEN 2 would put the panel for EMERALD on screen with no chip above it.
+--     The filter comes back the moment the run ends.
+function RomImporter:_activeGenFilter()
+  if self._genFilterSuppressed or self._romQueue then return nil end
+  return self.genFilter
+end
+
 function RomImporter:_visibleTabIds()
   local out = {}
-  -- `_genFilterSuppressed` is draw()'s answer on a window too narrow to carry
-  -- the dropdown: the filter is not applied there, so the gamepad must be able
-  -- to walk every chip the row is actually showing.
-  local filter = (not self._genFilterSuppressed) and self.genFilter or nil
+  local filter = self:_activeGenFilter()
   for _, v in ipairs(GameVersion.ORDER) do
     if not filter or GameVersion.generation(v) == filter then
       out[#out + 1] = v
@@ -5890,10 +6332,11 @@ function RomImporter:_drawTabBar(x, y, w, h, chip)
   -- FIND MODS stay whatever is selected -- see _visibleTabIds for why -- and
   -- ALL is simply no filter at all, so the row is byte-for-byte what it was
   -- before this existed.
-  if self.genFilter and not self._genFilterSuppressed then
+  local rowFilter = self:_activeGenFilter()
+  if rowFilter then
     local kept = {}
     for _, t in ipairs(tabs) do
-      if t.mods or t.find or GameVersion.generation(t.id) == self.genFilter then
+      if t.mods or t.find or GameVersion.generation(t.id) == rowFilter then
         kept[#kept + 1] = t
       end
     end
@@ -6018,7 +6461,7 @@ function RomImporter:_drawTabBar(x, y, w, h, chip)
   love.graphics.setScissor()
   -- "N of X ready" from GameVersion.ORDER -- or from the generation on show,
   -- because a count of nine beside a row of one reads as a broken row.
-  local shownGen = (not self._genFilterSuppressed) and self.genFilter or nil
+  local shownGen = rowFilter
   local ready, total = 0, 0
   for _, v in ipairs(GameVersion.ORDER) do
     if not shownGen or GameVersion.generation(v) == shownGen then
@@ -7677,17 +8120,42 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
 
   local top = y + headerH + 14 * s
 
-  -- notice line: the last install/delete result, else the platform hint
+  -- Notice line: the last install/delete result, else the platform hint.
+  --
+  -- MEASURED, NOT ASSUMED.  This advanced `top` by exactly one line whatever
+  -- it had just drawn, so any notice that wrapped ran straight down through
+  -- the cards underneath it -- which is what a failed mass import looks like,
+  -- because its summary names every archive it could not take.  Reported with
+  -- a screenshot of a panel with the first mod card behind six lines of red.
+  --
+  -- Capped as well as measured: an error from a shell command can be a
+  -- hundred lines, and a notice that pushes the whole list off the bottom is
+  -- no more readable than one drawn over it.
   love.graphics.setFont(self.hintFont)
+  local noticeText, noticeColor
   if self.modNotice then
-    col(self.modNotice.ok and PAL.green or PAL.red)
-    love.graphics.printf(self.modNotice.text, x, top, w, "left")
+    noticeText = tostring(self.modNotice.text)
+    noticeColor = self.modNotice.ok and PAL.green or PAL.red
   else
-    col(PAL.warning)
-    love.graphics.printf(self.android and "Or copy a mod .zip via USB."
-      or Strings("Or drop a mod .zip onto the window."), x, top, w, "left")
+    noticeText = self.android and "Or copy a mod .zip via USB."
+      or Strings("Or drop a mod .zip onto the window.")
+    noticeColor = PAL.warning
   end
-  top = top + self.hintFont:getHeight() + 12 * s
+  local NOTICE_MAX_LINES = 6
+  local _, noticeLines = self.hintFont:getWrap(noticeText, w)
+  local shown = #noticeLines
+  if shown > NOTICE_MAX_LINES then
+    -- rebuild from the lines that fit rather than trusting the wrap to land
+    -- the same way twice on a shorter string
+    local kept = {}
+    for i = 1, NOTICE_MAX_LINES - 1 do kept[#kept + 1] = noticeLines[i] end
+    kept[#kept + 1] = ("... (%d more lines)"):format(shown - (NOTICE_MAX_LINES - 1))
+    noticeText = table.concat(kept, "\n")
+    shown = NOTICE_MAX_LINES
+  end
+  col(noticeColor)
+  love.graphics.printf(noticeText, x, top, w, "left")
+  top = top + math.max(1, shown) * self.hintFont:getHeight() + 12 * s
 
   local listH = math.max(0, (y + h) - top)
 
