@@ -1103,6 +1103,14 @@ local REQUIRED_FILES_GEN2 = {
   "assets/generated/tilesets/playershouse.png",
   "assets/generated/fonts/font.png",
   "assets/generated/battle/chrisb.png",
+  -- THE PARTY BALL ROW, which is easy to lose and gives no sign that it has
+  -- been lost.  Reported from play, on Prism: "when battling vs a trainer it
+  -- doesnt show how many pokemons hes holding".  BattleState:drawBallRow
+  -- loads this sheet once, latches false when it is not there, and from then
+  -- on draws NOTHING -- no error, no gap, just a HUD with no balls in it.
+  -- Every Gen 2 cartridge can produce it (gen2RawSheet off LoadBallIconGFX),
+  -- so listing it here makes a cache that lacks it say so.
+  "assets/generated/battle/balls.png",
   "assets/generated/ui/town_map_johto.png",
   -- NOT the title screen: the extractor writes title/gen2_title.png for
   -- Gold/Silver and title/crystal_title.png for Crystal, so a shared entry can
@@ -3551,30 +3559,39 @@ function RomImporter:_modImportEntry(modId)
   return nil
 end
 
+-- STREAMED, NOT SLURPED.  Reported from play: importing a ROM from the
+-- launcher crashed it.  This read the whole file into one Lua string and
+-- handed that to ModImports.install, which then held it while the hash walked
+-- it, while it was written out, and while the shared bank wrote a second copy
+-- -- a couple of hundred megabytes live for a 64 MB cartridge, which a desktop
+-- absorbs and an Android heap does not.  ModImports.installFrom copies a
+-- megabyte at a time and never has the file in hand; `source` is a path
+-- either way (absolute off a picker, save-dir relative off the inbox) and it
+-- works out which.
+--
+-- `bytes` is still accepted, because a caller that genuinely has the bytes
+-- (the shared store) should not be made to write them to disk first.
 function RomImporter:_installModImport(modId, source, bytes)
   local ModImports = require("src.mods.ModImports")
   local entry, row = self:_modImportEntry(modId)
   if not (entry and row) then return end
-  if not bytes and source then
-    -- a picker hands back an absolute path; the inbox hands back a save-dir
-    -- relative one
-    local file = io.open(source, "rb")
-    if file then
-      bytes = file:read("*a")
-      file:close()
-    else
-      bytes = love.filesystem.read(source)
-    end
-  end
-  if not bytes then
+  local manifest = { path = row.manifestPath or ("mods/" .. modId) }
+  local ok, why, notes
+  if bytes then
+    ok, why = ModImports.install(manifest, entry, bytes)
+  elseif source then
+    ok, why, notes = ModImports.installFrom(manifest, entry, source)
+  else
     self.modNotice = { ok = false, text = "Could not read that file." }
     return
   end
-  local manifest = { path = row.manifestPath or ("mods/" .. modId) }
-  local ok, why = ModImports.install(manifest, entry, bytes)
   if ok then
-    self.modNotice = { ok = true,
-      text = "Imported " .. tostring(entry.name) .. " for " .. tostring(row.name) }
+    local text = "Imported " .. tostring(entry.name)
+                 .. " for " .. tostring(row.name)
+    -- ...and if the file was too big to checksum on this device, SAY so
+    -- rather than implying it was verified.
+    if notes then text = text .. "\n" .. tostring(notes) end
+    self.modNotice = { ok = true, text = text }
     self:_refreshMods()
   else
     self.modNotice = { ok = false, text = tostring(why) }
