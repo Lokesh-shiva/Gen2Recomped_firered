@@ -6,18 +6,20 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+a266457 FireRed: close gameplay and visual parity gaps
+d6cba1c FireRed: implement V.S. Seeker rematches
+72e94be FireRed: credit Tranzue for the port
+e90de37 FireRed: allow immediate exits from house mats
+2fcd262 FireRed: route imported wild battle commands
+157a4c3 FireRed: give yes-no menu a full lower row
+ac35ca8 FireRed: keep Gen3 wild events and choice labels visible
+9f31cdb FireRed: play Poké Flute cue for Snorlax events
+bdda3db Docs: log the Flash/Fly HM fix
 249aed8 FireRed: fix FLASH/FLY/DIVE badge gate never placing (party menu HMs dead)
 051a900 Docs: verify the naming-screen mon icon through a real catch
 0e36dc7 Docs: log the naming-screen icon fix's real-flow verification
 9de1fa0 Draw the naming screen's player/Pokémon icon (naming_screen.c sIconFunctions)
-806eb0a Docs: close the two start-flow reports, neither reproduced (item 2 later found wrong, see below)
-5376018 Docs: log FireRed start flow issues
-550e1bc FireRed: finish League and Sevii progression
-0461595 FireRed: elevator window view, Bill's teleporter, S.S. Anne departure
-1941926 FireRed: missing art scenes, NPC/clone fixes, HM checks, port card
-1ea63de FireRed: own tile behaviours, every script special, Trainer Tower, HoF and credits
-e5856cd FireRed-only specials ...
-a2a3273 FireRed dungeon map previews ...
+806eb0a Docs: close the two start-flow reports, neither reproduced
 ```
 Nothing has been pushed anywhere. Never push — this is Ceedrack's
 personal-use codebase (Gen2Recomped License, see LICENSE.md); commit locally
@@ -105,11 +107,12 @@ contains the charmap).
   ice, Five Island resort, Daisy's massage, berry powder shop, PC menu,
   elevator (floor window + list + shake + **window-view metatile cycling**),
   Seagallop ferry + **crossing scene**, Bill's teleporter animation, S.S. Anne
-  departure (**fixed; see verification below**), old man catching demo, Hall of Fame,
-  credits.
+  departure including its **wake trail and smoke puffs** (see verification
+  below), old man catching demo, Hall of Fame, credits.
 - **Tile behaviours**: 106/111 carried into the engine (the rest have no C
   effect on this cartridge). Spin tiles, Cycling Road pull-down + grass, fast
-  water refusal, side stairs (0xEC–0xEF, arrival facing correct), 31
+  water refusal, side stairs (0xEC–0xEF, correct facing plus FireRed's exact
+  16-frame fixed-point diagonal `ExitStairsMovement` slide), 31
   furniture/sign/PC/TV metatile scripts, ice/waterfall correctly
   distinguished (previously conflated by the shape-based Emerald deriver).
 - **HMs tested on real map objects**: Cut, Rock Smash, Strength (was reading
@@ -138,8 +141,9 @@ contains the charmap).
   "LEAGUE CHAMPION! CONGRATULATIONS!".
 - **Credits**: full FireRed-specific roll (`src/ui/Gen3CreditsFRLG.lua`) —
   runs the actual `sCreditsScript` read from ROM, city fly-over maps with the
-  player/rival running sprite, starter POKé BALL reveal scenes, copyright
-  card, THE END.
+  player/rival running sprite, starter POKé BALL reveal scenes with the normal
+  front sprite plus both cartridge-specific larger poses and the timed circle
+  shrink/reveal, copyright card, THE END.
 - **Diploma, museum fossil pictures, town-map SWITCH button for Sevii
   pages** — all drawn from ROM-extracted art (`extractFireRedExtraArt`,
   `constants.gen3FRLGArt`).
@@ -150,7 +154,7 @@ contains the charmap).
   `data.field.boot.studio = { credit=, author=, portAuthor=, year=, notice=,
   notice2= }`.
 
-## S.S. Anne departure — fixed and verified 2026-09-16
+## S.S. Anne departure — fixed and verified 2026-09-16/17
 
 The earlier movement-only diagnosis was incomplete. The ship's 128x64
 frame stores four consecutive 64x32 OAM pieces. Decoding those bytes as one
@@ -167,19 +171,29 @@ row-major 128x64 image scrambled the artwork before it ever moved.
 - The cutscene now uses `runner.waitingCheck`. The old detached field task
   was invisible to the stuck-script watchdog, which could cancel the scene
   at 720 frames. The off-screen check uses the shifted sprite centre.
+- `extractFireRedSSAnneArt` now extracts the cartridge's own raw 4bpp wake and
+  smoke sheets (`sWakeTiles`/`sSmokeTiles`) with `gObjectEventPal_SSAnne`.
+  Special 401 creates the wake after the 50-frame horn pause, emits smoke every
+  70 movement frames while the funnel is on-screen, and advances the exact
+  12-frame wake / 10-20-20-30-frame smoke animation cadence from `ss_anne.c`.
+  The wake is drawn behind the ship and the smoke above it; both remain purely
+  visual and are cleared after the final 40-frame horn pause.
 
-Verification: `tests/parity_frlg_ship.lua` passes 6 checks, including
+Verification: `tests/parity_frlg_ship.lua` passes 11 checks, including
 synthetic four-piece ROM composition, unchanged map position, visual speed,
-live wait registration and eventual completion. Before the fixes, the
-composition check and three departure assertions failed.
+live wait registration, the 50-frame wake delay, 70-frame smoke cadence,
+eventual completion and effect cleanup. Before the original movement fixes,
+the composition check and three departure assertions failed.
 
 After a full forced ROM reimport, `tests/frlg_ship_driver.lua` completed
 the actual departure script and returned to Vermilion with scene variable
-0x407E = 2 after 1,410 driver frames. Screenshots
-`ngshots/ship_fixed_{180,480,900,1200,return}.png` show the intact ship and
-the return to the dock. The early/mid-departure and return screenshots were
-read back. Import: 4,021 scripts; 152 overworld sheets, zero unreadable.
-Smoke and wake effects remain pending.
+0x407E = 2 after 1,407 driver frames. Screenshots
+`ngshots/ship_fx_wake.png`, `ngshots/ship_fx_smoke.png`,
+`ngshots/ship_fx_verify_{180,480,900,1200,return}.png` show the intact moving
+ship, the wake behind the stern, smoke drifting from the funnel, the ship
+leaving the screen cleanly, and the return to the dock. The focused screenshots
+were read back after the final import. Import: 4,021 scripts; 152 overworld
+sheets, zero unreadable.
 
 ## Gym progression and Psychic category — verified 2026-09-16
 
@@ -350,29 +364,43 @@ yet, which is the cartridge's own behaviour, not a bug. A real "fly to an
 already-visited town and land there" round trip wasn't driven this pass —
 worth doing once there's a save with an actual destination flagged.
 
-## Not yet done / not yet tested this playthrough
+## Final handoff checklist — closed 2026-09-17
 
-Ordered roughly by what blocks a real playthrough:
+The gameplay-verification block (Snorlax, Safari, save/load and V.S. Seeker)
+and the final three visual-parity items are closed. There are no known blockers
+left in this handoff checklist.
 
-1. **Poké Flute / Snorlax, Safari Zone, save/load round-trip** —
-   Poké Flute audio is wired, but the Snorlax battle regression still needs a
-   clean live run. Safari and save/load need the same end-to-end pass.
-2. **V.S. Seeker** — implemented as a FireRed-only path. It charges after 100
-   steps, scans nearby visible trainers, chooses the cartridge rematch rung
-   from the imported `sRematches` table, stores the selection per map object,
-   and consumes it when the trainer's type-5/type-7 rematch script starts.
-   Emerald's Match Call path is unchanged. The focused logic suite is
-   `tests/frlg_vs_seeker_test.lua`; a retail-ROM reimport and visible live
-   trainer run remain to be performed when the GUI runner is available.
-3. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
-   pokefirered `field_fadetransition.c`) — arrival facing is correct but the
-   16-frame walk-in slide itself isn't drawn.
-4. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
-   shrinking white circle instead of the three-silhouette-then-reveal effect
-   `DoCreditsMonScene` does.
-5. **S.S. Anne wake trail + smoke puffs** during the departure (separate
-   from the sprite-corruption bug above — even once the ship moves cleanly,
-   `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
+1. **Diagonal side-stair walk-in animation:** `Player:startStairExit` now
+   reproduces `ExitStairsMovement`'s four exact fixed-point direction speeds,
+   starts at `speed * 16`, reverses the speed, and converges the render-only
+   OAM offset to zero across 16 frames while the player fast-walks in place.
+   Field controls remain locked during the slide and the logical destination
+   cell never moves. `TILE_ONLY=stairs` was rerun after the final import;
+   `ngshots/tile_{01_stairs_entry,02_stairs_mid,03_stairs_settled}.png` were
+   read back and show the diagonal arrival and correct final west-facing pose.
+2. **Credits Pokémon reveal:** `extractFireRedExtraArt` now extracts both
+   larger credits poses for Charizard, Venusaur, Blastoise and Pikachu from
+   the retail ROM, using each species' normal palette and the exact
+   `WindowTemplate` coordinates from `credits.c`. `DoCreditsMonScene`'s
+   overlapping 16-frame fade/40-frame hold, 8/4/4-frame pose staging,
+   16-frame circle shrink, 32-frame hold, reveal/cry, 128-frame hold and
+   fade-out are represented in `Gen3CreditsFRLG`. The focused
+   `_frlg_credits_mon_reveal.lua` driver passed all pose-dimension assertions;
+   its Charizard front/pose1/pose2/circle/ball captures plus the other three
+   final reveals were read back.
+3. **S.S. Anne wake trail + smoke puffs:** the retail wake/smoke OBJ art is
+   extracted and Special 401 follows `CreateWakeBehindBoat` /
+   `CreateSmokeSprite` timing and screen offsets. `tests/parity_frlg_ship.lua`
+   passes 11/11 checks; the real departure driver asserted that both effects
+   rendered and returned to Vermilion cleanly at driver frame 1407. The wake,
+   smoke and return screenshots were read back after the final import.
+
+Final focused regression sweep after the last importer/special changes:
+`tests/frlg_vs_seeker_test.lua` **11/11**, `tests/parity_frlg_ship.lua`
+**11/11**, and `tests/parity_gen3_type_categories.lua` **3/3**. A final forced
+retail-ROM import completed successfully before the three visual drivers were
+rerun; the existing two accepted cache gaps (`data/generated/scenes.lua` and
+`assets/generated/ui/summary_info.png`) remain unchanged.
 
 ## Naming-screen icon — now verified through a real catch too — 2026-09-17
 
@@ -478,16 +506,63 @@ this session by actually running the flow and reading back real screenshots
    (`Sprites.playerForm` reading `save.player.gender`) resolves correctly
    live off a real gender choice, not just the hardcoded default in the
    throwaway drivers. Run finished cleanly (`DONE true`, name RED, rival
-   GARY, gender girl). The nickname (`kind = "mon"`) path was exercised only
-   by the isolated `_frlg_nickname_check.lua` driver, not yet inside a real
-   catch/starter-pickup playthrough — see "Not yet done" below.
+   GARY, gender girl). The nickname (`kind = "mon"`) path was subsequently
+   exercised through a real wild catch as well; see the naming-screen section
+   above and `ngshots/catch_02_naming_screen.png`.
 
 Lesson for next time a "missing sprite/menu row" report shows up: check the
 **real cartridge's own layout** (pokefirered source) before assuming this
 port is wrong — FireRed's screens are frequently *shorter* than Emerald's
 equivalents by design, not broken.
 
-## Poké Flute / Snorlax follow-up (2026-09-17)
+## Live gameplay verification block — closed 2026-09-17
+
+This pass used the retail FireRed ROM with mods off and exercised the remaining
+gameplay blockers through real field/battle/save paths rather than logic-only
+tests.
+
+- **Poké Flute / Snorlax:** `tests/drivers/_frlg_snorlax.lua` now drives the
+  Route 16 object at `(31,13)` through the real YES prompt, wake-up text,
+  Poké Flute cue, level-30 SNORLAX battle, victory, hide flag and object
+  removal. The run verifies `FLAG_G3_0807` (special-wild battle) clears after
+  the fight, `FLAG_G3_0080` remains set, the NPC disappears and the map script
+  finishes. Screenshot: `ngshots/frlg_snorlax_battle_entry.png`; result log:
+  `ngshots/frlg_snorlax_result.txt`.
+- **Safari Zone:** a real Fuchsia gate admission deducts exactly ¥500, gives 30
+  Safari Balls and enters the Center. A Safari battle reaches the
+  BALL/BAIT/ROCK/RUN menu; a forced miss consumes one ball and RUN returns to
+  the field. Exhausting the final step through normal overworld movement clears
+  Safari mode and the PA return lands at the entrance `(4,1)`. Two importer
+  defects were fixed while doing this: FRLG uses **600** steps (not Emerald's
+  500), and its map-rooted `ExitSafariMode` callers do not themselves contain
+  the global return warp. `extractSafari` now derives the return from the gate
+  map's warp back into the Safari map instead of inventing a destination.
+- **Save/load round trip:** `tests/drivers/_frlg_save_roundtrip.lua` routes the
+  real `SaveData.save`/`SaveData.load("firered")` writer and parser through an
+  isolated on-disk filesystem under `ngshots/`, never the player's normal save
+  directory. Money, bag items, event flags, defeated trainers, party
+  species/level/nickname/HP, map position/facing, Gen 3 vars and nested V.S.
+  Seeker state all survive the serialized reload with no `.tmp`/`.bak`
+  recovery.
+- **V.S. Seeker:** the retail import exposes 221 `sRematches` rows. A live Route
+  3 run uses Youngster Ben (`trainer 89`, object 9) after 100 real walking
+  steps; the nearby scan arms him and selects his first cartridge rematch party
+  (`trainer 101`). His real object script reaches the type-5 rematch record,
+  starts trainer 101, wins, records `FLAG_G3_0565`, clears that object's armed
+  state, then recharges after another 100 real walking steps without resurrecting
+  the consumed rematch. This exposed two shared wiring bugs: FRLG's trainer flag
+  block is the cartridge-declared `$0500..$07FF` even though the trainer table
+  has extra non-flaggable rows, and specials 60/61 must use FireRed's V.S.
+  Seeker rather than Emerald's Match Call. Type-5/type-7 records now correctly
+  fall through to post-battle talk when the object is not currently armed.
+  Screenshots: `ngshots/frlg_vs_seeker_armed.png` and
+  `ngshots/frlg_vs_seeker_battle.png`; result log:
+  `ngshots/frlg_vs_seeker_live_result.txt`.
+
+Emerald's Match Call path remains unchanged by the FireRed-specific special
+dispatch above.
+
+## Poké Flute / Snorlax implementation note (2026-09-17)
 
 The imported Route 16 Snorlax event is present at the cartridge coordinate
 `(31,13)` and its talk script reaches the level-30 wild-battle branch. The
@@ -495,9 +570,8 @@ FireRed command stream contains the Snorlax cry and delay, but no standalone
 Poké Flute audio command. `g3_wild_battle` now supplies the cartridge cue by
 playing `Pokeflute` immediately before the scripted wild battle. The existing
 engine has no separate Poké Flute field animation; the wake-up presentation is
-currently the cry, delay, transition, and battle entry. A focused regression
-driver (`tests/drivers/_frlg_snorlax.lua`) remains in progress to capture the
-battle state and verify the hide flag after the prompt.
+currently the cry, delay, transition, and battle entry. The focused live
+regression is complete; see the verification block above.
 
 ## Process notes for whoever picks this up
 
@@ -520,8 +594,9 @@ battle state and verify the hide flag after the prompt.
   `tests/frlg_sevii_progression_driver.lua`,
   `tests/firered_launcher_driver.lua`, and
   `tests/console_textinput_driver.lua`) have narrow `.gitignore` exceptions
-  so they can be retained; other scratch tests stay ignored. Changes from
-  2026-09-16 are uncommitted.
+  so they can be retained; other scratch tests stay ignored. The previously
+  uncommitted retained regressions plus the final gameplay/visual parity fixes
+  were committed locally as `a266457` on 2026-09-17.
 - Loose top-level `frlg_*.png` files in the repo root are old manual
   screenshots from earlier sessions, not driver output — ignore/clean them
   up if they get in the way, they're not tracked and not load-bearing.
