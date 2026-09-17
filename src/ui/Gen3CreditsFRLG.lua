@@ -52,6 +52,15 @@ local SCENES = {
 }
 local MON_SPECIES = { [0] = "CHARIZARD", "VENUSAUR", "BLASTOISE", "PIKACHU" }
 local SPRITE_SCENE = { [3] = 2, [6] = 3, [9] = 4, [12] = 5 }   -- 1-based sprite params rows
+-- DoCreditsMonScene: the 16-frame fade-in runs *inside* the initial 40-frame
+-- hold.  After that hold it waits 8 frames, puts window 1 up for 4 frames,
+-- puts window 2 up for 4, scales the circle for 16, then waits 32 before
+-- revealing BG1 and playing the cry.  Keep those waits explicit here rather
+-- than serialising the fade and hold (the old approximation made the scene
+-- twelve frames too long before the reveal).
+local MON_POSE1, MON_POSE2 = 48, 52
+local MON_CIRCLE_SHRINK, MON_REVEAL = 56, 104
+local MON_FADE_OUT, MON_DONE = MON_REVEAL + 128, MON_REVEAL + 128 + 16
 
 local function image(path)
   if type(path) ~= "string" then return nil end
@@ -191,19 +200,24 @@ function C:update()
       if not (okP and path) then
         require("src.core.Logger").warn("gen3 frlg credits: no pic for %s (%s)", tostring(species), tostring(path))
       end
+      local poses = {}
+      for i, rec in ipairs((self.art.monPoses or {})[self.cmd.param + 1] or {}) do
+        poses[i] = { img = image(rec.image), x = rec.x, y = rec.y }
+      end
       self.mon = { species = species, img = okP and image(path) or nil,
+                   poses = poses,
                    ball = image((self.art.pokeball or {})[self.cmd.param + 1]), t = 0 }
       self.phase = "mon"
     end
   elseif p == "mon" then
     local m = self.mon
     m.t = m.t + 1
-    -- 16 fade in, 40 wait, 12 silhouettes, 16 circle shrink, 32 wait, then
-    -- the ball and the mon, cry, 128 frames, fade out 16
+    -- credits.c starts the 16-frame fade-in and its 40-frame hold together.
+    -- The drawing constants above then account for 8/4/4, circle 16, wait 32.
     self.fade = math.min(1, m.t / 16)
-    if m.t == 116 then pcall(Sound.playCry, self.game.data, m.species) end
-    if m.t >= 244 then self.fade = math.max(0, 1 - (m.t - 244) / 16) end
-    if m.t >= 260 then self.mon = nil self.map = nil self:nextCommand() end
+    if m.t == MON_REVEAL then pcall(Sound.playCry, self.game.data, m.species) end
+    if m.t >= MON_FADE_OUT then self.fade = math.max(0, 1 - (m.t - MON_FADE_OUT) / 16) end
+    if m.t >= MON_DONE then self.mon = nil self.map = nil self:nextCommand() end
   elseif p == "endOut" then
     self.timer = self.timer - 1
     self.fade = self.timer / 16
@@ -303,18 +317,26 @@ function C:draw()
   if self.phase == "mon" and self.mon then
     local m = self.mon
     g.setColor(1, 1, 1, 1)
-    if m.t < 116 then
+    if m.t < MON_REVEAL then
       -- the white circle closing in on the ball
-      local k = math.max(0, math.min(1, (m.t - 68) / 16))
+      local k = math.max(0, math.min(1, (m.t - MON_CIRCLE_SHRINK) / 16))
       local r = 40 + (1 - k) * 200
       g.setColor(1, 1, 1, 1)
       g.circle("fill", 120, 80, r)
     else
       if m.ball then g.draw(m.ball, 0, 0) end
-      if m.img then
-        local w, h = m.img:getDimensions()
-        g.draw(m.img, math.floor(120 - w / 2), math.floor(80 - h / 2))
-      end
+    end
+
+    -- Each PutWindowTilemap call replaces the previous rectangular window;
+    -- draw only the active pose rather than compositing all three pictures.
+    local pose
+    if m.t >= MON_POSE2 then pose = m.poses[2]
+    elseif m.t >= MON_POSE1 then pose = m.poses[1] end
+    if pose and pose.img then
+      g.draw(pose.img, pose.x, pose.y)
+    elseif m.img then
+      local w, h = m.img:getDimensions()
+      g.draw(m.img, math.floor(120 - w / 2), math.floor(80 - h / 2))
     end
   elseif (self.phase == "end") and self.endImg then
     g.setColor(1, 1, 1, 1)

@@ -17,8 +17,20 @@ eq(VsSeeker.use(data, save, ow), "charging", "cannot use before full charge")
 VsSeeker.step(save)
 eq(VsSeeker.use(data, save, ow, function() return 99 end), "ready", "arms an eligible trainer")
 eq(VsSeeker.rematchFor(save, ow, npc), 11, "stores first eligible rematch on the map object")
+check(VsSeeker.isReady(save, ow, npc), "armed object is ready for a rematch")
+check(VsSeeker.shouldTry(data, save, ow, npc, 10),
+      "armed object takes the cartridge rematch dialogue branch")
 VsSeeker.clear(save, ow, npc)
 check(VsSeeker.rematchFor(save, ow, npc) == nil, "win clears only that trainer's rematch")
+check(not VsSeeker.isReady(save, ow, npc), "cleared object is no longer ready")
+
+-- ShouldTryRematchBattle stays true after at least one rematch party on this
+-- row has been beaten, even though IsTrainerReadyForRematch is false until the
+-- device arms the map object again.  This is what makes the type-5 record fall
+-- through to post-battle talk rather than refighting the original trainer.
+save.flags.FLAG_G3_050B = true
+check(VsSeeker.shouldTry(data, save, ow, npc, 10),
+      "previously beaten rematch keeps the rematch dialogue branch")
 
 -- Using the device starts the cartridge's recharge window; a full recharge
 -- restores readiness and does not resurrect the object-specific rematch.

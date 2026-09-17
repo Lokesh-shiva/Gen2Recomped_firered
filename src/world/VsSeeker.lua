@@ -129,6 +129,29 @@ function VsSeeker.rematchFor(save, ow, npc)
   return state(save).rematches[key(ow, npc)]
 end
 
+-- ShouldTryRematchBattle / IsTrainerReadyForRematch are deliberately
+-- different in FireRed.  The former stays true after any rematch party on the
+-- row has been beaten so the trainer keeps using their rematch/post-battle
+-- dialogue branch; the latter is true only while this exact map object is
+-- currently armed by the V.S. Seeker.
+function VsSeeker.isReady(save, ow, npc)
+  return VsSeeker.rematchFor(save, ow, npc) ~= nil
+end
+
+function VsSeeker.shouldTry(data, save, ow, npc, trainer)
+  if VsSeeker.isReady(save, ow, npc) then return true end
+  local row = rowFor(data, tonumber(trainer))
+  local parties = row and (row.parties or row)
+  if not parties then return false end
+  for slot = 2, #parties do
+    local id = tonumber(parties[slot])
+    if id and id ~= 0 and id ~= SKIP and VsSeeker.beaten(data, save, id) then
+      return true
+    end
+  end
+  return false
+end
+
 function VsSeeker.clear(save, ow, npc)
   if ow and npc and npc.def then state(save).rematches[key(ow, npc)] = nil end
   if npc then npc.vsSeekerReady = nil end

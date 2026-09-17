@@ -22346,7 +22346,11 @@ function RomExtractorGen3:fieldMoveGates(scripts)
   -- independently placed; it has to start above every flag the region's own
   -- scripts use; and no script anywhere in Hoenn may touch a flag inside it,
   -- because on the cartridge that block belongs to the battle setup alone.
-  local SYSTEM_FLAGS = base - 7            -- badge 1 is SYSTEM_FLAGS + 7
+  -- Emerald places badge 1 seven flags into its system block.  FRLG does
+  -- not: pret's flags.h fixes SYS_FLAGS at $800 and FLAG_BADGE01_GET at $820.
+  -- Keep the generic derivation for RSE, but use the cartridge's declared
+  -- layout for FireRed/LeafGreen just as the badge fallback above does.
+  local SYSTEM_FLAGS = self:isFireRedManifest() and 0x800 or (base - 7)
   local TRAINER_FLAGS_START = 0x500
   local trainerCount = 0
   for i in pairs((self._constants or {}).trainerOrder or {}) do
@@ -22367,7 +22371,16 @@ function RomExtractorGen3:fieldMoveGates(scripts)
     end
   end
   local fits = TRAINER_FLAGS_START + trainerCount <= SYSTEM_FLAGS
-  if not (fits and insideBlock == 0 and highestBelow < TRAINER_FLAGS_START) then
+  if self:isFireRedManifest() then
+    -- FRLG declares TRAINER_FLAGS_START=$500 and TRAINER_FLAGS_END=$7FF.
+    -- The ROM's trainer table has additional non-flagged rows beyond that
+    -- 0x300-entry save block (Trainer Tower/special-use parties), so using the
+    -- full trainer table length as a capacity test falsely rejected the real
+    -- base and made every V.S. Seeker trainer look unfought.
+    Logger.info("Gen3 trainer flags (FRLG): fixed cartridge block $0500..$07FF; "
+                  .. "%d trainer-table rows exist, but only the declared $300 "
+                  .. "flag slots live in the save", trainerCount)
+  elseif not (fits and insideBlock == 0 and highestBelow < TRAINER_FLAGS_START) then
     Logger.warn("gen3 trainer flags: $%04X does not hold up -- %d trainers "
                   .. "%s under the system block at $%04X, %d script "
                   .. "reference(s) inside it, highest script flag below is "
@@ -34420,7 +34433,7 @@ RomExtractorGen3.SAFARI = {
   ENTER = 208,          -- gSpecials index, from Gen3Specials' checked list
   EXIT = 209,
   MAX_BALLS = 255,      -- what the cartridge's own counter is stored in
-  STEPS = 500,          -- pret: SAFARI_STEP_COUNT
+  STEPS = 500,          -- Emerald default; FRLG's EnterSafariMode uses 600
   LINE_MAX = 120,       -- an announcement is one box, not a conversation
   TAIL_MIN = 12,        -- and its last line is a sentence, not a word
 }
@@ -34437,6 +34450,7 @@ function RomExtractorGen3:extractSafari()
   -- which script calls which special, and what it does next
   local enter, exitWarp = nil, nil
   local enterLabel, exitLabel = nil, nil
+  local exitCallers = {}
   for label, rows in pairs(pool.scripts) do
     for i, ir in ipairs(rows) do
       if type(ir) == "table" and ir[1] == "special" then
@@ -34444,13 +34458,18 @@ function RomExtractorGen3:extractSafari()
         if which == S.ENTER then
           enter, enterLabel = rows, label
         elseif which == S.EXIT then
+          exitCallers[#exitCallers + 1] = label
           exitLabel = label
-          -- the warp it leaves by, which is the next warp in the script
+          -- the warp it leaves by, which is the next warp in the script.
+          -- FireRed's out-of-balls-mid-battle path uses `setwarp` here and
+          -- calls WarpIntoMap from C immediately afterwards; the ordinary
+          -- retire/times-up path uses `warp`.  Both name the same gate target.
           for j = i + 1, #rows do
             local row = rows[j]
             if type(row) == "table"
                and (row[1] == "warp" or row[1] == "warpdoor"
-                    or row[1] == "warpsilent" or row[1] == "warphole") then
+                    or row[1] == "warpsilent" or row[1] == "warphole"
+                    or row[1] == "setwarp") then
               exitWarp = { group = tonumber(row[2]), number = tonumber(row[3]),
                            warp = tonumber(row[4]), x = tonumber(row[5]),
                            y = tonumber(row[6]), op = row[1] }
@@ -34465,6 +34484,62 @@ function RomExtractorGen3:extractSafari()
     Logger.warn("gen3 safari: nothing calls special %d, so the zone is left "
                   .. "as ordinary ground", S.ENTER)
     return
+  end
+
+  -- FireRed's three gate-scene scripts call ExitSafariMode after the engine
+  -- has already returned to the entrance building, so those callers contain
+  -- no warp at all.  The cartridge's *global* Safari exit script does contain
+  -- the warp, but it is launched from C and therefore is not necessarily one
+  -- of the map-rooted scripts in this extraction pool.  Derive that same
+  -- destination without naming a map: the entrance map owns an EXIT caller,
+  -- and one of its warps leads to the map the ENTER caller sends us into.
+  if not exitWarp and self:isFireRedManifest() then
+    local insideMap = nil
+    local sawEnter = false
+    for _, row in ipairs(enter) do
+      if type(row) == "table" then
+        if row[1] == "special" and tonumber(row[2]) == S.ENTER then
+          sawEnter = true
+        elseif sawEnter and (row[1] == "warp" or row[1] == "warpdoor"
+               or row[1] == "warpsilent" or row[1] == "warphole") then
+          local g, n = tonumber(row[2]), tonumber(row[3])
+          if g and n then insideMap = mapKey(g, n) end
+          break
+        end
+      end
+    end
+
+    local callers = {}
+    for _, label in ipairs(exitCallers) do callers[label] = true end
+    local function ownsCaller(entry)
+      if type(entry) ~= "table" then return false end
+      for _, label in pairs(entry.objects or {}) do if callers[label] then return true end end
+      for _, label in pairs(entry.signs or {}) do if callers[label] then return true end end
+      for _, row in ipairs(entry.coords or {}) do if callers[row.script] then return true end end
+      for _, row in ipairs(entry.callbacks or {}) do if callers[row.script] then return true end end
+      for _, tab in ipairs(entry.tables or {}) do
+        for _, row in ipairs(tab.rows or {}) do if callers[row.script] then return true end end
+      end
+      return false
+    end
+
+    if insideMap then
+      for mapId, entry in pairs(pool.maps or {}) do
+        if ownsCaller(entry) then
+          local def = self._maps and self._maps[mapId]
+          for _, warp in ipairs(def and def.warps or {}) do
+            if warp.destMap == insideMap then
+              exitWarp = { group = def.group, number = def.number,
+                           warp = -1, x = warp.x, y = warp.y,
+                           op = "derived-return-warp" }
+              exitLabel = exitLabel or next(callers)
+              break
+            end
+          end
+        end
+        if exitWarp then break end
+      end
+    end
   end
 
   -- ---- how many balls the gate hands over --------------------------------
@@ -34574,9 +34649,10 @@ function RomExtractorGen3:extractSafari()
   end
 
   local constants = self._constants or {}
+  local steps = self:isFireRedManifest() and 600 or S.STEPS
   constants.gen3Safari = {
     balls = balls,
-    steps = S.STEPS,
+    steps = steps,
     exitWarp = exitWarp,
     outOfBalls = outOfBalls,
     outOfTime = outOfTime,
@@ -34588,7 +34664,7 @@ function RomExtractorGen3:extractSafari()
   self._constants = constants
   self:write("constants", constants)
   Logger.info("Gen3 safari: %d balls and %d steps a game; %s lets you in and "
-                .. "%s lets you out%s%s", balls, S.STEPS, tostring(enterLabel),
+                .. "%s lets you out%s%s", balls, steps, tostring(enterLabel),
               tostring(exitLabel),
               outOfBalls and " -- and it says its own goodbyes" or "",
               exitWarp and (", to map %d/%d at %d,%d")
@@ -37836,6 +37912,24 @@ RomExtractorGen3.FRLG_ART = {
     THE_END = { TILES = 0x410B20, MAP = 0x410B94, PAL = 0x410B00 },
     COPYRIGHT = { TILES = 0xEAE548, MAP = 0xEAE900, PAL = 0xEAE528 },
     POKEBALL = { TILES = 0xEAAB98, MAP = 0xEAB30C, PALS = 0xEAAB18 },
+    -- LoadCreditsMonPic uses the ordinary species palette for all three
+    -- windows, then swaps these two larger poses into BG0 after the 64x64
+    -- front pic.  Coordinates are the WindowTemplate tile positions from
+    -- credits.c, converted to pixels.
+    MONS = {
+      { species = 6,
+        { TILES = 0x40CB8C, W = 10, H = 10, X = 80, Y = 40 },
+        { TILES = 0x40D228, W = 12, H = 13, X = 72, Y = 24 } }, -- CHARIZARD
+      { species = 3,
+        { TILES = 0x40E158, W = 10, H = 10, X = 80, Y = 40 },
+        { TILES = 0x40E904, W = 12, H = 10, X = 72, Y = 40 } }, -- VENUSAUR
+      { species = 9,
+        { TILES = 0x40F240, W = 10, H = 10, X = 80, Y = 40 },
+        { TILES = 0x40F944, W = 10, H = 12, X = 80, Y = 32 } }, -- BLASTOISE
+      { species = 25,
+        { TILES = 0x410198, W = 10, H = 10, X = 80, Y = 40 },
+        { TILES = 0x4105B4, W = 12, H = 12, X = 72, Y = 32 } }, -- PIKACHU
+    },
     PLAYER_MALE = { TILES = 0x410E30, PAL = 0x410E10 },
     PLAYER_FEMALE = { TILES = 0x411C18, PAL = 0x411BF8 },
     RIVAL = { TILES = 0x4129C0, PAL = 0x4129A0 },
@@ -37924,6 +38018,49 @@ function RomExtractorGen3.frlgTilemap(tiles, map, mapCols, w, h, colors, opts)
     end
   end
   return image
+end
+
+-- ---------------------------------------------------------------------------
+-- S.S. ANNE DEPARTURE SPRITES (ss_anne.c): both sheets are raw 4bpp and use
+-- object palette 10.  The wake is two 16x32 frames; smoke uses the first
+-- sixteen tiles of its source sheet as four 16x16 frames (the source graphic
+-- carries two trailing unused tiles).  Keep these as extracted ROM assets so
+-- the port does not bundle cartridge artwork.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_SS_ANNE = {
+  WAKE = 0x479838,
+  SMOKE = 0x479A38,
+  PAL = 0x395AE8,
+}
+
+function RomExtractorGen3:extractFireRedSSAnneArt()
+  self:beginStage("Gen3 FireRed S.S. Anne effects")
+  if not self:isFireRedManifest() then return end
+  local A = RomExtractorGen3.FRLG_SS_ANNE
+  local rom = self.rom
+  local ok, err = pcall(function()
+    local colors = RomExtractorGen3.frlgColors(rom, A.PAL, 16)
+    if not colors then error("object palette 10 is unreadable") end
+    local wake = RomExtractorGen3.frlgSheet(rom:bytes(A.WAKE, 16 * 32),
+                                            2, 4, 2, colors)
+    local smoke = RomExtractorGen3.frlgSheet(rom:bytes(A.SMOKE, 16 * 32),
+                                             2, 2, 4, colors)
+    local wakePath = "field_frlg/ss_anne_wake.png"
+    local smokePath = "field_frlg/ss_anne_smoke.png"
+    self:saveImage(wake, wakePath)
+    self:saveImage(smoke, smokePath)
+    local constants = self._constants or {}
+    constants.gen3SSAnneFx = {
+      wake = "assets/generated/" .. wakePath,
+      smoke = "assets/generated/" .. smokePath,
+      source = "ROM:ss_anne.c sWakeTiles/sSmokeTiles using OBJ palette 10",
+    }
+    self._constants = constants
+    self:write("constants", constants)
+  end)
+  if not ok then
+    Logger.warn("gen3 frlg S.S. Anne effects: %s", tostring(err))
+  end
 end
 
 function RomExtractorGen3:extractFireRedExtraArt()
@@ -38034,6 +38171,31 @@ function RomExtractorGen3:extractFireRedExtraArt()
           local pal = frlgColors(rom, d.PALS + m * 32, 16)
           rec.credits.pokeball[m + 1] = save(frlgTilemap(tiles, map, 32, 30, 20, pal, { opaque = true }),
                                              "credits_pokeball_" .. m)
+        end
+      end
+    end
+    do
+      local palTable = self:symbol("gMonPaletteTable")
+      rec.credits.monPoses = {}
+      if palTable then
+        for monId, mon in ipairs(C.MONS) do
+          local palPtr = rom:pointer(palTable + mon.species * 8)
+          local colors = palPtr and frlgColors(rom, palPtr, 16, true)
+          local poses = {}
+          if colors then
+            for poseId = 1, 2 do
+              local d = mon[poseId]
+              local ok, tiles = RomExtractorGen3.lz77ok(rom, d.TILES)
+              if ok then
+                poses[poseId] = {
+                  image = save(frlgSheet(tiles, d.W, d.H, 1, colors),
+                               ("credits_mon_%d_%d"):format(monId - 1, poseId)),
+                  x = d.X, y = d.Y,
+                }
+              end
+            end
+          end
+          rec.credits.monPoses[monId] = poses
         end
       end
     end
@@ -46157,6 +46319,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedMapPreviews",
   "extractFireRedSpecialTexts",
   "extractFireRedTrainerTower",
+  "extractFireRedSSAnneArt",
   "extractFireRedExtraArt",
   "extractItemIcons",
   "extractPokenav",

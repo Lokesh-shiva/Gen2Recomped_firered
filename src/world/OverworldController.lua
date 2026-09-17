@@ -2787,7 +2787,7 @@ function OverworldState:update(dt)
   -- the player lands on desk Oak.
   local scripted = self.runner:isRunning() or #self.scriptMoves > 0
                    or self.engaging or self.emote or self.teleportOut
-                   or self.whirlSpin
+                   or self.whirlSpin or self.player.stairExit
   -- Gen2 bootstrap can arrive with placeholder script state while map data
   -- is still converging; never softlock movement in the bedroom.
   local gen2BootBedroom = GameVersion.isGen2(Game.data)
@@ -2811,7 +2811,7 @@ function OverworldState:update(dt)
     -- the player can never start another step after being spotted.
     scripted = self.runner:isRunning() or #self.scriptMoves > 0
                or self.engaging or self.emote or self.teleportOut
-               or self.whirlSpin
+               or self.whirlSpin or self.player.stairExit
   end
   if (not scripted and not self.transitioning) or gen2BootBedroom then
     self:handleInput()
@@ -10142,11 +10142,18 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
     self:noteGen2Spawn(fromId)
     -- FIRERED'S SIDE STAIRS (ExitStairsMovement): you land ON the stair tile
     -- facing away from it -- west off a right-hand stair, east off a left one
+    -- and the sprite starts offset along the diagonal, then walks that OAM
+    -- offset back to the cell over 16 frames while field controls are locked.
+    -- GetStairsMovementDirection uses these exact fixed-point speeds.
     local stairB = self:frlgBehaviours() and self:frlgBehaviourAt(self.player.cellX, self.player.cellY)
-    if stairB == 0xEC or stairB == 0xEE then
-      self.player.facing = "left"
-    elseif stairB == 0xED or stairB == 0xEF then
-      self.player.facing = "right"
+    if stairB == 0xEC then
+      self.player:startStairExit(16, -10, "left")   -- UP_RIGHT
+    elseif stairB == 0xED then
+      self.player:startStairExit(-17, -10, "right") -- UP_LEFT
+    elseif stairB == 0xEE then
+      self.player:startStairExit(17, 3, "left")     -- DOWN_RIGHT
+    elseif stairB == 0xEF then
+      self.player:startStairExit(-17, 3, "right")   -- DOWN_LEFT
     end
     -- FIRERED: a warp into a dungeon with a preview picture shows it first
     local section = self.map.def and self.map.def.regionMapSection
@@ -11713,6 +11720,72 @@ function OverworldState:drawWorld()
     end
   end
 
+  -- FireRed's S.S. Anne departure uses two ordinary OBJ sprites that are not
+  -- object events: a looping 16x32 wake behind the ship and 16x16 smoke puffs
+  -- from its funnel.  Special 401 owns their exact lifetime/positions; this
+  -- pass only turns that state into the extracted ROM frames.
+  local function ssAnneArt()
+    local def = Game.data.constants and Game.data.constants.gen3SSAnneFx
+    if not def then return nil end
+    if self.ssAnneWakeImg == nil then
+      local ok, img = pcall(Assets.image, def.wake)
+      self.ssAnneWakeImg = ok and img or false
+    end
+    if self.ssAnneSmokeImg == nil then
+      local ok, img = pcall(Assets.image, def.smoke)
+      self.ssAnneSmokeImg = ok and img or false
+    end
+    if self.ssAnneWakeImg and not self.ssAnneWakeQuads then
+      local w, h = self.ssAnneWakeImg:getDimensions()
+      self.ssAnneWakeQuads = {
+        love.graphics.newQuad(0, 0, 16, 32, w, h),
+        love.graphics.newQuad(16, 0, 16, 32, w, h),
+      }
+    end
+    if self.ssAnneSmokeImg and not self.ssAnneSmokeQuads then
+      local w, h = self.ssAnneSmokeImg:getDimensions()
+      self.ssAnneSmokeQuads = {}
+      for i = 0, 3 do
+        self.ssAnneSmokeQuads[i + 1] = love.graphics.newQuad(i * 16, 0, 16, 16, w, h)
+      end
+    end
+    return self.ssAnneWakeImg, self.ssAnneSmokeImg
+  end
+
+  local function fxSSAnneWake()
+    local fx = self.ssAnneDepartureFx
+    if not (fx and fx.boat) then return end
+    local wake = ssAnneArt()
+    if not (wake and self.ssAnneWakeQuads) then return end
+    local age = math.min(fx.wakeAge or 0, 132)
+    local cx = fx.boat.px + (fx.boat.shiftPx or 0) + 8 - cam.x
+               + 80 + math.floor(age / 6)
+    if cx < -18 then return end
+    local frame = math.floor(age / 12) % 2 + 1
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(wake, self.ssAnneWakeQuads[frame],
+                       math.floor(cx - 8), 109 - 16)
+  end
+
+  local function fxSSAnneSmoke()
+    local fx = self.ssAnneDepartureFx
+    if not (fx and fx.smoke and #fx.smoke > 0) then return end
+    local _, smoke = ssAnneArt()
+    if not (smoke and self.ssAnneSmokeQuads) then return end
+    love.graphics.setColor(1, 1, 1, 1)
+    for _, puff in ipairs(fx.smoke) do
+      local age = puff.age or 0
+      local frame
+      if age < 10 then frame = 1
+      elseif age < 30 then frame = 2
+      elseif age < 50 then frame = 3
+      else frame = 4 end
+      local cx = puff.x + math.floor(age / 4)
+      love.graphics.draw(smoke, self.ssAnneSmokeQuads[frame],
+                         math.floor(cx - 8), 78 - 8)
+    end
+  end
+
   -- the watering can's water: droplets arcing down onto the soil, and a
   -- sparkle on the last few frames as it soaks in
   local function fxWater()
@@ -12089,6 +12162,11 @@ function OverworldState:drawWorld()
       if self.fishing then
         at(fxRod, self.player.px + 8, self.player.py + 16)
       end
+      -- The S.S. Anne effects are authored in screen OAM coordinates for this
+      -- fixed-camera cutscene.  Keep them as an upright overlay for a custom
+      -- world pipeline; the flat/tilt paths place the wake behind the ship.
+      fxSSAnneWake()
+      fxSSAnneSmoke()
     end
     override = Pipelines.drawWorld(pipelineId, ctx)
     -- world post-processes (a miniature-diorama blur, a colour grade) fold
@@ -12346,6 +12424,9 @@ function OverworldState:drawWorld()
       end
     end
 
+    -- OBJ priority 2 and a later sprite id put the wake behind the ship at the
+    -- same priority on hardware.  Draw it immediately before the entity pass.
+    fxSSAnneWake()
     local onTop = nil
     for _, e in ipairs(self.entities) do
       if self:gen3AboveTopLayer(e) then
@@ -12376,6 +12457,8 @@ function OverworldState:drawWorld()
     fxEmote()
     fxBird()
     fxRod()
+    -- Smoke keeps the template's priority 0, above the ship and map layers.
+    fxSSAnneSmoke()
   else
     -- === TILT PATH: ground-hugging FX stay on the projected ground, all
     -- standing things billboard upright over it in a separate pass. ======
@@ -12391,6 +12474,8 @@ function OverworldState:drawWorld()
     fxWater()
 
     Game.renderer:beginUprightPass()
+
+    fxSSAnneWake()
 
     -- One y-sorted list of ALL upright billboards -- sprites (player, NPCs,
     -- ghosts) -- keyed on baseline world y (the foot / base row).  Farther
@@ -12462,6 +12547,7 @@ function OverworldState:drawWorld()
       local fy = self.player.py - cam.y + 16
       self:billboard(fx, fy, vw, vh, zoneColorsAt(zones, fx, fy), false, fxRod)
     end
+    fxSSAnneSmoke()
 
     Game.renderer:endUprightPass()
   end

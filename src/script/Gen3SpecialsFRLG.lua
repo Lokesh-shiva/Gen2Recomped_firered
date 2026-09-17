@@ -350,10 +350,10 @@ return function(Gen3Commands)
     return (mapId(ctx) == "MAP_G03_N05" and p and p.cellX < 24) and 1 or 0
   end)
   -- DoSSAnneDepartureCutscene: slide the visual sprite, as ss_anne.c does
-  -- with x2. Its map object stays put until the script removes it.
-  -- ss_anne.c: horn, a 50-frame pause, then the ship (local id 1) slides
-  -- left a pixel every five frames until it is 120px off the left edge,
-  -- horn again, 40 frames, and the script carries on
+  -- with x2. Its map object stays put until the script removes it.  The wake
+  -- and smoke are OAM-only companions to that visual position: one wake is
+  -- created after the 50-frame horn pause, and smoke puffs spawn every 70 run
+  -- frames until the funnel is offscreen.
   def(401, function(ctx)
     pcall(Commands.play_sound, ctx, "SE_SS_ANNE_HORN")
     local ow, runner = ctx.overworld, ctx.runner
@@ -365,21 +365,65 @@ return function(Gen3Commands)
     if not boat then return end
     local wait, moved, tail = 50, 0, nil
     boat.shiftPx = 0
+    ow.ssAnneDepartureFx = nil
+    local fx
+    local function boatScreenX()
+      -- Preserve the same port-space centre used by the existing offscreen
+      -- check.  The player does not move during this cutscene, so this is the
+      -- GBA object's screen x (including the ship's visual-only x2 shift).
+      return boat.px + (boat.shiftPx or 0) + 8 - (ow.player.px - 112)
+    end
+    local function makeWake()
+      fx = { boat = boat, wakeAge = 1, smoke = {} }
+      ow.ssAnneDepartureFx = fx
+    end
+    local function makeSmoke()
+      if not fx then return end
+      local x = boatScreenX() + 49
+      if x >= -32 then
+        local camX = (ow.camera and ow.camera.x) or (ow.player.px - 112)
+        fx.smoke[#fx.smoke + 1] = {
+          x = boat.px + (boat.shiftPx or 0) + 8 - camX + 49,
+          age = 0,
+        }
+      end
+    end
+    local function advanceEffects()
+      if not fx then return end
+      if fx.wakeAge < 132 then fx.wakeAge = fx.wakeAge + 1 end
+      for i = #fx.smoke, 1, -1 do
+        local puff = fx.smoke[i]
+        puff.age = puff.age + 1
+        if puff.age >= 80 then table.remove(fx.smoke, i) end
+      end
+    end
     -- A runner-owned poll also tells the stuck-script watchdog this long
     -- cutscene has work pending; a detached field task was killed at 720f.
     runner.waitingCheck = function()
-      if wait > 0 then wait = wait - 1 return false end
+      if wait > 0 then
+        wait = wait - 1
+        if wait == 0 then makeWake() end
+        return false
+      end
       if tail then
+        advanceEffects()
         tail = tail - 1
-        return tail <= 0
+        if tail <= 0 then
+          ow.ssAnneDepartureFx = nil
+          return true
+        end
+        return false
       end
       moved = moved + 1
-      boat.shiftPx = -math.floor(moved / 5)
-      local screenX = boat.px + boat.shiftPx + 8 - (ow.player.px - 112)
+      if moved % 70 == 0 then makeSmoke() end
+      local screenX = boatScreenX()
       if screenX < -120 or moved > 5 * 600 then
         pcall(Commands.play_sound, ctx, "SE_SS_ANNE_HORN")
         tail = 40
+      else
+        boat.shiftPx = -math.floor(moved / 5)
       end
+      advanceEffects()
       return false
     end
     runner:yield()

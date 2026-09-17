@@ -518,6 +518,25 @@ function Player:update()
       self.spinning = false
     end
   end
+  -- FireRed's directional side-stair warp does not place the player sprite
+  -- directly on its destination cell.  ExitStairsMovement starts the OAM
+  -- sprite a few pixels up/sideways from the cell and walks that fixed-point
+  -- offset back to zero over 16 frames while the player walks in place.  Keep
+  -- the logical cell/px/py fixed so collision, the camera and warp guards all
+  -- see the real destination; only pose() applies this cosmetic OAM offset.
+  if self.stairExit then
+    local s = self.stairExit
+    if s.frames > 0 then
+      s.offsetX = s.offsetX + s.speedX
+      s.offsetY = s.offsetY + s.speedY
+      s.frames = s.frames - 1
+      -- GetWalkInPlaceFastMovementAction advances faster than an ordinary
+      -- walk.  Two ticks per field frame gives the same quick leg cadence
+      -- without changing the normal walking clock.
+      self.animClock = (self.animClock or 0) + 2
+    end
+    if s.frames <= 0 then self.stairExit = nil end
+  end
   -- wall-bonk walk-in-place (issue #230): while pushing into a wall the
   -- collision path keeps the walk clock running without moving the cell,
   -- so the sprite animates against the wall.  Guarded on not-moving so a
@@ -583,7 +602,7 @@ end
 function Player:walkPhase()
   -- moving, the land-frame after a completed step, or an active wall-bonk
   -- (issue #230) animate; a standing sprite otherwise
-  if not self.moving and not self.stepLanded
+  if not self.moving and not self.stepLanded and not self.stairExit
      and not (self.bumpFrames and self.bumpFrames > 0) then
     return 0
   end
@@ -622,7 +641,7 @@ function Player:isUnderwater()
 end
 
 function Player:pose()
-  local py = self.py
+  local px, py = self.px, self.py
   local hopping = false
   -- ledge hops arc (set for 2 cells by the ledge handler); surfing bobs
   if self.hopFrames and self.hopFrames > 0 then
@@ -682,6 +701,13 @@ function Player:pose()
       py = py - math.floor((total - self.spinFrames) * 24 / total)
     end
   end
+  if self.stairExit then
+    -- field_fadetransition.c stores the stair slide in 5-bit fixed point and
+    -- assigns sprite->x2/y2 with an arithmetic >> 5. math.floor matches that
+    -- signed shift for the negative left/up offsets too.
+    px = px + math.floor(self.stairExit.offsetX / 32)
+    py = py + math.floor(self.stairExit.offsetY / 32)
+  end
   -- RodResponse (engine/items/item_effects.asm) zeroes wWalkBikeSurfState
   -- across FishingAnim, so casting from the water shows the on-foot sheet
   -- THE POSE BEATS EVERY SHEET BELOW IT, including the surfboard: a SURF
@@ -701,7 +727,22 @@ function Player:pose()
                  -- no run cycle of its own; Hoenn's two both have one
                  or (self.running and self.runSprite)
                  or self.sprite
-  return sprite, self.px, py, facing, phase, flip, hopping
+  return sprite, px, py, facing, phase, flip, hopping
+end
+
+-- Begin FireRed's ExitStairsMovement arrival slide.  The caller passes the
+-- cartridge's fixed-point speeds from GetStairsMovementDirection; the exit
+-- animation starts at speed * 16, reverses the speed, then takes 16 frames to
+-- converge back to zero.
+function Player:startStairExit(speedX, speedY, facing)
+  self.facing = facing or self.facing
+  self.stairExit = {
+    speedX = -speedX,
+    speedY = -speedY,
+    offsetX = speedX * 16,
+    offsetY = speedY * 16,
+    frames = 16,
+  }
 end
 
 function Player:draw(camX, camY)

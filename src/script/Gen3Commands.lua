@@ -1680,6 +1680,12 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
     vsNpc = ctx.npc
     vsTrainer = require("src.world.VsSeeker").rematchFor(ctx.save,
                                                             ctx.game.overworld, vsNpc)
+    -- TRAINER_BATTLE_REMATCH(_DOUBLE) routes through
+    -- EventScript_TryDoRematchBattle.  When the object is not currently armed
+    -- IsTrainerReadyForRematch is false and the cartridge jumps straight to
+    -- the post-battle script; it does NOT fight the original party again.
+    -- Returning here lets the extracted row fall through to that same text.
+    if not vsTrainer then return end
   end
   -- AND WHETHER THIS ONE IS A DOUBLE.
   --
@@ -7554,6 +7560,13 @@ local function currentTrainer(ctx)
 end
 
 Gen3Commands.SPECIALS[60] = function(ctx)
+  if require("src.core.GameVersion").get() == "firered" then
+    local data = ctx.game and ctx.game.data
+    local id = currentTrainer(ctx)
+    if not (data and id) then return 0 end
+    return require("src.world.VsSeeker").shouldTry(data, ctx.save,
+      ctx.game.overworld, ctx.npc, id) and 1 or 0
+  end
   local MC = matchCall()
   local data = ctx.game and ctx.game.data
   local id = currentTrainer(ctx)
@@ -7569,6 +7582,10 @@ Gen3Commands.SPECIALS[60] = function(ctx)
 end
 
 Gen3Commands.SPECIALS[61] = function(ctx)
+  if require("src.core.GameVersion").get() == "firered" then
+    return require("src.world.VsSeeker").isReady(ctx.save,
+      ctx.game and ctx.game.overworld, ctx.npc) and 1 or 0
+  end
   local MC = matchCall()
   local data = ctx.game and ctx.game.data
   local id = currentTrainer(ctx)
