@@ -1671,6 +1671,16 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
       return
     end
   end
+  -- A FireRed rematch script still names the original trainer. The V.S.
+  -- Seeker has selected a party for this map object, so replace that operand
+  -- only for the battle while leaving the script's normal text and flags in
+  -- control. Types 5 and 7 are its single and double rematch records.
+  local vsNpc, vsTrainer
+  if require("src.core.GameVersion").get() == "firered" and (k == 5 or k == 7) then
+    vsNpc = ctx.npc
+    vsTrainer = require("src.world.VsSeeker").rematchFor(ctx.save,
+                                                            ctx.game.overworld, vsNpc)
+  end
   -- AND WHETHER THIS ONE IS A DOUBLE.
   --
   -- Modes 4, 6, 7 and 8 are doubles by the mode alone, and the script that
@@ -1719,8 +1729,12 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
       return "end"
     end
   end
-  startTrainer(ctx, ctx.g3Trainer,
+  startTrainer(ctx, vsTrainer or ctx.g3Trainer,
                isDouble and { double = true, trainerB = partner } or nil)
+  if vsTrainer and ctx.lastBattleResult == "win" then
+    require("src.world.VsSeeker").clear(ctx.save, ctx.game.overworld, vsNpc)
+    Gen3Commands.markTrainerBeaten(ctx, vsTrainer)
+  end
   if ctx.lastBattleResult == "win" and not FALL_THROUGH_KINDS[k] then
     -- ON A WIN THE CARTRIDGE DOES NOT FALL THROUGH.
     --

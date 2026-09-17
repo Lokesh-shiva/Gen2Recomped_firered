@@ -8910,7 +8910,11 @@ function OverworldState:onStepComplete()
   -- Hoenn ever wanted a rematch -- the whole POKéNAV MATCH CALL list would
   -- have shown a region of trainers with nothing to say.
   if GameVersion.isGen3() then
-    require("src.script.MatchCall").step(Game.data, Game.save)
+    if GameVersion.get() == "firered" then
+      require("src.world.VsSeeker").step(Game.save)
+    else
+      require("src.script.MatchCall").step(Game.data, Game.save)
+    end
     -- FireRed's own per-step counters (massage, resort, Birth Island, hidden
     -- item regrowth)
     local G3 = require("src.script.Gen3Commands")

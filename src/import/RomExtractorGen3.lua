@@ -32567,6 +32567,53 @@ function RomExtractorGen3:extractItemEffects()
               refused)
 end
 
+-- FireRed's V.S. Seeker table has 221 fixed 16-byte records: six trainer
+-- party ids, then an unused map group and map number. It has no symbol in
+-- the retail ROM, so anchor it by its unique opening record (Youngster Ben)
+-- and verify the next row before accepting it. The generated cache retains
+-- only the player's own cartridge data, never this table in source.
+function RomExtractorGen3:extractVsSeeker()
+  self:beginStage("FireRed V.S. Seeker")
+  if not self:isFireRedManifest() then return end
+  local rom = self.rom
+  local function half(v)
+    return string.char(v % 256, math.floor(v / 256) % 256)
+  end
+  local needle = half(89) .. half(101) .. half(0xFFFF) .. half(498)
+               .. half(499) .. half(0)
+  local at = rom.data:find(needle, 1, true)
+  if not at or rom.data:find(needle, at + 1, true) then
+    Logger.warn("gen3 frlg V.S. Seeker: Youngster Ben table anchor is not unique")
+    return
+  end
+  at = at - 1 -- Lua string position to ROM offset
+  -- The next row is Youngster Calvin twice, followed by zeroed remaining
+  -- party slots. This guards against a coincidental run in trainer data.
+  if rom:u16(at + 16) ~= 90 or rom:u16(at + 18) ~= 90 then
+    Logger.warn("gen3 frlg V.S. Seeker: table anchor at %07X failed row check", at)
+    return
+  end
+  local rematches, rows = {}, 221
+  for i = 0, rows - 1 do
+    local row, base = {}, at + i * 16
+    for j = 0, 5 do row[j + 1] = rom:u16(base + j * 2) end
+    local first = row[1]
+    if first == 0 or first == 0xFFFF then
+      Logger.warn("gen3 frlg V.S. Seeker: invalid party at row %d", i)
+      return
+    end
+    rematches[first] = { parties = row }
+  end
+  local constants = self._constants or {}
+  constants.gen3VsSeeker = {
+    rematches = rematches, steps = 100,
+    source = ("ROM:sRematches %07X (221 FireRed records)"):format(at),
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed V.S. Seeker: %d rematch rows", rows)
+end
+
 RomExtractorGen3.DATA_STAGES = {
   "extractConstants", "extractCryVolume", "extractEvolutionText",
   "extractShopMenu",
@@ -32574,7 +32621,7 @@ RomExtractorGen3.DATA_STAGES = {
   "extractSizeRecords", "extractPokemonJump", "extractNatureGirl",
   "extractPokemon", "extractItems", "extractBalls",
   "extractItemEffects",
-  "extractTypeChart", "extractTrainers", "extractMachines",
+  "extractTypeChart", "extractTrainers", "extractMachines", "extractVsSeeker",
   "extractBerries", "extractTrades", "extractMultichoice",
   "extractEncounters", "extractEggMoves", "extractDexEntries",
   "extractTrainerClasses", "extractTrainerMoney", "extractTutorMoves", "extractBattleTables",

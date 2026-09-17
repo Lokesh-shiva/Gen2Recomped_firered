@@ -137,6 +137,24 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     return
   end
 
+  if result == "vs_seeker" then
+    list:close()
+    local outcome, count = require("src.world.VsSeeker").use(game.data, game.save,
+                                                               game.overworld)
+    if outcome == "charging" then
+      showMessages(game, { Strings("The V.S. SEEKER's\nBATTERY isn't charged.\nIt needs %d more steps.", count) })
+    elseif outcome == "no_trainers" then
+      showMessages(game, { Strings("There are no TRAINERS\nwithin range.") })
+    elseif outcome == "none" then
+      showMessages(game, { Strings("The TRAINERS are\nnot ready to battle.") })
+    else
+      require("src.core.Sound").play(game.data, "Press_AB")
+      showMessages(game, { Strings("The V.S. SEEKER\nfound %d TRAINER%s ready!", count,
+        count == 1 and "" or "S") })
+    end
+    return
+  end
+
   if result == "consumed_escape" then -- Poké Doll
     consume(game, id)
     list:close()

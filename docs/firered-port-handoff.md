@@ -354,15 +354,23 @@ worth doing once there's a save with an actual destination flagged.
 
 Ordered roughly by what blocks a real playthrough:
 
-1. **Poké Flute / Snorlax, VS Seeker, Safari Zone, save/load round-trip** —
-   none of these have been touched this pass; unknown state.
-2. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
+1. **Poké Flute / Snorlax, Safari Zone, save/load round-trip** —
+   Poké Flute audio is wired, but the Snorlax battle regression still needs a
+   clean live run. Safari and save/load need the same end-to-end pass.
+2. **V.S. Seeker** — implemented as a FireRed-only path. It charges after 100
+   steps, scans nearby visible trainers, chooses the cartridge rematch rung
+   from the imported `sRematches` table, stores the selection per map object,
+   and consumes it when the trainer's type-5/type-7 rematch script starts.
+   Emerald's Match Call path is unchanged. The focused logic suite is
+   `tests/frlg_vs_seeker_test.lua`; a retail-ROM reimport and visible live
+   trainer run remain to be performed when the GUI runner is available.
+3. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
    pokefirered `field_fadetransition.c`) — arrival facing is correct but the
    16-frame walk-in slide itself isn't drawn.
-3. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
+4. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
    shrinking white circle instead of the three-silhouette-then-reveal effect
    `DoCreditsMonScene` does.
-4. **S.S. Anne wake trail + smoke puffs** during the departure (separate
+5. **S.S. Anne wake trail + smoke puffs** during the departure (separate
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
 
