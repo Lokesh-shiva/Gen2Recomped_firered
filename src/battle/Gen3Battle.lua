@@ -1888,15 +1888,22 @@ local function measurePlatforms(path)
 
       local side = (y < h / 2) and "opponent" or "player"
       local blob = blobs[side]
-      local run = 0
+      local run, rowMin, rowMax = 0, w, -1
       for x = 0, w - 1 do
         if keys[x] ~= band then
           run = run + 1
-          if x < blob.minx then blob.minx = x end
-          if x > blob.maxx then blob.maxx = x end
+          if x < rowMin then rowMin = x end
+          if x > rowMax then rowMax = x end
         end
       end
-      if run > blob.best then blob.best, blob.y = run, y end
+      -- Keep the horizontal bounds from the same widest row that supplies
+      -- the platform surface.  FireRed backdrops have edge detail on other
+      -- rows; folding those pixels into global min/max shifts both battlers
+      -- away from the actual platform even though the chosen y is correct.
+      if run > blob.best then
+        blob.best, blob.y = run, y
+        blob.minx, blob.maxx = rowMin, rowMax
+      end
     end
     local out = {}
     for side, blob in pairs(blobs) do

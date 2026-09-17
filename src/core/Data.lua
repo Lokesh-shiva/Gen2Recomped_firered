@@ -200,6 +200,30 @@ local GEN2_SCAFFOLD_MAP_ALIASES = {
   MAP_G1A_N0B = "ROUTE31_VIOLET_GATE",
 }
 
+-- FireRed's import labels maps by group and number.  The story layer predates
+-- that extractor and names the League rooms after their source scripts, so
+-- retain both identities.  The aliases also make warps land on the map that
+-- owns the League door, rival, and Hall of Fame hooks.
+local FIRERED_STORY_MAP_ALIASES = {
+  MAP_G01_N75 = "LORELEIS_ROOM",
+  MAP_G01_N76 = "BRUNOS_ROOM",
+  MAP_G01_N77 = "AGATHAS_ROOM",
+  MAP_G01_N78 = "LANCES_ROOM",
+  MAP_G01_N79 = "CHAMPIONS_ROOM",
+  MAP_G01_N80 = "HALL_OF_FAME",
+}
+
+local FIRERED_STORY_OBJECT_TEXT = {
+  LORELEIS_ROOM = "TEXT_LORELEISROOM_LORELEI",
+  BRUNOS_ROOM = "TEXT_BRUNOSROOM_BRUNO",
+  AGATHAS_ROOM = "TEXT_AGATHASROOM_AGATHA",
+}
+
+local FIRERED_STORY_OBJECT_NAMES = {
+  LANCES_ROOM = "LANCESROOM_LANCE",
+  CHAMPIONS_ROOM = "CHAMPIONSROOM_RIVAL",
+}
+
 local function copy(value)
   if type(value) ~= "table" then return value end
   local out = {}
@@ -258,6 +282,31 @@ local function seedMapAliases(maps, aliases)
     if not maps[friendlyId] and maps[rawId] then
       local mapped = copy(maps[rawId]); mapped.id = friendlyId; maps[friendlyId] = mapped
     end
+  end
+end
+
+local function seedTrainerPartyAlias(trainers, alias, sourceIds)
+  if not trainers or trainers[alias] then return end
+  local first = trainers[sourceIds[1]]
+  if not first then return end
+  local mapped = copy(first)
+  mapped.id = alias
+  mapped.parties = {}
+  for _, sourceId in ipairs(sourceIds) do
+    local source = trainers[sourceId]
+    if source and source.parties and source.parties[1] then
+      mapped.parties[#mapped.parties + 1] = copy(source.parties[1])
+    end
+  end
+  if #mapped.parties == #sourceIds then trainers[alias] = mapped end
+end
+
+-- A generated FireRed warp carries its group/number key.  Resolve that key to
+-- the story alias too, so arriving through a real warp and explicitly opening
+-- the readable alias select the same map-script contribution.
+local function preferMapAliases(maps, aliases)
+  for rawId, friendlyId in pairs(aliases or {}) do
+    if maps[rawId] and maps[friendlyId] then maps[rawId] = maps[friendlyId] end
   end
 end
 
@@ -1120,6 +1169,23 @@ function Data:seedDefaults()
         end
       end
     end
+  end
+  if require("src.core.GameVersion").get() == "firered" then
+    seedMapAliases(self.maps, FIRERED_STORY_MAP_ALIASES)
+    preferMapAliases(self.maps, FIRERED_STORY_MAP_ALIASES)
+    for mapId, textConst in pairs(FIRERED_STORY_OBJECT_TEXT) do
+      local map = self.maps[mapId]
+      if map and map.objects and map.objects[1] then map.objects[1].text = textConst end
+    end
+    for mapId, name in pairs(FIRERED_STORY_OBJECT_NAMES) do
+      local map = self.maps[mapId]
+      if map and map.objects and map.objects[1] then map.objects[1].name = name end
+    end
+    -- FireRed imports the three original Champion parties as separate named
+    -- trainer records. The shared story runner selects OPP_RIVAL3 by the
+    -- player's starter, so give it those imported parties in that order.
+    seedTrainerPartyAlias(self.trainers, "OPP_RIVAL3",
+      { "TERRY_438", "TERRY_439", "TERRY_440" })
   end
 end
 

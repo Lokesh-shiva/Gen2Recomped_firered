@@ -6745,6 +6745,53 @@ function RomExtractorGen3:surfBlob()
            colors = chosen, paletteTag = chosenTag }
 end
 
+function RomExtractorGen3:overworldFramePixels(raw, width, height, subsprites)
+  -- Ordinary sheets are already row-major. Oversized objects such as the
+  -- S.S. Anne exceed hardware OAM dimensions and store each piece separately.
+  if width <= 64 and height <= 64 then
+    return RomGba.tiles4bpp(raw, width / 8, height / 8)
+  end
+  assert(subsprites, "oversized object has no subsprite table")
+  local rom = self.rom
+  local count, at = rom:u8(subsprites), rom:pointer(subsprites + 4)
+  assert(at and count > 0 and count <= 64, "invalid object subsprite table")
+  local dimensions = {
+    [0] = {{8,8}, {16,16}, {32,32}, {64,64}},
+    [1] = {{16,8}, {32,8}, {32,16}, {64,32}},
+    [2] = {{8,16}, {8,32}, {16,32}, {32,64}},
+  }
+  local pieces, minX, minY, maxX, maxY = {}, math.huge, math.huge, -math.huge, -math.huge
+  for i = 0, count - 1 do
+    local p = at + i * 4
+    local x, y, bits = rom:u8(p), rom:u8(p + 1), rom:u16(p + 2)
+    if x >= 128 then x = x - 256 end
+    if y >= 128 then y = y - 256 end
+    local dims = dimensions[bits % 4]
+    local dim = dims and dims[math.floor(bits / 4) % 4 + 1]
+    assert(dim, "invalid object subsprite shape")
+    local offset = math.floor(bits / 16) % 1024 * 32
+    local size = dim[1] * dim[2] / 2
+    assert(offset + size <= #raw, "object subsprite exceeds frame bytes")
+    local chunk = {}
+    for j = 1, size do chunk[j] = raw[offset + j] end
+    pieces[#pieces + 1] = {x=x, y=y, w=dim[1], h=dim[2],
+      pixels=RomGba.tiles4bpp(chunk, dim[1] / 8, dim[2] / 8)}
+    minX, minY = math.min(minX, x), math.min(minY, y)
+    maxX, maxY = math.max(maxX, x + dim[1]), math.max(maxY, y + dim[2])
+  end
+  assert(maxX - minX == width and maxY - minY == height,
+         "object subsprite bounds disagree with frame dimensions")
+  local pixels = RomGba.tiles4bpp({}, width / 8, height / 8)
+  for _, piece in ipairs(pieces) do
+    for y = 1, piece.h do
+      for x = 1, piece.w do
+        pixels[piece.y - minY + y][piece.x - minX + x] = piece.pixels[y][x]
+      end
+    end
+  end
+  return pixels
+end
+
 function RomExtractorGen3:extractOverworldSprites()
   self:beginStage("Gen3 overworld sprites")
   local table_ = self:need("gObjectEventGraphicsInfoPointers", "overworld sprites")
@@ -6963,8 +7010,8 @@ function RomExtractorGen3:extractOverworldSprites()
       for i, frame in ipairs(order) do
         local at = self.rom:pointer(images + frame * 8)
         if not at then error("frame " .. frame .. " has no data pointer") end
-        cells[i] = RomGba.tiles4bpp(self.rom:bytes(at, frameBytes),
-                                    width / 8, frameHeight / 8)
+        cells[i] = self:overworldFramePixels(self.rom:bytes(at, frameBytes),
+                         width, frameHeight, self.rom:pointer(info + 20))
       end
       local runCells
       if runOrder then
@@ -42504,8 +42551,161 @@ function RomExtractorGen3:slotPaylines()
   }
 end
 
+function RomExtractorGen3:extractFireRedSlotMachine()
+  local S = {
+    REELS = 0x464926, PAYOUTS = 0x464966,
+    REEL_PAL = 0x464974, REEL_TILES = 0x464A14,
+    REEL_PAL_TAGS = 0x465608,
+    DIGIT_PAL = 0x465524, DIGIT_TILES = 0x465544,
+    BG_PAL = 0x465930, BG_TILES = 0x4659D0, BG_MAP = 0x4661D4,
+    COUNT = 3, TAGS = 21, SYMBOLS = 7,
+  }
+  local reels = {}
+  for reel = 0, S.COUNT - 1 do
+    local row, seen = {}, {}
+    for i = 0, S.TAGS - 1 do
+      local tag = self.rom:u8(S.REELS + reel * S.TAGS + i)
+      if tag >= S.SYMBOLS then
+        Logger.warn("FireRed slot machine: reel %d has invalid symbol %d",
+                    reel + 1, tag)
+        return
+      end
+      row[i + 1], seen[tag] = tag, true
+    end
+    -- FireRed deliberately omits cherries from the third reel: its cherry
+    -- prizes depend only on the first two reels.  Every other symbol appears
+    -- on all three, while cherries must appear on the first two.
+    for tag = 0, S.SYMBOLS - 1 do
+      local required = tag ~= 4 or reel < 2
+      if required and not seen[tag] then
+        Logger.warn("FireRed slot machine: reel %d never shows symbol %d",
+                    reel + 1, tag)
+        return
+      end
+    end
+    reels[reel + 1] = row
+  end
+
+  local payouts = {}
+  for i = 0, 6 do payouts[i] = self.rom:u16(S.PAYOUTS + i * 2) end
+  if payouts[0] ~= 0 or payouts[1] ~= 2 or payouts[2] ~= 6
+     or payouts[5] ~= 100 or payouts[6] ~= 300 then
+    Logger.warn("FireRed slot machine: payout table failed its cartridge checks")
+    return
+  end
+
+  local record = {
+    rules = "frlg", reels = reels, payouts = payouts,
+    symbols = 7, tags = 21, noMatch = 0, cherry = 4,
+    twoCherry = 1, threeCherry = 2,
+    symbolMatch = { [0]=6, [1]=5, [2]=4, [3]=4, [4]=2, [5]=3, [6]=3 },
+    rows = { {1,1,1}, {2,2,2}, {3,3,3} },
+    diagonals = { {1,2,3}, {3,2,1} }, lines = {1,3,5}, maxBet = 3,
+    screen = { windows = {{x=64,w=32},{x=104,w=32},{x=144,w=32}},
+               top = 28, height = 72, rowPitch = 24,
+               counters = { creditX=81, payoutX=129, y=22 } },
+    source = "ROM:pokefirered sReelIconAnimByReelAndPos / sPayoutTable",
+  }
+
+  local composed = 0
+  local okArt, artErr = pcall(function()
+    local okTiles, tiles = RomExtractorGen3.lz77ok(self.rom, S.REEL_TILES)
+    assert(okTiles and #tiles >= 7 * 512, "reel icon sheet does not decompress")
+    local palettes = {}
+    for bank = 0, 4 do
+      palettes[bank] = RomGba.palette(self.rom:bytes(S.REEL_PAL + bank * 32, 32))
+    end
+    record.symbolArt = {}
+    for icon = 0, 6 do
+      local tag = self.rom:u16(S.REEL_PAL_TAGS + icon * 2)
+      local colors = palettes[tag] or palettes[0]
+      local raw = {}
+      for i = 1, 512 do raw[i] = tiles[icon * 512 + i] end
+      local px = RomGba.tiles4bpp(raw, 4, 4)
+      local image = ImageWriter.blank(32, 32)
+      for y = 1, 32 do for x = 1, 32 do
+        local index, c = px[y][x], colors[px[y][x] + 1]
+        if index ~= 0 and c then
+          image:setPixel(x-1,y-1,c[1]/255,c[2]/255,c[3]/255,1)
+        end
+      end end
+      local path = ("slots/frlg_symbol_%d.png"):format(icon)
+      self:saveImage(image, path)
+      record.symbolArt[icon] = "assets/generated/" .. path
+      composed = composed + 1
+    end
+
+    local okBg, bgTiles = RomExtractorGen3.lz77ok(self.rom, S.BG_TILES)
+    local okMap, bgMap = RomExtractorGen3.lz77ok(self.rom, S.BG_MAP)
+    assert(okBg and okMap and #bgMap >= 32 * 20 * 2,
+           "slot background does not decompress")
+    local banks = {}
+    for bank = 0, 4 do
+      banks[bank] = RomGba.palette(self.rom:bytes(S.BG_PAL + bank * 32, 32))
+    end
+    local image = ImageWriter.blank(256,160)
+    local cache = {}
+    for cy=0,19 do for cx=0,31 do
+      local at=(cy*32+cx)*2
+      local entry=(bgMap[at+1] or 0)+(bgMap[at+2] or 0)*256
+      local tile=entry%1024
+      local flipX=math.floor(entry/1024)%2==1
+      local flipY=math.floor(entry/2048)%2==1
+      local colors=banks[math.floor(entry/4096)%16] or banks[0]
+      if tile*32+32 <= #bgTiles and colors then
+        local px=cache[tile]
+        if not px then
+          local raw={}
+          for i=1,32 do raw[i]=bgTiles[tile*32+i] end
+          px=RomGba.tiles4bpp(raw,1,1); cache[tile]=px
+        end
+        for y=1,8 do for x=1,8 do
+          local sx=flipX and 9-x or x
+          local sy=flipY and 9-y or y
+          local index,c=px[sy][sx],colors[px[sy][sx]+1]
+          if index ~= 0 and c then
+            image:setPixel(cx*8+x-1,cy*8+y-1,c[1]/255,c[2]/255,c[3]/255,1)
+          end
+        end end
+      end
+    end end
+    self:saveImage(image,"slots/frlg_machine.png")
+    record.background="assets/generated/slots/frlg_machine.png"
+    composed=composed+1
+
+    local okDigits,digitTiles=RomExtractorGen3.lz77ok(self.rom,S.DIGIT_TILES)
+    local digitPal=RomGba.palette(self.rom:bytes(S.DIGIT_PAL,32))
+    assert(okDigits and #digitTiles >= 10*64,"slot digits do not decompress")
+    local strip=ImageWriter.blank(80,16)
+    for digit=0,9 do
+      local raw={}
+      for i=1,64 do raw[i]=digitTiles[digit*64+i] end
+      local px=RomGba.tiles4bpp(raw,1,2)
+      for y=1,16 do for x=1,8 do
+        local index,c=px[y][x],digitPal[px[y][x]+1]
+        if index ~= 0 and c then
+          strip:setPixel(digit*8+x-1,y-1,c[1]/255,c[2]/255,c[3]/255,1)
+        end
+      end end
+    end
+    self:saveImage(strip,"slots/frlg_digits.png")
+    record.digitArt="assets/generated/slots/frlg_digits.png"
+    composed=composed+1
+  end)
+  if not okArt then
+    Logger.warn("FireRed slot machine art could not be composed (%s)",tostring(artErr))
+  end
+
+  local constants=self._constants or {}
+  constants.gen3Slots=record
+  self._constants=constants
+  self:write("constants",constants)
+  Logger.info("FireRed slot machine: 3 reels, 7 symbols, 7 payouts, %d pictures",composed)
+end
+
 function RomExtractorGen3:extractSlotMachine()
   self:beginStage("Gen3 slot machine")
+  if self:isFireRedManifest() then return self:extractFireRedSlotMachine() end
   local S = RomExtractorGen3.SLOTS
   local reels, why = self:slotReels()
   if not reels then

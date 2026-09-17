@@ -12414,7 +12414,7 @@ function OverworldState:drawWorld()
                        function() g.npc:draw(cam.x - g.ox, cam.y - g.oy) end)
       else
         local e = it.e
-        local fx = e.px - cam.x + 8
+        local fx = e.px + (e.shiftPx or 0) - cam.x + 8
         local fy = e.py - cam.y + 16
         local colors = zoneColorsAt(zones, fx, fy)
         self:billboard(fx, fy, vw, vh, colors, false,

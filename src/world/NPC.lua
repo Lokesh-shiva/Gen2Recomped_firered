@@ -825,7 +825,9 @@ end
 function NPC:pose()
   -- movement_set_sliding: the object keeps its standing frame while it moves,
   -- so it glides rather than walks (Ice Path boulders, the Kimono Girls).
-  return self.sprite, self.px, self.py, self.facing,
+  -- Visual-only x2 (FRLG ship departure). Collision, scripts and terrain
+  -- remain at the map object, matching the cartridge's stationary object.
+  return self.sprite, self.px + (self.shiftPx or 0), self.py, self.facing,
          self.sliding and 0 or self:walkPhase(), self.stepFlip, false
 end
 

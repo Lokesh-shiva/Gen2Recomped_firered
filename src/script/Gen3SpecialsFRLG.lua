@@ -349,8 +349,8 @@ return function(Gen3Commands)
     local p = ctx.overworld and ctx.overworld.player
     return (mapId(ctx) == "MAP_G03_N05" and p and p.cellX < 24) and 1 or 0
   end)
-  -- DoSSAnneDepartureCutscene: the horn and the wake behind the boat; the
-  -- script moves the ship itself
+  -- DoSSAnneDepartureCutscene: slide the visual sprite, as ss_anne.c does
+  -- with x2. Its map object stays put until the script removes it.
   -- ss_anne.c: horn, a 50-frame pause, then the ship (local id 1) slides
   -- left a pixel every five frames until it is 120px off the left edge,
   -- horn again, 40 frames, and the script carries on
@@ -363,24 +363,20 @@ return function(Gen3Commands)
       if e.def and e.def.localId == 1 and e ~= ow.player then boat = e break end
     end
     if not boat then return end
-    ow.fieldTasks = ow.fieldTasks or {}
-    local wait, moved, tail, startPx = 50, 0, nil, boat.px
-    local resumed = false
-    ow.fieldTasks[#ow.fieldTasks + 1] = function()
+    local wait, moved, tail = 50, 0, nil
+    boat.shiftPx = 0
+    -- A runner-owned poll also tells the stuck-script watchdog this long
+    -- cutscene has work pending; a detached field task was killed at 720f.
+    runner.waitingCheck = function()
       if wait > 0 then wait = wait - 1 return false end
       if tail then
         tail = tail - 1
-        if tail <= 0 then
-          if not resumed then resumed = true runner:resume() end
-          return true
-        end
-        return false
+        return tail <= 0
       end
       moved = moved + 1
-      boat.px = startPx - math.floor(moved / 5)
       boat.shiftPx = -math.floor(moved / 5)
-      local screenX = boat.px - (ow.player.px - 112)
-      if screenX < -120 - 64 or moved > 5 * 600 then
+      local screenX = boat.px + boat.shiftPx + 8 - (ow.player.px - 112)
+      if screenX < -120 or moved > 5 * 600 then
         pcall(Commands.play_sound, ctx, "SE_SS_ANNE_HORN")
         tail = 40
       end

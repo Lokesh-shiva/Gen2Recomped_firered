@@ -42,10 +42,22 @@ contains the charmap).
   `ngshots/`. Read screenshots back with the Read tool (they render as
   images).
 - Test with mods off: always keep `POKEPORT_NO_MODS=1` set.
-- **PowerShell gotcha:** `Remove-Item` on paths starting `C:\Program...` gets
-  blocked by the sandbox even when the actual target is fine — don't rely on
-  it to clean `ngshots/`; just let old screenshots accumulate or use `del`
-  via `cmd /c`.
+- Also set `POKEPORT_NO_BOOT_REPORT=1` for drivers/imports. Otherwise a
+  previous failed launch can stop on the crash-report screen before the
+  driver starts, with empty redirected logs.
+- On this Codex Windows host, LÖVE could not initialize its filesystem
+  inside the sandbox. Request execution escalation for LÖVE runs; do not
+  bypass the sandbox. Keep gameplay windows visible: the user explicitly
+  wants to watch automated runs, so do not pass `-WindowStyle Hidden`.
+- Git may report differing repository ownership for the sandbox account.
+  Read-only Git inspection used a command-local
+  `-c safe.directory=D:/gen1recomp-0.1.75-windows/gen2recomp-firered`;
+  no global Git configuration was changed.
+- Preserve the pre-existing deletion of Android
+  `RoundTripLatencyActivity.java` and untracked screenshots/manifest.
+- Screenshot cleanup is unnecessary. Do not work around a sandbox denial
+  with another shell. Keep filesystem operations in PowerShell and validate
+  absolute targets before any recursive deletion or move.
 - Existing drivers worth knowing about (all in `tests/drivers/`, all
   gitignored so check they still exist before assuming):
   `_frlg_tiles.lua` (TILE_ONLY=spin,stairs,cycle,fast,furniture,pc,tower),
@@ -86,7 +98,7 @@ contains the charmap).
   ice, Five Island resort, Daisy's massage, berry powder shop, PC menu,
   elevator (floor window + list + shake + **window-view metatile cycling**),
   Seagallop ferry + **crossing scene**, Bill's teleporter animation, S.S. Anne
-  departure (**see bug below**), old man catching demo, Hall of Fame,
+  departure (**fixed; see verification below**), old man catching demo, Hall of Fame,
   credits.
 - **Tile behaviours**: 106/111 carried into the engine (the rest have no C
   effect on this cartridge). Spin tiles, Cycling Road pull-down + grass, fast
@@ -131,104 +143,169 @@ contains the charmap).
   `data.field.boot.studio = { credit=, author=, portAuthor=, year=, notice=,
   notice2= }`.
 
-## Known regression: S.S. Anne departure sprite is corrupted — **not fixed**
+## S.S. Anne departure — fixed and verified 2026-09-16
 
-**Symptom** (confirmed via `_frlg_art.lua` ART_ONLY=ssanne,
-`ngshots/art_ssanne_*.png`): the ship sprite tears/garbles as it slides off
-screen instead of moving as one clean sprite.
+The earlier movement-only diagnosis was incomplete. The ship's 128x64
+frame stores four consecutive 64x32 OAM pieces. Decoding those bytes as one
+row-major 128x64 image scrambled the artwork before it ever moved.
 
-**Root cause, found this session but not yet fixed**: in
-`src/script/Gen3SpecialsFRLG.lua`, special 401 (`DoSSAnneDepartureCutscene`)
-directly overwrites `boat.px` every frame:
+- `RomExtractorGen3:overworldFramePixels` now composes oversized object
+  frames from their ROM subsprite tables (signed coordinates, shape/size,
+  and tile offsets). Ordinary sprites retain their existing decode path.
+- Special 401 uses a visual `shiftPx`, consumed by `NPC:pose` and the
+  billboard anchor. The map/collision coordinates remain stationary, as
+  they do in the cartridge's `x2` animation. Horizontal movement does not
+  change y sorting; true-color redraw and reflections consume the pose.
+  Terrain/collision/sight checks retain map coordinates intentionally.
+- The cutscene now uses `runner.waitingCheck`. The old detached field task
+  was invisible to the stuck-script watchdog, which could cancel the scene
+  at 720 frames. The off-screen check uses the shifted sprite centre.
 
-```lua
-boat.px = startPx - math.floor(moved / 5)
-boat.shiftPx = -math.floor(moved / 5)
-```
+Verification: `tests/parity_frlg_ship.lua` passes 6 checks, including
+synthetic four-piece ROM composition, unchanged map position, visual speed,
+live wait registration and eventual completion. Before the fixes, the
+composition check and three departure assertions failed.
 
-But `NPC.px`/`NPC.py` are **not** free-standing render coordinates in this
-engine — they're tightly derived from `cellX * 16` / `cellY * 16` plus a
-small in-progress-step delta everywhere else in `src/world/NPC.lua` (see
-lines ~481, ~644–689). Nothing else that reads the boat's position —
-collision, grass/tile overdraw redraw regions keyed by `cellX`/`cellY`,
-sprite priority/z-ordering, any palette-zone marking keyed by cell — knows
-about this manual `px` override, so those systems keep acting on the boat's
-original cell while the sprite itself is drawn hundreds of pixels away. That
-mismatch is what produces the "jumbled" look — different subsystems are
-drawing/compositing the sprite against stale per-cell state.
+After a full forced ROM reimport, `tests/frlg_ship_driver.lua` completed
+the actual departure script and returned to Vermilion with scene variable
+0x407E = 2 after 1,410 driver frames. Screenshots
+`ngshots/ship_fixed_{180,480,900,1200,return}.png` show the intact ship and
+the return to the dock. The early/mid-departure and return screenshots were
+read back. Import: 4,021 scripts; 152 overworld sheets, zero unreadable.
+Smoke and wake effects remain pending.
 
-**Fix approach for next session**: don't hand-roll a `px` override loop.
-Either:
-1. Use the existing `scriptMove`/step-offset mechanism the rest of the
-   engine's scripted movement uses (search `OverworldState:scriptMove` in
-   `OverworldController.lua`) so the position update goes through the same
-   path as every other moving NPC, keeping `cellX`/`cellY` and the render
-   delta in sync — likely means repeatedly nudging the boat's `cellX` in
-   real map cells rather than raw pixels, or
-2. If a true off-cell "slide anywhere" motion is needed (the boat genuinely
-   travels many screens, further than a cell-based mover was designed for),
-   add a dedicated sprite-only offset field (e.g. `shiftPx`) that
-   `SpriteRenderer:draw`/`NPC:draw` honours **in addition to** `cellX*16`,
-   and audit every other place that reads `npc.px`/`npc.py` directly
-   (grass-overdraw markers, `Collision.occupied`, sight-line checks) to make
-   sure they don't also need the offset or are explicitly skipped for this
-   NPC while the cutscene runs.
-Check how the credits scene's player/rival running sprite
-(`src/ui/Gen3CreditsFRLG.lua`, `C:loadSprite`/`C:update`) moves — that one is
-a **UI-owned sprite**, not a world NPC, so it can freely set its own `x`
-without this conflict; it's a model for "sprite that just slides across the
-screen" but the S.S. Anne boat is a real map NPC (`LOCALID_SS_ANNE`) so the
-same trick can't be copied verbatim without picking one of the two options
-above.
+## Gym progression and Psychic category — verified 2026-09-16
 
-**Suggested restart prompt** for the next session (paste as-is, or
-paraphrase):
+The gym coverage now has both halves: the existing leader driver verifies
+all eight real battle/reward chains, and `tests/frlg_gym_puzzles_driver.lua`
+starts at every gym entrance and reaches the leader through the real map
+mechanics.
 
-> Read docs/firered-port-handoff.md in gen2recomp-firered (branch
-> firered-port). Fix the S.S. Anne departure sprite corruption described
-> under "Known regression" — special 401 in src/script/Gen3SpecialsFRLG.lua
-> is overwriting boat.px directly instead of going through the engine's
-> normal NPC movement path, which desyncs it from cellX/cellY-derived state
-> elsewhere (collision, grass overdraw, etc.) and tears the sprite. Fix it
-> properly (likely via scriptMove or a dedicated render-only offset field
-> that every consumer of npc.px/py is audited against), verify with
-> POKEPORT_DRIVER=tests/drivers/_frlg_art.lua ART_ONLY=ssanne and read back
-> the ngshots/art_ssanne_*.png screenshots to confirm the ship moves as one
-> clean sprite. Then continue down the "Not yet done" list below, testing
-> each gym/story beat the same way (real driver, real screenshots, read them
-> back — don't just assume code is correct from reading it).
+`tests/frlg_gyms_driver.lua` separately passed each leader's defeated flag,
+badge flag, TM reward flag, exactly one awarded TM, and completed script:
+Brock TM39, Misty TM03, Surge TM34, Erika TM19, Koga TM06, Sabrina TM04,
+Blaine TM38, and Giovanni TM26.
+
+- Brock and Misty: complete collision-correct walkways, including trainer
+  sight battles. The driver pathfinder uses `Collision.canMove`, so Cerulean's
+  elevation/directional walkway rules are exercised rather than bypassed.
+- Surge: reads the two randomized switch positions initialized by
+  `SetVermilionTrashCans`, interacts with both trash cans, and crosses the
+  opened electric barrier.
+- Erika: uses Cut on the required tree and traverses the hedge/trainer route.
+- Koga: solves the invisible-wall collision maze.
+- Sabrina: uses a legal four-pad route to the central room and avoids crossing
+  unintended pads while moving within each room.
+- Blaine: answers all six quiz machines correctly (YES, NO, NO, NO, YES, NO),
+  opening each door before advancing.
+- Giovanni: plans around the actual FRLG arrow and stop tile behaviours and
+  lets the runtime perform every forced spinner movement.
+
+The combined run passed all 8 routes. The eight final-position screenshots
+`ngshots/gym_puzzle_{Brock,Misty,Surge,Erika,Koga,Sabrina,Blaine,Giovanni}.png`
+were read back and show the player at each leader with the puzzle route open.
+Use `POKEPORT_DRIVER=tests/frlg_gym_puzzles_driver.lua`,
+`POKEPORT_SPEED=8`, and optionally `GYM_ONLY=<leader>`.
+
+The `PSYCHC has no category` warning was a registry rebuild bug, not bad ROM
+extraction. `data/generated/type_chart.lua` had the correct `special` category,
+but `TypeChart.registerInto` registered only the built-in Gen 1 names; the mod
+catalog rebuild then discarded generated Gen 3 records such as `PSYCHC`,
+`ELECTR`, and `FIGHT`. It now registers the generated type table when present
+and falls back to the built-in table for older datasets. The focused regression
+`tests/parity_gen3_type_categories.lua` passes 3/3. The combined gym run used
+PSYCHIC throughout many real trainer battles and emitted no missing-category
+warning.
+
+## Team Rocket progression and traversal — verified 2026-09-16
+
+This group is closed. Two visible drivers cover both story scripts and
+physical routes.
+
+`tests/frlg_rocket_driver.lua` passes the real Game Corner grunt/poster reveal;
+Hideout Lift Key, both B4F guards, Giovanni and Silph Scope; Silph Card Key,
+7F rival, Lapras gift, 11F Giovanni, and the president's Master Ball.
+
+`tests/frlg_rocket_traversal_driver.lua` covers everything that remained:
+
+- all four Mt. Moon Rocket grunts, Super Nerd Miguel, the real YES choice on
+  the Dome Fossil, the fossil item, and both completion flags;
+- a physical Game Corner machine interaction, three-coin bet, spin, three reel
+  stops, result, and clean return to the overworld;
+- the actual Silph 5F Card Key item ball, a 2F barrier script, its door flag,
+  and walking through the cells that were blocked before the door opened;
+- the open poster's real warp followed by collision- and spinner-aware travel
+  through Hideout B1F, B2F, B3F, and B4F using each floor's real stair warp.
+
+The slot run exposed a FireRed cache gap: `extractSlotMachine` previously
+recognized only Emerald's reel layout, so FireRed's `playslotmachine` command
+returned without opening a screen. The FireRed branch now imports its 3x21
+reel table, seven payout classes, per-symbol palettes, reel art, digits, and
+background from the cartridge. `Gen3Slots` applies FireRed's asymmetric cherry
+and grouped Pokemon payout rules while preserving the Emerald rules. A forced
+ROM reimport completed with 4,021 scripts and reported `3 reels, 7 symbols, 7
+payouts, 9 pictures`.
+
+The final visible traversal run and separate story regression both exited
+successfully. Screenshots were read back for Mt. Moon, the slot screen/result,
+the crossed Card Key barrier, B4F arrival, the poster staircase, and Silph's
+president room. Logs: `ngshots/rocket_traversal.log` and
+`ngshots/rocket_progression.log`.
+
+The Mt. Moon Rocket grunt and Super Nerd battles also exposed a shared battle
+placement bug. FireRed's cave backdrop has edge detail on rows away from the
+platform surface; the scanner used those rows' horizontal extremes while using
+the surface row's height, shifting opponent trainers and Pokemon left toward
+the HP panel. `measurePlatforms` now keeps x bounds and y from the same widest
+platform row. `tests/frlg_mtmoon_battle_placement_driver.lua` visibly checks
+both encounters at the trainer and Pokemon phases; the measured centers are
+now opponent `175.5` and player `63.5`, matching the drawn cave platforms.
+Screenshots: `ngshots/mtmoon_rocket_trainer.png`,
+`ngshots/mtmoon_rocket_mons.png`, `ngshots/mtmoon_scientist_trainer.png`, and
+`ngshots/mtmoon_scientist_mons.png`.
+
+## League and Sevii regression coverage — verified 2026-09-17
+
+FireRed's League import uses raw group-and-number map IDs while the story
+layer uses named rooms. `Data:seedDefaults` now aliases the six League maps,
+binds the imported Elite Four objects to their story text and names Lance and
+the Champion objects for their scripted entrances. It also exposes the three
+imported original-Champion parties (`TERRY_438` through `TERRY_440`) as the
+shared `OPP_RIVAL3` class in starter order.
+
+Visible runs passed Lorelei, Bruno, Agatha and Lance with their victory flags;
+the Champion driver then entered from Lance's room, fought the imported rival
+party and set `EVENT_BEAT_CHAMPION_RIVAL`. The Hall of Fame driver consumed
+the Champion handoff marker and recorded the team. It explicitly vetoes the
+save callback, so no test writes the player's real save.
+
+`tests/frlg_champion_driver.lua` and `tests/frlg_hall_of_fame_driver.lua`
+hold those regressions. `DoPokemonLeagueLightingEffect` remains visually a
+no-op, but it does not prevent the battle or ceremony progression.
+
+`tests/frlg_sevii_progression_driver.lua` passed the imported FireRed special
+paths for Cape Brink's fully-friendly Blastoise tutor selection and reward
+flag, Resort Gorgeous's requested species/reward selection, all eleven Birth
+Island triangle touches through Deoxys awakening, Icefall Cave's persisted
+cracked ice, and Trainer Tower's eight floor initializations, timer record and
+prize. This coverage operates on an isolated fresh save and does not write to
+disk.
 
 ## Not yet done / not yet tested this playthrough
 
 Ordered roughly by what blocks a real playthrough:
 
-1. **No gym has been run through its actual scripts yet** — Brock, Misty,
-   Lt. Surge, Erika, Koga, Sabrina, Blaine, Giovanni. Same method as the
-   Vermilion trash cans (`_frlg_events.lua` EVENT_ONLY): teleport to the map,
-   run the real script/trainer battle chain via `gen3RunFieldScript` or by
-   walking triggers, screenshot, verify against pokefirered's own
-   `data/scripts/<GymName>.inc`.
-2. **Team Rocket**: Mt. Moon, the Game Corner, Rocket Hideout (spin tiles are
-   fixed but the full script chain — card key doors, Giovanni fight — is
-   untested), Silph Co (elevator alone is verified; the full
-   floor-by-floor Rocket-executive chain up to Giovanni is not), Rocket
-   Game Corner slot machine.
-3. **Elite Four + Champion room**: untested end to end; the
-   `DoPokemonLeagueLightingEffect` special is currently a no-op.
-4. **Sevii Islands story content**: written but not played through — Cape
-   Brink tutor, Icefall Cave ice puzzle, Deoxys triangle (Birth Island),
-   Trainer Tower full climb + prize/time board, Resort Gorgeous.
-5. **Flash and Fly HMs** — not driven by any test yet (Cut/Rock
+1. **Flash and Fly HMs** — not driven by any test yet (Cut/Rock
    Smash/Strength/Surf/Waterfall/Bike were).
-6. **Poké Flute / Snorlax, VS Seeker, Safari Zone, save/load round-trip** —
+2. **Poké Flute / Snorlax, VS Seeker, Safari Zone, save/load round-trip** —
    none of these have been touched this pass; unknown state.
-7. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
+3. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
    pokefirered `field_fadetransition.c`) — arrival facing is correct but the
    16-frame walk-in slide itself isn't drawn.
-8. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
+4. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
    shrinking white circle instead of the three-silhouette-then-reveal effect
    `DoCreditsMonScene` does.
-9. **S.S. Anne wake trail + smoke puffs** during the departure (separate
+5. **S.S. Anne wake trail + smoke puffs** during the departure (separate
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
 
@@ -243,6 +320,16 @@ Ordered roughly by what blocks a real playthrough:
   for the exact index and `pokefirered/src/*.c` for the real C function
   (grep by name) before writing the handler — don't guess behaviour.
 - Never commit `tools/rom_manifest_firered.json`.
+- The retained regression files include (`tests/parity_frlg_ship.lua`,
+  `tests/parity_gen3_type_categories.lua`, `tests/frlg_ship_driver.lua`,
+  `tests/frlg_gyms_driver.lua`, `tests/frlg_gym_puzzles_driver.lua`,
+  `tests/frlg_rocket_driver.lua`,
+  `tests/frlg_rocket_traversal_driver.lua`, and
+  `tests/frlg_mtmoon_battle_placement_driver.lua`,
+  `tests/frlg_champion_driver.lua`, `tests/frlg_hall_of_fame_driver.lua`, and
+  `tests/frlg_sevii_progression_driver.lua`) have narrow `.gitignore` exceptions
+  so they can be retained; other scratch tests stay ignored. Changes from
+  2026-09-16 are uncommitted.
 - Loose top-level `frlg_*.png` files in the repo root are old manual
   screenshots from earlier sessions, not driver output — ignore/clean them
   up if they get in the way, they're not tracked and not load-bearing.
