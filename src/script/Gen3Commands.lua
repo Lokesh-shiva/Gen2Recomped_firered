@@ -3207,6 +3207,8 @@ Gen3Commands.SPECIALS[161] = function(ctx)
     title = Strings("NICKNAME?"),
     maxLen = 10,
     default = mon.nickname,
+    kind = "mon",
+    mon = mon,
     onDone = function(nick)
       if nick and #nick > 0 then mon.nickname = nick end
       if runner then runner:resume() end
@@ -8554,6 +8556,8 @@ Gen3Commands.SPECIALS[486] = function(ctx)
     title = Strings("NICKNAME?"),
     maxLen = 10,
     default = mon.nickname,
+    kind = "mon",
+    mon = mon,
     onDone = function(nick)
       if nick and #nick > 0 then mon.nickname = nick end
       if runner then runner:resume() end

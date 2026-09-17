@@ -220,19 +220,18 @@ function Speech:menu(labels, opts)
   return choice
 end
 
-function Speech:naming(title, default, apply)
+function Speech:naming(title, default, apply, opts)
   local done
-  require("src.ui.Screens").push(self.game, "NamingScreen", {
-    title = title,
-    default = default,
-    maxLen = (self.game.data.constants or {}).playerNameLength or 7,
-    onDone = function(name)
-      if name == nil or name == "" then name = default end
-      apply(name)
-      done = true
-      self.waitFrames = 1
-    end,
-  })
+  local push = { title = title, default = default,
+                 maxLen = (self.game.data.constants or {}).playerNameLength or 7 }
+  for k, v in pairs(opts or {}) do push[k] = v end
+  push.onDone = function(name)
+    if name == nil or name == "" then name = default end
+    apply(name)
+    done = true
+    self.waitFrames = 1
+  end
+  require("src.ui.Screens").push(self.game, "NamingScreen", push)
   self.waitFrames = -1
   coroutine.yield()
   return done
@@ -345,7 +344,8 @@ function Speech:run()
   while true do
     self:say("yourName")
     self:tween("black", 1, 1 / 16)
-    self:naming(Strings("YOUR NAME?"), defaultName, function(name) player.name = name end)
+    self:naming(Strings("YOUR NAME?"), defaultName, function(name) player.name = name end,
+                { kind = "player" })
     self.picOffset = 0
     self:tween("black", 0, 1 / 16)
     box = self:ask("soYourName")

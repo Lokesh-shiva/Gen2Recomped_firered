@@ -7858,6 +7858,7 @@ function BattleState:askNicknameUI(mon, displayName)
       if not yes then return end
       pcall(Screens.push, game, "NamingScreen", {
         title = Strings("NICKNAME?"), maxLen = 10,
+        kind = "mon", mon = mon,
         onDone = function(name)
           if name and #name > 0 then mon.nickname = name end
         end,

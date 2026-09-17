@@ -324,13 +324,11 @@ Ordered roughly by what blocks a real playthrough:
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
 
-## Start-flow reports checked and closed (not reproducible) — 2026-09-17
+## Start-flow reports checked — one closed, one was a real bug (fixed) — 2026-09-17
 
 The two items logged in the previous version of this section were re-checked
 this session by actually running the flow and reading back real screenshots
-(not just reading code). **Neither reproduces.** Closing them here so nobody
-re-investigates from scratch; if either resurfaces, it's a regression from
-something *after* this point, not the thing originally reported.
+(not just reading code).
 
 1. **"Start menu entries missing (expected NEW GAME, OPTIONS, EXIT)"** — not
    a bug. Ran `tests/drivers/_frlg_title.lua`
@@ -345,28 +343,62 @@ something *after* this point, not the thing originally reported.
    `GameVersion.get() == "firered"` (see the `~= "firered"` check, ~line 94).
    Whoever filed the original report was likely expecting Emerald's four-row
    menu and flagging FireRed's genuinely-shorter one as broken.
-2. **"Player sprite missing during name entry"** — not a bug, and also
-   two separate things got conflated:
-   - The **Oak-speech naming sequence** (`src/ui/Gen3OakSpeechFRLG.lua`,
-     the "which one is right for you?" platform scene around gender/name
-     selection) *does* show the player's trainer sprite, correctly, in full
-     colour. Verified via `tests/drivers/_frlg_newgame.lua`,
-     `ngshots/frlg_ng_015.png` and `ngshots/frlg_ng_024.png` — Leaf standing
-     on the platform both mid-sequence and at the end. The underlying art
-     (`assets/generated/oak_speech_frlg/red.png` / `leaf.png`) is also intact,
-     not blank/corrupted.
-   - The **keyboard-typing screen itself** (`src/ui/NamingScreen.lua`) has
-     never had a player portrait, on this port or on real hardware —
-     pokefirered's `naming_screen.c` creates no trainer/mon pic sprite at
-     all, it's just the keyboard, the entry field and the banner. Verified
-     by pushing `NamingScreen` directly (a throwaway driver,
-     `tests/drivers/_frlg_keyboard_check.lua`, kept — see
-     `ngshots/keyboard_check_01.png`): matches the real cartridge screen
-     exactly, no portrait, which is correct.
-   The original report's phrase "during name entry" most likely meant the
-   Oak-speech scene (where a sprite legitimately belongs and is present), so
-   this was probably a same-session timing issue that's since resolved, or a
-   report filed without checking a screenshot.
+2. **"Player sprite missing during name entry"** — real bug, now fixed. The
+   **Oak-speech naming sequence** (`src/ui/Gen3OakSpeechFRLG.lua`, the
+   "which one is right for you?" platform scene) was never the issue — it
+   already showed the player's trainer sprite correctly (verified via
+   `tests/drivers/_frlg_newgame.lua`, `ngshots/frlg_ng_015.png` and
+   `ngshots/frlg_ng_024.png`).
+
+   The actual bug was the **keyboard-typing screen** (`src/ui/NamingScreen.lua`).
+   A first pass this session grepped pokefirered's `naming_screen.c` for
+   "Pic"/"Sprite" only, found nothing, and wrongly concluded the cartridge
+   draws no portrait there at all — that conclusion was wrong and got
+   committed to this doc. The user corrected it directly after seeing the
+   actual screen: *"in keyboard typing there's only a green patch.... above
+   that there should be player sprite and if pokemon name is typing then the
+   pokemon sprite."* A broader grep (`MonIcon\|OBJ_EVENT\|PlayerAvatar\|Icon`)
+   found the real dispatch table, `sIconFunctions` in `naming_screen.c`:
+   `NamingScreen_CreatePlayerIcon` draws the player's own overworld walk
+   sprite (south-facing stand frame) next to the question when naming the
+   player or rival, and `NamingScreen_CreateMonIcon` draws the species'
+   bouncing party icon when giving a Pokémon a nickname. This port's
+   `src/ui/NamingScreen.lua` had never drawn either — the plate's background
+   tiles decode fine (including the green ground-shadow ellipse the icon
+   normally stands on), but nothing was ever drawn on top of it, so the
+   ellipse sat empty.
+
+   **Fix**: `NamingScreen` now takes `opts.kind` (`"player"` or `"mon"`,
+   plus `opts.species`/`opts.mon` for the mon case) and draws the
+   corresponding icon over the plate in both `drawFireRed` and `drawGen3`.
+   The player icon resolves the current gender's overworld walk sheet the
+   same way `Player:refreshForm` does (`Sprites.playerForm` +
+   `FieldDefaults.fieldValue(data, "playerSprites", "walk")`), crops its
+   south-facing standing frame (frame 0), and draws it directly — Gen 3
+   overworld sheets import as `trueColor = true` full-RGBA PNGs
+   (`RomExtractorGen3:extractOverworldSprites`), so no palette remap is
+   needed outside the world-render pipeline. The mon icon reuses the exact
+   resolution `Gen3PartyMenu:iconFor` uses (`data.icons.bySpecies` /
+   `data.pokemon[species].icon`, through the `pokemon.icon` mod seam) and
+   the same two-frame bounce. Wired through every real call site:
+   `Gen3OakSpeechFRLG.lua`'s player-naming call (`kind = "player"`; rival
+   naming intentionally left without an icon — the dedicated rival
+   overworld sheet `naming_screen.c` uses isn't extracted by this port, and
+   showing the wrong sprite would be worse than showing none), and the two
+   nickname sites in `Gen3Commands.lua` plus the caught-mon nickname site in
+   `BattleState.lua` (all `kind = "mon", mon = mon`).
+
+   Verified by pushing `NamingScreen` directly with each `kind`
+   (`tests/drivers/_frlg_keyboard_check.lua` for `"player"`,
+   `tests/drivers/_frlg_nickname_check.lua` for `"mon"`) and reading back
+   `ngshots/keyboard_check_01.png` (Red standing on the ground-shadow patch,
+   full colour) and `ngshots/nickname_check_01.png` (Charizard's party icon
+   in the same spot). Icon placement (centred at GBA pixel x=56, bottom
+   anchored around y=52) is an estimate from pokefirered's OAM coordinates
+   for `NamingScreen_CreatePlayerIcon`/`CreateMonIcon` (`~(56,37)`/`~(56,40)`)
+   rather than a pixel-exact port of the OAM tables; it reads correctly in
+   the screenshots but is worth a closer look if it ever looks off by a few
+   pixels against real hardware.
 
 Lesson for next time a "missing sprite/menu row" report shows up: check the
 **real cartridge's own layout** (pokefirered source) before assuming this

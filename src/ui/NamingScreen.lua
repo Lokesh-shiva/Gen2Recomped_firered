@@ -36,6 +36,82 @@ local NamingScreen = {}
 NamingScreen.__index = NamingScreen
 NamingScreen.isOpaque = true
 
+-- naming_screen.c's sIconFunctions: the plate to the left of the question
+-- ("YOUR NAME?" / "NICKNAME?") carries a small icon of whoever is being
+-- named -- the player's own overworld sprite (NamingScreen_CreatePlayerIcon)
+-- or, when naming a caught Pokémon, that species' bouncing party icon
+-- (NamingScreen_CreateMonIcon).  Reported from play: "in keyboard typing
+-- there's only a green patch.... above that there should be player sprite
+-- and if pokemon name is typing then the pokemon sprite" -- this port drew
+-- the plate's background tiles but never the OAM sprite the cartridge lays
+-- over them, so the patch sat empty.
+local iconImgCache = {}
+local function loadIconImage(path)
+  if not path then return nil end
+  if iconImgCache[path] == nil then
+    local Assets = require("src.render.Assets")
+    local ok, img = pcall(Assets.image, path)
+    iconImgCache[path] = ok and img or false
+  end
+  return iconImgCache[path] or nil
+end
+
+-- The player's own overworld walk sprite, standing south (frame 0 is always
+-- STAND.down -- see SpriteRenderer.STAND): matches
+-- GetPlayerAvatarGraphicsIdByStateIdAndGender(..., PLAYER_AVATAR_STATE_NORMAL)
+-- picking the current gender's sheet, ANIM_STD_GO_SOUTH's first frame.
+local function playerIconFrame(game)
+  local data = game and game.data
+  if not data then return nil end
+  local okReq, FieldDefaults = pcall(require, "src.world.FieldDefaults")
+  local okReq2, Sprites = pcall(require, "src.pokemon.Sprites")
+  if not (okReq and okReq2) then return nil end
+  local sprites = data.sprites or {}
+  local walkId = FieldDefaults.fieldValue(data, "playerSprites", "walk")
+  local ok, form = pcall(Sprites.playerForm, data)
+  if ok and form and form.walk and sprites[form.walk] then walkId = form.walk end
+  local def = walkId and sprites[walkId]
+  local img = def and loadIconImage(def.image)
+  if not img then return nil end
+  local tw = math.floor(tonumber(def.frameWidth) or 16)
+  local th = math.floor(tonumber(def.frameHeight) or 16)
+  if tw < 8 or th < 8 then tw, th = 16, 16 end
+  return img, tw, th
+end
+
+-- A Pokémon's bouncing party-icon sprite, resolved exactly the way
+-- Gen3PartyMenu:iconFor does (the registry first, then the species row's own
+-- field, through the same pokemon.icon mod seam).
+local ICON_PERIOD = 0.32
+local function monIconFrame(game, species, t)
+  local data = game and game.data
+  if not (data and species) then return nil end
+  local icons = data.icons
+  local def = data.pokemon and data.pokemon[species]
+  local entry = (icons and icons.bySpecies and icons.bySpecies[species])
+                or (def and def.icon)
+  local path, frameH
+  if type(entry) == "table" then
+    path, frameH = entry.image, tonumber(entry.frameHeight)
+  elseif type(entry) == "string" then
+    path = entry
+  end
+  local okHook, hooked = pcall(function()
+    return require("src.pokemon.Sprites").iconPath(data, nil, path, {})
+  end)
+  if okHook and type(hooked) == "string" then path = hooked end
+  local img = loadIconImage(path)
+  if not img then return nil end
+  frameH = frameH or tonumber(icons and icons.frameHeight) or 32
+  local iw, ih = img:getDimensions()
+  frameH = math.min(frameH, ih)
+  local frames = math.max(1, math.floor(ih / frameH))
+  local frame = frames > 1
+    and (math.floor((t % (ICON_PERIOD * frames)) / ICON_PERIOD) % frames)
+    or 0
+  return img, iw, frameH, frame
+end
+
 -- SGB: generic whole-screen palette (SET_PAL_GENERIC)
 function NamingScreen:sgbPalettes(game)
   return require("src.render.PaletteFX").wholeNamed(game.data, "MEWMON")
@@ -236,6 +312,11 @@ function NamingScreen.new(game, opts)
   self.maxLen = opts.maxLen or 7
   self.default = opts.default
   self.onDone = opts.onDone
+  -- who the plate's icon is of: "player" (own overworld sprite) or "mon"
+  -- (nickname screens, the species' party icon) -- see playerIconFrame /
+  -- monIconFrame above
+  self.kind = opts.kind
+  self.species = opts.species or (opts.mon and opts.mon.species)
   self.glyphs = {} -- typed glyphs; multi-byte cells (<PK>, ♂, ×) count as 1
   self.row, self.col = 1, 1
   self.lower = false
@@ -764,10 +845,44 @@ function NamingScreen:drawFireRed(rec)
   g.setColor(1, 1, 1, 1)
 end
 
+-- Drawn last, over the plate's own tiles, at the same spot naming_screen.c's
+-- sIconFunctions place their sprite: roughly (56, 37) GBA-screen pixels,
+-- just left of the question text (which starts at x=72 in drawFireRed).
+function NamingScreen:drawIcon()
+  if not self.kind then return end
+  local g = love.graphics
+  g.setColor(1, 1, 1, 1)
+  if self.kind == "player" then
+    local img, tw, th = playerIconFrame(self.game)
+    if img then
+      local iw, ih = img:getDimensions()
+      local quad = love.graphics.newQuad(0, 0, tw, th, iw, ih)
+      g.draw(img, quad, 56 - math.floor(tw / 2), 52 - th)
+    end
+  elseif self.kind == "mon" then
+    local t = love.timer and love.timer.getTime() or 0
+    local img, iw, frameH, frame = monIconFrame(self.game, self.species, t)
+    if img then
+      local quad = love.graphics.newQuad(0, frame * frameH, iw, frameH,
+                                         iw, img:getHeight())
+      g.draw(img, quad, 56 - math.floor(iw / 2), 52 - frameH)
+    end
+  end
+  g.setColor(1, 1, 1, 1)
+end
+
 function NamingScreen:draw()
   local frlg = self.layout and (self.game.data.constants or {}).gen3FRLGNaming
-  if frlg and frlg.images and frlg.images.bg then return self:drawFireRed(frlg) end
-  if self.layout then return self:drawGen3() end
+  if frlg and frlg.images and frlg.images.bg then
+    self:drawFireRed(frlg)
+    self:drawIcon()
+    return
+  end
+  if self.layout then
+    self:drawGen3()
+    self:drawIcon()
+    return
+  end
   return self:drawClassic()
 end
 
