@@ -211,6 +211,25 @@ function Loader:_loadState()
   end
 end
 
+-- Move the enable state and options of any mod whose id has changed onto its
+-- new id.  Runs once per launch and writes at most once ever per rename:
+-- adoptOptions only moves a key when the new id has no state of its own and
+-- the old id is not itself an installed mod, so the launch after a rename
+-- finds nothing left to do.
+function Loader:_adoptRenames()
+  local ok, moved = pcall(function()
+    local options = SaveData.loadOptions(self.fs)
+    if not require("src.mods.ModRename").adoptOptions(options, self.mods) then
+      return false
+    end
+    if self.fs.write then SaveData.saveOptions(options, self.fs) end
+    return true
+  end)
+  -- Re-read what _loadState read before the manifests were known.  Skipped
+  -- when nothing moved, which is every launch but the one after a rename.
+  if ok and moved then self:_loadState() end
+end
+
 -- THE IN-GAME SWITCH IS STILL THE MASTER SWITCH -- with one asymmetry.
 --
 -- The manager has no per-generation chips of its own (they live in the
@@ -1095,6 +1114,12 @@ function Loader:load(data)
   require("src.mods.Builtins").install(self.content, data)
   self:_loadState()
   self:_discover()
+  -- A RENAMED MOD COLLECTS ITS OLD STATE, now and not before: adoption needs
+  -- the manifests, and the manifests are what _discover just read.  _loadState
+  -- above therefore ran against the pre-adoption options and has to be redone
+  -- -- which is why this refreshes what it read rather than only writing the
+  -- file.  See src/mods/ModRename.lua for what it will and will not move.
+  self:_adoptRenames()
   -- Experimental mods stay off until the player opts in: a missing
   -- options.mods entry normally means enabled, but experimental flips that.
   do

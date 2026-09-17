@@ -396,7 +396,18 @@ end
 function LauncherMods.list()
   local ok, result = pcall(function()
     local options = SaveData.loadOptions()
-    return LauncherMods.deriveList(discover(), options)
+    local manifests = discover()
+    -- A RENAMED MOD COLLECTS ITS OLD STATE HERE TOO.  The launcher runs before
+    -- any game does, so without this the first thing a player sees after a
+    -- mod changed its id is that mod's rows sitting at their defaults -- and
+    -- them changing one back would write under the new id and strand the old
+    -- entry for good.  Same rules as the loader's pass: nothing is taken from
+    -- an id that is itself installed, nothing overwrites state the new id
+    -- already has, and the file is written only when something moved.
+    if require("src.mods.ModRename").adoptOptions(options, manifests) then
+      SaveData.saveOptions(options)
+    end
+    return LauncherMods.deriveList(manifests, options)
   end)
   if not ok then
     -- a single bad options/mod file must not blank the launcher

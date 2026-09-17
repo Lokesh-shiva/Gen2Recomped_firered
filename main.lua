@@ -969,6 +969,14 @@ function love.errorhandler(msg)
   -- not merely with the last stage that succeeded.
   pcall(function() BootTrace.mark("ERROR " .. tostring(msg)) end)
 
+  -- ...and DRAIN THE LOG, which this handler has been documented as doing
+  -- since the logger was written and has never actually done.  Logger buffers
+  -- to 64 lines before it touches the disk, so a launch that ends in an error
+  -- before reaching that many -- which is most of them, and every short one --
+  -- left log.txt empty and the reason for the crash only in memory.  Nothing
+  -- else in the tree called this.
+  pcall(function() require("src.core.Logger").flush() end)
+
   -- The stock handler first, so desktop keeps the screen everyone knows.  It is
   -- pcall'd because it is exactly the thing that can fail here, and a raise
   -- inside it would otherwise be the second error that ends the process.

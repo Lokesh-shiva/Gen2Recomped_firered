@@ -1126,6 +1126,13 @@ function Game:adoptSave(save, seedBuckets)
   save.modData = save.modData or {}
   local loader = self.mods
   if not loader then return end
+  -- A mod whose id changed takes its per-playthrough state with it.  Per save
+  -- rather than once at boot, because each slot carries its own modData and a
+  -- player may open several -- and here, rather than in SaveData, because this
+  -- is the first point that has both the save and the manifests.
+  pcall(function()
+    require("src.mods.ModRename").adoptModData(save.modData, loader.mods)
+  end)
   if seedBuckets then
     for id, bucket in pairs(loader.modSave or {}) do
       if save.modData[id] == nil then save.modData[id] = bucket end

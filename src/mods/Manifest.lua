@@ -300,6 +300,14 @@ function Manifest.validate(raw, path)
     -- Which maps this mod says it touches; see parseMaps. Absent on every mod
     -- that predates the field, which is why nothing may depend on it.
     maps = parseMaps(raw),
+    -- Ids this mod used to publish under.  Four things key on a mod's id and
+    -- none of them is inside the mod (enable state, options, per-save state,
+    -- storage), so a rename orphans all four unless it is declared here; see
+    -- src/mods/ModRename.lua for what that adoption is and is not allowed to
+    -- do.  Validated rather than trusted: these become table keys and path
+    -- components.
+    previousIds = require("src.mods.ModRename")
+      .previousIds({ id = raw.id, previous_ids = raw.previous_ids }),
     assets_transforms = optionalFile(raw.assets_transforms, "assets_transforms"),
     path = path,
     raw = raw,

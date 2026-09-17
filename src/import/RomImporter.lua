@@ -2762,6 +2762,24 @@ function RomImporter:startData(data, displayName)
   self.detail = displayName or info.displayName
   self.progress = 0
   self.romData = data
+  -- BREADCRUMBS THROUGH THE IMPORT, for the same reason boot has them.
+  --
+  -- An import is the longest, most memory-hungry thing this program does -- a
+  -- Gen 3 cartridge unpacks to hundreds of megabytes -- and when it dies it
+  -- usually dies BELOW LUA: an allocation failure or an OOM kill reaches no
+  -- error handler, writes no crash.txt, and leaves log.txt empty because the
+  -- logger had not filled its buffer yet.  From the outside that is
+  -- indistinguishable from the app simply vanishing, which is exactly how it
+  -- gets reported.
+  --
+  -- BootTrace.mark is an open-write-close per call, so the file on disk is
+  -- current even when the next instruction is the one that kills us: whatever
+  -- the last line says is the stage the import did not survive.  Marked on
+  -- STAGE CHANGES only -- onProgress fires per map and per tileset, and one
+  -- file write each would be its own performance bug -- which is a couple of
+  -- dozen lines per import.
+  BootTrace.mark(("import %s: begin (%.1f MB rom)")
+    :format(tostring(version), #data / 1048576))
   self.worker = coroutine.create(function()
     self.status = "Preparing private game data"
     coroutine.yield()
@@ -2785,6 +2803,7 @@ function RomImporter:startData(data, displayName)
     CacheFs.removeTree("data/generated")
     CacheFs.removeTree("assets/generated")
     CacheFs.remove(MARKER_PATH)
+    BootTrace.mark("import " .. tostring(version) .. ": old cache cleared")
 
     -- WHICH EXTRACTOR, and spelled out rather than inferred.
     --
@@ -2808,11 +2827,23 @@ function RomImporter:startData(data, displayName)
             :format(tostring(version), tostring(info.generation)))
     end
     local RomExtractor = require(choice.module)
+    BootTrace.mark(("import %s: %s"):format(tostring(version), choice.module))
+    local markedStage = nil
     local function onProgress(progress, total, stage, current, stageTotal)
       self.status = stage
       self.progress = progress / total
       self.stageCurrent = current
       self.stageTotal = stageTotal
+      -- One line per STAGE, carrying how much Lua memory is live when it
+      -- starts.  The number is the point: an import that dies below Lua dies
+      -- of memory far more often than of anything else, and a trace whose last
+      -- two lines are a stage and a figure climbing towards a limit says so
+      -- without anybody having to reproduce it under a profiler.
+      if stage ~= markedStage then
+        markedStage = stage
+        BootTrace.mark(("import %s: %s (%.0f MB lua)"):format(
+          tostring(version), tostring(stage), collectgarbage("count") / 1024))
+      end
       coroutine.yield()
     end
     local extractor = choice.takesVersion
@@ -2821,6 +2852,8 @@ function RomImporter:startData(data, displayName)
     extractor:run()
     self.romData = nil
     collectgarbage("collect")
+    BootTrace.mark(("import %s: extracted (%.0f MB lua)")
+      :format(tostring(version), collectgarbage("count") / 1024))
     -- Written last: the marker is what isReady() checks, so it must only
     -- appear once the extraction has finished.
     --
@@ -4874,6 +4907,18 @@ function RomImporter:draw()
   local bannerBand = bannerActive and (bannerH + 20 * s) or 6 * s
   local cX = appX + padH
   local cW = appW - 2 * padH
+  -- THE HEADER ROW'S REMAINING WIDTH, and NOT the content width.
+  --
+  -- The gear, the generation dropdown and IMPORT ROMS each take their slice
+  -- off the right-hand end of the row they share, so what is left over is what
+  -- the chip row may use.  That is a fact about ONE ROW.  It used to be
+  -- subtracted from `cW` itself, which is also the width every panel below is
+  -- drawn at -- so on a phone in portrait, where those three controls eat most
+  -- of a narrow row, the whole launcher underneath was squeezed into a strip
+  -- about a third of the screen wide with its labels wrapping one word to a
+  -- line (reported with a screenshot).  Nothing below the bar has any business
+  -- narrowing because of what is on it.
+  local barW = cW
   local contentBottom = oy + height - footerH - bannerBand
   local cH = math.max(0, contentBottom - contentTop)
 
@@ -4902,7 +4947,7 @@ function RomImporter:draw()
   -- bar so the bar's own scissor cannot clip it.
   do
     local gear = 30 * s
-    local gx = cX + cW - gear
+    local gx = cX + barW - gear
     local gy = tabBarY + (tabBarH - gear) / 2
     local on = self.settingsOpen and true or false
     col(on and PAL.link or PAL.warning, on and 1 or 0.75)
@@ -4929,7 +4974,7 @@ function RomImporter:draw()
                           width = gear + 12 * s, height = gear + 12 * s,
                           pinned = true }
     -- and the bar stops short of it, so a long chip row cannot run underneath
-    cW = cW - gear - 10 * s
+    barW = barW - gear - 10 * s
   end
 
   -- THE GENERATION DROPDOWN, beside the gear and on the same rule: pinned out
@@ -4950,24 +4995,24 @@ function RomImporter:draw()
     local dw, short = widthOf(false), false
     -- A phone-width row cannot carry "GEN 2" as well as nine chips and a gear,
     -- so the chip shortens to "G2" before it is given up on.
-    if cW <= dw + 140 * s then dw, short = widthOf(true), true end
-    if cW > dw + 110 * s then
+    if barW <= dw + 140 * s then dw, short = widthOf(true), true end
+    if barW > dw + 110 * s then
       self._genFilterSuppressed = nil
-      self:_drawGenDropdown(cX + cW - dw, tabBarY + (tabBarH - dh) / 2, dw, dh,
+      self:_drawGenDropdown(cX + barW - dw, tabBarY + (tabBarH - dh) / 2, dw, dh,
                             short)
-      cW = cW - dw - 10 * s
+      barW = barW - dw - 10 * s
       -- MASS ROM IMPORT, immediately left of it ("next to the gen select
       -- button").  Dropped before the dropdown is on a narrow row, because the
       -- dropdown is the control that makes a nine-chip row usable at all and
       -- every game's own panel still has its own Import ROM button.
       local label = Strings("IMPORT ROMS")
       local rw = self.hintFont:getWidth(label) + 26 * s
-      if cW > rw + 110 * s then
-        self.romBatchRect = self:_chipButton(cX + cW - rw,
+      if barW > rw + 110 * s then
+        self.romBatchRect = self:_chipButton(cX + barW - rw,
           tabBarY + (tabBarH - dh) / 2, label,
           { w = rw, h = dh, kind = "accent" })
         self.romBatchRect.pinned = true
-        cW = cW - rw - 10 * s
+        barW = barW - rw - 10 * s
       end
     else
       -- NO DROPDOWN MEANS NO FILTER, or the player is left looking at one
@@ -4982,7 +5027,7 @@ function RomImporter:draw()
 
   -- tab bar (rebuilds self.tabRects).  Pinned: it is the launcher's navigation,
   -- and it sits above the scrolling viewport.
-  self:_drawTabBar(cX, tabBarY, cW, tabBarH, chip)
+  self:_drawTabBar(cX, tabBarY, barW, tabBarH, chip)
 
   if batchText then
     local by = tabBarY + tabBarH + 10 * s
