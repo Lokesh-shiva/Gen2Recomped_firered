@@ -324,25 +324,54 @@ Ordered roughly by what blocks a real playthrough:
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
 
-## Newly reported start-flow issues — 2026-09-17
+## Start-flow reports checked and closed (not reproducible) — 2026-09-17
 
-These were observed in the FireRed start flow and are intentionally logged for
-the next debugging session:
+The two items logged in the previous version of this section were re-checked
+this session by actually running the flow and reading back real screenshots
+(not just reading code). **Neither reproduces.** Closing them here so nobody
+re-investigates from scratch; if either resurfaces, it's a regression from
+something *after* this point, not the thing originally reported.
 
-1. **Start menu entries missing.** The game start screen does not show the
-   expected `NEW GAME`, `OPTIONS`, and `EXIT` entries. Check the FireRed title
-   screen/menu state, menu-row construction, and the launcher-to-game startup
-   path. Confirm whether the menu is being replaced by the imported title
-   screen or is rendering with an empty row list.
-2. **Player sprite missing during name entry.** While entering the player’s
-   name, the character portrait/sprite is absent. Check the name-entry scene’s
-   sprite asset lookup, palette setup, and the FireRed-specific transition from
-   the title/start menu into naming. Verify the asset path and that the sprite
-   draw call is not being skipped by an unsupported imported object ID.
+1. **"Start menu entries missing (expected NEW GAME, OPTIONS, EXIT)"** — not
+   a bug. Ran `tests/drivers/_frlg_title.lua`
+   (`POKEPORT_DRIVER=tests/drivers/_frlg_title.lua`), read back
+   `ngshots/title_menu.png`: it shows `CONTINUE` (with PLAYER/POKéDEX/TIME/
+   BADGES filled in from the save) and `NEW GAME`, both rendering correctly.
+   **This is cartridge-accurate** — real FireRed's main menu (pokefirered
+   `main_menu.c`) only ever has CONTINUE + NEW GAME; OPTION lives inside the
+   in-game START menu once you're playing, not on this screen, and a GBA
+   cartridge has no EXIT at all. `src/ui/Gen3MainMenu.lua` already documents
+   this in its own header comment and deliberately skips OPTION/EXIT for
+   `GameVersion.get() == "firered"` (see the `~= "firered"` check, ~line 94).
+   Whoever filed the original report was likely expecting Emerald's four-row
+   menu and flagging FireRed's genuinely-shorter one as broken.
+2. **"Player sprite missing during name entry"** — not a bug, and also
+   two separate things got conflated:
+   - The **Oak-speech naming sequence** (`src/ui/Gen3OakSpeechFRLG.lua`,
+     the "which one is right for you?" platform scene around gender/name
+     selection) *does* show the player's trainer sprite, correctly, in full
+     colour. Verified via `tests/drivers/_frlg_newgame.lua`,
+     `ngshots/frlg_ng_015.png` and `ngshots/frlg_ng_024.png` — Leaf standing
+     on the platform both mid-sequence and at the end. The underlying art
+     (`assets/generated/oak_speech_frlg/red.png` / `leaf.png`) is also intact,
+     not blank/corrupted.
+   - The **keyboard-typing screen itself** (`src/ui/NamingScreen.lua`) has
+     never had a player portrait, on this port or on real hardware —
+     pokefirered's `naming_screen.c` creates no trainer/mon pic sprite at
+     all, it's just the keyboard, the entry field and the banner. Verified
+     by pushing `NamingScreen` directly (a throwaway driver,
+     `tests/drivers/_frlg_keyboard_check.lua`, kept — see
+     `ngshots/keyboard_check_01.png`): matches the real cartridge screen
+     exactly, no portrait, which is correct.
+   The original report's phrase "during name entry" most likely meant the
+   Oak-speech scene (where a sprite legitimately belongs and is present), so
+   this was probably a same-session timing issue that's since resolved, or a
+   report filed without checking a screenshot.
 
-Reproduction should use a fresh FireRed save and screenshot read-back at the
-title menu and name-entry screens. Do not change launcher or Emerald behavior
-while fixing these.
+Lesson for next time a "missing sprite/menu row" report shows up: check the
+**real cartridge's own layout** (pokefirered source) before assuming this
+port is wrong — FireRed's screens are frequently *shorter* than Emerald's
+equivalents by design, not broken.
 
 ## Process notes for whoever picks this up
 
