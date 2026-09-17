@@ -149,7 +149,7 @@ function Loader.new(opts)
   local self = setmetatable({
     mods = {}, loaded = {}, errors = {}, initialized = false,
     events = Events.new(), hooks = Hooks.new(), content = {}, assets = {},
-    exports = {}, migrations = {}, order = {},
+    exports = {}, apis = {}, migrations = {}, order = {},
     modSave = {}, modOptions = {}, optionSchemas = {},
     optionStatus = {}, imageCache = {},
     fs = (opts and opts.fs) or (love and love.filesystem),
@@ -278,11 +278,33 @@ end
 function Loader:_discover()
   if not self.fs.getDirectoryItems then return end
   local roots = { "mods" }
+  -- THE SAME CONFINEMENT THE LAUNCHER APPLIES.  When the player has chosen a
+  -- game-data folder, a mod counts only if it is in it -- and the game has to
+  -- agree with the panel about that, or the launcher hides a mod and the game
+  -- loads it anyway, which is the worst of both answers.  nil (and so no
+  -- filtering at all) for an injected fs, a portable install and the ordinary
+  -- save-directory case, which is every setup that predates the setting.
+  -- Only when this loader is running on the REAL love.filesystem: a test's
+  -- injected fs has its own tree with no relationship to any root on disk, and
+  -- filtering it against one would discover nothing at all.
+  local confine = nil
+  if love and love.filesystem and self.fs == love.filesystem then
+    local okLM, LauncherMods = pcall(require, "src.mods.LauncherMods")
+    if okLM and LauncherMods and LauncherMods.confinedRoot then
+      local okRoot, root = pcall(LauncherMods.confinedRoot)
+      if okRoot then confine = root end
+    end
+  end
   for _, root in ipairs(roots) do
     if self.fs.getInfo(root) then
       for _, name in ipairs(self.fs.getDirectoryItems(root)) do
         local path = root .. "/" .. name
         local info = self.fs.getInfo(path)
+        if confine then
+          local okIn, inside = pcall(
+            require("src.mods.LauncherMods").underRoot, confine, path)
+          if okIn and not inside then info = nil end
+        end
         -- a dev-linked mod dir (ln -s) reports type "symlink" even with
         -- setSymlinksEnabled(true) -- PhysFS never resolves the symlink's
         -- own getInfo, only traversal into it. readManifest below still
@@ -965,6 +987,17 @@ function Loader:_loadMod(mod)
     end
   end
   local api = self:_api(mod)
+  -- KEEP THE API OBJECT, not only its exports.
+  --
+  -- `self.exports[id]` has always been the mod's published surface, and that is
+  -- what OTHER MODS see.  What was thrown away is the api the mod itself holds
+  -- -- mod.imports, mod.cache, mod.assets -- which is exactly what you need
+  -- when a mod reports that its base file is missing while every engine-side
+  -- check says it is there.  Asking a freshly built api the same question
+  -- cannot answer that, because the whole question is whether the object the
+  -- mod is holding differs from the one the engine would build.
+  self.apis = self.apis or {}
+  self.apis[mod.manifest.id] = api
   local result = chunk(api)
   if type(result) == "function" then result(api) end
   -- a mod that replaced the table wholesale (mod.exports = {...}) still

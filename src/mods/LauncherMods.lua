@@ -355,6 +355,55 @@ local function decodeManifest(raw, path)
   return manifest
 end
 
+-- The root a mod must be inside to count, or nil when every home counts.
+--
+-- Only a CUSTOM folder confines: portable mode's game folder has always been
+-- one of several legitimate homes (a mod dropped beside the executable, a dev
+-- checkout in the source's own mods/), and narrowing those would hide mods
+-- nobody moved and nobody asked to move.
+function LauncherMods.confinedRoot()
+  local ok, report = pcall(CacheFs.rootReport)
+  if ok and type(report) == "table" and report.kind == "custom" then
+    return report.path
+  end
+  return nil
+end
+
+-- Is this love.filesystem path a real entry under `root`?  Asked with io.*
+-- against the real path, because love.filesystem is exactly the thing that
+-- cannot tell one home from another.
+function LauncherMods.underRoot(root, path)
+  if not (root and path) then return false end
+  local real = LauncherMods.realPath(root, path)
+  local handle = io.open(real .. CacheFs.SEP .. "manifest.json", "rb")
+  if handle then handle:close() return true end
+  -- a folder with no manifest is not a mod anyway, but answer honestly for
+  -- anything else that asks
+  handle = io.open(real, "rb")
+  if handle then handle:close() return true end
+  return false
+end
+
+-- The mods sitting in a home that is no longer the one in use: their folder
+-- names, for a line on the panel telling the player they exist and how to
+-- bring them over.  Empty when nothing is confined.
+function LauncherMods.strandedMods()
+  local fs = love and love.filesystem
+  local root = LauncherMods.confinedRoot()
+  if not (fs and root and fs.getInfo("mods")) then return {} end
+  local out = {}
+  for _, name in ipairs(fs.getDirectoryItems("mods") or {}) do
+    local path = "mods/" .. name
+    local info = fs.getInfo(path)
+    if info and (info.type == "directory" or info.type == "symlink")
+       and fs.getInfo(path .. "/manifest.json")
+       and not LauncherMods.underRoot(root, path) then
+      out[#out + 1] = name
+    end
+  end
+  return out
+end
+
 -- Scan "mods/" one level deep for valid manifests (mirrors Loader:_discover,
 -- but validates only -- no entry chunk is ever loaded).  First id wins on a
 -- duplicate.  Returns an array of validated manifests.
@@ -370,12 +419,30 @@ local function discover()
   -- is cached and idempotent.
   CacheFs.root()
   if not fs.getInfo("mods") then return out end
+  -- THE CHOSEN FOLDER IS THE ONLY HOME ONCE THERE IS ONE.
+  --
+  -- love.filesystem lists every home at once, which is right for reading a
+  -- mod and wrong as a permanent state: after the game-data folder changed,
+  -- the panel went on showing mods still sitting in the old one, a re-install
+  -- landed beside them under a new folder name, and a base file declared by
+  -- both was written twice.  Reported as "all of my mods are showing in the
+  -- launcher but theyre not in my new location", with a log of two 1.4 GB
+  -- streams to prove it.
+  --
+  -- So when a custom root is live, a mod counts only if it is IN it.  The ones
+  -- left behind are not lost and not deleted -- MOVE EXISTING DATA HERE brings
+  -- them over, and LauncherMods.strandedMods below is what the panel says
+  -- about them in the meantime.
+  local confine = LauncherMods.confinedRoot()
   local seen = {}
   for _, name in ipairs(fs.getDirectoryItems("mods")) do
     local path = "mods/" .. name
     local info = fs.getInfo(path)
     -- a dev-linked mod dir (ln -s) reports type "symlink" even with
     -- setSymlinksEnabled(true); see the matching note in Loader:_discover.
+    if confine and not LauncherMods.underRoot(confine, path) then
+      info = nil
+    end
     if info and (info.type == "directory" or info.type == "symlink") then
       local raw = fs.read(path .. "/manifest.json")
       if raw then

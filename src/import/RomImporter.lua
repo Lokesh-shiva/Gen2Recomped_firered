@@ -4198,6 +4198,7 @@ function RomImporter:update(dt)
     end
   end
   self:_pollPickedFiles(dt)
+  self:_stepDataMove()
   if self.workState ~= "working" or not self.worker then return end
   local started = love.timer.getTime()
   repeat
@@ -7607,6 +7608,21 @@ function RomImporter:_launcherSettingsRows()
       end
       add({ kind = "action", label = "OPEN FOLDER", value = "SHOW",
             action = "openDataDir" })
+      -- ...and the way to stop having TWO homes.  Changing the folder points
+      -- future writes at it and leaves what is already installed where it was;
+      -- love.filesystem shows both at once, so the launcher goes on listing
+      -- mods that are not in the new place and a re-install becomes a second
+      -- copy of the same mod.  An explicit action rather than something the
+      -- switch does for you: this can be gigabytes.
+      if require("src.import.CacheFs").rootReport().kind ~= "save" then
+        add({ kind = "action", label = "MOVE EXISTING DATA HERE",
+              value = self.moveWorker and "WORKING" or "MOVE",
+              action = "moveData",
+              note = self.moveNotice
+                or "Moves installed mods, mod storage and imported base files "
+                .. "out of the app's folder into this one. Saves and settings "
+                .. "stay where they are." })
+      end
     end
   else
     add({ kind = "action", label = "NOT AVAILABLE HERE", value = "-",
@@ -7948,6 +7964,8 @@ function RomImporter:_settingsAction(entry)
       self._settingsRowCache = nil
       self.settingsNotice = Strings("GEN %d now uses the shared settings", gen)
     end
+  elseif action == "moveData" then
+    self:startDataMove()
   elseif action == "resetTheme" then
     local opts = self:_settings()
     opts.launcherTheme, opts.launcherAccent, opts.launcherText = false, false, false
@@ -8052,6 +8070,60 @@ function RomImporter:setDataDir(path)
     self.settingsNotice = Strings("Games will be installed in the default folder")
   end
   return true
+end
+
+-- ---------------------------------------------------------------------------
+-- MOVING WHAT IS ALREADY INSTALLED into the chosen folder.
+--
+-- Its own coroutine rather than the import worker's: that one is driven by
+-- workState and ends by pumping the ROM queue, and a migration finishing must
+-- not start an import.  Stepped from the same update, inside the same frame
+-- budget, so the launcher keeps drawing while gigabytes move.
+-- ---------------------------------------------------------------------------
+
+function RomImporter:startDataMove()
+  if self.moveWorker then return end
+  local DataMove = require("src.import.DataMove")
+  local report = function(done, total, label)
+    self.moveNotice = ("Moving %s ... %d%%"):format(
+      tostring(label or ""),
+      total > 0 and math.floor(done / total * 100) or 0)
+  end
+  self.moveNotice = "Moving..."
+  self._settingsRowCache = nil
+  self.moveWorker = coroutine.create(function()
+    local result, why = DataMove.run(report)
+    if not result then
+      self.moveNotice = "Could not move: " .. tostring(why)
+    else
+      self.moveNotice = DataMove.summarize(result)
+    end
+  end)
+end
+
+-- One slice per frame.  Rebuilds the settings rows when it finishes so the
+-- MOVE row stops saying WORKING and the folder note re-reads the disk.
+function RomImporter:_stepDataMove()
+  local worker = self.moveWorker
+  if type(worker) ~= "thread" then return end
+  local started = love.timer.getTime()
+  repeat
+    local ok, err = coroutine.resume(worker)
+    if not ok then
+      self.moveNotice = "Could not move: " .. tostring(err)
+      self.moveWorker = nil
+      self._settingsRowCache = nil
+      return
+    end
+    if coroutine.status(worker) == "dead" then
+      self.moveWorker = nil
+      self._settingsCache = nil
+      self._settingsRowCache = nil
+      self:_recheckReady()
+      self:_refreshMods()
+      return
+    end
+  until love.timer.getTime() - started >= 0.008
 end
 
 function RomImporter:openDataDir()
@@ -8968,9 +9040,27 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
     noticeText = tostring(self.modNotice.text)
     noticeColor = self.modNotice.ok and PAL.green or PAL.red
   else
-    noticeText = self.android and "Or copy a mod .zip via USB."
-      or Strings("Or drop a mod .zip onto the window.")
-    noticeColor = PAL.warning
+    -- MODS LEFT IN THE OLD HOME, said here rather than left as a mystery.
+    -- Once a game-data folder is in use the panel lists only what is in it, so
+    -- a player who changed the folder after installing things sees a shorter
+    -- list than they had.  Those mods are not gone and not deleted; this is
+    -- the line that says where they are and what brings them over.
+    local stranded = {}
+    pcall(function()
+      stranded = require("src.mods.LauncherMods").strandedMods() or {}
+    end)
+    if #stranded > 0 then
+      noticeText = Strings(
+        "%d mod(s) are still in the app's own folder and are not being used: "
+        .. "%s. Settings -> LAUNCHER SETTINGS -> MOVE EXISTING DATA HERE "
+        .. "brings them over.",
+        #stranded, table.concat(stranded, ", "))
+      noticeColor = PAL.warning
+    else
+      noticeText = self.android and "Or copy a mod .zip via USB."
+        or Strings("Or drop a mod .zip onto the window.")
+      noticeColor = PAL.warning
+    end
   end
   local NOTICE_MAX_LINES = 6
   local _, noticeLines = self.hintFont:getWrap(noticeText, w)

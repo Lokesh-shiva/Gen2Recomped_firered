@@ -549,55 +549,104 @@ end
 -- Only WRITING needs this.  A read goes through love.filesystem, which can
 -- open a file in the chosen root already -- the root is mounted -- so the
 -- shim below implements the write side and hands reads back to love.
+-- A love.filesystem-shaped File for a path under the live root.
+--
+-- TWO CONTRACTS HAVE TO MATCH, and getting either wrong is silent:
+--
+--   * love.filesystem.newFile(path, mode) returns a file ALREADY OPEN when a
+--     mode is given, and a closed one when it is not.  A caller that passes a
+--     mode never calls :open, so a shim that only opens inside :open hands
+--     back a handle whose every read returns nil -- which is not an error
+--     anywhere, it is just no data.  That is what broke a mod reading its own
+--     disc image in ranges: mod.imports:read(id, offset, length) goes through
+--     ModImports' `slice`, which does exactly `newFile(path, "r")` and then
+--     seeks -- so the mod saw an unreadable file, could not validate the disc,
+--     and reported the disc as not imported while every check around it said
+--     it was there.
+--   * love's File:seek(pos) takes an absolute position; io's file:seek takes
+--     (whence, offset).  Passing love's one-argument form to an io handle sets
+--     the whence to a number and lands nowhere near the requested offset --
+--     silently, again, because both return a number.
+--
+-- So the handle records WHICH kind it opened and every method dispatches on
+-- that, rather than sniffing for a method name and hoping.
 local function realFile(rel)
-  local handle, mode = nil, nil
+  local handle, kind, mode = nil, nil, nil
+
   local file = {}
+
+  -- love.filesystem.newFile is absent in a headless test's stub, and the
+  -- guards this shim sits behind test for `newFile` on the FILESYSTEM, which
+  -- is always present here -- so the absence has to be answered by failing to
+  -- open rather than by indexing nil.  Every caller already handles a handle
+  -- that will not open; none of them survives an error thrown inside one.
+  local function loveNewFile(path)
+    local lfs = love and love.filesystem
+    if not (lfs and type(lfs.newFile) == "function") then return nil end
+    return lfs.newFile(path)
+  end
+
   function file:open(m)
-    mode = m
-    if m == "r" then
-      local lf = love.filesystem.newFile(rel)
+    mode = m or "r"
+    -- READS go through love.filesystem: it already sees every home, including
+    -- the live root (which is mounted), so a file written before the folder
+    -- changed is still readable.  Only writes need the real path.
+    if mode == "r" then
+      local lf = loveNewFile(rel)
       if not lf then return false, "no file" end
       local ok, err = lf:open("r")
-      if ok then handle = lf end
-      return ok, err
+      if not ok then return false, err end
+      handle, kind = lf, "love"
+      return true
     end
     local root = rawRoot()
     if not root then
-      local lf = love.filesystem.newFile(rel)
+      local lf = loveNewFile(rel)
       if not lf then return false, "no file" end
-      local ok, err = lf:open(m)
-      if ok then handle = lf end
-      return ok, err
+      local ok, err = lf:open(mode)
+      if not ok then return false, err end
+      handle, kind = lf, "love"
+      return true
     end
     ensureParents(root, rel)
-    local f, err = io.open(realPath(root, rel), m == "a" and "ab" or "wb")
+    local f, err = io.open(realPath(root, rel), mode == "a" and "ab" or "wb")
     if not f then return false, err end
-    handle = f
+    handle, kind = f, "io"
     return true
   end
+
   function file:write(chunk)
     if not handle then return false, "not open" end
     if mode == "r" then return false, "opened for reading" end
-    if handle.write and handle.seek == nil then return handle:write(chunk) end
-    local ok, err = pcall(handle.write, handle, chunk)
-    if not ok then return false, err end
-    return true
+    if kind == "io" then
+      local ok, err = pcall(handle.write, handle, chunk)
+      if not ok then return false, err end
+      return true
+    end
+    return handle:write(chunk)
   end
+
   function file:read(n)
     if not handle then return nil end
-    if handle.read then return handle:read(n) end
-    return nil
+    return handle:read(n)
   end
-  function file:seek(offset)
+
+  -- Absolute position, love's spelling, whichever handle is underneath.
+  function file:seek(pos)
     if not handle then return false end
-    if handle.seek then return handle:seek(offset) end
-    return false
+    if kind == "io" then
+      local at = handle:seek("set", pos)
+      return at ~= nil
+    end
+    return handle:seek(pos)
   end
+
   function file:close()
     if handle and handle.close then pcall(handle.close, handle) end
-    handle = nil
+    handle, kind = nil, nil
     return true
   end
+
   return file
 end
 
@@ -620,7 +669,16 @@ function CacheFs.dataFs()
     createDirectory = function(rel) return CacheFs.rawCreateDirectory(rel) end,
     remove = function(rel) return CacheFs.rawRemove(rel) end,
     removeDir = function(rel) return CacheFs.rawRemoveDir(rel) end,
-    newFile = function(rel) return realFile(rel) end,
+    -- `mode` given means ALREADY OPEN, exactly as love.filesystem does it --
+    -- see realFile.  Returning an unopened handle here reads as an empty file
+    -- rather than as a failure, which is the worst shape a bug can take.
+    newFile = function(rel, mode)
+      local file = realFile(rel)
+      if mode == nil then return file end
+      local ok = file:open(mode)
+      if not ok then return nil end
+      return file
+    end,
   }
   return dataFsCache
 end
