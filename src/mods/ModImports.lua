@@ -26,7 +26,21 @@ local Logger = require("src.core.Logger")
 
 local ModImports = {}
 
+-- The launcher's own trees -- the shared base-file bank under imports/base/
+-- and the copy written into a mod's own folder -- follow the player's chosen
+-- game-data folder, which love.filesystem cannot reach: it always resolves a
+-- write to the OS save directory.  CacheFs.dataFs reads and enumerates through
+-- love.filesystem (every home at once, including the chosen root, which is
+-- mounted) and routes writes and removes at whichever root is live.
+--
+-- Falls back to love.filesystem when CacheFs is unavailable, which is how the
+-- headless tests run: they inject their own fs and never load it.
 local function fs()
+  local ok, CacheFs = pcall(require, "src.import.CacheFs")
+  if ok and CacheFs and CacheFs.dataFs then
+    local okFs, handle = pcall(CacheFs.dataFs)
+    if okFs and handle then return handle end
+  end
   return love and love.filesystem
 end
 

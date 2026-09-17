@@ -2443,6 +2443,27 @@ function RomImporter.new(onComplete, opts)
   -- handler can catch.
   BootTrace.mark("launcher: state + images")
 
+  -- WHICH FOLDER THE CACHE IS USING, named once per launch, before the
+  -- readiness scan below is the first thing to ask for it.
+  --
+  -- A player who points the game-data folder somewhere and finds files still
+  -- landing in AppData has no way to tell whether the setting did not save,
+  -- was refused, or was accepted and then could not be mounted -- and the one
+  -- log line that would have said so never reached disk, because the logger
+  -- buffers 64 lines and a launch produces a handful.  This goes in the boot
+  -- trace, which is open-write-close per line, so the answer is on disk before
+  -- the question gets asked.
+  do
+    local ok, report = pcall(function()
+      return require("src.import.CacheFs").rootReport()
+    end)
+    if ok and type(report) == "table" then
+      BootTrace.mark(("launcher: game data %s %s%s"):format(
+        tostring(report.kind), tostring(report.path or "?"),
+        report.why and (" -- " .. tostring(report.why)) or ""))
+    end
+  end
+
   for _, version in ipairs(GameVersion.ORDER) do
     local info = GameVersion.info(version)
     local report = RomImporter.readyReport(version)
@@ -7630,24 +7651,40 @@ end
 -- is one they have to go hunting through an options file to verify.
 function RomImporter:_dataDirNote()
   local SaveData = require("src.core.SaveData")
+  local CacheFs = require("src.import.CacheFs")
   local lines = {}
-  local active = SaveData.dataDir and SaveData.dataDir() or nil
   local stored = SaveData.dataDirSetting and SaveData.dataDirSetting() or nil
-  local problem = SaveData.dataDirProblem and SaveData.dataDirProblem() or nil
-  if SaveData.isPortable() then
-    local base = SaveData.portableBaseDir()
-    lines[#lines + 1] = "Portable: " .. tostring(base or "the game folder")
-  elseif active then
-    lines[#lines + 1] = "Games are installed in " .. active
+  -- ASKS THE THING THAT DOES THE WRITING.  This used to ask SaveData, which
+  -- only knows whether the folder is readable and writable -- not whether the
+  -- cache can actually live there, which additionally needs it on the PhysFS
+  -- read path.  When those disagreed this panel said "games are installed in
+  -- D:\..." while every byte went to the save directory, and there was
+  -- nothing on screen or on disk to say otherwise.
+  local report = CacheFs.rootReport()
+  if report.kind == "portable" then
+    lines[#lines + 1] = "Portable: " .. tostring(report.path or "the game folder")
+  elseif report.kind == "custom" then
+    lines[#lines + 1] = "Games are installed in " .. tostring(report.path)
   elseif stored then
     lines[#lines + 1] = "Set to " .. stored
-    lines[#lines + 1] = "Not in use right now ("
-      .. tostring(problem or "unavailable")
-      .. "); the default folder is being used instead."
+    lines[#lines + 1] = "NOT IN USE ("
+      .. tostring(report.why or "unavailable")
+      .. "). Games are going to the default folder instead."
   else
     lines[#lines + 1] = "Games are installed in the app's own folder "
-      .. "(AppData on Windows)."
+      .. "(" .. tostring(report.path or "AppData on Windows") .. ")."
   end
+  -- WHAT MOVES AND WHAT DOES NOT, said here rather than discovered.
+  --
+  -- Everything that grows without bound follows the folder: the ROM cache, the
+  -- mods themselves, their storage, and the shared base-file bank where a
+  -- 1.4 GB disc lands.  Saves and settings deliberately do not.  They are
+  -- kilobytes, so they buy nothing by moving, and they are the state you most
+  -- want to still have when the drive this points at is not plugged in --
+  -- which is the failure this setting makes possible and cannot prevent.
+  lines[#lines + 1] = "Moves: imported games, installed mods, mod storage and "
+    .. "imported base files. Stays: your saves and settings, so they survive "
+    .. "this folder going missing."
   -- THE ONE THING THAT SURPRISES PEOPLE.  Changing this does not move what is
   -- already imported: the launcher would have to copy gigabytes through the UI
   -- thread to do it, and a launcher that appears to hang for four minutes
@@ -7976,9 +8013,17 @@ function RomImporter:setDataDir(path)
   -- one who points at an empty folder should see the truth rather than a row
   -- of PLAY buttons for data that is no longer on the read path.
   self:_recheckReady()
-  local dir = SaveData.dataDir()
-  if dir then
-    self.settingsNotice = Strings("Games will be installed in %s", dir)
+  -- Reported from CacheFs, for the same reason the note above is: SaveData
+  -- accepting a folder is not the same as the cache being able to live in it,
+  -- and a confirmation that names a folder nothing will be written to is
+  -- worse than no confirmation at all.
+  local report = require("src.import.CacheFs").rootReport()
+  if report.kind == "custom" then
+    self.settingsNotice = Strings("Games will be installed in %s",
+      tostring(report.path))
+  elseif path ~= nil and path ~= "" then
+    self.settingsNotice = Strings("That folder was saved but cannot be used: %s",
+      tostring(report.why or "unknown reason"))
   else
     self.settingsNotice = Strings("Games will be installed in the default folder")
   end

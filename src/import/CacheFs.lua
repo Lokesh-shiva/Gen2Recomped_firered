@@ -247,24 +247,39 @@ end
 -- save directory rather than proceeding into that trap.
 local customRoot = nil
 local customResolved = false
+local customWhy = nil            -- why a chosen folder is NOT in use
 local function resolveCustomRoot()
   if customResolved then return customRoot end
   customResolved = true
-  customRoot = nil
-  if not resolveMkdir() then return nil end
+  customRoot, customWhy = nil, nil
+  if not resolveMkdir() then
+    customWhy = "this build cannot create folders outside the save directory"
+    return nil
+  end
   local ok, base = pcall(function()
     return require("src.core.SaveData").dataDir()
   end)
-  if not (ok and base) then return nil end
+  if not (ok and base) then
+    -- Not an error: no folder chosen, or SaveData already refused the stored
+    -- one and has its own reason (dataDirProblem) for the panel to show.
+    return nil
+  end
   if love.filesystem.getSource and base == love.filesystem.getSource() then
     customRoot = base
   elseif mountReadable(base) then
     customRoot = base
   else
+    customWhy = "that folder could not be added to the read path"
     pcall(function()
-      require("src.core.Logger").warn(
+      local Logger = require("src.core.Logger")
+      Logger.warn(
         "game-data folder %s could not be mounted; using the save directory",
         tostring(base))
+      -- Drained now rather than left in the buffer.  This warning explains a
+      -- setting that appears to have been ignored, and it is exactly the sort
+      -- of line a launch produces one of -- far under the 64 the logger waits
+      -- for before it writes anything at all.
+      Logger.flush()
     end)
   end
   return customRoot
@@ -277,6 +292,42 @@ function CacheFs.root()
   return resolvePortableRoot() or resolveCustomRoot()
 end
 
+-- WHICH ROOT IS ACTUALLY IN USE, and why, as one answer.
+--
+-- This exists because there were two of them.  SaveData.dataDir() says whether
+-- the player's chosen folder is READABLE AND WRITABLE, and CacheFs decides
+-- whether the cache can actually live there -- which additionally needs the
+-- folder on the PhysFS read path, because the cache is written with io.* and
+-- read back by require/newImage.  Those two can disagree, and when they did,
+-- the launcher panel read SaveData and said "games will be installed in D:\..."
+-- while every byte went on going to the save directory.  Reported exactly that
+-- way: "changing the install path doesnt work ... it goes straight back to
+-- writing files in appdata".
+--
+-- So: ONE authority, and it is this one, because it is the one the writes go
+-- through.  `kind` is "portable" | "custom" | "save"; `why` is set only when a
+-- folder was chosen and is not being used.
+function CacheFs.rootReport()
+  local portable = resolvePortableRoot()
+  if portable then
+    return { kind = "portable", path = portable }
+  end
+  local custom = resolveCustomRoot()
+  if custom then
+    return { kind = "custom", path = custom }
+  end
+  local why = customWhy
+  if not why then
+    local ok, problem = pcall(function()
+      return require("src.core.SaveData").dataDirProblem()
+    end)
+    if ok then why = problem end
+  end
+  local path = nil
+  pcall(function() path = love.filesystem.getSaveDirectory() end)
+  return { kind = "save", path = path, why = why }
+end
+
 -- Drop the resolved root so the next call re-reads the setting.  Called when
 -- the player changes the game-data folder, which is why it does not also
 -- unmount: the old folder stays on the physfs read path for this process, and
@@ -285,6 +336,7 @@ end
 function CacheFs.forgetRoot()
   customResolved = false
   customRoot = nil
+  customWhy = nil
 end
 
 -- Create a real directory (and only that one -- no parents), for callers
@@ -406,6 +458,171 @@ function CacheFs.rmdirReal(path)
   if type(path) ~= "string" or path == "" then return end
   local rmdir = resolveRmdir()
   if rmdir then rmdir(path) end
+end
+
+
+-- ---------------------------------------------------------------------------
+-- THE LAUNCHER'S OWN DATA, in whichever root is live.
+--
+-- Everything above is the ROM cache, which is version-prefixed.  The launcher
+-- keeps three other trees that are not: installed mods (mods/), per-mod
+-- storage (modstorage/) and the shared base-file bank (imports/base/, where a
+-- 1.4 GB disc lands).  All three were on love.filesystem, which always
+-- resolves to the OS save directory -- so a player who pointed the game-data
+-- folder at another drive watched their imports move and everything else stay
+-- exactly where it was.  Reported as "changing the install path doesnt work
+-- for everything".
+--
+-- THE SPLIT IS READS vs WRITES, and it is not a compromise -- it is the only
+-- correct arrangement:
+--
+--   * READS and ENUMERATION stay on love.filesystem, because it already sees
+--     every home at once.  The save directory, the game folder and the chosen
+--     root are all on the PhysFS search path, so `getDirectoryItems("mods")`
+--     returns the union without knowing any of this exists.  Routing reads at
+--     the live root instead would make a mod installed before the setting
+--     changed invisible rather than merely stale.
+--   * WRITES and REMOVES go through the root, because love.filesystem cannot
+--     reach outside the save directory at all.
+--
+-- Which is exactly the split the mod installer already used for the portable
+-- folder (#330); this is that seam, named, so the other two trees can share
+-- it instead of each growing their own half of it.
+local function rawRoot() return CacheFs.root() end
+
+-- write/createDirectory/remove without the cache prefix.  The prefix belongs
+-- to ROM-derived data; mods/ and modstorage/ are not per-cartridge and must
+-- not be filed under whichever version was imported last.
+function CacheFs.rawWrite(rel, data)
+  local root = rawRoot()
+  if root then
+    ensureParents(root, rel)
+    local f, err = io.open(realPath(root, rel), "wb")
+    if not f then return false, err end
+    f:write(data)
+    f:close()
+    return true
+  end
+  local parent = rel:match("^(.*)/[^/]+$")
+  if parent then love.filesystem.createDirectory(parent) end
+  return love.filesystem.write(rel, data)
+end
+
+function CacheFs.rawCreateDirectory(rel)
+  local root = rawRoot()
+  if root then
+    local mkdir = resolveMkdir()
+    if not mkdir then return false end
+    local cur = root
+    for part in rel:gmatch("[^/]+") do
+      cur = cur .. SEP .. part
+      mkdir(cur)
+    end
+    return true
+  end
+  return love.filesystem.createDirectory(rel)
+end
+
+-- BOTH HOMES, deliberately.  A mod installed before the folder changed sits in
+-- the save directory and the one installed after sits in the chosen root;
+-- love.filesystem shows them as one list, so "delete this" has to mean both or
+-- an uninstall silently leaves half a mod behind for the loader to find.
+function CacheFs.rawRemove(rel)
+  local root = rawRoot()
+  if root then os.remove(realPath(root, rel)) end
+  if love.filesystem then love.filesystem.remove(rel) end
+  return true
+end
+
+function CacheFs.rawRemoveDir(rel)
+  local root = rawRoot()
+  if root then
+    local rmdir = resolveRmdir()
+    if rmdir then rmdir(realPath(root, rel)) end
+  end
+  if love.filesystem then love.filesystem.remove(rel) end
+  return true
+end
+
+-- A love.filesystem-shaped File for a path under the live root.
+--
+-- Only WRITING needs this.  A read goes through love.filesystem, which can
+-- open a file in the chosen root already -- the root is mounted -- so the
+-- shim below implements the write side and hands reads back to love.
+local function realFile(rel)
+  local handle, mode = nil, nil
+  local file = {}
+  function file:open(m)
+    mode = m
+    if m == "r" then
+      local lf = love.filesystem.newFile(rel)
+      if not lf then return false, "no file" end
+      local ok, err = lf:open("r")
+      if ok then handle = lf end
+      return ok, err
+    end
+    local root = rawRoot()
+    if not root then
+      local lf = love.filesystem.newFile(rel)
+      if not lf then return false, "no file" end
+      local ok, err = lf:open(m)
+      if ok then handle = lf end
+      return ok, err
+    end
+    ensureParents(root, rel)
+    local f, err = io.open(realPath(root, rel), m == "a" and "ab" or "wb")
+    if not f then return false, err end
+    handle = f
+    return true
+  end
+  function file:write(chunk)
+    if not handle then return false, "not open" end
+    if mode == "r" then return false, "opened for reading" end
+    if handle.write and handle.seek == nil then return handle:write(chunk) end
+    local ok, err = pcall(handle.write, handle, chunk)
+    if not ok then return false, err end
+    return true
+  end
+  function file:read(n)
+    if not handle then return nil end
+    if handle.read then return handle:read(n) end
+    return nil
+  end
+  function file:seek(offset)
+    if not handle then return false end
+    if handle.seek then return handle:seek(offset) end
+    return false
+  end
+  function file:close()
+    if handle and handle.close then pcall(handle.close, handle) end
+    handle = nil
+    return true
+  end
+  return file
+end
+
+local dataFsCache = nil
+
+-- The filesystem the launcher's own trees should use.  Shaped like
+-- love.filesystem so it drops into the modules that already take an `fs`.
+function CacheFs.dataFs()
+  if dataFsCache then return dataFsCache end
+  dataFsCache = {
+    -- reads and enumeration: every home at once
+    getInfo = function(...) return love.filesystem.getInfo(...) end,
+    getDirectoryItems = function(...) return love.filesystem.getDirectoryItems(...) end,
+    read = function(...) return love.filesystem.read(...) end,
+    load = function(...) return love.filesystem.load(...) end,
+    getSaveDirectory = function() return love.filesystem.getSaveDirectory() end,
+    getSource = function() return love.filesystem.getSource() end,
+    -- writes and removes: the live root
+    write = function(rel, data) return CacheFs.rawWrite(rel, data) end,
+    createDirectory = function(rel) return CacheFs.rawCreateDirectory(rel) end,
+    remove = function(rel) return CacheFs.rawRemove(rel) end,
+    removeDir = function(rel) return CacheFs.rawRemoveDir(rel) end,
+    newFile = function(rel) return realFile(rel) end,
+  }
+  return dataFsCache
 end
 
 -- The platform's path separator, so a caller building a real path out of a
