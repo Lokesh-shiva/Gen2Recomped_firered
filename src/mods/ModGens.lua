@@ -35,6 +35,37 @@ local function blankGens(value)
   return { value, value, value }
 end
 
+-- WHAT THE MOD ITSELF SAYS IT SUPPORTS, as a lookup, or nil when it says
+-- nothing.  A manifest's `generations` is a claim about where the mod WORKS;
+-- the player's chips are a choice about where they want it.  The claim wins,
+-- because a mod running somewhere it was never written for does not fail
+-- cleanly -- it half-applies, and every symptom that follows looks like an
+-- engine bug.
+function ModGens.supported(manifest)
+  local list = manifest and manifest.generations
+  if type(list) ~= "table" or not list[1] then return nil end
+  local set = {}
+  for _, n in ipairs(list) do set[tonumber(n)] = true end
+  return set
+end
+
+-- Does this mod's own manifest allow it to run under `gen`?  True when it
+-- declares nothing, which is every mod that predates the field.
+function ModGens.allows(manifest, gen)
+  local set = ModGens.supported(manifest)
+  if not set then return true end
+  return set[tonumber(gen)] == true
+end
+
+-- allows(), with the player's override folded in -- the question the loader
+-- actually has to answer.  Second return says WHY it is allowed, so the log
+-- can be honest about a mod running outside its own claim.
+function ModGens.permits(manifest, value, gen)
+  if ModGens.allows(manifest, gen) then return true, "declared" end
+  if ModGens.forced(value, gen) then return true, "forced" end
+  return false, "unsupported"
+end
+
 -- decode(value) -> on, gens
 --
 -- `on` is nil when there is no entry at all, which is NOT the same as false:
@@ -42,20 +73,74 @@ end
 -- experimental", and flattening that to false here would silently switch off
 -- every mod nobody has ever touched.
 function ModGens.decode(value)
-  if value == nil then return nil, blankGens(true) end
+  if value == nil then return nil, blankGens(true), blankGens(false) end
   if type(value) == "table" then
-    local gens = {}
+    local gens, force = {}, {}
     local src = type(value.gens) == "table" and value.gens or {}
+    local fsrc = type(value.force) == "table" and value.force or {}
     for i = 1, ModGens.COUNT do
       -- absent means on: a record written by a build that knew about two
       -- generations must not switch the third one off
       gens[i] = src[i] ~= false
+      -- ...and absent means NOT forced, which is the other way round for the
+      -- same reason: an override is something the player did on purpose, and
+      -- a record that predates the field never did it
+      force[i] = fsrc[i] == true
     end
     local on
     if value.on == nil then on = true else on = value.on and true or false end
-    return on, gens
+    return on, gens, force
   end
-  return value and true or false, blankGens(true)
+  return value and true or false, blankGens(true), blankGens(false)
+end
+
+-- WHEN THE PLAYER OVERRULES THE MANIFEST.
+--
+-- A mod's `generations` is its author's claim about where it works, and the
+-- loader refuses to load it anywhere else -- which is right, because a mod
+-- running outside its own claim half-applies and every symptom then reads as
+-- an engine fault.  But the claim is a CLAIM: the author of a Gen 1/Gen 2 mod
+-- who has just taught it Hoenn, or a player willing to find out what breaks,
+-- must not be locked out by a line in a JSON file until a new release ships.
+--
+-- So the refusal is a default with a door in it.  The door is deliberately
+-- separate from the chips: a chip is "I want this here", an override is "I
+-- know the mod says otherwise", and collapsing the two would make every
+-- ordinary chip press a decision about something the player never claimed.
+function ModGens.anyForced(force)
+  for i = 1, ModGens.COUNT do
+    if force and force[i] then return true end
+  end
+  return false
+end
+
+function ModGens.forcedOf(value)
+  local _, _, force = ModGens.decode(value)
+  return force
+end
+
+function ModGens.forced(value, generation)
+  local g = tonumber(generation)
+  if not (g and g >= 1 and g <= ModGens.COUNT) then return false end
+  return ModGens.forcedOf(value)[g] == true
+end
+
+-- Forcing a generation ON also ticks its chip and the master, for the same
+-- reason withGen does: an override that leaves the mod switched off is a
+-- decision that changes nothing.
+function ModGens.withForced(value, generation, want)
+  local on, gens, force = ModGens.decode(value)
+  local g = tonumber(generation)
+  if not (g and g >= 1 and g <= ModGens.COUNT) then
+    return ModGens.encode(on == nil and true or on, gens, force)
+  end
+  force[g] = want and true or false
+  if want then
+    gens[g] = true
+    on = true
+  end
+  if on == nil then on = true end
+  return ModGens.encode(on, gens, force)
 end
 
 function ModGens.allOn(gens)
@@ -67,11 +152,18 @@ end
 
 -- encode(on, gens) -> the value to store.  A boolean whenever it can be one,
 -- so the file only grows a record for a mod that actually needs one.
-function ModGens.encode(on, gens)
-  if ModGens.allOn(gens) then return on and true or false end
+function ModGens.encode(on, gens, force)
+  local forced = ModGens.anyForced(force)
+  if ModGens.allOn(gens) and not forced then return on and true or false end
   local out = {}
   for i = 1, ModGens.COUNT do out[i] = gens[i] ~= false end
-  return { on = on and true or false, gens = out }
+  local rec = { on = on and true or false, gens = out }
+  if forced then
+    local f = {}
+    for i = 1, ModGens.COUNT do f[i] = force[i] == true end
+    rec.force = f
+  end
+  return rec
 end
 
 -- Is this mod on for `generation`?  nil when there is no entry, so the caller
@@ -96,8 +188,8 @@ end
 
 -- Flip the master switch, keeping the chips.
 function ModGens.withEnabled(value, on)
-  local _, gens = ModGens.decode(value)
-  return ModGens.encode(on, gens)
+  local _, gens, force = ModGens.decode(value)
+  return ModGens.encode(on, gens, force)
 end
 
 -- Flip one generation.
@@ -111,15 +203,19 @@ end
 -- everywhere by its chips, and flicking any chip back on revives it without a
 -- second click.
 function ModGens.withGen(value, generation, want)
-  local on, gens = ModGens.decode(value)
+  local on, gens, force = ModGens.decode(value)
   local g = tonumber(generation)
   if not (g and g >= 1 and g <= ModGens.COUNT) then
-    return ModGens.encode(want, gens)
+    return ModGens.encode(want, gens, force)
   end
   gens[g] = want and true or false
   if want then on = true end
   if on == nil then on = true end
-  return ModGens.encode(on, gens)
+  -- untick a generation and its override goes with it: leaving one behind
+  -- would revive the override the next time the chip came back on, which is
+  -- not something the player asked for twice
+  if not want then force[g] = false end
+  return ModGens.encode(on, gens, force)
 end
 
 -- The three chips for a row, as booleans.  Separate from decode so a caller

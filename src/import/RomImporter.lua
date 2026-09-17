@@ -5833,7 +5833,7 @@ function RomImporter:mousepressed(x, y, button)
         self:_confirmModUpdate(c.id, c.release)
       elseif c.kind == "enableAll" then
         self:_setAllMods(true, true)
-      elseif c.kind == "experimentalGen" then
+      elseif c.kind == "experimentalGen" or c.kind == "forceGen" then
         self:_toggleModGeneration(c.id, c.gen, true)
       else
         self:_toggleMod(c.id, true)
@@ -8689,6 +8689,42 @@ function RomImporter:_toggleModGeneration(id, gen, confirmed)
   if not row then return end
   -- absent means ticked, the same way ModGens reads it
   local want = (row.gens or {})[gen] == false
+  -- LIGHTING A CHIP THE MOD SAYS IT CANNOT FILL.
+  --
+  -- The loader refuses to load a mod outside its declared `generations`, and
+  -- that refusal is a default rather than a wall (ModGens.permits).  The door
+  -- is here, and it asks first: a plain chip press is "I want this mod here",
+  -- and overruling the author's own claim is a different sentence, which the
+  -- player has to say out loud.  Unticking the chip again clears the override
+  -- (ModGens.withGen), so there is nothing to undo separately.
+  local declared = ModGens.supported(row.supportedGens
+    and { generations = row.supportedGens } or nil)
+  if want and declared and not declared[gen] then
+    if not (row.forcedGens or {})[gen] and not confirmed then
+      local claim = {}
+      for i = 1, ModGens.COUNT do
+        if declared[i] then claim[#claim + 1] = ModGens.LABELS[i] end
+      end
+      self._modConfirm = {
+        kind = "forceGen", id = id, gen = gen,
+        title = "Not made for this generation",
+        yesLabel = "Run it anyway",
+        lines = {
+          (row.name or id) .. " says it is for "
+            .. (claim[1] and table.concat(claim, " and ") or "no generation")
+            .. ".",
+          "Running it under " .. tostring(ModGens.LABELS[gen] or "?")
+            .. " may break the mod, this game, or both.",
+          "Turn it on there anyway?",
+        },
+      }
+      return
+    end
+    self._modConfirm = nil
+    LauncherMods.setForcedGeneration(id, gen, true)
+    self:_refreshMods()
+    return
+  end
   if want and not row.enabled and row.experimental and not confirmed then
     self._modConfirm = {
       kind = "experimentalGen", id = id, gen = gen,
@@ -9399,25 +9435,46 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
       local gx2 = clusterX + (L.clusterW - L.genRowW) / 2
       local gy2 = ty + th + 6 * s
       local gens = m.gens or { true, true, true }
+      -- A CHIP THE MOD SAYS IT CANNOT FILL.  `supportedGens` is the manifest's
+      -- own claim; a chip outside it is not something the player can usefully
+      -- tick, because the loader will not load the mod there -- so it draws
+      -- dead rather than lit, and a lie is not what a green chip should be.
+      -- Overrule the claim (ModGens.forced, behind the confirm in
+      -- _toggleModGeneration) and it lights GOLD instead of green: on, and on
+      -- somewhere the author did not promise.
+      local declared = m.supportedGens
+      local forcedGens = m.forcedGens or {}
       for gi = 1, ModGens.COUNT do
         local ticked = gens[gi] ~= false
         local live = ticked and m.enabled
+        local claimed = true
+        if declared then
+          claimed = false
+          for _, n in ipairs(declared) do
+            if tonumber(n) == gi then claimed = true break end
+          end
+        end
+        local blocked = (not claimed) and not forcedGens[gi]
+        if blocked then live = false end
+        local hue = claimed and PAL.green or PAL.gold
+        local edge = blocked and PAL.disabled or hue
+        local shown = ticked and not blocked
         local grect = { x = gx2, y = gy2, width = L.genW, height = L.genH,
                         id = m.id, gen = gi }
         self:_hover(grect)
         local rr2 = L.genH / 2
         if live then
-          col(PAL.green, 0.85)
+          col(hue, 0.85)
           love.graphics.rectangle("fill", gx2, gy2, L.genW, L.genH, rr2, rr2)
         else
-          col(PAL.cardBorder, ticked and 0.30 or 0.12)
+          col(PAL.cardBorder, shown and 0.30 or 0.12)
           love.graphics.rectangle("fill", gx2, gy2, L.genW, L.genH, rr2, rr2)
           love.graphics.setLineWidth(1)
-          col(ticked and PAL.green or PAL.disabled, ticked and 0.7 or 0.4)
+          col(shown and edge or PAL.disabled, shown and 0.7 or 0.4)
           love.graphics.rectangle("line", gx2, gy2, L.genW, L.genH, rr2, rr2)
         end
         love.graphics.setFont(self.warningFont)
-        col(live and PAL.slotBg or (ticked and PAL.green or PAL.disabled))
+        col(live and PAL.slotBg or (shown and edge or PAL.disabled))
         printfB(ModGens.SHORT[gi], gx2,
           gy2 + (L.genH - self.warningFont:getHeight()) / 2, L.genW, "center")
         local gvy = math.max(grect.y, top)

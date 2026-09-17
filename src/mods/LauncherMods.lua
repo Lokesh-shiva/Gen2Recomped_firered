@@ -93,7 +93,7 @@ function LauncherMods.deriveList(manifests, options)
   for _, m in ipairs(manifests) do ordered[#ordered + 1] = m end
   table.sort(ordered, function(a, b) return a.id < b.id end)
 
-  local byId, enabledSet, genSet = {}, {}, {}
+  local byId, enabledSet, genSet, forceSet = {}, {}, {}, {}
   for _, m in ipairs(ordered) do
     byId[m.id] = m
     -- THE MASTER SWITCH, which is the one the dependency and conflict
@@ -106,6 +106,7 @@ function LauncherMods.deriveList(manifests, options)
     if on == nil then on = not m.experimental end
     if on then enabledSet[m.id] = true end
     genSet[m.id] = ModGens.gensOf(mods[m.id])
+    forceSet[m.id] = ModGens.forcedOf(mods[m.id])
   end
 
   local out = {}
@@ -168,6 +169,15 @@ function LauncherMods.deriveList(manifests, options)
       -- three unless the player has said otherwise, so a row that has never
       -- been touched draws three lit chips and behaves exactly as it used to.
       gens = genSet[m.id] or { true, true, true },
+      -- The generations the MOD says it works in, so the card can show a chip
+      -- the player cannot usefully turn on (see ModGens.supported).  nil on
+      -- every mod that declares nothing, which is every mod predating it.
+      supportedGens = m.generations,
+      -- ...and the generations the player has overruled that claim for, so a
+      -- chip the mod says it cannot fill can still be drawn as one the player
+      -- deliberately lit (see ModGens.forced).  All false on every row nobody
+      -- has overruled, which is nearly all of them.
+      forcedGens = forceSet[m.id],
       status = status,
       statusDetail = detail,
       github = m.github,
@@ -504,6 +514,18 @@ function LauncherMods.setGeneration(id, generation, want)
   local options = SaveData.loadOptions()
   options.mods = options.mods or {}
   options.mods[id] = ModGens.withGen(options.mods[id], generation, want)
+  SaveData.saveOptions(options)
+  return true
+end
+
+-- setForcedGeneration(id, generation, want): the player overruling the mod's
+-- own `generations` claim for one generation.  Separate call from
+-- setGeneration on purpose -- the panel asks before it gets here, and a plain
+-- chip press must never turn into an override by accident.
+function LauncherMods.setForcedGeneration(id, generation, want)
+  local options = SaveData.loadOptions()
+  options.mods = options.mods or {}
+  options.mods[id] = ModGens.withForced(options.mods[id], generation, want)
   SaveData.saveOptions(options)
   return true
 end

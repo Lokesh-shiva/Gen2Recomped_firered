@@ -11811,13 +11811,120 @@ function OverworldState:gen3WorldFor(mapDef, map, tileset)
     return i and collisionCells[i] or nil
   end
 
-  -- 0..15.  3 is ordinary ground, 1 is water the player surfs on, 15 is the
-  -- "any level" marker a bridge deck carries, and 0 is a transition cell that
-  -- matches whatever it is stepped onto.  This is the Y axis Gen 2 never had.
+  -- 0..15, and the two that are NOT levels are the ones worth stating, because
+  -- an earlier version of this comment had them the wrong way round:
+  --
+  --   3   ordinary dry land, which is most of Hoenn
+  --   1   water the player surfs on
+  --   0   "ANY LEVEL" -- a transition cell that matches whatever steps on it,
+  --       and does not change what that mover is standing at
+  --   15  "UNDER A BRIDGE" -- also not a level, and also sticky
+  --
+  -- This is the Y axis Gen 2 never had.  It is a LEVEL ID and not a height:
+  -- multiply it and every 0 cell sinks three units below the land beside it,
+  -- which is exactly what "places me underground in some areas where the
+  -- ground is raised" looks like.  world.layerAt below is the height ordering.
   function world.elevationAt(cx, cy)
     if not elevationCells then return nil end
     local i = indexOf(cx, cy)
     return i and elevationCells[i] or nil
+  end
+
+  -- HOW HIGH, as an ordering rather than an id: 0 is the ground, 1 is a bridge
+  -- deck, 2 passes over the deck.  Taken off the cartridge's own OAM priority
+  -- table (UpdateObjectEventZCoordAndPriority, 08096D14) and flipped around
+  -- its largest value, so nothing in it is invented -- see
+  -- src/world/Gen3Elevation.lua.  Both wildcards land on the ground, which is
+  -- what each of them means.
+  function world.layerOf(elevation)
+    return Gen3Elevation.layerOf(data, elevation)
+  end
+
+  function world.layerAt(cx, cy)
+    local e = world.elevationAt(cx, cy)
+    if e == nil then return nil end
+    return Gen3Elevation.layerOf(data, e)
+  end
+
+  world.elevationLayers = Gen3Elevation.layerCount(data)
+
+  -- ...and the heights those levels sit at ON THIS MAP, a metatile apart,
+  -- with ordinary ground at 0.  `layerOf` is the cartridge's three-rung draw
+  -- order and is the same everywhere; this is the map's own set, which is what
+  -- a terrain mesh needs -- Route 119 uses three levels and Victory Road six.
+  -- nil on a map with no elevation.  See src/world/Gen3Elevation.lua.
+  local heights, levelCount, course = Gen3Elevation.ranks(elevationCells)
+  world.elevationHeights = heights
+  world.elevationLevels = levelCount
+  world.course = course or 16
+
+  -- The height of one cell.  nil on the two values that are NOT levels: a
+  -- wildcard (0) takes the height of whatever it joins, and a deck (15) is at
+  -- one height for the walker ON it and another for the walker UNDER it.
+  -- Second return says which, so a caller can resolve it rather than guess --
+  -- guessing is what puts a character underground.
+  function world.heightAt(cx, cy)
+    if not heights then return nil, "no elevation" end
+    local e = world.elevationAt(cx, cy)
+    if e == nil then return nil, "off the map" end
+    if e == 0 then return nil, "transition cell" end
+    if e == 15 then return nil, "bridge cell" end
+    return heights[e], e
+  end
+  world.mapId = (map and map.id) or mapDef.id
+  world.widthCells = tonumber(def and def.width) or 0
+  world.heightCells = tonumber(def and def.height) or 0
+
+  -- WHERE THE PEOPLE ARE, AND HOW HIGH THEY ARE STANDING.
+  --
+  -- The other half of the same report, and the half no amount of terrain data
+  -- answers: a renderer that raises the ground has to raise whoever is on it
+  -- by the same amount, and the level a mover is standing AT is not always the
+  -- level of the cell under them.  0 and 15 do not replace what is held
+  -- (ObjectEventUpdateElevation, 08096DB8), so someone who has walked UNDER a
+  -- bridge keeps the ground's level the whole way across -- read the cell
+  -- instead and they pop up onto the deck they are walking beneath.
+  --
+  -- Coordinates are in the ACTIVE map's cells; `px`/`py` are the same pixel
+  -- position the engine's own camera follows, so a mod can place a character
+  -- smoothly between cells instead of snapping it.  nil before the world has
+  -- a player (headless, boot).
+  local ow = self
+  function world.playerAt()
+    local p = ow.player
+    if not (p and p.cellX) then return nil end
+    local elevation = p.elevation
+    return { mapId = ow.map and ow.map.id, x = p.cellX, y = p.cellY,
+             px = p.px, py = p.py, facing = p.facing,
+             elevation = elevation,
+             layer = Gen3Elevation.layerOf(data, elevation) }
+  end
+
+  -- The player and every live NPC on the active map, same shape.  An NPC's
+  -- level is kept sticky the same way (gen3DrawElevation), so a walker
+  -- crossing a bridge mouth rises with it.
+  function world.actors()
+    local out = {}
+    local p = world.playerAt()
+    if p then
+      p.id = "player"
+      p.isPlayer = true
+      out[#out + 1] = p
+    end
+    for _, npc in ipairs(ow.npcs or {}) do
+      local elevation = npc.gen3Elevation
+      local okE, live = pcall(ow.gen3DrawElevation, ow, npc)
+      if okE and live ~= nil then elevation = live end
+      out[#out + 1] = {
+        id = npc.id, isPlayer = false,
+        mapId = ow.map and ow.map.id,
+        x = npc.cellX, y = npc.cellY, px = npc.px, py = npc.py,
+        facing = npc.facing,
+        elevation = elevation,
+        layer = Gen3Elevation.layerOf(data, elevation),
+      }
+    end
+    return out
   end
 
   world.hasElevation = elevationCells ~= nil
