@@ -18,11 +18,16 @@ local Commands = {}
 -- wild setup verbs available even when the optional Gen3 module is loaded
 -- lazily, as happens during imported FireRed map scripts.
 function Commands.g3_set_wild(ctx, species, level, item)
-  return require("src.script.Gen3Commands").g3_set_wild(ctx, species, level, item)
+  local G3 = require("src.script.Gen3Commands")
+  ctx.g3Wild = { species = G3.speciesId(ctx.game and ctx.game.data, species),
+                 level = tonumber(level), item = item }
 end
 
 function Commands.g3_wild_battle(ctx)
-  return require("src.script.Gen3Commands").g3_wild_battle(ctx)
+  local wild = ctx.g3Wild
+  if not wild or not wild.species then return end
+  Commands.start_battle(ctx, "wild", wild.species, wild.level or 5,
+                        wild.item and { heldItem = wild.item } or nil)
 end
 
 -- "mod:" keys route to save.modData[owner], the mod-private namespace
@@ -1796,6 +1801,10 @@ local registered = {}
 -- foreground = ..., blocking = ... }.
 function Commands.resolve(data, name)
   if NOT_VERBS[name] then return nil end
+  if type(name) == "string" and name:sub(1, 3) == "g3_"
+      and type(Commands[name]) == "function" then
+    return Commands[name], Commands.meta[name]
+  end
   local record = data and data.commands and data.commands[name]
   if record == nil or record == registered[name] then
     record = Commands[name]
