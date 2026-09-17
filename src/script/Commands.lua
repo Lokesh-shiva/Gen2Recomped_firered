@@ -431,6 +431,9 @@ function Commands.start_battle(ctx, kind, a, b, opts)
   end
   if kind == "wild" then
     battle = BattleState.newWild(ctx.game, a, b, opts)
+    if a == "SNORLAX" then
+      require("src.core.Sound").play(ctx.game and ctx.game.data, "Pokeflute")
+    end
   else
     battle = BattleState.newTrainer(ctx.game, a, b)
     -- the beaten trainer's own line, printed on the battle screen before

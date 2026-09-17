@@ -479,6 +479,18 @@ Lesson for next time a "missing sprite/menu row" report shows up: check the
 port is wrong — FireRed's screens are frequently *shorter* than Emerald's
 equivalents by design, not broken.
 
+## Poké Flute / Snorlax follow-up (2026-09-17)
+
+The imported Route 16 Snorlax event is present at the cartridge coordinate
+`(31,13)` and its talk script reaches the level-30 wild-battle branch. The
+FireRed command stream contains the Snorlax cry and delay, but no standalone
+Poké Flute audio command. `g3_wild_battle` now supplies the cartridge cue by
+playing `Pokeflute` immediately before the scripted wild battle. The existing
+engine has no separate Poké Flute field animation; the wake-up presentation is
+currently the cry, delay, transition, and battle entry. A focused regression
+driver (`tests/drivers/_frlg_snorlax.lua`) remains in progress to capture the
+battle state and verify the hide flag after the prompt.
+
 ## Process notes for whoever picks this up
 
 - **Always verify with a driver + screenshot read-back**, not just by
