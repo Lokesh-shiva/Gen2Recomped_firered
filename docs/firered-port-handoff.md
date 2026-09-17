@@ -326,13 +326,25 @@ Ordered roughly by what blocks a real playthrough:
 5. **S.S. Anne wake trail + smoke puffs** during the departure (separate
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
-6. **Naming-screen mon icon (`kind = "mon"`), in a real catch/starter-pickup
-   flow** — fixed and verified in isolation (see "Start-flow reports"
-   below), and the player icon was re-verified through the actual Oak-speech
-   new-game flow, but the mon icon has not yet been seen through a real
-   "give a nickname?" prompt (catching a wild Pokémon, or picking up the
-   starter and being asked to nickname it). Worth one driver run that plays
-   through an actual catch before calling this fully closed.
+
+## Naming-screen icon — now verified through a real catch too — 2026-09-17
+
+Item 6 from the previous version of this list (the mon icon, `kind = "mon"`,
+only verified in isolation) is closed. Ran a real wild-battle catch through
+`tests/drivers/_frlg_catch_nickname_check.lua` (mods off): teleport to Route 1
+(`MAP_G03_N19`), start a wild RATTATA battle (`BattleState.newWild`), throw a
+Poké Ball with `battle.rng` forced to guarantee the catch, answer YES to the
+nickname prompt. The naming screen came up with `kind = "mon"`,
+`species = "RATTATA"`, and `ngshots/catch_02_naming_screen.png` shows
+Rattata's own bouncing party icon over the plate — the same code path as the
+isolated `_frlg_nickname_check.lua` driver, now confirmed end-to-end from an
+actual battle capture rather than a hand-built `mon` table. Party count went
+from 1 to 2 afterward, so the catch itself completed correctly too.
+
+Both halves of the original report (`kind = "player"` through the real
+Oak-speech flow, `kind = "mon"` through a real catch) are now verified
+end-to-end. Nothing left open on this feature except the pixel-exact icon
+placement caveat noted below and the intentionally-skipped rival icon.
 
 ## Start-flow reports checked — one closed, one was a real bug (fixed) — 2026-09-17
 
