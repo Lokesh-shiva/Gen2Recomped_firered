@@ -82,6 +82,15 @@ end
 -- tile instead); everywhere else the player must face the map edge
 -- (IsPlayerFacingEdgeOfMap).  carpets = field.warpCarpets.
 function Warp.extraCheck(map, carpets, cx, cy, dir)
+  -- FireRed house exit mats are a one-cell-deep behaviour-$65 strip: DOWN
+  -- pushes against its interior wall rather than off the map edge.  The
+  -- cartridge still takes the paired warp immediately, so recognize that
+  -- authored exit before applying the older carpet/edge rules.
+  if require("src.core.GameVersion").get() == "firered"
+     and dir == "down" and map:cellBehaviour(cx, cy) == 0x65
+     and map:warpAtCell(cx, cy) then
+    return true
+  end
   local Collision = require("src.world.Collision")
   local facingEdge =
     (dir == "up" and cy == 0)

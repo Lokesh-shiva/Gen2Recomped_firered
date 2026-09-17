@@ -910,7 +910,14 @@ function Map:isDoorTileCell(cx, cy)
   -- reason.  This is the same fix in the same shape.
   if self.tileset.behaviourBytes then
     local b = self:cellBehaviour(cx, cy)
-    return (b ~= nil and self.doorTiles[b]) and true or false
+    if b ~= nil and self.doorTiles[b] then return true end
+    -- FireRed's interior exit mats are behaviour $65.  They are not a
+    -- visible door tile, so the automatic south-step may legitimately be
+    -- blocked by the map edge; they still keep the arrival warp armed so the
+    -- player can immediately walk back out with DOWN.
+    if GameVersion.get() == "firered" and b == 0x65
+        and self:warpAtCell(cx, cy) then return true end
+    return false
   end
   local t = self:cellTile(cx, cy)
   if self.doorTiles[t] then return true end
