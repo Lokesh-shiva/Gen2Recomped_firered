@@ -341,8 +341,18 @@ function Gen3Options:drawFireRed()
     if i > total then break end
     local row = self.rows[i]
     local y = oy + (slot - 1) * 13 + 2
-    text((row and row.label) or self.cancelLabel or "", ox + 8, y, gray, light)
-    if row then text(self:valueText(row), ox + 130, y, red, pink) end
+    local selected = (i == self.index)
+    if selected then
+      -- The cartridge leaves the selected row out of BLDY, which is subtle
+      -- on modern displays. A solid blue strip preserves that behavior while
+      -- making the active row unambiguous and keeping both columns readable.
+      g.setColor(0, 123 / 255, 197 / 255, 1)
+      g.rectangle("fill", ox, y - 2, 208, 14)
+    end
+    local labelInk, labelShadow = selected and white or gray, selected and dark or light
+    local valueInk, valueShadow = selected and white or red, selected and dark or pink
+    text((row and row.label) or self.cancelLabel or "", ox + 8, y, labelInk, labelShadow)
+    if row then text(self:valueText(row), ox + 130, y, valueInk, valueShadow) end
   end
   -- everything but the chosen row is lightened by BLDY 2 (of 16)
   local sel = self.index - self.scroll

@@ -824,7 +824,17 @@ M.LANCES_ROOM = {
     if (x == 5 and y == 1) or (x == 6 and y == 2) then
       local lance
       for _, npc in ipairs(ow.npcs) do
-        if npc.def and npc.def.name == "LANCESROOM_LANCE" then lance = npc break end
+        local d = npc.def
+        -- Imported FireRed object tables are not consistent about retaining
+        -- the extracted name. Prefer the canonical name, then accept the
+        -- trainer metadata seeded for this room so the coordinate trigger
+        -- cannot silently become a no-op after a map reload.
+        if d and (d.name == "LANCESROOM_LANCE"
+                  or d.trainerClass == "LANCE"
+                  or d.trainerName == "LANCE") then
+          lance = npc
+          break
+        end
       end
       if not lance or ow:trainerDefeated(lance) then return false end
       if not lance.def.trainerClass then
