@@ -324,6 +324,26 @@ Ordered roughly by what blocks a real playthrough:
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
 
+## Newly reported start-flow issues — 2026-09-17
+
+These were observed in the FireRed start flow and are intentionally logged for
+the next debugging session:
+
+1. **Start menu entries missing.** The game start screen does not show the
+   expected `NEW GAME`, `OPTIONS`, and `EXIT` entries. Check the FireRed title
+   screen/menu state, menu-row construction, and the launcher-to-game startup
+   path. Confirm whether the menu is being replaced by the imported title
+   screen or is rendering with an empty row list.
+2. **Player sprite missing during name entry.** While entering the player’s
+   name, the character portrait/sprite is absent. Check the name-entry scene’s
+   sprite asset lookup, palette setup, and the FireRed-specific transition from
+   the title/start menu into naming. Verify the asset path and that the sprite
+   draw call is not being skipped by an unsupported imported object ID.
+
+Reproduction should use a fresh FireRed save and screenshot read-back at the
+title menu and name-entry screens. Do not change launcher or Emerald behavior
+while fixing these.
+
 ## Process notes for whoever picks this up
 
 - **Always verify with a driver + screenshot read-back**, not just by
