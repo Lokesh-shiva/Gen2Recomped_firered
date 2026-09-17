@@ -17,6 +17,20 @@ local SCROLLBACK_MAX = 200
 
 -- Printable input arrives through love.textinput, which is the only path
 -- that preserves Caps Lock, non-US layouts, composed characters and paste.
+-- Some desktop SDL builds omit the text event for shifted punctuation, so
+-- keep a one-event fallback for those keys and suppress its duplicate.
+local SHIFTED_CHARS = {
+  ["1"] = "!", ["2"] = "@", ["3"] = "#", ["4"] = "$", ["5"] = "%",
+  ["6"] = "^", ["7"] = "&", ["8"] = "*", ["9"] = "(", ["0"] = ")",
+  ["-"] = "_", ["="] = "+", ["["] = "{", ["]"] = "}",
+  ["\\"] = "|", [";"] = ":", ["'"] = "\"", [","] = "<",
+  ["."] = ">", ["/"] = "?",
+}
+
+local function shiftDown()
+  return love and love.keyboard and love.keyboard.isDown
+    and (love.keyboard.isDown("lshift") or love.keyboard.isDown("rshift"))
+end
 
 -- one-line pretty printer with a depth fuse, for expression results
 local function pp(value, depth)
@@ -42,6 +56,7 @@ function Console.new(game)
     history = {},
     historyIndex = 0,
     scroll = 0,
+    pendingText = nil,
   }, Console)
   self.env = setmetatable({
     game = game,
@@ -347,10 +362,21 @@ function Console:onKeyPressed(key)
       math.max(0, #self.lines - ROWS))
   elseif key == "pagedown" then
     self.scroll = math.max(0, self.scroll - ROWS)
+  else
+    local shifted = SHIFTED_CHARS[key]
+    if shifted and shiftDown() then
+      self.buffer = self.buffer .. shifted
+      self.pendingText = shifted
+    end
   end
 end
 
 function Console:onTextInput(text)
+  if self.pendingText then
+    local pending = self.pendingText
+    self.pendingText = nil
+    if text == pending then return end
+  end
   self.buffer = self.buffer .. text
 end
 
