@@ -6,6 +6,9 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+9de1fa0 Draw the naming screen's player/Pokémon icon (naming_screen.c sIconFunctions)
+806eb0a Docs: close the two start-flow reports, neither reproduced (item 2 later found wrong, see below)
+5376018 Docs: log FireRed start flow issues
 550e1bc FireRed: finish League and Sevii progression
 0461595 FireRed: elevator window view, Bill's teleporter, S.S. Anne departure
 1941926 FireRed: missing art scenes, NPC/clone fixes, HM checks, port card
@@ -323,6 +326,13 @@ Ordered roughly by what blocks a real playthrough:
 5. **S.S. Anne wake trail + smoke puffs** during the departure (separate
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
+6. **Naming-screen mon icon (`kind = "mon"`), in a real catch/starter-pickup
+   flow** — fixed and verified in isolation (see "Start-flow reports"
+   below), and the player icon was re-verified through the actual Oak-speech
+   new-game flow, but the mon icon has not yet been seen through a real
+   "give a nickname?" prompt (catching a wild Pokémon, or picking up the
+   starter and being asked to nickname it). Worth one driver run that plays
+   through an actual catch before calling this fully closed.
 
 ## Start-flow reports checked — one closed, one was a real bug (fixed) — 2026-09-17
 
@@ -399,6 +409,19 @@ this session by actually running the flow and reading back real screenshots
    rather than a pixel-exact port of the OAM tables; it reads correctly in
    the screenshots but is worth a closer look if it ever looks off by a few
    pixels against real hardware.
+
+   **Re-verified against the real full new-game flow, not just the isolated
+   drivers above** (`tests/drivers/_frlg_newgame.lua`, mods off): Pikachu
+   intro through Oak's speech, gender select, player naming, rival naming,
+   completion, no errors. The driver picked GIRL, and
+   `ngshots/frlg_ng_naming_014_player.png` shows **Leaf's** own overworld
+   sprite (not Red's) standing on the patch — confirming the gender lookup
+   (`Sprites.playerForm` reading `save.player.gender`) resolves correctly
+   live off a real gender choice, not just the hardcoded default in the
+   throwaway drivers. Run finished cleanly (`DONE true`, name RED, rival
+   GARY, gender girl). The nickname (`kind = "mon"`) path was exercised only
+   by the isolated `_frlg_nickname_check.lua` driver, not yet inside a real
+   catch/starter-pickup playthrough — see "Not yet done" below.
 
 Lesson for next time a "missing sprite/menu row" report shows up: check the
 **real cartridge's own layout** (pokefirered source) before assuming this
