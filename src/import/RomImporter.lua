@@ -1276,6 +1276,11 @@ local PAL = {
   -- radial background gradient (bright navy at top-centre -> near black)
   bgTop       = { 22, 34, 74 },   -- #16224a
   bgBot       = { 7, 11, 29 },    -- #070b1d
+  -- The bright point of that gradient.  Identical to bgTop until a theme is
+  -- applied, at which point LauncherTheme rewrites it as the preset's top
+  -- colour with the accent mixed in -- which is what makes the accent visible
+  -- across the whole screen rather than only on the links.
+  bgGlow      = { 22, 34, 74 },   -- #16224a
   -- neon accents, one per cartridge
   red         = { 255, 60, 72 },  -- rgb(255,60,72)
   blue        = { 70, 150, 255 }, -- rgb(70,150,255)
@@ -1291,6 +1296,13 @@ local PAL = {
   link        = { 127, 208, 255 }, -- #7fd0ff, the bois.icu link
   linkHover   = { 191, 234, 255 }, -- #bfeaff, brighter on hover
   white       = { 255, 255, 255 },
+  -- THE READING COLOUR, and deliberately not `white`.  Most of the launcher's
+  -- text prints with this; `white` stays what it also is -- the glass sheen on
+  -- a button, the 18% border highlight, the toggle knob, and the ink on a
+  -- filled red or green plate where contrast against the FILL is what matters
+  -- and the theme has no business changing it.  Identical to white until a
+  -- text family is applied (src/import/LauncherTheme.lua).
+  ink         = { 255, 255, 255 },
   -- "Play" button (green gradient) + its ink
   playTop     = { 62, 224, 138 }, -- #3ee08a
   playBot     = { 22, 163, 90 },  -- #16a35a
@@ -1339,6 +1351,25 @@ local PAL = {
   chipInkGold = { 58, 44, 0 },     -- #3a2c00
   chipInkSilver = { 16, 23, 35 },  -- #101723
 }
+
+-- THE PALETTE IS REPAINTABLE.  Everything above is what the launcher ships
+-- with; src/import/LauncherTheme.lua keeps a pristine copy of the keys a theme
+-- may touch and lays the player's preset and accent over them.  Called once in
+-- new() before anything draws, and again whenever either settings row steps.
+-- The cartridge chip gradients are deliberately NOT themed: they are how a
+-- player tells Crystal from Prism from Emerald in the row at a glance.
+function RomImporter.applyTheme(options)
+  local LauncherTheme = require("src.import.LauncherTheme")
+  local theme, accent, text = LauncherTheme.fromOptions(options)
+  LauncherTheme.apply(PAL, theme, accent, text)
+  return theme, accent, text
+end
+
+-- The live palette, for tests and for anything that needs to read a colour the
+-- launcher is actually drawing with rather than the one it shipped with.
+function RomImporter.palette()
+  return PAL
+end
 
 -- CacheFs.exists checks the game folder directly for a portable install,
 -- otherwise the save directory through love.filesystem.  It honors
@@ -2137,8 +2168,11 @@ end
 -- ...and a FOLDER, for the other half of the same request: point at where the
 -- releases live and take everything in it.  LauncherMods.zipsInFolder decides
 -- what counts as "in it" (the folder and one level under).
-local function chooseFolder()
-  local prompt = Strings("Choose a folder of mod .zip files")
+-- `prompt` is optional: the game-data folder row opens the same dialog with a
+-- different question, and a picker whose title says "mod .zip files" while it
+-- is choosing where to install games is a picker a player closes again.
+local function chooseFolder(prompt)
+  prompt = prompt or Strings("Choose a folder of mod .zip files")
   local platform = love.system.getOS()
   if platform == "OS X" then
     return commandOutput(
@@ -2333,6 +2367,13 @@ function RomImporter.new(onComplete, opts)
     -- Android path stays exactly as it was: act on press, never arm.
     touchPollable = android and love.touch ~= nil
       and love.touch.getTouches ~= nil and love.touch.getPosition ~= nil,
+    -- The settings drawer: whether it is up, which of its two pages is
+    -- showing (nil = the main one, "launcher" = LAUNCHER SETTINGS), and which
+    -- generation the GAME DEFAULTS rows are being set for (nil = all).
+    settingsOpen = false,
+    settingsPage = nil,
+    settingsGen = nil,
+    settingsScroll = 0,
     tab = "red",          -- active launcher tab: "red"/"blue"/"yellow"/"mods"
     logo = love.graphics.newImage("assets/logo/logo.png"),
     bcg = love.graphics.newImage("assets/logo/UD.png"),
@@ -2491,6 +2532,10 @@ function RomImporter.new(onComplete, opts)
   -- so nothing changes for anybody who never opens the dropdown.
   do
     local okOpt, options = pcall(require("src.core.SaveData").loadOptions)
+    -- The palette, before anything draws with it.  Applied here rather than at
+    -- module load so that the launcher picks up a theme chosen on the previous
+    -- run, and re-applied by _applyLauncherTheme the moment either row steps.
+    if okOpt then pcall(RomImporter.applyTheme, options) end
     local g = okOpt and type(options) == "table" and options.launcherGeneration
     self.genFilter = (g == 1 or g == 2 or g == 3) and g or nil
     -- ...and a filter that hides the tab the launcher opened on would show an
@@ -4644,24 +4689,6 @@ function RomImporter:draw()
     self.playFont     = f(20 * s)   -- Play button
     self.slotNameFont = f(15 * s)   -- save-slot player name / "NEW GAME"
 
-    -- Background: a radial gradient (bright navy at top-centre -> near black).
-    -- A triangle fan from the top-centre gives the radial falloff; the screen
-    -- is cleared to the outer colour first so the corners it does not reach
-    -- match seamlessly.  Sized to the full window so unsafe edges stay filled.
-    do
-      local cx, cy = fullW / 2, 0
-      local rx, ry = fullW * 1.3, fullH * 1.08
-      local n = 72
-      local verts = { { cx, cy, 0, 0,
-        PAL.bgTop[1] / 255, PAL.bgTop[2] / 255, PAL.bgTop[3] / 255, 1 } }
-      for i = 0, n do
-        local a = (i / n) * math.pi * 2
-        verts[#verts + 1] = { cx + math.cos(a) * rx, cy + math.sin(a) * ry, 0, 0,
-          PAL.bgBot[1] / 255, PAL.bgBot[2] / 255, PAL.bgBot[3] / 255, 1 }
-      end
-      self.bgMesh = love.graphics.newMesh(verts, "fan", "static")
-    end
-
     -- CRT vignette: a gentle edge darkening, centred slightly above the middle.
     do
       local cx, cy = fullW / 2, fullH * 0.45
@@ -4712,6 +4739,34 @@ function RomImporter:draw()
       return vec4(p.rgb + band * 0.55, p.a) * color;
     }
   ]])
+
+  -- BACKGROUND: a radial gradient (bright point at top-centre -> near black).
+  -- A triangle fan from the top-centre gives the radial falloff; the screen is
+  -- cleared to the outer colour first so the corners it does not reach match
+  -- seamlessly.  Sized to the full window so unsafe edges stay filled.
+  --
+  -- ITS OWN KEY, not the font one.  A mesh's vertex colours are BAKED at build
+  -- time, so while this was rebuilt only on a resize, changing the theme
+  -- repainted every card, every label and the flat clear underneath -- and
+  -- left the gradient on top of them exactly as it was.  Reported as the theme
+  -- not changing the background, which is precisely what it was.
+  local glow = PAL.bgGlow or PAL.bgTop
+  local bgKey = ("%dx%d|%d,%d,%d|%d,%d,%d"):format(fullW, fullH,
+    glow[1], glow[2], glow[3], PAL.bgBot[1], PAL.bgBot[2], PAL.bgBot[3])
+  if self.bgKey ~= bgKey or not self.bgMesh then
+    self.bgKey = bgKey
+    local cx, cy = fullW / 2, 0
+    local rx, ry = fullW * 1.3, fullH * 1.08
+    local n = 72
+    local verts = { { cx, cy, 0, 0,
+      glow[1] / 255, glow[2] / 255, glow[3] / 255, 1 } }
+    for i = 0, n do
+      local a = (i / n) * math.pi * 2
+      verts[#verts + 1] = { cx + math.cos(a) * rx, cy + math.sin(a) * ry, 0, 0,
+        PAL.bgBot[1] / 255, PAL.bgBot[2] / 255, PAL.bgBot[3] / 255, 1 }
+    end
+    self.bgMesh = love.graphics.newMesh(verts, "fan", "static")
+  end
 
   -- background (full window — unsafe edges stay painted)
   col(PAL.bgBot)
@@ -5220,7 +5275,7 @@ function RomImporter:draw()
     love.graphics.rectangle("line", dx, dy, dw, dh, rr, rr)
 
     love.graphics.setFont(self.slotNameFont)
-    col(PAL.white)
+    col(PAL.ink)
     love.graphics.print(Strings("Name save slot"), dx + 16 * s, dy + 14 * s)
 
     -- the field: bordered strip, current text, blinking caret on the pulse
@@ -5266,7 +5321,7 @@ function RomImporter:draw()
     love.graphics.rectangle("line", dx, dy, dw, dh, rr, rr)
 
     love.graphics.setFont(self.slotNameFont)
-    col(PAL.white)
+    col(PAL.ink)
     love.graphics.print(Strings("Add a mod index"), dx + 16 * s, dy + 14 * s)
     love.graphics.setFont(self.hintFont)
     col(PAL.detail)
@@ -5337,7 +5392,7 @@ function RomImporter:draw()
     col((c.kind == "update") and PAL.green or PAL.gold, 0.65)
     love.graphics.rectangle("line", dx, dy, dw, dh, rr, rr)
     love.graphics.setFont(self.slotNameFont)
-    col(PAL.white)
+    col(PAL.ink)
     love.graphics.printf(c.title or "Confirm", dx + 16 * s, dy + 14 * s,
       dw - 32 * s, "left")
     love.graphics.setFont(self.hintFont)
@@ -5360,7 +5415,7 @@ function RomImporter:draw()
     col(PAL.disabled, nhot and 0.55 or 0.35)
     love.graphics.rectangle("fill", self._modConfirmNo.x, by, btnW, btnH, 8 * s, 8 * s)
     love.graphics.setFont(self.saveBtnFont)
-    col(PAL.white)
+    col(PAL.ink)
     printfB(c.yesLabel or "OK", self._modConfirmYes.x,
       by + (btnH - self.saveBtnFont:getHeight()) / 2, btnW, "center")
     col(PAL.detail)
@@ -5379,7 +5434,7 @@ function RomImporter:draw()
     col(PAL.green, 0.5)
     love.graphics.rectangle("line", dx, dy, dw, dh, rr, rr)
     love.graphics.setFont(self.slotNameFont)
-    col(PAL.white)
+    col(PAL.ink)
     love.graphics.printf("v" .. tostring(n.version) .. " notes",
       dx + 16 * s, dy + 12 * s, dw - 32 * s, "left")
     local body = ModUpdate.cleanBody(n.body or "", 0)
@@ -5424,7 +5479,7 @@ function RomImporter:draw()
     col(PAL.modDot, 0.5)
     love.graphics.rectangle("line", dx, dy, dw, dh, rr, rr)
     love.graphics.setFont(self.slotNameFont)
-    col(PAL.white)
+    col(PAL.ink)
     love.graphics.printf(ellipsize(self.slotNameFont, d.title, dw - 32 * s),
       dx + 16 * s, dy + 12 * s, dw - 32 * s, "left")
     local body = ModUpdate.cleanBody(d.body or "", 0)
@@ -5482,7 +5537,7 @@ function RomImporter:draw()
     love.graphics.rectangle("line", dx, dy, dw, dh, rr, rr)
 
     love.graphics.setFont(self.slotNameFont)
-    col(PAL.white)
+    col(PAL.ink)
     love.graphics.printf("Other versions: " .. tostring(v.name),
       dx + pad, dy + 10 * s, dw - pad * 2, "left")
     love.graphics.setFont(self.hintFont)
@@ -5523,7 +5578,7 @@ function RomImporter:draw()
       local label = "v" .. rel.version
       if rel.version == v.current then label = label .. " (installed)" end
       if rel.prerelease then label = label .. " pre" end
-      col(rel.version == v.current and PAL.warning or PAL.white)
+      col(rel.version == v.current and PAL.warning or PAL.ink)
       love.graphics.print(label, rect.x + 12 * s, rect.y + 6 * s)
 
       -- one-line ellipsized preview only (never wrap changelog into the row)
@@ -5825,8 +5880,15 @@ function RomImporter:mousepressed(x, y, button)
     -- most of it is toggles you set once -- and half the rows are ABOUT what
     -- is on the tab behind them (a mod's options, with the mod list behind).
     self.settingsOpen = not self.settingsOpen
+    self._settingsPress = nil   -- a press armed on a row the drawer just hid
     if self.settingsOpen then
       self.settingsScroll = 0
+      -- Always opens on the first page.  The launcher page is a place you go
+      -- to do one thing and come back from; reopening the gear onto it, days
+      -- later, would hide every row the gear is actually for.
+      self.settingsPage = nil
+      self.settingsGen = nil
+      self.settingsNotice = nil
       -- rebuilt on each opening, not per frame: reading every installed mod's
       -- schema file is disk work, and at sixty frames a second on a folder of
       -- mods it is disk work for as long as the drawer is open.
@@ -5845,24 +5907,45 @@ function RomImporter:mousepressed(x, y, button)
     and inside(self.settingsDrawerRect, x, y)
 
   -- Settings rows: both arrows and the value between them step the option.
+  --
+  -- A press only ARMS the row where a drag can be resolved (_updateSlotDrag),
+  -- for the same reason the mods list does: the drawer scrolls, a finger that
+  -- starts on a row and moves means to scroll it, and stepping VIDEO MODE
+  -- because a player swiped through it is a setting changed by accident on a
+  -- screen with no undo.  Where a pointer cannot be polled -- Android without
+  -- love.touch -- it steps on press exactly as it always did.
   if button == 1 and self.settingsRowRects then
     for _, r in ipairs(self.settingsRowRects) do
       local entry = r.entry
+      local hit = nil
       if entry and entry.kind == "action" then
-        if inside(r.value, x, y) then
-          if entry.action == "touchLayout" and self.onEditTouchControls then
-            self.onEditTouchControls()
-          end
-          return
-        end
+        if inside(r.value, x, y) then hit = 0 end
       else
-        if inside(r.left, x, y) then self:_stepSetting(entry, -1) return end
-        if inside(r.right, x, y) or inside(r.value, x, y) then
-          self:_stepSetting(entry, 1)
-          return
+        if inside(r.left, x, y) then hit = -1
+        elseif inside(r.right, x, y) or inside(r.value, x, y) then hit = 1 end
+      end
+      if hit then
+        if armDrag then
+          self._settingsPress = { entry = entry, dir = hit, y0 = y,
+            scroll0 = self.settingsScroll or 0, moved = false }
+        elseif hit == 0 then
+          self:_settingsAction(entry)
+        else
+          self:_stepSetting(entry, hit)
         end
+        return
       end
     end
+  end
+  -- ...and the drawer's own blank space pans it.  Armed before `shielded`
+  -- swallows the press, so a swipe that starts between two rows scrolls the
+  -- list rather than doing nothing at all -- which, on a phone, is most of
+  -- the drawer's area and was the whole of the reported bug.
+  if button == 1 and self.settingsOpen and armDrag
+     and inside(self.settingsDrawerRect, x, y) then
+    self._settingsPress = { y0 = y, scroll0 = self.settingsScroll or 0,
+                            moved = false }
+    return
   end
   -- and everything else in the drawer's rectangle stops here: see `shielded`.
   if shielded then return end
@@ -6234,7 +6317,7 @@ function RomImporter:_glassyButton(x, y, w, h, label, font, enabled)
   love.graphics.setLineWidth(1)
   col(PAL.white, 0.18)
   love.graphics.rectangle("line", x, y, w, h, r, r)
-  col(PAL.white)
+  col(PAL.ink)
   printfB(label, x, y + (h - font:getHeight()) / 2, w, "center")
   return rect
 end
@@ -6279,7 +6362,7 @@ function RomImporter:_chipButton(x, y, label, opts)
     love.graphics.setLineWidth(math.max(1, s))
     col(PAL.white, hot and 0.35 or 0.18)
     love.graphics.rectangle("line", x, y, w, h, r, r)
-    col(PAL.white)
+    col(PAL.ink)
   end
   printfB(label, x, y + (h - font:getHeight()) / 2, w, "center")
   return rect
@@ -6434,7 +6517,7 @@ function RomImporter:_drawGenDropdown(x, y, w, h, short)
   col(open and PAL.link or PAL.cardBorder, open and 0.9 or 0.55)
   love.graphics.rectangle("line", x, y, w, h, 8 * s, 8 * s)
   love.graphics.setFont(self.hintFont)
-  col(open and PAL.link or PAL.white)
+  col(open and PAL.link or PAL.ink)
   love.graphics.print(label, x + 10 * s,
     y + (h - self.hintFont:getHeight()) / 2)
   -- caret, pointing the way the menu will go
@@ -6505,7 +6588,7 @@ function RomImporter:_drawGenMenu()
         if self.ready[v] then ready = ready + 1 end
       end
     end
-    col(active and PAL.link or PAL.white)
+    col(active and PAL.link or PAL.ink)
     love.graphics.print(RomImporter.generationLabel(value), rr.x + 8 * s,
       ry + (rowH - self.hintFont:getHeight()) / 2)
     col(PAL.warning, 0.8)
@@ -6687,7 +6770,7 @@ function RomImporter:_drawTabBar(x, y, w, h, chip)
     local segEnd = cursorX + chip
     if active then
       love.graphics.setFont(self.tabLabelFont)
-      col(PAL.white)
+      col(PAL.ink)
       local labelX = cursorX + chip + gap
       local lw = printSpaced(self.tabLabelFont, t.label, labelX,
         y + (h - self.tabLabelFont:getHeight()) / 2, 2 * s)
@@ -6770,7 +6853,7 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
 
   -- header: name + status pill
   love.graphics.setFont(self.gameNameFont)
-  col(PAL.white)
+  col(PAL.ink)
   printB(gameName, x, y)
   local nameW = self.gameNameFont:getWidth(gameName)
   local pill
@@ -6981,7 +7064,7 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   printSpaced(self.labelFont, "ROM", ix, iy, 2 * s)
   iy = iy + labelH + 10 * s
   love.graphics.setFont(self.stateFont)
-  col(PAL.white)
+  col(PAL.ink)
   printfB(romState, ix, iy, innerW, "left")
   iy = iy + stateH + 5 * s
   love.graphics.setFont(self.hintFont)
@@ -7310,14 +7393,54 @@ RomImporter.SETTINGS_ROWS = {
 -- All three end up in the same options file, which is why one Save covers
 -- them; they are simply not the same shape inside it.
 function RomImporter:_settingsRows()
+  if self.settingsPage == "launcher" then
+    return self:_launcherSettingsRows()
+  end
   local rows = {}
   local function add(r) rows[#rows + 1] = r; return r end
+  local GenOptions = require("src.core.GenOptions")
+  local gen = self:_settingsGeneration()
+
+  -- THE LAUNCHER'S OWN SETTINGS ARE A PAGE, NOT A SECTION.  What follows this
+  -- is every default a GAME starts with; where the launcher installs those
+  -- games and what colour it paints itself are about the launcher, they are
+  -- set once and never again, and interleaving them with the rows a player
+  -- actually comes here to change makes both lists longer to read.
+  add({ kind = "section", label = "LAUNCHER" })
+  add({ kind = "action", label = "LAUNCHER SETTINGS",
+        value = "OPEN", action = "launcherPage",
+        note = "Where games are installed, and how the launcher looks." })
 
   add({ kind = "section", label = "GAME DEFAULTS",
         note = "These are the defaults every game starts with. A "
             .. "playthrough's own OPTIONS menu still overrides them." })
+  -- WHICH GAMES THE ROWS BELOW ARE FOR.  DMG green is right for Red and wrong
+  -- for Emerald; the frame cap and FAITHFUL RES mean different things on a
+  -- Game Boy screen and a GBA one.  ALL sets the shared value every generation
+  -- follows, a generation sets an override only it reads
+  -- (src/core/GenOptions.lua).
+  add({ kind = "option", scope = "settingsGen", label = "APPLIES TO",
+        row = { id = "settingsGen",
+                values = { false, 1, 2, 3 },
+                labels = { [false] = "ALL GAMES", [1] = "GEN 1 ONLY",
+                           [2] = "GEN 2 ONLY", [3] = "GEN 3 ONLY" } } })
   for _, row in ipairs(RomImporter.SETTINGS_ROWS) do
-    add({ kind = "option", scope = "game", row = row, label = row.label })
+    add({ kind = "option", scope = "game", gen = gen, row = row,
+          label = row.label })
+  end
+  -- Only while a generation is selected AND has something to clear: an action
+  -- that is always there and usually does nothing is one a player learns to
+  -- ignore, and this one is the way back from an override they regret.
+  if gen then
+    local opts = self:_settings()
+    local n = GenOptions.count(opts, gen)
+    if n > 0 then
+      add({ kind = "action", label = "USE SHARED VALUES",
+            value = (n == 1) and "1 SET" or (tostring(n) .. " SET"),
+            action = "clearGenOverrides",
+            note = ("GEN %d is overriding %d of the rows above. This puts it "
+                    .. "back on the shared values."):format(gen, n) })
+    end
   end
 
   -- TOUCH CONTROLS. The toggle and the layout editor belong together: turning
@@ -7358,6 +7481,138 @@ function RomImporter:_settingsRows()
   return rows
 end
 
+
+-- THE LAUNCHER SETTINGS PAGE, the drawer's second page.
+--
+-- Two things live here, and both are about the installation rather than any
+-- one playthrough: where imported games are written, and what the launcher
+-- looks like while you pick one.
+function RomImporter:_launcherSettingsRows()
+  local rows = {}
+  local function add(r) rows[#rows + 1] = r; return r end
+  local SaveData = require("src.core.SaveData")
+  local LauncherTheme = require("src.import.LauncherTheme")
+
+  add({ kind = "action", label = "BACK", value = "SETTINGS",
+        action = "settingsBack" })
+
+  -- ------- where games are installed
+  add({ kind = "section", label = "GAME DATA FOLDER",
+        note = self:_dataDirNote() })
+  if SaveData.dataDirSupported() then
+    if SaveData.isPortable() then
+      -- Portable mode already answered this question, with a file sitting next
+      -- to the executable.  Showing a stepper that cannot win against it would
+      -- be a control that does nothing.
+      add({ kind = "action", label = "PORTABLE MODE", value = "IN USE",
+            action = "openDataDir",
+            note = "portable.txt sits beside the game, so everything is kept "
+                .. "in the game folder. Remove it to choose a folder here." })
+    else
+      add({ kind = "action", label = "CHOOSE FOLDER", value = "BROWSE",
+            action = "chooseDataDir" })
+      if SaveData.dataDirSetting() then
+        add({ kind = "action", label = "USE THE DEFAULT FOLDER",
+              value = "RESET", action = "clearDataDir" })
+      end
+      add({ kind = "action", label = "OPEN FOLDER", value = "SHOW",
+            action = "openDataDir" })
+    end
+  else
+    add({ kind = "action", label = "NOT AVAILABLE HERE", value = "-",
+          action = "none",
+          note = "This platform has no folder to point at; games stay in the "
+              .. "app's own storage." })
+  end
+
+  -- ------- how the launcher looks
+  add({ kind = "section", label = "APPEARANCE",
+        note = "Chip colours stay as they are: they are how you tell the "
+            .. "cartridges apart at a glance." })
+  add({ kind = "option", scope = "launcher", label = "THEME",
+        row = { id = "launcherTheme", values = LauncherTheme.presetValues(),
+                labels = self:_themeLabels(LauncherTheme.PRESETS,
+                                           LauncherTheme.presetValues()) } })
+  add({ kind = "option", scope = "launcher", label = "ACCENT",
+        row = { id = "launcherAccent", values = LauncherTheme.accentValues(),
+                labels = self:_themeLabels(LauncherTheme.ACCENTS,
+                                           LauncherTheme.accentValues()) } })
+  -- TEXT is its own axis rather than something a ground decides, because it is
+  -- the row a player comes here for when the reason is their eyes rather than
+  -- their taste -- CONTRAST brightens the small print without taking the
+  -- ground they chose away from them.
+  add({ kind = "option", scope = "launcher", label = "TEXT",
+        row = { id = "launcherText", values = LauncherTheme.textValues(),
+                labels = self:_themeLabels(LauncherTheme.TEXTS,
+                                           LauncherTheme.textValues()) } })
+  -- The chosen entries explain themselves under the rows, one line each.  Only
+  -- the ones that are set: DEFAULT has nothing to say, and three lines of
+  -- "the launcher's own" would be three lines of nothing.
+  local opts = self:_settings()
+  -- Appended one at a time rather than gathered into a list first: a nil from
+  -- the first lookup would end an ipairs walk before it reached the second, so
+  -- choosing a text family while the ground was DEFAULT would silently lose
+  -- its line.
+  local themeNote = LauncherTheme.presetNote(opts.launcherTheme or nil)
+  if themeNote then add({ kind = "section", label = "", note = themeNote }) end
+  local textNote = LauncherTheme.textNote(opts.launcherText or nil)
+  if textNote then add({ kind = "section", label = "", note = textNote }) end
+  add({ kind = "action", label = "RESET APPEARANCE", value = "DEFAULT",
+        action = "resetTheme" })
+
+  return rows
+end
+
+-- A `labels` map for a theme stepper: every id's own label, plus DEFAULT for
+-- the `false` entry the value lists start with.  Built rather than written out
+-- because the two tables it serves have different shapes and the same rule.
+function RomImporter:_themeLabels(source, values)
+  local labels = { [false] = "DEFAULT" }
+  for _, id in ipairs(values) do
+    if id then
+      local entry = source[id]
+      labels[id] = entry and entry.label or tostring(id):upper()
+    end
+  end
+  return labels
+end
+
+-- The line under the GAME DATA FOLDER heading: where games are going right
+-- now, and -- when the stored folder is not the one in use -- why not.
+--
+-- Says the FULL PATH rather than "custom folder": the whole point of the
+-- setting is that the player chose a place, and a panel that will not name it
+-- is one they have to go hunting through an options file to verify.
+function RomImporter:_dataDirNote()
+  local SaveData = require("src.core.SaveData")
+  local lines = {}
+  local active = SaveData.dataDir and SaveData.dataDir() or nil
+  local stored = SaveData.dataDirSetting and SaveData.dataDirSetting() or nil
+  local problem = SaveData.dataDirProblem and SaveData.dataDirProblem() or nil
+  if SaveData.isPortable() then
+    local base = SaveData.portableBaseDir()
+    lines[#lines + 1] = "Portable: " .. tostring(base or "the game folder")
+  elseif active then
+    lines[#lines + 1] = "Games are installed in " .. active
+  elseif stored then
+    lines[#lines + 1] = "Set to " .. stored
+    lines[#lines + 1] = "Not in use right now ("
+      .. tostring(problem or "unavailable")
+      .. "); the default folder is being used instead."
+  else
+    lines[#lines + 1] = "Games are installed in the app's own folder "
+      .. "(AppData on Windows)."
+  end
+  -- THE ONE THING THAT SURPRISES PEOPLE.  Changing this does not move what is
+  -- already imported: the launcher would have to copy gigabytes through the UI
+  -- thread to do it, and a launcher that appears to hang for four minutes
+  -- after a settings change is worse than one that tells you to re-import.
+  lines[#lines + 1] = "Changing this does not move games you have already "
+    .. "imported; they stay where they are and can be re-imported or copied "
+    .. "across by hand."
+  return table.concat(lines, "\n")
+end
+
 -- The options table, read once per settings frame and cached until something
 -- writes: loadOptions parses a file, and the panel would otherwise re-read it
 -- sixty times a second while the player looks at it.
@@ -7371,9 +7626,32 @@ function RomImporter:_settings()
   return self._settingsCache
 end
 
+-- The generation the GAME DEFAULTS rows are currently being set for, or nil
+-- for the shared values.  Deliberately NOT persisted: it is a lens on the
+-- rows below it, not a setting, and a launcher that opens next week still
+-- pointed at GEN 1 is one where a player changes COLORS and cannot work out
+-- why Emerald ignored them.
+function RomImporter:_settingsGeneration()
+  local g = self.settingsGen
+  if g == 1 or g == 2 or g == 3 then return g end
+  return nil
+end
+
 -- The current value of one entry, whichever scope it lives in.
 function RomImporter:_settingValue(entry)
   local opts = self:_settings()
+  if entry.scope == "settingsGen" then
+    -- `false` rather than nil: the stepper matches against its own value list,
+    -- and ALL is spelled `false` there for the same reason the generation
+    -- filter spells it that way.
+    return self:_settingsGeneration() or false
+  elseif entry.scope == "launcher" then
+    local v = opts[entry.row.id]
+    if v == nil or v == false then return false end
+    return v
+  elseif entry.scope == "game" and entry.gen then
+    return require("src.core.GenOptions").get(opts, entry.row.id, entry.gen)
+  end
   if entry.scope == "touch" then
     local tc = opts.touchControls
     -- Absent means ON: SaveData's defaults ship `touchControls = {enabled=true}`
@@ -7390,6 +7668,26 @@ end
 
 function RomImporter:_setSettingValue(entry, value)
   local opts = self:_settings()
+  if entry.scope == "settingsGen" then
+    self.settingsGen = (value == 1 or value == 2 or value == 3) and value or nil
+    -- The rows below it change meaning, and one of them (USE SHARED VALUES)
+    -- appears and disappears with it, so the cached list has to go.
+    self._settingsRowCache = nil
+    return
+  elseif entry.scope == "launcher" then
+    opts[entry.row.id] = value or false
+    -- Repaint immediately.  A theme row that only takes effect on the next
+    -- launch is one a player steps through four times looking for a preview.
+    pcall(RomImporter.applyTheme, opts)
+    return
+  elseif entry.scope == "game" and entry.gen then
+    require("src.core.GenOptions").set(opts, entry.row.id, value, entry.gen)
+    -- The first override a generation gains is also when USE SHARED VALUES
+    -- has to appear, and the last one it loses is when it has to go; both are
+    -- decided by _settingsRows, so the cached list is now wrong.
+    self._settingsRowCache = nil
+    return
+  end
   if entry.scope == "touch" then
     local tc = type(opts.touchControls) == "table" and opts.touchControls or {}
     tc.enabled = value and true or false
@@ -7500,6 +7798,11 @@ function RomImporter:_stepSetting(entry, dir)
     self:_setSettingValue(entry, values[at])
     if row.apply then row.apply(values[at]) end
   end
+  -- The scope selector is a lens, not a setting: it lives on `self` and there
+  -- is nothing to write.  Returning before the save also keeps it out of the
+  -- options file, where a future build would have to decide what a stale one
+  -- means.
+  if entry.scope == "settingsGen" then return end
   local opts = self:_settings()
   local ok = pcall(function()
     require("src.core.SaveData").saveOptions(opts)
@@ -7510,6 +7813,148 @@ function RomImporter:_stepSetting(entry, dir)
         "launcher settings: the options file could not be written")
     end)
   end
+end
+
+-- What an `action` row does when it is pressed.  One place rather than a chain
+-- of ifs in mousepressed, because the drawer now has two pages of them and the
+-- touch path below resolves the same rows on release.
+function RomImporter:_settingsAction(entry)
+  local action = entry and entry.action
+  if not action or action == "none" then return end
+  if action == "touchLayout" then
+    if self.onEditTouchControls then self.onEditTouchControls() end
+  elseif action == "launcherPage" then
+    self.settingsPage = "launcher"
+    self.settingsScroll = 0
+    self.settingsNotice = nil
+    self._settingsRowCache = nil
+  elseif action == "settingsBack" then
+    self.settingsPage = nil
+    self.settingsScroll = 0
+    self.settingsNotice = nil
+    self._settingsRowCache = nil
+  elseif action == "clearGenOverrides" then
+    local gen = self:_settingsGeneration()
+    if gen then
+      local opts = self:_settings()
+      require("src.core.GenOptions").clear(opts, gen)
+      self:_saveSettings()
+      self._settingsRowCache = nil
+      self.settingsNotice = Strings("GEN %d now uses the shared settings", gen)
+    end
+  elseif action == "resetTheme" then
+    local opts = self:_settings()
+    opts.launcherTheme, opts.launcherAccent, opts.launcherText = false, false, false
+    pcall(RomImporter.applyTheme, opts)
+    self:_saveSettings()
+    self._settingsRowCache = nil
+    self.settingsNotice = Strings("Appearance back to the default")
+  elseif action == "chooseDataDir" then
+    self:chooseDataDir()
+  elseif action == "clearDataDir" then
+    self:setDataDir(nil)
+  elseif action == "openDataDir" then
+    self:openDataDir()
+  end
+end
+
+-- The options file write every settings path ends with, in one place so a
+-- failure is reported the same way wherever it came from.
+function RomImporter:_saveSettings()
+  local opts = self:_settings()
+  local ok = pcall(function()
+    require("src.core.SaveData").saveOptions(opts)
+  end)
+  if not ok then
+    pcall(function()
+      require("src.core.Logger").warn(
+        "launcher settings: the options file could not be written")
+    end)
+  end
+  return ok
+end
+
+-- ---------------------------------------------------------------------------
+-- THE GAME DATA FOLDER
+--
+-- Opening a native folder picker takes as long as the player takes, and on
+-- Windows it is a PowerShell process -- so, like every other picker in here,
+-- the call is made from the click and the result handled inline rather than
+-- polled.  Nothing is moved and nothing is deleted: the setting points the
+-- NEXT import somewhere else, which is the whole of what it claims to do.
+-- ---------------------------------------------------------------------------
+
+-- Re-run the readiness report for every cartridge.  The same loop new() runs
+-- at boot, minus the logging: this is a deliberate action a player just took,
+-- not a diagnosis of a launch.
+function RomImporter:_recheckReady()
+  for _, version in ipairs(GameVersion.ORDER) do
+    local ok, report = pcall(RomImporter.readyReport, version)
+    if ok and type(report) == "table" then
+      self.ready[version] = report.ok and not self.forceImport
+    end
+  end
+end
+
+function RomImporter:chooseDataDir()
+  local SaveData = require("src.core.SaveData")
+  if not SaveData.dataDirSupported() then
+    self.settingsNotice = Strings("This platform keeps games in one place")
+    return
+  end
+  if not hasNativePicker() then
+    self.settingsNotice = Strings("No folder picker on this device")
+    return
+  end
+  local folder = chooseFolder(Strings("Choose where to install games"))
+  if not folder or folder == "" then return end
+  self:setDataDir(folder)
+end
+
+function RomImporter:setDataDir(path)
+  local SaveData = require("src.core.SaveData")
+  local ok, why = SaveData.setDataDir(path)
+  if not ok then
+    self.settingsNotice = Strings("Could not use that folder: %s",
+      tostring(why or "unknown reason"))
+    return false
+  end
+  -- The options table this panel is holding still has the old value in it, and
+  -- setDataDir wrote through its own copy; drop both caches so the next frame
+  -- reads what is actually on disk.
+  self._settingsCache = nil
+  self._settingsRowCache = nil
+  -- Which games count as imported depends on which folder is being looked at,
+  -- so the readiness of every tab has just changed.  Re-checked here rather
+  -- than left for the next launch: a player who points at a folder with a
+  -- previous install in it should see those games come back immediately, and
+  -- one who points at an empty folder should see the truth rather than a row
+  -- of PLAY buttons for data that is no longer on the read path.
+  self:_recheckReady()
+  local dir = SaveData.dataDir()
+  if dir then
+    self.settingsNotice = Strings("Games will be installed in %s", dir)
+  else
+    self.settingsNotice = Strings("Games will be installed in the default folder")
+  end
+  return true
+end
+
+function RomImporter:openDataDir()
+  local SaveData = require("src.core.SaveData")
+  local dir = SaveData.dataDir()
+  if not dir and SaveData.isPortable() then dir = SaveData.portableBaseDir() end
+  if not dir then
+    -- The default folder is LOVE's save directory, which love.system can name
+    -- and the player otherwise cannot.
+    local ok, path = pcall(love.filesystem.getSaveDirectory)
+    if ok then dir = path end
+  end
+  if not dir or dir == "" then
+    self.settingsNotice = Strings("There is no folder to open")
+    return
+  end
+  pcall(love.system.openURL, fileUrl(dir))
 end
 
 function RomImporter:_selectTab(id)
@@ -7524,6 +7969,7 @@ function RomImporter:_selectTab(id)
   self.tab = id
   self._slotPress = nil   -- drop any half-started slot drag on tab change
   self._modPress = nil    -- and any half-started mod toggle press
+  self._settingsPress = nil -- and any half-started settings row press
   self._pagePress = nil   -- and any half-started page pan
   self._tabPress = nil    -- and any half-started tab-bar pan
   self._findSearchFocus = false  -- and the search caret, now off screen
@@ -7592,6 +8038,33 @@ function RomImporter:_updateSlotDrag()
       self._slotPress = nil
     end
   end
+  -- THE SETTINGS DRAWER.  Same rule, its own scroll offset: the drawer is a
+  -- panel over the page, so a drag inside it must move the drawer and never the
+  -- page behind it -- which is why this clamps against _settingsMax and never
+  -- touches pageScroll the way the lists above do.
+  local sp = self._settingsPress
+  if sp then
+    if down then
+      -- `(py or sp.y0)` for the same reason the tab bar's drag reads
+      -- `(px or tp.x0)`: the pointer position can be absent for a frame, and a
+      -- nil arithmetic here is a crash while a finger is on the screen.
+      local d = (py or sp.y0) - sp.y0
+      if math.abs(d) > 4 * (self._s or 1) then sp.moved = true end
+      if sp.moved then
+        self.settingsScroll = clamp(sp.scroll0 - d, 0, self._settingsMax or 0)
+      end
+    else
+      if not sp.moved and sp.entry then
+        if sp.dir == 0 then
+          self:_settingsAction(sp.entry)
+        elseif sp.dir then
+          self:_stepSetting(sp.entry, sp.dir)
+        end
+      end
+      self._settingsPress = nil
+    end
+  end
+
   -- The same click-vs-drag resolution for the mods list: a moved pointer scrolls
   -- the list, a still one toggles the armed mod on release.
   local mp = self._modPress
@@ -7819,7 +8292,7 @@ function RomImporter:_drawSaveSlotPanel(version, x, y, w, h, paged)
         end
 
         love.graphics.setFont(self.slotNameFont)
-        col(PAL.white)
+        col(PAL.ink)
         -- a custom label (#205) wins over the player name; both ellipsize
         local name = slot.label or slot.name or Strings("NEW GAME")
         printB(ellipsize(self.slotNameFont, name, rw - 24 * s - math.max(pillW, rightReserve)),
@@ -8269,7 +8742,7 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
 
   -- header: "Mods" + "N of M enabled" (left) and "Import mod .zip" (right)
   love.graphics.setFont(self.gameNameFont)
-  col(PAL.white)
+  col(PAL.ink)
   printB("Mods", x, y)
   local nameW = self.gameNameFont:getWidth("Mods")
   local headerH = self.gameNameFont:getHeight()
@@ -8627,7 +9100,7 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
       local badgeW = badgeTW + 12 * s
       local badgeH = self.warningFont:getHeight() + 6 * s
       love.graphics.setFont(self.stateFont)
-      col(PAL.white)
+      col(PAL.ink)
       local drawnName = ellipsize(self.stateFont, m.name, L.leftW - badgeW - 8 * s)
       printB(drawnName, nx, ny)
       local bxx = nx + self.stateFont:getWidth(drawnName) + 8 * s
@@ -9098,6 +9571,7 @@ end
 -- forward, which is the same thing the in-game menu's A button does.
 function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
   local s = self._s
+  local GenOptions = require("src.core.GenOptions")
   self.settingsRowRects = {}
 
   -- Built once per entry into the tab, not once per frame: reading every
@@ -9109,9 +9583,25 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
   local entries = self._settingsRowCache
 
   love.graphics.setFont(self.gameNameFont)
-  col(PAL.white)
-  printB(Strings("Settings"), x, y)
+  col(PAL.ink)
+  printB(self.settingsPage == "launcher" and Strings("Launcher settings")
+                                          or Strings("Settings"), x, y)
   local top = y + self.gameNameFont:getHeight() + 10 * s
+
+  -- WHAT JUST HAPPENED, under the title.  This line has been set by the
+  -- settings code for as long as it has existed and was never drawn, so a
+  -- player who pressed a row that could only answer in words -- a mod's text
+  -- option, and now every game-data folder outcome -- got no answer at all.
+  -- Measured rather than assumed one line: a folder path is longer than the
+  -- drawer is wide.
+  if self.settingsNotice then
+    love.graphics.setFont(self.hintFont)
+    col(PAL.link)
+    local text = Strings(tostring(self.settingsNotice))
+    local _, lines = self.hintFont:getWrap(text, w)
+    printfB(text, x, top, w, "left")
+    top = top + math.max(1, #lines) * self.hintFont:getHeight() + 8 * s
+  end
 
   local rowH = 34 * s
   local cy = top
@@ -9120,18 +9610,27 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
       -- A little air above a heading, none above the first one.
       if cy > top then cy = cy + 10 * s end
       love.graphics.setFont(self.hintFont)
-      col(PAL.heading)
-      printB(Strings(entry.label), x, cy)
-      cy = cy + self.hintFont:getHeight() + 4 * s
+      -- A section with no label is a note on its own -- the theme's one-line
+      -- description under the APPEARANCE rows.  It gets the text and neither
+      -- the heading nor the rule, because both would announce a section that
+      -- has no rows in it.
+      local titled = entry.label ~= nil and entry.label ~= ""
+      if titled then
+        col(PAL.heading)
+        printB(Strings(entry.label), x, cy)
+        cy = cy + self.hintFont:getHeight() + 4 * s
+      end
       if entry.note then
         col(PAL.warning)
         local _, lines = self.hintFont:getWrap(Strings(entry.note), w)
         printfB(Strings(entry.note), x, cy, w, "left")
         cy = cy + math.max(1, #lines) * self.hintFont:getHeight() + 4 * s
       end
-      col(PAL.cardBorder, 0.35)
-      love.graphics.rectangle("fill", x, cy, w, 1)
-      cy = cy + 8 * s
+      if titled then
+        col(PAL.cardBorder, 0.35)
+        love.graphics.rectangle("fill", x, cy, w, 1)
+        cy = cy + 8 * s
+      end
 
     elseif entry.kind == "action" then
       col(PAL.cardBlue, 0.55)
@@ -9150,6 +9649,17 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
         value = { x = x, y = cy, width = w, height = rowH - 4 * s },
       }
       cy = cy + rowH
+      -- An action can carry its own explanation -- where games are being
+      -- installed, what USE SHARED VALUES is about to undo.  Under the plate
+      -- rather than in the section heading, because the sentence is about
+      -- THAT button and a heading two rows up is not read as being about it.
+      if entry.note then
+        love.graphics.setFont(self.hintFont)
+        col(PAL.warning)
+        local _, lines = self.hintFont:getWrap(Strings(entry.note), w)
+        printfB(Strings(entry.note), x, cy, w, "left")
+        cy = cy + math.max(1, #lines) * self.hintFont:getHeight() + 6 * s
+      end
 
     else
       col(PAL.cardBlue, 0.55)
@@ -9160,6 +9670,13 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
       printB(Strings(entry.label), x + 12 * s, cy + 9 * s)
 
       local value = self:_entryLabel(entry)
+      -- A DOT MEANS "THIS GENERATION ONLY".  Without it the rows look
+      -- identical whether the value on screen is the shared one or an override
+      -- only Gen 1 reads, and the first way a player finds out which is by
+      -- wondering why Emerald ignored a setting they watched themselves change.
+      local overridden = entry.scope == "game" and entry.gen
+        and GenOptions.hasOverride(self:_settings(), entry.row.id, entry.gen)
+      if overridden then value = value .. " *" end
       local vW = self.hintFont:getWidth(value)
       local arrowW = 22 * s
       local rightPad = 12 * s
@@ -9169,7 +9686,7 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
       col(PAL.link)
       printB("<", leftX + 6 * s, cy + 9 * s)
       printB(">", vX + vW + 14 * s, cy + 9 * s)
-      col(PAL.white)
+      col(PAL.ink)
       printB(value, vX, cy + 9 * s)
 
       -- `width`/`height`, never `w`/`h`: `inside` reads only those two names,
@@ -9208,7 +9725,7 @@ function RomImporter:_drawFindPanel(x, y, w, h, paged)
 
   -- header
   love.graphics.setFont(self.gameNameFont)
-  col(PAL.white)
+  col(PAL.ink)
   printB("Find Mods", x, y)
   local nameW = self.gameNameFont:getWidth("Find Mods")
   local headerH = self.gameNameFont:getHeight()
@@ -9449,7 +9966,7 @@ function RomImporter:_drawFindPanel(x, y, w, h, paged)
 
       local tx = nx + L.leftX
       love.graphics.setFont(self.stateFont)
-      col(PAL.white)
+      col(PAL.ink)
       printB(ellipsize(self.stateFont, entry.title or entry.id, L.textW), tx, ny)
 
       love.graphics.setFont(self.hintFont)

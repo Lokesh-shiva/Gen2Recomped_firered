@@ -1159,7 +1159,12 @@ end
 -- across New Game without touching the progress save.
 function Game:writeOptions()
   if not (self.save and self.save.options) then return end
-  SaveData.saveOptions(self.save.options)
+  -- The generation this playthrough belongs to, so a row it overrides is
+  -- written back into that override rather than over everyone else's shared
+  -- value (SaveData.saveOptions / src/core/GenOptions.lua).  Nil for a game
+  -- with no overrides in play, which is the pre-existing behaviour.
+  local gen = SaveData.generationOf and SaveData.generationOf(nil) or nil
+  SaveData.saveOptions(self.save.options, nil, gen)
 end
 
 -- Push the live options table into audio + display subsystems.

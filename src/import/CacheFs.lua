@@ -234,8 +234,68 @@ local function resolvePortableRoot()
   return portableRoot
 end
 
+-- The player's chosen game-data folder when the cache should live there,
+-- else nil.  Same two requirements as portable mode -- a windowless mkdir and
+-- a folder love.filesystem can be made to READ back -- because the cache is
+-- written with io.* and then read by require/newImage, and a folder that only
+-- half satisfies that is an import that appears to succeed and a game that
+-- cannot find its own data.
+--
+-- Unlike the portable folder this one is never the physfs source, so the
+-- mount is not an optimisation: without it a fused build writes a perfectly
+-- good cache nothing can read.  Failing the mount therefore falls back to the
+-- save directory rather than proceeding into that trap.
+local customRoot = nil
+local customResolved = false
+local function resolveCustomRoot()
+  if customResolved then return customRoot end
+  customResolved = true
+  customRoot = nil
+  if not resolveMkdir() then return nil end
+  local ok, base = pcall(function()
+    return require("src.core.SaveData").dataDir()
+  end)
+  if not (ok and base) then return nil end
+  if love.filesystem.getSource and base == love.filesystem.getSource() then
+    customRoot = base
+  elseif mountReadable(base) then
+    customRoot = base
+  else
+    pcall(function()
+      require("src.core.Logger").warn(
+        "game-data folder %s could not be mounted; using the save directory",
+        tostring(base))
+    end)
+  end
+  return customRoot
+end
+
+-- PORTABLE FIRST.  A portable copy has already said where it keeps its
+-- things, and it says so with a file sitting next to the executable, which
+-- beats a line in an options file the portable copy may not even be reading.
 function CacheFs.root()
-  return resolvePortableRoot()
+  return resolvePortableRoot() or resolveCustomRoot()
+end
+
+-- Drop the resolved root so the next call re-reads the setting.  Called when
+-- the player changes the game-data folder, which is why it does not also
+-- unmount: the old folder stays on the physfs read path for this process, and
+-- a read path with a folder on it nothing asks about is harmless, whereas
+-- unmounting a folder an open image was streamed from is not.
+function CacheFs.forgetRoot()
+  customResolved = false
+  customRoot = nil
+end
+
+-- Create a real directory (and only that one -- no parents), for callers
+-- outside this module that need the same windowless mkdir: SaveData proves a
+-- chosen game-data folder is writable and may have to create it first.
+function CacheFs.mkdirReal(path)
+  if type(path) ~= "string" or path == "" then return false end
+  local mkdir = resolveMkdir()
+  if not mkdir then return false end
+  mkdir(path)
+  return true
 end
 
 local function realPath(root, rel)
