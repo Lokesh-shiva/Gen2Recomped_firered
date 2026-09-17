@@ -272,6 +272,9 @@ end
 -- ------- repl
 
 function Console:exec(line)
+  -- Clipboard selections from a code block often carry a leading/trailing
+  -- newline.  Treat that as formatting around the command, not Lua syntax.
+  line = line:gsub("^%s+", ""):gsub("%s+$", "")
   self:print("> " .. line)
   if line:match("^%s*$") then return end
   self.history[#self.history + 1] = line

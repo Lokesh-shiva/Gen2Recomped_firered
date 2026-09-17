@@ -30,6 +30,9 @@ return function(game)
   love.keyboard.isDown = oldIsDown
   assert(console.buffer:sub(-22) == " warp MAP_G03_N00 10 10 ",
     "Ctrl+V did not paste clipboard text into the console")
+  console:exec("  help  ")
+  assert(console.lines[#console.lines] == "anything else = lua",
+    "console did not trim whitespace around a pasted command")
   U.log("PASS console accepts native text input")
   love.event.quit(0)
 end
