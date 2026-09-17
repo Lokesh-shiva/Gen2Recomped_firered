@@ -14,6 +14,17 @@ local Strings = require("src.core.Strings")
 
 local Commands = {}
 
+-- Gen3ScriptVM rows are dispatched through this shared registry. Keep the
+-- wild setup verbs available even when the optional Gen3 module is loaded
+-- lazily, as happens during imported FireRed map scripts.
+function Commands.g3_set_wild(ctx, species, level, item)
+  return require("src.script.Gen3Commands").g3_set_wild(ctx, species, level, item)
+end
+
+function Commands.g3_wild_battle(ctx)
+  return require("src.script.Gen3Commands").g3_wild_battle(ctx)
+end
+
 -- "mod:" keys route to save.modData[owner], the mod-private namespace
 -- (09 §4.8); owner comes from the dispatching contribution's source
 -- attribution, so an engine-owned script using one is a script error
@@ -1801,6 +1812,17 @@ function Commands.registerInto(registry, _, owner)
     if type(fn) == "function" and not NOT_VERBS[verb] then
       registry:register(verb, fn, owner)
       registered[verb] = fn
+    end
+  end
+  -- Imported Gen3 rows share ScriptRunner's command registry. Register their
+  -- handlers here so generated FireRed events cannot silently skip battle
+  -- verbs when the Gen3 module is loaded lazily.
+  local ok, Gen3 = pcall(require, "src.script.Gen3Commands")
+  if ok and Gen3 then
+    for verb, fn in pairs(Gen3) do
+      if type(fn) == "function" and verb:sub(1, 3) == "g3_" then
+        registry:register(verb, fn, owner)
+      end
     end
   end
 end
