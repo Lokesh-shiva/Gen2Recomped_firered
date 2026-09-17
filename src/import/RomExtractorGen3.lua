@@ -22283,10 +22283,40 @@ function RomExtractorGen3:fieldMoveGates(scripts)
     elseif n == best then tied = true end
   end
   if not base or best < 2 or tied then
-    Logger.warn("Gen3 field moves: %d script gate(s) agreed on a badge block "
-                  .. "and it was%s unique -- not placing it",
-                best, tied and " not" or "")
-    return
+    -- FIRERED/LEAFGREEN'S OWN FIELD MOVES BARELY TOUCH SCRIPT BYTECODE.
+    --
+    -- The vote above only sees badges checked by `checkflag`+`checkpartymove`
+    -- in a MAP SCRIPT -- CUT's tree and ROCK SMASH's rock are scripted that
+    -- way, so they vote. FLASH, FLY, SURF, STRENGTH and WATERFALL are asked
+    -- for entirely in native code (SetUpFieldMove_Flash and siblings, called
+    -- straight from the party menu with no script in between), so they leave
+    -- no candidate at all. On this ROM that left only one script-based vote,
+    -- which the check above correctly refuses to trust alone -- and without
+    -- a base, `knowsFieldMove` can never find FLASH/FLY/DIVE in the party
+    -- menu's field-move list no matter what the mon knows, even though the
+    -- object-triggered moves (CUT/SMASH/STRENGTH/SURF/WATERFALL) keep working
+    -- fine through their own scripts.
+    --
+    -- FLAG_BADGE01_GET is $820 on every FireRed/LeafGreen revision (pret's
+    -- include/constants/flags.h) -- it is not a ROM-derived value this port
+    -- discovers, it is a fixed fact about this game's binary layout, the same
+    -- one already hardcoded in tests/drivers/_frlg_hms.lua's badge setup.
+    -- Falling back to it here only for FRLG (never for Emerald/Ruby/Sapphire,
+    -- where this constant does not hold and the heuristic is the only source)
+    -- is corroboration by a second, independent fact instead of a guess.
+    if self:isFireRedManifest() then
+      base = 0x820
+      Logger.info("Gen3 field moves: %d script gate(s) agreed and it was%s "
+                    .. "unique, but this is FireRed/LeafGreen -- falling "
+                    .. "back to FLAG_BADGE01_GET ($820), the pret constant, "
+                    .. "instead of leaving FLASH/FLY/DIVE unreachable",
+                  best, tied and " not" or "")
+    else
+      Logger.warn("Gen3 field moves: %d script gate(s) agreed on a badge "
+                    .. "block and it was%s unique -- not placing it",
+                  best, tied and " not" or "")
+      return
+    end
   end
   local moves, badges = {}, {}
   for i = 1, 8 do badges[i] = base + i - 1 end
