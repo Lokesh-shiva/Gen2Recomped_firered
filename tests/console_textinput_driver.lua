@@ -21,6 +21,15 @@ return function(game)
   console:onTextInput("_")
   assert(console.buffer == "READY_SET_",
     "native underscore duplicated the console fallback")
+  local oldClipboard = love.system.getClipboardText
+  local oldIsDown = love.keyboard.isDown
+  love.system.getClipboardText = function() return " warp MAP_G03_N00 10 10 " end
+  love.keyboard.isDown = function(key) return key == "lctrl" end
+  console:onKeyPressed("v")
+  love.system.getClipboardText = oldClipboard
+  love.keyboard.isDown = oldIsDown
+  assert(console.buffer:sub(-22) == " warp MAP_G03_N00 10 10 ",
+    "Ctrl+V did not paste clipboard text into the console")
   U.log("PASS console accepts native text input")
   love.event.quit(0)
 end

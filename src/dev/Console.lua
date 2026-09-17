@@ -32,6 +32,11 @@ local function shiftDown()
     and (love.keyboard.isDown("lshift") or love.keyboard.isDown("rshift"))
 end
 
+local function ctrlDown()
+  return love and love.keyboard and love.keyboard.isDown
+    and love.keyboard.isDown("lctrl", "rctrl", "lgui", "rgui")
+end
+
 -- one-line pretty printer with a depth fuse, for expression results
 local function pp(value, depth)
   depth = depth or 0
@@ -336,7 +341,12 @@ end
 -- ------- input & drawing
 
 function Console:onKeyPressed(key)
-  if key == "`" then
+  if key == "v" and ctrlDown() then
+    local ok, text = pcall(love.system.getClipboardText)
+    if ok and type(text) == "string" then
+      self.buffer = self.buffer .. text:gsub("[\r\n]", " ")
+    end
+  elseif key == "`" then
     self:stopTrace()
     self.game.stack:pop()
   elseif key == "return" or key == "kpenter" then
