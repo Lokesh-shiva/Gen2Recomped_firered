@@ -569,8 +569,36 @@ function ManagerState:_runImportReady(m, entry)
     -- nobody can see, on the one press that was supposed to start the work.
     return Strings("%s IS NOT AVAILABLE", tostring(entry.onReady):upper())
   end
+
+  -- ONCE PER FAILURE, AND NEVER RE-ENTERED.
+  --
+  -- What this calls is the mod's own heavy work: for a disc it loads a dozen
+  -- extractor modules, swaps render pipelines and resets its caches, all
+  -- synchronously, inside a menu press.  A run that fails PART WAY can leave
+  -- the mod holding half of that -- and a row a player presses again because
+  -- nothing visibly happened will do it again, and again, each time on top of
+  -- the last.  The engine cannot make a mod's init re-entrant, but it can
+  -- refuse to be the thing that calls it repeatedly.
+  --
+  -- A success clears the mark, because succeeding twice is what a rebuild IS.
+  -- A failure holds it until the drawer is reopened, which is the player
+  -- deliberately coming back rather than pressing the same row twice.
+  self._readyRuns = self._readyRuns or {}
+  local mark = tostring(m.id) .. "/" .. tostring(entry.id)
+  if self._readyRuns[mark] == "running" then
+    return Strings("ALREADY WORKING")
+  end
+  if self._readyRuns[mark] then
+    return Strings("%s -- REOPEN THIS PAGE TO TRY AGAIN"):format(
+      tostring(self._readyRuns[mark]))
+  end
+  self._readyRuns[mark] = "running"
+
   local ok, result, detail = pcall(fn)
-  if not ok then return Strings("FAILED: %s", tostring(result)) end
+  if not ok then
+    self._readyRuns[mark] = Strings("FAILED")
+    return Strings("FAILED: %s", tostring(result))
+  end
   -- A mod's export answers (ok, message) or (ok, <its own status table>).  A
   -- string is what to show; a TABLE is a status record, and the reason the
   -- work stopped is inside it.
@@ -611,6 +639,11 @@ function ManagerState:_runImportReady(m, entry)
       Logger.flush()
     end)
   end
+  if result == false then
+    self._readyRuns[mark] = Strings("DID NOT FINISH")
+  else
+    self._readyRuns[mark] = nil     -- succeeding twice is what a rebuild IS
+  end
   local said = explain(detail) or explain(result)
   if said then
     -- The menu draws in a Game Boy face at a fixed width, so a paragraph is a
@@ -624,6 +657,13 @@ function ManagerState:_runImportReady(m, entry)
   if result == false then return Strings("%s DID NOT FINISH",
                                          tostring(entry.onReady):upper()) end
   return Strings("DONE")
+end
+
+-- Clear the marks, so reopening the page is a fresh attempt.  Called where the
+-- drawer opens: coming back to it is a deliberate act, pressing the same row
+-- twice in a row is not.
+function ManagerState:_clearImportReadyMarks()
+  self._readyRuns = nil
 end
 
 function ManagerState:_pollImport()
@@ -1175,6 +1215,10 @@ function ManagerState:buildOptionRows(m, schema)
 end
 
 function ManagerState:openOptions(m)
+  -- Opening the page is a deliberate return, so a base-file action that failed
+  -- last time may be attempted again; pressing the same row twice in a row is
+  -- not, and is what the marks refuse (see _runImportReady).
+  self:_clearImportReadyMarks()
   local schema = self:schemaFor(m)
   if not schema then
     if not ModImports.of(m) then
