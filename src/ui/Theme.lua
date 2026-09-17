@@ -19,7 +19,7 @@ local Theme = {
   -- FireRed's YES/NO menu is one tile farther left and wider than the
   -- compact Gen1 default; this keeps both labels and the cursor inside the
   -- framed box on the Poké Flute confirmation.
-  choiceBox = { tx = 13, ty = 7, tw = 7, th = 5 },
+  choiceBox = { tx = 13, ty = 7, tw = 7, th = 6 },
 }
 
 -- THE SURFACE THIS DATASET'S SCREEN FURNITURE NEEDS.
