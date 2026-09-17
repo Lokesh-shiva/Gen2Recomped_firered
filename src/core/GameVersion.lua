@@ -912,7 +912,7 @@ GameVersion.VERSIONS = {
 -- put a Game Boy Advance game behind two Game Boy Color hacks, and broke the
 -- ordering rule tests/polished_crystal_registration_test.lua asserts.
 GameVersion.ORDER = { "red", "blue", "yellow", "gold", "silver", "crystal",
-                      "emerald", "prism", "polishedcrystal" }
+                      "firered", "emerald", "prism", "polishedcrystal" }
 
 GameVersion.current = "red"
 

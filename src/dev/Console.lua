@@ -15,20 +15,8 @@ local COLS = 19          -- 160px canvas minus the border
 local HISTORY_MAX = 64
 local SCROLLBACK_MAX = 200
 
--- keypressed names -> characters; the console types from key events because
--- love.textinput never reaches Game.  Shift reads the live keyboard.
-local KEY_CHARS = {
-  space = "  ", ["1"] = "1!", ["2"] = "2@", ["3"] = "3#", ["4"] = "4$",
-  ["5"] = "5%", ["6"] = "6^", ["7"] = "7&", ["8"] = "8*", ["9"] = "9(",
-  ["0"] = "0)", ["-"] = "-_", ["="] = "=+", ["["] = "[{", ["]"] = "]}",
-  ["\\"] = "\\|", [";"] = ";:", ["'"] = "'\"", [","] = ",<", ["."] = ".>",
-  ["/"] = "/?",
-}
-
-local function shiftDown()
-  return love and love.keyboard and love.keyboard.isDown
-    and (love.keyboard.isDown("lshift") or love.keyboard.isDown("rshift"))
-end
+-- Printable input arrives through love.textinput, which is the only path
+-- that preserves Caps Lock, non-US layouts, composed characters and paste.
 
 -- one-line pretty printer with a depth fuse, for expression results
 local function pp(value, depth)
@@ -359,17 +347,11 @@ function Console:onKeyPressed(key)
       math.max(0, #self.lines - ROWS))
   elseif key == "pagedown" then
     self.scroll = math.max(0, self.scroll - ROWS)
-  else
-    local chars = KEY_CHARS[key]
-    if chars then
-      local index = shiftDown() and 2 or 1
-      self.buffer = self.buffer .. chars:sub(index, index)
-    elseif key:match("^%a$") then
-      self.buffer = self.buffer .. (shiftDown() and key:upper() or key)
-    elseif key:match("^kp%d$") then
-      self.buffer = self.buffer .. key:sub(3)
-    end
   end
+end
+
+function Console:onTextInput(text)
+  self.buffer = self.buffer .. text
 end
 
 function Console:update() end

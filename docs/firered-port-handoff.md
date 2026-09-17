@@ -6,6 +6,7 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+550e1bc FireRed: finish League and Sevii progression
 0461595 FireRed: elevator window view, Bill's teleporter, S.S. Anne departure
 1941926 FireRed: missing art scenes, NPC/clone fixes, HM checks, port card
 1ea63de FireRed: own tile behaviours, every script special, Trainer Tower, HoF and credits
@@ -291,6 +292,20 @@ cracked ice, and Trainer Tower's eight floor initializations, timer record and
 prize. This coverage operates on an isolated fresh save and does not write to
 disk.
 
+## Launcher and developer-console regressions — verified 2026-09-17
+
+FireRed is now an official launcher tab before Emerald, with its own
+red-orange accent. It is included in `GameVersion.ORDER`, so readiness,
+import, save-slot selection and the launcher counter all use the same version
+list. `tests/firered_launcher_driver.lua` verifies its placement and
+importability.
+
+The developer console no longer synthesizes printable keys from key names.
+`love.textinput` is forwarded through `Game` to the active overlay, which
+preserves Caps Lock, keyboard-layout symbols, composed text and paste.
+`tests/console_textinput_driver.lua` asserts an uppercase identifier with an
+underscore reaches the console unchanged.
+
 ## Not yet done / not yet tested this playthrough
 
 Ordered roughly by what blocks a real playthrough:
@@ -327,7 +342,9 @@ Ordered roughly by what blocks a real playthrough:
   `tests/frlg_rocket_traversal_driver.lua`, and
   `tests/frlg_mtmoon_battle_placement_driver.lua`,
   `tests/frlg_champion_driver.lua`, `tests/frlg_hall_of_fame_driver.lua`, and
-  `tests/frlg_sevii_progression_driver.lua`) have narrow `.gitignore` exceptions
+  `tests/frlg_sevii_progression_driver.lua`,
+  `tests/firered_launcher_driver.lua`, and
+  `tests/console_textinput_driver.lua`) have narrow `.gitignore` exceptions
   so they can be retained; other scratch tests stay ignored. Changes from
   2026-09-16 are uncommitted.
 - Loose top-level `frlg_*.png` files in the repo root are old manual

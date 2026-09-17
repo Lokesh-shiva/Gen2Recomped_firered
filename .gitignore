@@ -117,6 +117,8 @@ mobile/ios/bundle_id.local
 !/tests/frlg_champion_driver.lua
 !/tests/frlg_hall_of_fame_driver.lua
 !/tests/frlg_sevii_progression_driver.lua
+!/tests/console_textinput_driver.lua
+!/tests/firered_launcher_driver.lua
 /mods/*
 
 # ...EXCEPT THE ONES THAT SHIP WITH THE LAUNCHER.
