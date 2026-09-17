@@ -6,6 +6,9 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+249aed8 FireRed: fix FLASH/FLY/DIVE badge gate never placing (party menu HMs dead)
+051a900 Docs: verify the naming-screen mon icon through a real catch
+0e36dc7 Docs: log the naming-screen icon fix's real-flow verification
 9de1fa0 Draw the naming screen's player/Pokémon icon (naming_screen.c sIconFunctions)
 806eb0a Docs: close the two start-flow reports, neither reproduced (item 2 later found wrong, see below)
 5376018 Docs: log FireRed start flow issues
@@ -309,21 +312,57 @@ preserves Caps Lock, keyboard-layout symbols, composed text and paste.
 `tests/console_textinput_driver.lua` asserts an uppercase identifier with an
 underscore reaches the console unchanged.
 
+## Flash and Fly HMs — fixed and verified 2026-09-17
+
+Both were previously untested and, it turned out, both were actually dead
+from the party menu: `Gen3PartyMenu:flashUsableBy`/`:flyUsableBy` (and
+`:knowsFieldMove` under them) gate every badge-locked field move through
+`constants.gen3FieldMoves`, which `RomExtractorGen3:fieldMoveGates` derives
+by finding `checkflag`+`checkpartymove` pairs in map scripts and voting on
+which badge-flag block they agree on. On this ROM the vote only ever found
+**one** script-based candidate (CUT and ROCK SMASH are scripted at their map
+objects; FLASH/FLY/SURF/STRENGTH/WATERFALL are asked for in native code —
+`SetUpFieldMove_Flash` and siblings — with no script bytecode to find at
+all), and the heuristic's own safety check correctly refuses to trust a
+single vote. So `gen3FieldMoves` came back empty and FLASH/FLY/DIVE were
+unreachable from the party menu no matter what the party knew, even though
+CUT/ROCK_SMASH/STRENGTH/SURF/WATERFALL kept working fine through their
+separate *object-script* path (which is why those five tested clean earlier
+and this pair didn't get caught until now).
+
+**Fix** (`src/import/RomExtractorGen3.lua`, `fieldMoveGates`): when the
+script vote can't clear its own bar, fall back to `FLAG_BADGE01_GET = $820`
+— a fixed fact about every FireRed/LeafGreen revision (pret's
+`include/constants/flags.h`), not a value this port derives, and already
+relied on elsewhere in this port (`tests/drivers/_frlg_hms.lua`'s badge
+setup). Gated to `isFireRedManifest()` so Ruby/Sapphire/Emerald — where this
+constant does not hold — keep using the heuristic untouched.
+
+Verified with `tests/drivers/_frlg_flash_fly.lua` (mods off, forced
+reimport): FLASH now lights Rock Tunnel's full radius from the party menu
+(`ngshots/hmff_01_flash_before.png` → `hmff_03_flash_after.png`,
+`flashUsableBy` false → true). FLY now opens FireRed's own "FLY TO?" list
+picker (`ngshots/hmff_05_fly_region_map.png`, `flyUsableBy` false → true) —
+correctly the Kanto list, not Hoenn's interactive region map (that split is
+intentional, see `Gen3PartyMenu:flyUsableBy`'s own header comment); it
+showed "Nothing here" because a fresh save has no flown-to towns flagged
+yet, which is the cartridge's own behaviour, not a bug. A real "fly to an
+already-visited town and land there" round trip wasn't driven this pass —
+worth doing once there's a save with an actual destination flagged.
+
 ## Not yet done / not yet tested this playthrough
 
 Ordered roughly by what blocks a real playthrough:
 
-1. **Flash and Fly HMs** — not driven by any test yet (Cut/Rock
-   Smash/Strength/Surf/Waterfall/Bike were).
-2. **Poké Flute / Snorlax, VS Seeker, Safari Zone, save/load round-trip** —
+1. **Poké Flute / Snorlax, VS Seeker, Safari Zone, save/load round-trip** —
    none of these have been touched this pass; unknown state.
-3. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
+2. **Diagonal side-stair walk-in animation** (`ExitStairsMovement` in
    pokefirered `field_fadetransition.c`) — arrival facing is correct but the
    16-frame walk-in slide itself isn't drawn.
-4. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
+3. **Credits' mon silhouette/circle-zoom reveal** — currently draws a plain
    shrinking white circle instead of the three-silhouette-then-reveal effect
    `DoCreditsMonScene` does.
-5. **S.S. Anne wake trail + smoke puffs** during the departure (separate
+4. **S.S. Anne wake trail + smoke puffs** during the departure (separate
    from the sprite-corruption bug above — even once the ship moves cleanly,
    `CreateWakeBehindBoat`/`CreateSmokeSprite` aren't reproduced).
 
