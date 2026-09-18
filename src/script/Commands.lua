@@ -1801,14 +1801,18 @@ local registered = {}
 -- foreground = ..., blocking = ... }.
 function Commands.resolve(data, name)
   if NOT_VERBS[name] then return nil end
+  local record = data and data.commands and data.commands[name]
+  -- A mod-owned registry record must win even for Gen3 verbs. The lazy
+  -- Gen3 fallback below exists only when the registry has no override.
+  if record ~= nil and record ~= registered[name] then
+    if type(record) == "table" then return record.fn, record end
+    if type(record) == "function" then return record, Commands.meta[name] end
+  end
   if type(name) == "string" and name:sub(1, 3) == "g3_"
       and type(Commands[name]) == "function" then
     return Commands[name], Commands.meta[name]
   end
-  local record = data and data.commands and data.commands[name]
-  if record == nil or record == registered[name] then
-    record = Commands[name]
-  end
+  record = Commands[name]
   if type(record) == "table" then return record.fn, record end
   if type(record) ~= "function" then return nil end
   return record, Commands.meta[name]

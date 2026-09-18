@@ -380,4 +380,14 @@ check(mixedData.audio.cries.OLD ~= nil and mixedData.audio.cries.NEW ~= nil,
 check(mixedData.audio.sfx.OLD ~= nil and mixedData.audio.sfx.NEW ~= nil,
   "the whole-table sfx swap and the granular id both survive")
 
+-- Lazy Gen3 loading must not bypass a mod-owned command override.  The
+-- registry record is intentionally a different function from the engine
+-- handler, which is the case for an api-2 override after catalog merge.
+local commandOverride = function() return "mod-command" end
+local resolved = Commands.resolve({ commands = {
+  g3_set_wild = commandOverride,
+} }, "g3_set_wild")
+check(resolved == commandOverride,
+  "Gen3 command overrides keep precedence over lazy engine loading")
+
 S.finish()
