@@ -53,7 +53,7 @@ RomExtractorGen3.__index = RomExtractorGen3
 -- The progress denominator.  Kept honest with the two stage lists below: a
 -- mismatch does not break anything, it just makes the bar lie, which is the
 -- kind of small wrongness that survives for months.
-local STAGE_COUNT = 90
+local STAGE_COUNT = 91
 
 -- ---------------------------------------------------------------------------
 -- The stage tables below are keyed to Emerald's ROM.  A sibling cartridge
@@ -37737,6 +37737,61 @@ function RomExtractorGen3:extractFireRedFieldShadow()
 end
 
 -- ---------------------------------------------------------------------------
+-- FIRERED'S FLY BIRD (field_effect.c FldEff_FlyOut / FldEff_FlyIn):
+-- gFieldEffectObjectPic_Bird is five raw 64x64 4bpp frames using the general
+-- field-effect palette.  The animation table selects frame 1/2 for Red's
+-- fly-out/fly-in and 3/4 for Leaf's; frame 0 is the bird without the player.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.FRLG_FLY_BIRD = { PIC = 0x39D3C8, PAL = 0x35B968 }
+
+function RomExtractorGen3:extractFireRedFlyBird()
+  self:beginStage("Gen3 FireRed fly bird")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local S = RomExtractorGen3.FRLG_FLY_BIRD
+  local rom = self.rom
+  local ok, err = pcall(function()
+    local palRaw = rom:bytes(S.PAL, 32)
+    local pal = {}
+    for i = 0, 15 do
+      pal[i] = { RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256) }
+    end
+    local w, h, frames = 64, 64, 5
+    local frameBytes = w * h / 2
+    local img = ImageWriter.blank(w, h * frames)
+    local raw = rom:bytes(S.PIC, frameBytes * frames)
+    for frame = 0, frames - 1 do
+      local slice = {}
+      local base = frame * frameBytes
+      for i = 1, frameBytes do slice[i] = raw[base + i] end
+      local px = RomGba.tiles4bpp(slice, w / 8, h / 8)
+      for y = 1, h do
+        for x = 1, w do
+          local v = px[y][x]
+          local c = v ~= 0 and pal[v]
+          if c then
+            img:setPixel(x - 1, frame * h + y - 1,
+                         c[1] / 255, c[2] / 255, c[3] / 255, 1)
+          end
+        end
+      end
+    end
+    self:saveImage(img, "field_frlg/fly_bird.png")
+  end)
+  if not ok then Logger.warn("gen3 frlg fly bird: %s", tostring(err)) return end
+  local constants = self._constants or {}
+  constants.gen3FRLGFlyBird = {
+    path = "assets/generated/field_frlg/fly_bird.png",
+    frameWidth = 64, frameHeight = 64, frames = 5,
+    flyOut = { boy = 1, girl = 3 },
+    flyIn = { boy = 2, girl = 4 },
+    source = "ROM:gFieldEffectObjectPic_Bird 039D3C8 + gFieldEffectObjectPalette0 035B968",
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed FLY bird: 5 frames, 64x64")
+end
+
+-- ---------------------------------------------------------------------------
 -- FIRERED'S DUNGEON PREVIEWS (map_preview_screen.c sMapPreviewScreenData):
 -- 28 records of { u8 mapsec, u8 type (0 cave, 1 forest), u16 flag, tiles
 -- (LZ), tilemap (LZ), palette (3 raw rows loaded at bank 13) }.
@@ -46362,6 +46417,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedPocketArt",
   "extractFireRedNaming",
   "extractFireRedFieldShadow",
+  "extractFireRedFlyBird",
   "extractFireRedMapPreviews",
   "extractFireRedSpecialTexts",
   "extractFireRedTrainerTower",

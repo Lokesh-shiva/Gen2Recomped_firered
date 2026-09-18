@@ -4533,15 +4533,16 @@ end
 
 -- IS THERE A BIRD TO CARRY THE PLAYER?
 --
--- Kanto's fly is a bird sprite that sweeps in, and the player is hidden while
--- it does.  Hoenn's cartridge has one too, but nothing in a retail ROM NAMES
--- it, so a Gen 3 dataset carries no `playerSprites.fly` -- and hiding the
--- player for a bird that never arrives is how FLY came to look like nothing
--- happening at all.  Without one the player stays drawn and rises off the map
--- instead, which is the same departure the Teleport spin already uses.
+-- Kanto's fly uses the dedicated gFieldEffectObjectPic_Bird sheet: the
+-- fly-out frames already contain Red/Leaf riding the bird, so the standalone
+-- player is hidden while that effect is active.  Older caches and sibling
+-- datasets may still expose the historical playerSprites.fly form; if neither
+-- exists the player stays drawn and uses the Teleport-like rise fallback.
 function OverworldState:hasFlyBird()
   local id = FieldDefaults.fieldValue(Game.data, "playerSprites", "fly")
-  return (id and Game.data.sprites and Game.data.sprites[id]) and true or false
+  if id and Game.data.sprites and Game.data.sprites[id] then return true end
+  local frlg = Game.data.constants and Game.data.constants.gen3FRLGFlyBird
+  return (frlg and frlg.path) and true or false
 end
 
 -- Close whatever menus are stacked over the map, down to the map itself.
@@ -11947,6 +11948,46 @@ function OverworldState:drawWorld()
   -- the FLY bird sweeping off with the player
   local function fxBird()
     if not self.flyAnim then return end
+    -- FireRed has a dedicated five-frame 64x64 field-effect bird.  Frames 1
+    -- and 3 already contain Red/Leaf riding it during fly-out, so use the
+    -- cartridge sheet directly instead of substituting the selected mon's
+    -- battle front sprite.
+    local frlg = Game.data.constants and Game.data.constants.gen3FRLGFlyBird
+    if frlg and frlg.path then
+      if self.flyBirdImg == nil then
+        local ok, img = pcall(love.graphics.newImage, frlg.path)
+        self.flyBirdImg = ok and img or false
+      end
+      if self.flyBirdImg then
+        local gender = ((Game.save or {}).player or {}).gender == "girl"
+                       and "girl" or "boy"
+        local frame = ((frlg.flyOut or {})[gender]) or (gender == "girl" and 3 or 1)
+        local fw = frlg.frameWidth or 64
+        local fh = frlg.frameHeight or 64
+        self.flyBirdQuads = self.flyBirdQuads or {}
+        if not self.flyBirdQuads[frame] then
+          local iw, ih = self.flyBirdImg:getDimensions()
+          self.flyBirdQuads[frame] = love.graphics.newQuad(
+            0, frame * fh, fw, fh, iw, ih)
+        end
+        local t = math.max(0, math.min(48, 48 - self.flyAnim.frames))
+        local reach = 16
+        local dx, dy
+        if t <= reach then
+          local k = 1 - t / reach
+          dx, dy = -96 * k, -72 * k
+        else
+          local k = (t - reach) / (48 - reach)
+          dx, dy = -120 * k * k, -96 * k * k
+        end
+        local px = math.floor(self.player.px - cam.x + 8 - fw / 2 + dx)
+        local py = math.floor(self.player.py - cam.y + 8 - fh / 2 + dy)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.draw(self.flyBirdImg, self.flyBirdQuads[frame], px, py)
+        require("src.render.PaletteFX").markTrueColor(px, py, fw, fh)
+        return
+      end
+    end
     local birdId = FieldDefaults.fieldValue(Game.data, "playerSprites", "fly")
     if not self.birdSprite and birdId and Game.data.sprites[birdId] then
       local SR = require("src.render.SpriteRenderer")
@@ -11962,7 +12003,9 @@ function OverworldState:drawWorld()
       return
     end
 
-    -- NOBODY NAMES THE CARTRIDGE'S BIRD, SO THE POKEMON FLIES YOU ITSELF.
+    -- Legacy fallback for datasets that predate the ROM-extracted FireRed
+    -- bird above.  Keep it for old caches/other games, but current FireRed
+    -- imports should never reach this branch.
     --
     -- Reported from play, twice: "ensure the animation of the flying type
     -- pokemon swooping up my player plays after the fly hm transition" and
