@@ -59,13 +59,180 @@ function Gen3PlayerPC.words(game, menu)
   return list or {}
 end
 
--- ITEM STORAGE, in the cartridge's order.  The three flows are the older
--- screen's -- see PlayerPC.withdraw and friends.
+-- ---------------------------------------------------------------------------
+-- THE LIST BEHIND THESE ROWS IS THE BAG'S, NOT THE GAME BOY'S.
+--
+-- Reported from play: "after I write withdraw item then the menu where potion
+-- is visible... that menu is gbc color".  It was.  The three flows used to be
+-- taken wholesale from src/ui/PlayerPC.lua, and those push `ListMenu`, which
+-- paints a 160x144 white Game Boy page with the Game Boy font -- so choosing
+-- WITHDRAW ITEM out of a Gen 3 PC dropped the player onto a Kanto screen.
+--
+-- It is the same bug the catching tutorial had ("the bag he opens in the
+-- tutorial is the gen1 bag"), and it has the same answer: Gen3BagMenu already
+-- draws the cartridge's list, frame, description box and quantities, and it
+-- already knows how to show a list that is NOT the bag's own contents and to
+-- hand a pick back instead of using it (`rows` + `pick`/`onPick`, written for
+-- DisplayListMenuID's tutorial arm and for "which berry are you planting").
+-- Item storage is exactly that shape: a list of what is in the PC, and a pick.
+--
+-- WHAT IS REUSED AND WHAT IS NOT.  The store, the capacity rule and the
+-- quantity prompt are unchanged -- they were never the problem -- so this
+-- borrows PlayerPC's own helpers where they are screen-agnostic and replaces
+-- only the screen.  DEPOSIT opens the real bag, which is what the cartridge
+-- opens: you are choosing out of your pockets, not out of the PC.
+local function itemDef(game, id)
+  return (game.data.items or {})[id]
+end
+
+local function itemName(game, id)
+  local def = itemDef(game, id)
+  return (def and def.name) or id
+end
+
+-- A Gen3BagMenu row per stack in `store`, in item order, with the CANCEL the
+-- cartridge ends every one of these lists with.
+local function storageRows(game, store)
+  local ids = {}
+  for id, n in pairs(store) do
+    if (tonumber(n) or 0) > 0 then ids[#ids + 1] = id end
+  end
+  table.sort(ids)
+  local rows = {}
+  for _, id in ipairs(ids) do
+    local def = itemDef(game, id)
+    rows[#rows + 1] = {
+      id = id,
+      label = itemName(game, id),
+      qty = tonumber(store[id]),
+      -- a key item prints no count, here as in the bag
+      important = (def and (def.keyItem or (tonumber(def.importance) or 0) ~= 0))
+                  or nil,
+      description = def and (def.description or def.desc),
+    }
+  end
+  rows[#rows + 1] = { close = true, label = Strings("CANCEL") }
+  return rows
+end
+
+-- The bag screen, showing `rows` under `title` with the pocket switch locked
+-- off: this list is one list, not three pockets.
+local function storageList(game, title, rows, onPick, onCancel)
+  local menu = require("src.ui.Gen3BagMenu").new(game, {
+    rows = rows, pick = true, onPick = onPick, onCancel = onCancel,
+  })
+  menu.pockets = { { key = "ITEM", name = title } }
+  menu.pocket = 1
+  menu.lockPocket = true
+  game.stack:push(menu)
+  return menu
+end
+
+-- Key items and HMs always move one, with no prompt (IsKeyItem in
+-- players_pc.asm, and FireRed's own ItemStorage arm does the same).
+local function askQuantity(game, id, max, cb)
+  local def = itemDef(game, id)
+  if (def and def.keyItem) or tostring(id):find("^HM_") or (max or 1) <= 1 then
+    return cb(1)
+  end
+  game.stack:push(require("src.ui.QuantityBox").new(game, {
+    max = max,
+    onDone = function(qty) if qty then cb(qty) end end,
+  }))
+end
+
+local function say(game, text, after)
+  game.stack:push(require("src.render.TextBox").new(game, text, after))
+end
+
+local function g3Withdraw(game, back)
+  local pc = game.save.pcItems
+  local open
+  open = function()
+    storageList(game, Strings("WITHDRAW ITEM"), storageRows(game, pc),
+      function(id)
+        askQuantity(game, id, pc[id] or 1, function(qty)
+          local Bag = require("src.inventory.Bag")
+          if not Bag.add(game.save, id, qty, game.data) then
+            return say(game, Strings("You can't carry\nany more items."), open)
+          end
+          pc[id] = (pc[id] or 0) - qty
+          if pc[id] <= 0 then pc[id] = nil end
+          require("src.core.Sound").play(game.data, "Withdraw_Deposit")
+          say(game, Strings("Withdrew\n%s.", itemName(game, id)), open)
+        end)
+      end, back)
+  end
+  open()
+end
+
+-- wNumBoxItems capacity: 50 stacks (PC_ITEM_CAPACITY)
+local function pcFull(game, pc, id)
+  if pc[id] then return false end -- growing an existing stack is fine
+  local cap = (game.data.field or {}).pcItemCap or 50
+  local stacks = 0
+  for _ in pairs(pc) do stacks = stacks + 1 end
+  return stacks >= cap
+end
+
+local function g3Deposit(game, back)
+  local pc = game.save.pcItems
+  local Bag = require("src.inventory.Bag")
+  local open
+  open = function()
+    -- the REAL bag: depositing is choosing out of your own pockets
+    local menu = require("src.ui.Gen3BagMenu").new(game, {
+      pick = true,
+      onCancel = back,
+      onPick = function(id)
+        if Bag.isBadge and Bag.isBadge(id) then return open() end
+        local have = (game.save.inventory or {})[id] or 1
+        askQuantity(game, id, have, function(qty)
+          if pcFull(game, pc, id) then
+            return say(game, Strings("No room left to\nstore items."), open)
+          end
+          Bag.remove(game.save, id, qty)
+          pc[id] = (pc[id] or 0) + qty
+          require("src.core.Sound").play(game.data, "Withdraw_Deposit")
+          say(game, Strings("%s was\nstored via PC.", itemName(game, id)), open)
+        end)
+      end,
+    })
+    game.stack:push(menu)
+  end
+  open()
+end
+
+local function g3Toss(game, back)
+  local pc = game.save.pcItems
+  local open
+  open = function()
+    storageList(game, Strings("TOSS ITEM"), storageRows(game, pc),
+      function(id)
+        local def = itemDef(game, id)
+        if (def and def.keyItem) or tostring(id):find("^HM_") then
+          return say(game, Strings("That's too impor-\ntant to toss!"), open)
+        end
+        askQuantity(game, id, pc[id] or 1, function(qty)
+          say(game, Strings("Toss %s?", itemName(game, id)), function()
+            game.stack:push(require("src.ui.ChoiceBox").new(game, function(yes)
+              if not yes then return open() end
+              pc[id] = (pc[id] or 0) - qty
+              if pc[id] <= 0 then pc[id] = nil end
+              say(game, Strings("Threw away %s.", itemName(game, id)), open)
+            end, { noSound = true }))
+          end)
+        end)
+      end, back)
+  end
+  open()
+end
+
+-- ITEM STORAGE, in the cartridge's order.
 local function itemStorage(game, onCancel)
   local words = Gen3PlayerPC.words(game, "itemStorage")
-  local PC = require("src.ui.PlayerPC")
   game.save.pcItems = game.save.pcItems or {}
-  local flows = { PC.withdraw, PC.deposit, PC.toss }
+  local flows = { g3Withdraw, g3Deposit, g3Toss }
   local rows = {}
   for i, label in ipairs(words) do
     local flow = flows[i]
