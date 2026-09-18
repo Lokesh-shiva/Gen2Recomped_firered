@@ -382,6 +382,23 @@ was `MAP_G03_N00`, landing exactly at `(6,8)`. The driver printed
 `ngshots/fly_roundtrip_01_picker.png`, `_02_field_move.png`,
 `_03_departure.png`, and `_04_arrived.png`.
 
+**FLY rider sprite corrected 2026-09-18.** A visual follow-up found that the
+departure effect was using the selected Pokémon's battle front sprite (the
+fallback in `fxBird`) rather than FireRed's dedicated field-effect bird. The
+reference `FldEff_FlyOut` creates `FLDEFFOBJ_BIRD` from
+`gFieldEffectObjectPic_Bird`; its five 64x64 frames are bird-only, Red fly-out,
+Red fly-in, Leaf fly-out and Leaf fly-in, with fly-out selected by
+`playerGender * 2 + 1`. Exact source-data matching against the retail ROM
+located the 0x2800-byte sheet at `0x39D3C8` and
+`gFieldEffectObjectPalette0` at `0x35B968`. `extractFireRedFlyBird` now writes
+that cartridge sheet and records Red/Leaf fly-out frames 1/3; `fxBird` prefers
+it and therefore hides the separate player exactly as the existing fly draw
+path expects. A forced retail-ROM reimport succeeded, the same end-to-end FLY
+driver again printed `PASS FLY round trip MAP_G03_N00 ... 6 8`, and the fresh
+`ngshots/fly_roundtrip_03_departure.png` was visually checked: it shows the
+FireRed rider-bird rather than Pidgeot's battle sprite, with no duplicate
+player underneath.
+
 ## Final handoff checklist — closed 2026-09-17
 
 The gameplay-verification block (Snorlax, Safari, save/load and V.S. Seeker)
