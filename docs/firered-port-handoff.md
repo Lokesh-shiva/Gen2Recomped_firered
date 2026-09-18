@@ -6,6 +6,8 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+d8b92bc FireRed: open Town Map for FLY
+7331cfd Docs: close FireRed final handoff checklist
 a266457 FireRed: close gameplay and visual parity gaps
 d6cba1c FireRed: implement V.S. Seeker rematches
 72e94be FireRed: credit Tranzue for the port
@@ -352,17 +354,31 @@ relied on elsewhere in this port (`tests/drivers/_frlg_hms.lua`'s badge
 setup). Gated to `isFireRedManifest()` so Ruby/Sapphire/Emerald — where this
 constant does not hold — keep using the heuristic untouched.
 
-Verified with `tests/drivers/_frlg_flash_fly.lua` (mods off, forced
-reimport): FLASH now lights Rock Tunnel's full radius from the party menu
-(`ngshots/hmff_01_flash_before.png` → `hmff_03_flash_after.png`,
-`flashUsableBy` false → true). FLY now opens FireRed's own "FLY TO?" list
-picker (`ngshots/hmff_05_fly_region_map.png`, `flyUsableBy` false → true) —
-correctly the Kanto list, not Hoenn's interactive region map (that split is
-intentional, see `Gen3PartyMenu:flyUsableBy`'s own header comment); it
-showed "Nothing here" because a fresh save has no flown-to towns flagged
-yet, which is the cartridge's own behaviour, not a bug. A real "fly to an
-already-visited town and land there" round trip wasn't driven this pass —
-worth doing once there's a save with an actual destination flagged.
+Initial verification with `tests/drivers/_frlg_flash_fly.lua` (mods off,
+forced reimport) proved FLASH lights Rock Tunnel's full radius from the party
+menu (`ngshots/hmff_01_flash_before.png` → `hmff_03_flash_after.png`,
+`flashUsableBy` false → true) and proved FLY becomes usable, but that pass did
+not have a visited town to drive a real destination/landing round trip.
+
+**FLY round trip closed 2026-09-18.** A follow-up
+`tests/drivers/_frlg_fly_roundtrip.lua` intentionally did not seed
+`save.visited`: it entered a real imported FLY town first, letting the normal
+map-entry path set the visited flag, then moved to Route 1 and invoked FLY from
+a level-60 Pidgeot through `Gen3PartyMenu:useFieldMove`. That exposed one real
+bug: `OverworldState:openRegionMap` required Hoenn's
+`gen3MapSectionRects/gen3RegionMapPlaces` before opening any Gen 3 map, so
+FireRed's already-imported `gen3FRLGRegionMap` was rejected and FLY silently
+fell back to the generic text `FlyMenu`. Commit `d8b92bc` accepts either
+Hoenn's section data or FireRed's own region-map grid.
+
+After the fix the same live driver opens FireRed's cartridge-style Town Map,
+restricts it to the visited destination, runs the Pokémon field-move sweep
+*after* the destination is selected, performs the departure animation and
+lands on the imported heal-location FLY warp. The selected retail-ROM target
+was `MAP_G03_N00`, landing exactly at `(6,8)`. The driver printed
+`PASS FLY round trip MAP_G03_N00 ... 6 8` with exit code 0. Captures are
+`ngshots/fly_roundtrip_01_picker.png`, `_02_field_move.png`,
+`_03_departure.png`, and `_04_arrived.png`.
 
 ## Final handoff checklist — closed 2026-09-17
 
