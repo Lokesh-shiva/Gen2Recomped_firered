@@ -4749,7 +4749,12 @@ function OverworldState:tryPcTile(fx, fy)
         return true
       end
     end
+    -- FireRed's cartridge names the PC behaviour MB_PC ($83).  Newer caches
+    -- contain the extractor's derived value; the literal fallback keeps a
+    -- cache produced before that stage from falling through to the old PC
+    -- menu while still leaving other Gen 3 datasets data-driven.
     local pc = Game.data.constants and Game.data.constants.gen3PcBehaviour
+    if not pc and GameVersion.get() == "firered" then pc = 0x83 end
     if pc and self.map:cellBehaviour(fx, fy) == pc then
       -- ...AND WHAT IT OPENS IS THE CARTRIDGE'S OWN SCRIPT, not this port's
       -- PC menu.  EventScript_PC is what the field runs for this behaviour:
@@ -7526,6 +7531,13 @@ end
 
 function OverworldState:talkTo(npc)
   npc.frozen = true
+  -- Face the player at the interaction boundary.  Gen 3's ordinary
+  -- `callstd 2` scripts still emit FACEPLAYER, but a number of FireRed text
+  -- entries are routed through a hand-ported handler or an older cache that
+  -- has no lowered prologue.  The cartridge always turns the speaker before
+  -- the response, and a script may still immediately override this for a
+  -- deliberate cutscene pose.
+  if npc.facePlayer then npc:facePlayer(self.player) end
   local unfreeze = function() npc.frozen = false end
   local d = npc.def
 
@@ -7671,12 +7683,90 @@ end
 
 local function sameItems(_, items) return items end
 
+-- FireRed's own PC front menu.  This is kept as a runtime fallback because
+-- older FireRed caches do not carry the Emerald-style `gen3PCMenu` record;
+-- routing those caches through openPC used to draw the Game Boy menu even
+-- though all of the Gen 3 storage screens were already present.
+function OverworldState:openGen3PC(onDone)
+  local done = onDone or function() end
+  local Menu = require("src.ui.Menu")
+  local Gen3Commands = require("src.script.Gen3Commands")
+  local constants = Game.data.constants or {}
+  local frlg = constants.gen3FRLGSpecialTexts or {}
+  local text = frlg.pcMenu or {}
+  local flags = Game.save.flags or {}
+  local function has(flag)
+    return flags[Gen3Commands.flagKey(flag)] == true
+  end
+  local player = (Game.save.player and Game.save.player.name) or "RED"
+  local rows, actions = {}, {}
+  local function label(i, fallback)
+    local value = text[i]
+    if type(value) ~= "string" or value == "" then value = fallback end
+    return Strings((value:gsub("{PLAYER}", player)))
+  end
+
+  rows[#rows + 1] = label(has(0x834) and 2 or 1, has(0x834)
+                           and "BILL'S PC" or "SOMEONE'S PC")
+  actions[#actions + 1] = "storage"
+  rows[#rows + 1] = label(3, player .. "'s PC")
+  actions[#actions + 1] = "player"
+  if has(0x829) then
+    rows[#rows + 1] = label(4, "PROF. OAK'S PC")
+    actions[#actions + 1] = "oak"
+  end
+  if has(0x82C) then
+    rows[#rows + 1] = label(5, "HALL OF FAME")
+    actions[#actions + 1] = "hall"
+  end
+  rows[#rows + 1] = label(6, "LOG OFF")
+  actions[#actions + 1] = "off"
+
+  require("src.core.Sound").play(Game.data, "Turn_On_PC")
+  local function reopen()
+    self:openGen3PC(done)
+  end
+  local items = {}
+  for i, row in ipairs(rows) do
+    items[i] = { label = row, onSelect = function()
+      local action = actions[i]
+      if action == "storage" then
+        require("src.core.Sound").play(Game.data, "Enter_PC")
+        Screens.push(Game, "StorageMenu", { onDone = reopen })
+      elseif action == "player" then
+        require("src.core.Sound").play(Game.data, "Enter_PC")
+        Screens.push(Game, "PlayerPC", { order = "player", onDone = reopen })
+      elseif action == "oak" then
+        self:openOaksPC(reopen)
+      elseif action == "hall" then
+        Game.stack:push(TextBox.new(Game,
+          Strings("The HALL OF FAME link is not available in this port."),
+          reopen))
+      else
+        require("src.core.Sound").play(Game.data, "Turn_Off_PC")
+        done()
+      end
+    end }
+  end
+  Game.stack:push(Menu.new(Game, items, {
+    tx = 0, ty = 0, tw = 18, th = #items * 2 + 2,
+    onCancel = function()
+      require("src.core.Sound").play(Game.data, "Turn_Off_PC")
+      done()
+    end,
+    noSound = true,
+  }))
+end
+
 -- The Pokémon Center PC: BILL's PC (boxes), the player's item storage,
 -- and PROF.OAK's dex rating (engine/menus/players_pc.asm,
 -- engine/events/pokedex_rating.asm).  The assembled entries run through
 -- the ui.pc.items hook; LOG OFF is appended after it so a mod cannot
 -- orphan the exit.
 function OverworldState:openPC(onDone)
+  if GameVersion.isGen3() then
+    return self:openGen3PC(onDone)
+  end
   require("src.core.Sound").play(Game.data, "Turn_On_PC")
   local Menu = require("src.ui.Menu")
   local done = onDone or function() end

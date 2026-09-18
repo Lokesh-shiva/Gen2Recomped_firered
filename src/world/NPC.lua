@@ -621,6 +621,27 @@ function NPC:refreshSprite(data)
   self.sprite = SpriteRenderer.new(withBigFlag(resolveSpriteDef(data, self.def.sprite), self.def.sprite, self.def), self.id)
 end
 
+-- Gen 3 stores an object's current elevation separately from its template.
+-- The template is only the initial hint (and is still needed for bridge
+-- objects); ordinary objects must pick up the elevation of the cell they are
+-- standing on before Collision.canMove checks their next step.  Without this
+-- sync every NPC had a nil elevation, so the Gen 3 elevation guard was
+-- bypassed and wanderers could step from dry land into water or across a
+-- bridge seam.
+function NPC:updateElevation(map)
+  if not (map and map.cellElevation) then return end
+  local at = map:cellElevation(self.cellX, self.cellY)
+  if at == nil then return end
+  -- 0 matches anything and 15 means "under a bridge"; neither replaces the
+  -- elevation the object already carries.  A cache imported before object
+  -- elevations were written still gets the template value as its fallback.
+  if at ~= 0 and at ~= 15 then
+    self.elevation = at
+  elseif self.elevation == nil then
+    self.elevation = self.gen3Elevation
+  end
+end
+
 function NPC:facePlayer(player)  local dx = player.cellX - self.cellX
   local dy = player.cellY - self.cellY
   if math.abs(dx) > math.abs(dy) then
@@ -639,6 +660,10 @@ function NPC:shake(frames, onDone)
 end
 
 function NPC:update(map, entities)
+  -- Keep the mover's standing elevation current before every collision test.
+  -- This is deliberately lazy so pooled neighbours and scripted placements
+  -- follow the same rule without needing a second rebuild pass.
+  self:updateElevation(map)
   if self.shakeFrames then
     self.shakeFrames = self.shakeFrames - 1
     self.px = self.cellX * 16 + (math.floor(self.shakeFrames / 2) % 2 == 0 and 1 or -1)
@@ -690,6 +715,7 @@ function NPC:update(map, entities)
       self.moving = false
       self.hopStep = nil
       self.stepFlip = not self.stepFlip
+      self:updateElevation(map)
     end
     return
   end
