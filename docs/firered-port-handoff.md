@@ -6,6 +6,14 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+dd5d701 Gen3: stop the PP-item move picker falling into the Game Boy list
+b8c2292 Docs: re-check the three reopened PC/NPC items live
+921e852 Docs: log the PC item storage fix
+aa9bb40 FireRed: give the PC's item storage FireRed's list, not the Game Boy's
+71343ac Docs: log the directional warp fix and open the pre-PR sweep
+8008c6f FireRed: fire arrow/stair warps from the walk, not the arrival
+9a3fbcf Docs: reopen manual FireRed PC and NPC issues
+d1cedf8 FireRed: use Gen3 PC menu and constrain NPC movement
 eb86f72 FireRed: match naming-screen icons
 384269d Docs: verify FireRed FLY round trip
 d8b92bc FireRed: open Town Map for FLY
@@ -712,14 +720,57 @@ open `Gen3BagMenu` rather than `ListMenu`, a withdrawn POTION moves PC→bag
 (3→2, bag 1), a deposit moves it back (→3), and a toss removes an ANTIDOTE
 (2→1). Screenshots `ngshots/pcitem_03_withdraw.png`, `pcitem_08_toss.png`.
 
-### Still open in this sweep
+### 3. PP-item move picker was the Game Boy list — fixed, `dd5d701`
 
-- The three reopened PC/NPC items below.
-- Remaining Gen 1 leaks found by grep, still to be triaged: `FlyMenu` is kept
-  as a fallback if `openRegionMap` ever declines; `BattleState.lua:3932` keeps
-  a `ListMenu` fallback behind the `Gen3BagMenu` path. Shop, dex, party,
-  summary, box, start menu, main menu, bag and move-learn all already route to
-  their Gen 3 screens through `src/ui/Screens.lua`'s `GEN3_ALIASES`.
+Found by the sweep rather than reported. Using an ETHER/ELIXIR/PP UP out of
+FireRed's bag reaches `BagMenu.useItem`, whose "which move?" step pushed
+`ListMenu` — so a Gen 3 item flow dropped onto a Gen 1 screen halfway
+through. There is no ripped move-picker window to reuse, but `Menu` is
+bordered with the **cartridge's own nine-slice** (`Font.drawBox` prefers the
+extracted `sWindowFrames`; this dataset carries 10 frames and defaults to
+frame 1), so on Gen 3 the pick now uses that window and font with the PP in
+the label. Gen 1/2 keep `ListMenu`. Verified by
+`tests/drivers/_frlg_ether_move.lua`, 2/2, screenshot `ngshots/ether_01.png`.
+
+### 4. Gen 1 / Emerald sweep — where things actually stand
+
+**Routing.** Every screen a FireRed player reaches by name goes through
+`src/ui/Screens.lua`'s `GEN3_ALIASES`: bag, party, summary, start menu, box,
+storage menu, player PC, trainer card, options, dex, dex entry, move-learn and
+the evolution scene. `Gen3Pokedex`/`Gen3DexEntry` delegate again to
+`Gen3PokedexFRLG`, and the title, intro, Hall of Fame and credits each have
+their own `*FRLG` screen. Shop goes to `Gen3ShopMenu`.
+
+**Remaining `ListMenu` (Game Boy) call sites, all triaged:**
+
+| Site | Reachable on FireRed? |
+| --- | --- |
+| `PlayerPC.lua` ×3 | No — Gen 1/2 only now (see item 2 above) |
+| `BagMenu.lua:695` (the bag itself) | No — `Gen3BagMenu` serves the alias |
+| `BagMenu.lua` "which move?" | **Was yes** — fixed in item 3 above |
+| `BoxMenu.lua` ×4 | No — `BoxMenu` aliases to `Gen3BoxMenu` |
+| `ShopMenu.lua` ×2, `PokedexMenu.lua` | No — Gen 3 screens serve these |
+| `FlyMenu.lua` | Only if `openRegionMap` declines; since `d8b92bc` it does not (FireRed's Town Map is accepted), so this is a fallback, not a path |
+| `BattleState.lua:3932` | Fallback behind the `Gen3BagMenu` branch above it |
+| `BindingsMenu.lua` | Engine settings, not a cartridge screen — leave |
+
+**Emerald numbering applied to FireRed** — one real instance found and fixed
+(item 1's `doorTiles`/stairs). The lesson generalises: several imported
+tables are shared between Hoenn and Kanto and a few carry **Hoenn's** byte
+values. When a behaviour-keyed table misbehaves on FireRed, census the
+cartridge's own data before trusting either the table's comment or a pret
+header (`tests/drivers/_frlg_warp_census.lua` is the pattern).
+
+**Gen 3 screens with no FireRed-specific branch at all** (`grep -c
+'firered\|frlg\|FRLG\|FireRed'` = 0): `Gen3StorageMenu`, `Gen3MoveLearnMenu`,
+`Gen3EvolutionState`, `Gen3ItemMenu`, `Gen3StarterSelect`, `Gen3Cutscene`,
+`Gen3DexSearch`, plus the Hoenn-only ones FireRed never opens (`Gen3Contest`,
+`Gen3BerryBlender`, `Gen3PokeblockCase`/`Feed`, `Gen3Pokenav`,
+`Gen3Roulette`, `Gen3EasyChat`, `Gen3WallClock`). The first group is
+**reachable** on FireRed and is drawn from shared Gen 3 art, which is right
+for the storage system and close for the rest; none of them was reported and
+none was verified pixel-for-pixel this pass. That is the honest next place to
+look if more "this screen looks like Emerald" reports come in.
 
 ## Manual verification reopened the PC/NPC issues — 2026-09-18
 
