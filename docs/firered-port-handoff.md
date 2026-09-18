@@ -6,6 +6,8 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+eb86f72 FireRed: match naming-screen icons
+384269d Docs: verify FireRed FLY round trip
 d8b92bc FireRed: open Town Map for FLY
 7331cfd Docs: close FireRed final handoff checklist
 a266457 FireRed: close gameplay and visual parity gaps
@@ -418,7 +420,7 @@ retail-ROM import completed successfully before the three visual drivers were
 rerun; the existing two accepted cache gaps (`data/generated/scenes.lua` and
 `assets/generated/ui/summary_info.png`) remain unchanged.
 
-## Naming-screen icon — now verified through a real catch too — 2026-09-17
+## Naming-screen icon — pixel-exact player/mon + rival complete — 2026-09-18
 
 Item 6 from the previous version of this list (the mon icon, `kind = "mon"`,
 only verified in isolation) is closed. Ran a real wild-battle catch through
@@ -432,10 +434,43 @@ isolated `_frlg_nickname_check.lua` driver, now confirmed end-to-end from an
 actual battle capture rather than a hand-built `mon` table. Party count went
 from 1 to 2 afterward, so the catch itself completed correctly too.
 
-Both halves of the original report (`kind = "player"` through the real
-Oak-speech flow, `kind = "mon"` through a real catch) are now verified
-end-to-end. Nothing left open on this feature except the pixel-exact icon
-placement caveat noted below and the intentionally-skipped rival icon.
+The original player/mon report remains verified end-to-end, and the final
+fidelity caveats are now closed too. `naming_screen.c` does **not** use one
+shared bottom anchor: `NamingScreen_CreatePlayerIcon` creates the 16x32 player
+sprite at centre `(56,37)`, `NamingScreen_CreateMonIcon` creates the 32x32 party
+icon at centre `(56,40)`, and `NamingScreen_CreateRivalIcon` creates its 16x32
+rival sprite at centre `(56,37)`. The port previously used a shared bottom
+anchor of `y=52`, putting the player about one pixel high and the Pokémon icon
+four pixels high. `NamingScreen:drawIcon` now converts those exact cartridge
+centres to LÖVE top-left coordinates using each sprite's real dimensions.
+
+The old "rival icon cannot be extracted" note was also wrong. The retail USA
+ROM contains `sRival_Gfx` as an exact second 0x900-byte copy of Blue's normal
+nine-frame overworld sheet: the ordinary `gObjectEventPic_Blue` copy starts at
+`0x38A428`, while the naming-screen-private copy is at `0x3E1980`.
+`gNamingScreenRival_Pal` is the 32-byte palette at `0xE98004`, immediately
+between `gNamingScreenKeyboard_Pal` (`0xE97FE4`) and
+`gNamingScreenMenu_Pal` (`0xE98024`) exactly as `graphics.c` lays them out.
+`RomExtractorGen3:extractFireRedNaming` now composes that real sheet/palette and
+records the cartridge's `sAnim_Rival` sequence: tile offsets `0,24,0,32` are
+16x32 frame indices `{0,3,0,4}`, held 10 frames each. Oak's NEW NAME branch now
+passes `kind = "rival"`, so the real keyboard flow draws and animates Blue.
+
+Fresh verification after a forced retail-ROM reimport (mods off) reported
+`Gen3 FireRed naming screen: 18 images` (the added eighteenth image is the rival
+sheet). `tests/drivers/_frlg_naming_fidelity.lua` drove the real Oak sequence,
+chose GIRL, captured the player keyboard, deliberately chose NEW NAME instead
+of a rival preset, reached `kind = "rival"`, checked the imported 16x32 / nine
+frame / `{0,3,0,4}` / 10-tick record, and finished with
+`PASS naming fidelity RED GREEN girl`. Visual reads of
+`ngshots/naming_fidelity_player.png`, `naming_fidelity_rival_0.png`, and
+`naming_fidelity_rival_2.png` show Leaf and Blue centred on the plate; the two
+rival captures show different valid animation poses. The real catch driver was
+also rerun after the coordinate correction: it reached `kind = "mon"`,
+`species = "RATTATA"`, party count 2, and the fresh
+`ngshots/catch_02_naming_screen.png` shows Rattata centred at the cartridge's
+`(56,40)` target. There is no remaining naming-icon fidelity caveat from this
+handoff.
 
 ## Start-flow reports checked — one closed, one was a real bug (fixed) — 2026-09-17
 
@@ -474,15 +509,16 @@ this session by actually running the flow and reading back real screenshots
    found the real dispatch table, `sIconFunctions` in `naming_screen.c`:
    `NamingScreen_CreatePlayerIcon` draws the player's own overworld walk
    sprite (south-facing stand frame) next to the question when naming the
-   player or rival, and `NamingScreen_CreateMonIcon` draws the species'
-   bouncing party icon when giving a Pokémon a nickname. This port's
+   player, `NamingScreen_CreateRivalIcon` uses its private animated Blue sheet
+   for a newly-entered rival name, and `NamingScreen_CreateMonIcon` draws the
+   species' bouncing party icon when giving a Pokémon a nickname. This port's
    `src/ui/NamingScreen.lua` had never drawn either — the plate's background
    tiles decode fine (including the green ground-shadow ellipse the icon
    normally stands on), but nothing was ever drawn on top of it, so the
    ellipse sat empty.
 
-   **Fix**: `NamingScreen` now takes `opts.kind` (`"player"` or `"mon"`,
-   plus `opts.species`/`opts.mon` for the mon case) and draws the
+   **Fix**: `NamingScreen` now takes `opts.kind` (`"player"`, `"mon"`, or
+   `"rival"`, plus `opts.species`/`opts.mon` for the mon case) and draws the
    corresponding icon over the plate in both `drawFireRed` and `drawGen3`.
    The player icon resolves the current gender's overworld walk sheet the
    same way `Player:refreshForm` does (`Sprites.playerForm` +
@@ -493,11 +529,11 @@ this session by actually running the flow and reading back real screenshots
    needed outside the world-render pipeline. The mon icon reuses the exact
    resolution `Gen3PartyMenu:iconFor` uses (`data.icons.bySpecies` /
    `data.pokemon[species].icon`, through the `pokemon.icon` mod seam) and
-   the same two-frame bounce. Wired through every real call site:
-   `Gen3OakSpeechFRLG.lua`'s player-naming call (`kind = "player"`; rival
-   naming intentionally left without an icon — the dedicated rival
-   overworld sheet `naming_screen.c` uses isn't extracted by this port, and
-   showing the wrong sprite would be worse than showing none), and the two
+   the same two-frame bounce. The 2026-09-18 fidelity pass additionally
+   extracts FireRed's private rival naming sheet/palette and its four-step
+   animation, and gives Oak's rival NEW NAME keyboard `kind = "rival"`.
+   Wired through every real call site: `Gen3OakSpeechFRLG.lua`'s player- and
+   rival-naming calls, and the two
    nickname sites in `Gen3Commands.lua` plus the caught-mon nickname site in
    `BattleState.lua` (all `kind = "mon", mon = mon`).
 
@@ -505,13 +541,11 @@ this session by actually running the flow and reading back real screenshots
    (`tests/drivers/_frlg_keyboard_check.lua` for `"player"`,
    `tests/drivers/_frlg_nickname_check.lua` for `"mon"`) and reading back
    `ngshots/keyboard_check_01.png` (Red standing on the ground-shadow patch,
-   full colour) and `ngshots/nickname_check_01.png` (Charizard's party icon
-   in the same spot). Icon placement (centred at GBA pixel x=56, bottom
-   anchored around y=52) is an estimate from pokefirered's OAM coordinates
-   for `NamingScreen_CreatePlayerIcon`/`CreateMonIcon` (`~(56,37)`/`~(56,40)`)
-   rather than a pixel-exact port of the OAM tables; it reads correctly in
-   the screenshots but is worth a closer look if it ever looks off by a few
-   pixels against real hardware.
+   full colour) and `ngshots/nickname_check_01.png` (Charizard's party icon).
+   The later fidelity pass replaced the old estimated `y=52` bottom anchor
+   with the exact `CreateSprite` centres from `naming_screen.c`: player/rival
+   `(56,37)`, mon `(56,40)`. See the completed naming-screen section above for
+   the fresh screenshots and the rival-sheet extraction evidence.
 
    **Re-verified against the real full new-game flow, not just the isolated
    drivers above** (`tests/drivers/_frlg_newgame.lua`, mods off): Pikachu
