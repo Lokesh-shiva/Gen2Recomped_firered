@@ -374,7 +374,8 @@ function Speech:run()
     if pick == 1 then
       self:tween("black", 1, 1 / 16)
       self:naming(Strings("RIVAL's NAME?"), rivals[1] or "GREEN",
-                  function(name) player.rival = name end)
+                  function(name) player.rival = name end,
+                  { kind = "rival" })
       self:tween("black", 0, 1 / 16)
     else
       player.rival = rivals[pick - 1] or "GREEN"

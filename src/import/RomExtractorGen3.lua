@@ -37557,6 +37557,12 @@ RomExtractorGen3.FRLG_NAMING = {
   GFX = 0xE980E4, BG_MAP = 0xE982BC,
   KB_MAPS = { upper = 0xE98398, lower = 0xE98458, symbols = 0xE98518 },
   MENU_PAL = 0xE98024, KB_PAL = 0xE97FE4,
+  -- naming_screen.c's private rival sheet is a second exact copy of
+  -- gObjectEventPic_Blue (0x38A428) in the retail ROM.  Its dedicated palette
+  -- sits between gNamingScreenKeyboard_Pal and gNamingScreenMenu_Pal in
+  -- graphics.c.  Keep the private copy/palette here because that is exactly
+  -- what NamingScreen_CreateRivalIcon loads.
+  RIVAL_GFX = 0x3E1980, RIVAL_PAL = 0xE98004,
   SPRITES = {
     back = { 0xE98858, 40, 24, 4 }, ok = { 0xE98A38, 40, 24, 4 },
     frame = { 0xE985D8, 40, 32, 4 },
@@ -37638,10 +37644,50 @@ function RomExtractorGen3:extractFireRedNaming()
       save(key, img)
     end)
   end
+  -- RIVAL's naming icon is not the ordinary object-event sprite at runtime:
+  -- NamingScreen_CreateRivalIcon loads this private 0x900-byte, nine-frame
+  -- sheet with gNamingScreenRival_Pal and animates tile offsets
+  -- 0,24,0,32 for ten frames apiece.  A 16x32 frame is eight tiles, so those
+  -- offsets are frame indices 0,3,0,4.
+  local rivalIcon
+  pcall(function()
+    local w, h, frames = 16, 32, 9
+    local frameBytes = w * h / 2
+    local raw = rom:bytes(N.RIVAL_GFX, frameBytes * frames)
+    local palRaw = rom:bytes(N.RIVAL_PAL, 32)
+    local rpal = {}
+    for i = 0, 15 do
+      rpal[i] = { RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256) }
+    end
+    local img = ImageWriter.blank(w, h * frames)
+    for frame = 0, frames - 1 do
+      local slice = {}
+      local base = frame * frameBytes
+      for i = 1, frameBytes do slice[i] = raw[base + i] end
+      local px = RomGba.tiles4bpp(slice, w / 8, h / 8)
+      for y = 1, h do
+        for x = 1, w do
+          local v = px[y][x]
+          local col = v ~= 0 and rpal[v]
+          if col then
+            img:setPixel(x - 1, frame * h + y - 1,
+                         col[1] / 255, col[2] / 255, col[3] / 255, 1)
+          end
+        end
+      end
+    end
+    save("rival", img)
+    rivalIcon = {
+      image = images.rival, frameWidth = w, frameHeight = h, frames = frames,
+      animation = { 0, 3, 0, 4 }, frameTicks = 10,
+      source = "ROM:naming_screen.c sRival_Gfx 03E1980 + gNamingScreenRival_Pal 0E98004",
+    }
+  end)
   local function c(i) local t = pal[i] return { t[1], t[2], t[3] } end
   local constants = self._constants or {}
   constants.gen3FRLGNaming = {
     images = images,
+    rivalIcon = rivalIcon,
     colors = {
       fill = { upper = c(10 * 16 + 13), lower = c(10 * 16 + 14), symbols = c(10 * 16 + 15) },
       key = { c(10 * 16 + 1), c(10 * 16 + 2) },

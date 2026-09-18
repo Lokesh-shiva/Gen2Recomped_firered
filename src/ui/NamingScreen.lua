@@ -37,10 +37,11 @@ NamingScreen.__index = NamingScreen
 NamingScreen.isOpaque = true
 
 -- naming_screen.c's sIconFunctions: the plate to the left of the question
--- ("YOUR NAME?" / "NICKNAME?") carries a small icon of whoever is being
--- named -- the player's own overworld sprite (NamingScreen_CreatePlayerIcon)
--- or, when naming a caught Pokémon, that species' bouncing party icon
--- (NamingScreen_CreateMonIcon).  Reported from play: "in keyboard typing
+-- ("YOUR NAME?" / "NICKNAME?" / "RIVAL's NAME?") carries a small icon of
+-- whoever is being named -- the player's own overworld sprite
+-- (NamingScreen_CreatePlayerIcon), the dedicated rival sheet
+-- (NamingScreen_CreateRivalIcon), or, when naming a caught Pokémon, that
+-- species' bouncing party icon (NamingScreen_CreateMonIcon). Reported from play: "in keyboard typing
 -- there's only a green patch.... above that there should be player sprite
 -- and if pokemon name is typing then the pokemon sprite" -- this port drew
 -- the plate's background tiles but never the OAM sprite the cartridge lays
@@ -110,6 +111,21 @@ local function monIconFrame(game, species, t)
     and (math.floor((t % (ICON_PERIOD * frames)) / ICON_PERIOD) % frames)
     or 0
   return img, iw, frameH, frame
+end
+
+local function rivalIconFrame(game, t)
+  local data = game and game.data
+  local naming = data and data.constants and data.constants.gen3FRLGNaming
+  local rec = naming and naming.rivalIcon
+  if not (rec and rec.image) then return nil end
+  local img = loadIconImage(rec.image)
+  if not img then return nil end
+  local fw = math.floor(tonumber(rec.frameWidth) or 16)
+  local fh = math.floor(tonumber(rec.frameHeight) or 32)
+  local anim = rec.animation or { 0, 3, 0, 4 }
+  local seconds = (tonumber(rec.frameTicks) or 10) / 60
+  local step = math.floor((t % (seconds * #anim)) / seconds) + 1
+  return img, fw, fh, anim[step] or 0
 end
 
 -- SGB: generic whole-screen palette (SET_PAL_GENERIC)
@@ -312,9 +328,9 @@ function NamingScreen.new(game, opts)
   self.maxLen = opts.maxLen or 7
   self.default = opts.default
   self.onDone = opts.onDone
-  -- who the plate's icon is of: "player" (own overworld sprite) or "mon"
-  -- (nickname screens, the species' party icon) -- see playerIconFrame /
-  -- monIconFrame above
+  -- who the plate's icon is of: "player" (own overworld sprite), "rival"
+  -- (FireRed's private animated Blue sheet), or "mon" (nickname screens, the
+  -- species' party icon) -- see the icon helpers above
   self.kind = opts.kind
   self.species = opts.species or (opts.mon and opts.mon.species)
   self.glyphs = {} -- typed glyphs; multi-byte cells (<PK>, ♂, ×) count as 1
@@ -845,9 +861,9 @@ function NamingScreen:drawFireRed(rec)
   g.setColor(1, 1, 1, 1)
 end
 
--- Drawn last, over the plate's own tiles, at the same spot naming_screen.c's
--- sIconFunctions place their sprite: roughly (56, 37) GBA-screen pixels,
--- just left of the question text (which starts at x=72 in drawFireRed).
+-- Drawn last, over the plate's own tiles, at naming_screen.c's exact CreateSprite
+-- centres: player/rival at (56,37), Pokémon at (56,40). CreateSprite positions
+-- are sprite centres, so convert them to LÖVE's top-left draw coordinates here.
 function NamingScreen:drawIcon()
   if not self.kind then return end
   local g = love.graphics
@@ -857,7 +873,7 @@ function NamingScreen:drawIcon()
     if img then
       local iw, ih = img:getDimensions()
       local quad = love.graphics.newQuad(0, 0, tw, th, iw, ih)
-      g.draw(img, quad, 56 - math.floor(tw / 2), 52 - th)
+      g.draw(img, quad, 56 - math.floor(tw / 2), 37 - math.floor(th / 2))
     end
   elseif self.kind == "mon" then
     local t = love.timer and love.timer.getTime() or 0
@@ -865,7 +881,15 @@ function NamingScreen:drawIcon()
     if img then
       local quad = love.graphics.newQuad(0, frame * frameH, iw, frameH,
                                          iw, img:getHeight())
-      g.draw(img, quad, 56 - math.floor(iw / 2), 52 - frameH)
+      g.draw(img, quad, 56 - math.floor(iw / 2), 40 - math.floor(frameH / 2))
+    end
+  elseif self.kind == "rival" then
+    local t = love.timer and love.timer.getTime() or 0
+    local img, fw, fh, frame = rivalIconFrame(self.game, t)
+    if img then
+      local iw, ih = img:getDimensions()
+      local quad = love.graphics.newQuad(0, frame * fh, fw, fh, iw, ih)
+      g.draw(img, quad, 56 - math.floor(fw / 2), 37 - math.floor(fh / 2))
     end
   end
   g.setColor(1, 1, 1, 1)
