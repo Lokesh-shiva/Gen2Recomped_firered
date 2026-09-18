@@ -640,6 +640,31 @@ engine has no separate Poké Flute field animation; the wake-up presentation is
 currently the cry, delay, transition, and battle entry. The focused live
 regression is complete; see the verification block above.
 
+## Manual verification reopened the PC/NPC issues — 2026-09-18
+
+The manual play report after commit `d1cedf8` says these issues are **still
+present** and must not be treated as closed:
+
+1. **Pokémon Center PC still shows the generic Gen 1 UI.** The focused driver
+   can open the fallback menu and log `SOMEONE’S PC`, the player PC, and `LOG
+   OFF`, but that does not prove the real facing-tile interaction reaches the
+   same path in the visible game. Reproduce this from a fresh FireRed save at
+   a real Pokémon Center PC and capture the screen and map position before
+   changing the menu again.
+2. **Talking to NPCs still leaves them facing the old direction.** The isolated
+   `talkTo` check reports the expected direction, but the live report wins:
+   verify the actual input path, the active entity selected by `interact`, and
+   any script/cutscene code that immediately reposes the NPC.
+3. **The Pallet Town fat NPC can still leave its allowed area and enter the
+   water.** The elevation guard and the Pallet probe pass in isolation, so the
+   next check must observe the live wander loop over time, including the
+   imported movement range, map-cell coordinates, and the map's water/elevation
+   grid. Do not close this issue from a mocked collision result alone.
+
+Commit `d1cedf8` is therefore an attempted fix, not a completed resolution.
+Keep these three items open until a real visible FireRed run reproduces the
+cartridge behavior and the screenshots/logs are read back.
+
 ## Process notes for whoever picks this up
 
 - **Always verify with a driver + screenshot read-back**, not just by
