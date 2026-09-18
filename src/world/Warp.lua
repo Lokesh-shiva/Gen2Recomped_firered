@@ -82,12 +82,15 @@ end
 -- tile instead); everywhere else the player must face the map edge
 -- (IsPlayerFacingEdgeOfMap).  carpets = field.warpCarpets.
 function Warp.extraCheck(map, carpets, cx, cy, dir)
-  -- FireRed house exit mats are a one-cell-deep behaviour-$65 strip: DOWN
-  -- pushes against its interior wall rather than off the map edge.  The
-  -- cartridge still takes the paired warp immediately, so recognize that
-  -- authored exit before applying the older carpet/edge rules.
-  if require("src.core.GameVersion").get() == "firered"
-     and dir == "down" and map:cellBehaviour(cx, cy) == 0x65
+  -- FIRERED'S DIRECTIONAL WARPS, which this is the whole trigger for.
+  --
+  -- TryArrowWarp takes the arrow panels, the interior exit mats and the side
+  -- staircases, and it takes them only when the player is walking in the
+  -- behaviour's own direction -- never on arrival, which is what
+  -- Map:isWarpTileCell now refuses for exactly these cells.  Whether the step
+  -- is blocked by the building's wall or would have left the map makes no
+  -- difference on the cartridge, so neither is asked about here.
+  if map.frlgWarpDirection and map:frlgWarpDirection(cx, cy) == dir
      and map:warpAtCell(cx, cy) then
     return true
   end
