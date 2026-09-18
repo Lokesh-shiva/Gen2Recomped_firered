@@ -640,6 +640,69 @@ engine has no separate Poké Flute field animation; the wake-up presentation is
 currently the cry, delay, transition, and battle entry. The focused live
 regression is complete; see the verification block above.
 
+## Pre-PR regression sweep — in progress 2026-09-18
+
+Manual play before opening a PR reported three things: the item list behind
+the PC's WITHDRAW ITEM row is "gbc color", the reopened PC/NPC items below are
+"not fixed properly", and "when exiting the house even the tile beside the
+house... the exit is leading to exit... same with stairs". The request also
+asks for a full sweep for anything still using Gen 1 menus or Emerald parts.
+Work items are being committed and logged here one at a time so a fresh
+session can resume mid-sweep.
+
+### 1. Directional warps — fixed, `8008c6f`
+
+`Warp.onArrive` fired **every** Gen 3 warp the moment it was stepped on,
+because the Gen 3 tileset sets `warpsAreEvents = true` and
+`Map:isWarpTileCell` therefore answered "yes" for any cell carrying a warp
+event. On the cartridge the exit mats, arrow panels and side staircases are
+not arrival warps at all: `IsWarpMetatileBehavior` (the list
+`TryStartWarpEventScript` checks on a completed step) deliberately excludes
+them, and they fire only from `TryArrowWarp`, which runs under
+`input->heldDirection && input->dpadDirection == playerDirection`.
+
+So walking *along* a two-cell doormat re-entered the building, and stepping
+onto a side staircase from above took it. A census of every imported warp
+event (`tests/drivers/_frlg_warp_census.lua`) shows the scale: 527 warps on
+`$65` (the interior exit mats, **90** of them directly beside another `$65`
+warp), 68/64/32 on `$62`/`$63`/`$64`, and 246 across `$EC..$EF`.
+
+**Numbering note for future work:** this cartridge's data puts the four side
+staircases at **`$EC..$EF`**, not the `$6C..$6F` a current pret
+`metatile_behaviors.h` names — the census finds zero warps on `$6C..$6F`, and
+the port's own `ExitStairsMovement` arrival slide already reads `$EC..$EF`.
+Trust the census over the header here. `doorTiles` still lists Hoenn's `$6C`
+"water door"; on FireRed that value is simply unused, so it was left alone.
+
+`Map:frlgWarpDirection` now names the eight directional behaviours and the
+direction each must be walked in; `isWarpTileCell`/`isDoorTileCell` decline
+them and `Warp.extraCheck` fires them. Because `isWarpTileCell` declines
+them, `refreshStandingOnWarp` leaves the cell armed, which is what the
+narrower `$65`-only special case in `e90de37` had been added for — pressing
+DOWN on an exit mat still leaves the building. FireRed-gated, so Emerald
+(different numbering) is untouched.
+
+Verified by `tests/drivers/_frlg_warp_dirs.lua`, 9/9 checks: walking along a
+real two-cell mat does not warp, DOWN on it still exits, and stepping onto a
+`$EC` staircase from above stays put. `ngshots/warpdir_02_mat_sideways.png`
+shows the player standing on the Viridian Forest gate mat after walking along
+it.
+
+### Still open in this sweep
+
+- **PC item storage is the Game Boy list** (the "gbc color" report).
+  `Gen3PlayerPC`'s ITEM STORAGE rows call `PlayerPC.withdraw/deposit/toss`,
+  which push `src/ui/ListMenu.lua` — a hardcoded 160x144 white Game Boy
+  screen. Same class of bug as the catching tutorial's Gen 1 bag, which was
+  fixed by routing to `Gen3BagMenu` (see its `opts.rows`/`pick`/`onPick`
+  scripted-list mode, which is the intended seam for this).
+- The three reopened PC/NPC items below.
+- Remaining Gen 1 leaks found by grep, still to be triaged: `FlyMenu` is kept
+  as a fallback if `openRegionMap` ever declines; `BattleState.lua:3932` keeps
+  a `ListMenu` fallback behind the `Gen3BagMenu` path. Shop, dex, party,
+  summary, box, start menu, main menu, bag and move-learn all already route to
+  their Gen 3 screens through `src/ui/Screens.lua`'s `GEN3_ALIASES`.
+
 ## Manual verification reopened the PC/NPC issues — 2026-09-18
 
 The manual play report after commit `d1cedf8` says these issues are **still
