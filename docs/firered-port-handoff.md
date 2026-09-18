@@ -772,6 +772,203 @@ for the storage system and close for the rest; none of them was reported and
 none was verified pixel-for-pixel this pass. That is the honest next place to
 look if more "this screen looks like Emerald" reports come in.
 
+## REOPENED AFTER MANUAL PLAY — 2026-09-18 (round 2) — START HERE
+
+Three reports from manual play *after* the sweep above. **Nothing below has
+been fixed or attempted yet** — this section is analysis and pointers only, so
+the next session must not assume any of it is verified. The three earlier
+reopened PC/NPC items further down were re-checked and are genuinely closed;
+these are new (items 1 and 3 are partly *caused* by fixes in this sweep).
+
+### R1. The PC's item storage is wearing the BAG's screen — my fix was half right
+
+> "why is the bag menu ui is being used in the pc ui?"
+
+Fair. Commit `aa9bb40` fixed the real bug (it was the Game Boy `ListMenu`) by
+routing WITHDRAW/TOSS through `Gen3BagMenu`'s scripted-list mode — so the list,
+frame, description box and quantities are right, but the screen still draws
+**the bag sprite and the bag's pocket plate**, which the cartridge does not
+show here.
+
+The cartridge splits these three rows across **two different screens**, and
+this is worth getting exactly right (all verified in the pret clone):
+
+- **DEPOSIT really does open the bag** — `player_pc.c`'s
+  `Task_DepositItem_WaitFadeAndGoToBag` calls
+  `GoToBagMenu(ITEMMENULOCATION_ITEMPC, OPEN_BAG_ITEMS, CB2_ReturnToField)`.
+  So the current deposit routing is already correct; **do not change it**.
+  (The cartridge even swaps the bag's background for this case —
+  `gBagBg_ItemPC_Tilemap`, `graphics/item_menu/bg_item_pc.bin.lz` — which this
+  port does not do yet, a nice-to-have.)
+- **WITHDRAW and TOSS open a screen of their own** — `player_pc.c`'s
+  `Task_PlayerPcWithdrawItem` calls `ItemPc_Init`, which is the whole separate
+  `src/item_pc.c` screen: its own two BG templates, its own
+  `sWindowTemplates` (list window at tilemap 7,1 19x12; message window at
+  5,14 25x6; two 5x4 corner windows at 1,1 and 24,15) and **its own background
+  art**, none of which is the bag:
+  - `gItemPcTiles` — `graphics/item_pc/bg.4bpp.lz`
+  - `gItemPcTilemap` — `graphics/item_pc/bg.bin.lz`
+  - `gItemPcBgPals` — `graphics/item_pc/bg.gbapal.lz` (three 4bpp palettes)
+
+  So the fix is a real screen: extract those three in `RomExtractorGen3`
+  (same shape as `extractFireRedNaming`, which already does LZ77 tiles +
+  tilemap + palette and writes a `constants.gen3FRLG*` record), then add
+  `src/ui/Gen3ItemPcFRLG.lua` that draws that background and lays the list out
+  on `item_pc.c`'s window templates. Reuse `Gen3BagMenu`'s row-building and
+  cursor/quantity logic where it is furniture-independent; do not reuse its
+  `background()`/`bagFrame()`.
+- Keep everything `aa9bb40` got right: the store, the 50-stack
+  `PC_ITEM_CAPACITY` rule, the key-item/HM "always one, no prompt" rule, and
+  the quantity prompt. `src/ui/PlayerPC.lua` stays as the Gen 1/2 screen.
+
+### R2. The NPC in the player's house faces the wrong way and never turns
+
+> "inside our house is facing the wrong default direction and she doesn't
+> turns to us when we talk to her"
+
+This is Mum in the player's house (Pallet Town, the `MAP_G04_N00`-style
+interior). **Two separate faults in one object**, and note that the NPC-facing
+item I closed further down was tested on Pallet Town's *outdoor* objects, which
+do turn correctly — so whatever this is, it is specific to this object or to
+its movement type, and the closed item is not evidence about it.
+
+Where to look:
+
+- **Default facing.** A Gen 3 object's initial direction comes from its
+  `movementType` (`MOVEMENT_TYPE_FACE_UP/DOWN/LEFT/RIGHT`, and the
+  `FACE_*_AND_*` variants), not from a separate field. Check what
+  `RomExtractorGen3` writes for `movementType` and whether anything maps the
+  face-locked types onto a starting `facing` at spawn — if nothing does, every
+  such NPC spawns facing the engine default and Mum will look wrong while a
+  wanderer looks fine, which matches the report exactly.
+- **Not turning on talk.** `OverworldState:talkTo`
+  (`src/world/OverworldController.lua`, ~line 7532) does call
+  `npc:facePlayer(self.player)` and sets `npc.frozen = true` before it. So
+  either (a) the per-frame updater for a face-locked movement type re-applies
+  its fixed direction and does not honour `frozen`, or (b) this object's text
+  goes through a hand-ported `mapScripts.talkScript` branch that re-poses her.
+  Check (a) first: it explains both halves of this report with one cause.
+- Verify with a driver that stands the player on each of the four sides of
+  *this* object and asserts the rendered facing, not just `e.facing`.
+
+### R3. The house exit mat still warps from the wrong cell
+
+> "still the exit issue is there like inside the house even if I stand at the
+> right of the exit red mat"
+
+`8008c6f` fixed the *arrow/stair* half of this and is verified (walking along
+an outdoor two-cell mat no longer warps). It did **not** go far enough,
+because I deliberately took the narrow path: I only stopped the eight
+directional behaviours from firing on arrival and left
+`tileset.warpsAreEvents` otherwise intact, so **any warp event on any other
+behaviour still fires the moment it is stepped on**, and
+`Warp.extraCheck`'s Gen 1 fallback ("is the player facing the map edge") still
+applies to FireRed.
+
+The cartridge's rule is an allowlist, and this port does not implement it yet.
+From `field_control_avatar.c`, a FireRed warp fires in exactly three ways:
+
+1. **On a completed step** — `TryStartWarpEventScript`, gated by
+   `IsWarpMetatileBehavior`, which is **only**: `$60` CAVE_DOOR, `$61` LADDER,
+   `$66` FALL_WARP, `$67` REGULAR_WARP (warp pad), `$68` LAVARIDGE_1F_WARP,
+   `$69` WARP_DOOR, `$6A`/`$6B` UP/DOWN_ESCALATOR, `$71` UNION_ROOM_WARP.
+   Nothing else — **including plain ground `$00`** — fires on arrival.
+2. **Walking into an arrow/stair warp** — `TryArrowWarp`, already implemented
+   by `Map:frlgWarpDirection` + `Warp.extraCheck`.
+3. **Pressing north into a door in front of you** — `TryDoorWarp`, WARP_DOOR
+   (`$69`) only.
+
+There is no "facing the map edge" rule on this cartridge at all; that is
+pokered's `ExtraWarpCheck` and it should not be reachable on FireRed.
+
+**The likely cause of this exact report:** the census
+(`tests/drivers/_frlg_warp_census.lua`, gitignored — rewrite it if gone) found
+**486 warp events sitting on behaviour `$00`**, ordinary floor. The extractor's
+own comment calls those script destinations, which is right — but because they
+still fire on arrival (and because the edge fallback still applies), the cell
+*beside* a house's exit mat can be a live warp. Implementing rule 1 as a real
+allowlist is the fix.
+
+**Risk to weigh before doing it:** 486 warps is a lot to switch off at once.
+Do it FireRed-gated, census first, and drive a real round trip through several
+buildings (enter, walk around the mat, leave) plus a ladder, an escalator, a
+cave entrance and a warp pad before believing it. If some genuine entrance in
+this port's data turns out to sit on `$00`, that is a data/import question —
+find out which map, do not widen the allowlist to make it go away.
+
+### Prompt for the session that picks these up
+
+```
+Read docs/firered-port-handoff.md first, all of it, especially the section
+"REOPENED AFTER MANUAL PLAY — 2026-09-18 (round 2)" and the build/run/test
+notes at the top. Branch firered-port; commit locally only, never push; never
+commit tools/rom_manifest_firered.json. Test with POKEPORT_NO_MODS=1 and
+POKEPORT_NO_BOOT_REPORT=1, verify every claim with a driver plus a screenshot
+you actually read back, and update the handoff doc as you close each item so
+the work survives a session ending mid-way.
+
+Three open items, in this order:
+
+1. R3, the warp allowlist. This is the one that breaks play, so do it first.
+   FireRed currently fires a warp from ANY warp event the moment it is stepped
+   on, because the Gen 3 tileset sets warpsAreEvents and Map:isWarpTileCell
+   answers yes for every warp cell; on top of that Warp.extraCheck still falls
+   back to pokered's "facing the map edge" rule, which this cartridge does not
+   have. Implement field_control_avatar.c's real rule, FireRed-gated so
+   Emerald is untouched: a step landing on a cell fires a warp only when the
+   behaviour is one of $60 CAVE_DOOR, $61 LADDER, $66 FALL_WARP, $67
+   REGULAR_WARP, $68 LAVARIDGE_1F_WARP, $69 WARP_DOOR, $6A/$6B ESCALATORS,
+   $71 UNION_ROOM_WARP; arrow and side-stair warps keep firing only from the
+   matching walk (Map:frlgWarpDirection, already in place and verified);
+   pressing north into a $69 door in front of you fires that door; nothing
+   else fires at all. Census the imported warps by behaviour before and after
+   (486 of them sit on plain $00 today) and report the diff. Then drive a real
+   round trip: enter a house, walk across and around the exit mat from every
+   side, leave by pressing down on it, and repeat for a ladder, an escalator,
+   a cave entrance and a warp pad. The reported symptom to reproduce first and
+   then defeat: standing to the RIGHT of a house's red exit mat and still
+   being sent outside.
+
+2. R2, the player's-house NPC. She spawns facing the wrong way and does not
+   turn when talked to. Suspect one cause for both: a face-locked
+   MOVEMENT_TYPE_FACE_* object never gets its initial facing applied at spawn,
+   and its per-frame updater re-applies that fixed direction over the
+   facePlayer that OverworldState:talkTo (~line 7532) does. Check what
+   RomExtractorGen3 writes for movementType, where an object's starting facing
+   is decided, and whether the updater honours npc.frozen. Verify by standing
+   on all four sides of that exact object and checking the RENDERED pose, not
+   just e.facing. Do not generalise from Pallet Town's outdoor NPCs -- those
+   already turn correctly and were verified this session.
+
+3. R1, the PC item screen. WITHDRAW and TOSS currently borrow Gen3BagMenu, so
+   they show the bag sprite and pocket plate, which the cartridge does not
+   show. On real hardware those two rows open a separate screen entirely --
+   player_pc.c's Task_PlayerPcWithdrawItem calls ItemPc_Init, which is
+   src/item_pc.c with its own background (gItemPcTiles / gItemPcTilemap /
+   gItemPcBgPals, i.e. graphics/item_pc/bg.4bpp.lz, bg.bin.lz, bg.gbapal.lz)
+   and its own window templates (list 7,1 19x12; message 5,14 25x6; two 5x4
+   corners at 1,1 and 24,15). Extract those three the way
+   extractFireRedNaming already extracts LZ77 tiles + tilemap + palette, add
+   src/ui/Gen3ItemPcFRLG.lua, and route WITHDRAW and TOSS to it. DEPOSIT must
+   keep opening the real bag -- that IS what the cartridge does
+   (GoToBagMenu(ITEMMENULOCATION_ITEMPC, ...)) -- so leave it alone. Keep the
+   store, the 50-stack PC_ITEM_CAPACITY rule, the key-item/HM "always one"
+   rule and the quantity prompt exactly as they are now.
+
+Ground rules learned the hard way in this repo, do not relearn them:
+- Trust the cartridge's own data over any header. This port's side stairs are
+  $EC..$EF even though a current pret metatile_behaviors.h names them
+  $6C..$6F, and doorTiles still carries Hoenn's $6C "water door". Census the
+  imported data before trusting a constant.
+- A driver that "passes" can be lying. One wander driver passed only because
+  the player had drifted into a house and it was watching entities that no
+  longer existed. Assert the map has not changed and re-resolve entities each
+  frame.
+- Grep the pret source more than one way before concluding the cartridge does
+  not do something. A naming-screen feature was declared "not a bug" once
+  because the grep said "Pic"/"Sprite" and the real code said "Icon".
+```
+
 ## Manual verification reopened the PC/NPC issues — 2026-09-18
 
 The manual play report after commit `d1cedf8` says these issues are **still
