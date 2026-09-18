@@ -688,14 +688,32 @@ real two-cell mat does not warp, DOWN on it still exits, and stepping onto a
 shows the player standing on the Viridian Forest gate mat after walking along
 it.
 
+### 2. PC item storage was the Game Boy list — fixed, `aa9bb40`
+
+The "gbc color" report. `Gen3PlayerPC`'s ITEM STORAGE rows called
+`PlayerPC.withdraw/deposit/toss` wholesale, and all three push
+`src/ui/ListMenu.lua` — a hardcoded 160x144 white Game Boy page in the Game
+Boy font. Only the *store* and the rules were ever shared between the
+cartridges; the screen was not.
+
+Same class of bug as the catching tutorial's Gen 1 bag, and the same answer:
+`Gen3BagMenu` already draws the cartridge's list, frame, item icon,
+quantities and description box, and already supports a list that is not the
+bag's own contents plus a pick handed back instead of used
+(`opts.rows` + `pick`/`onPick`, written for `DisplayListMenuID`'s tutorial
+arm). WITHDRAW and TOSS now open that list over `save.pcItems` under their
+own header with the pocket switch locked off; DEPOSIT opens the **real bag**,
+which is what the cartridge opens. The store, the 50-stack
+`PC_ITEM_CAPACITY` rule, the key-item/HM "always one, no prompt" rule and the
+quantity prompt are unchanged, and `PlayerPC` keeps its flows for Gen 1/2.
+
+Verified by `tests/drivers/_frlg_pc_items.lua`, 12/12 checks: all three rows
+open `Gen3BagMenu` rather than `ListMenu`, a withdrawn POTION moves PC→bag
+(3→2, bag 1), a deposit moves it back (→3), and a toss removes an ANTIDOTE
+(2→1). Screenshots `ngshots/pcitem_03_withdraw.png`, `pcitem_08_toss.png`.
+
 ### Still open in this sweep
 
-- **PC item storage is the Game Boy list** (the "gbc color" report).
-  `Gen3PlayerPC`'s ITEM STORAGE rows call `PlayerPC.withdraw/deposit/toss`,
-  which push `src/ui/ListMenu.lua` — a hardcoded 160x144 white Game Boy
-  screen. Same class of bug as the catching tutorial's Gen 1 bag, which was
-  fixed by routing to `Gen3BagMenu` (see its `opts.rows`/`pick`/`onPick`
-  scripted-list mode, which is the intended seam for this).
 - The three reopened PC/NPC items below.
 - Remaining Gen 1 leaks found by grep, still to be triaged: `FlyMenu` is kept
   as a fallback if `openRegionMap` ever declines; `BattleState.lua:3932` keeps
