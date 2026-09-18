@@ -746,6 +746,56 @@ Commit `d1cedf8` is therefore an attempted fix, not a completed resolution.
 Keep these three items open until a real visible FireRed run reproduces the
 cartridge behavior and the screenshots/logs are read back.
 
+### Re-checked live on 2026-09-18 — none of the three reproduces
+
+Each was re-run the way this section demanded (real interaction, real map, live
+loop; mods off) rather than through an isolated probe. Drivers are kept in
+`tests/drivers/` (gitignored) and named below so the next session can repeat
+them instead of re-deriving them.
+
+1. **Centre PC — does not reproduce.** `_frlg_center_find.lua` takes the
+   cartridge's own `constants.gen3HealLocations[*].respawn` map (a healer's
+   room, i.e. a Pokémon Centre interior), finds its `MB_PC` (`$83`) tile,
+   stands the player on the walkable cell *south* of it facing north, and
+   presses A — the real facing-tile interaction. On `MAP_G05_N04` at PC tile
+   `(11,1)`, player `(11,2)` facing up, it opens `SOMEONE'S PC / RED's PC /
+   LOG OFF`, then the storage menu (`WITHDRAW/DEPOSIT/MOVE POKéMON / MOVE
+   ITEMS / SEE YA!`), then `src.ui.Gen3BoxMenu` — the Gen 3 chain end to end.
+   `ngshots/centre_02_pc_menu.png` shows it inside a real Centre (heal
+   machine, counter, Poké Ball floor mark).
+   The window is `src/ui/Menu.lua`, which is *not* a Gen 1 look: `Font.drawBox`
+   prefers the cartridge's own nine-slice, and the probe
+   (`_frlg_frame_probe.lua`) confirms the dataset carries it —
+   `font.frame = "sheet"`, `frames.image =
+   assets/generated/fonts/gen3_frames.png`, `count = 10`, sheet loads 24x240,
+   `options.gen3Frame` unset so it draws frame 1, FireRed's default. The
+   earlier report predates `d1cedf8` and the item-storage fix above.
+2. **NPC facing — does not reproduce.** `_frlg_npc_face.lua` drives the real
+   input path (`U.tap "a"` → `interact` → `talkTo`) against Pallet Town's own
+   objects. `TEXT_MAP_G03_N00_OBJ_001` turned `up` → `down` for a player
+   standing south of it and stayed turned while the text was up;
+   `ngshots/npcface_01.png` shows the NPC visibly facing the player with
+   FireRed's dialogue frame. `OBJ_002` was already facing the player, turned
+   correctly, and then resumed its idle turning once the text closed — which
+   is the cartridge's behaviour for a look-around object, not a bug (the
+   driver's original "must stay turned forever" assertion was wrong and was
+   relaxed).
+3. **Pallet Town wanderer — does not reproduce.** `_frlg_npc_wander.lua`
+   watches the live wander loop for **3600 frames** with the player parked on
+   a warp-free cell, re-resolving objects by `localId` every frame and
+   aborting if the map ever changes. `OBJ_002` — the wide-ranging one, range
+   `6,2` — was off its origin cell on 3356 of 3600 frames and **never** stood
+   on a water cell and **never** exceeded its imported range; `OBJ_001`
+   (range `1,4`) stayed put, which is collision, not a failure.
+   **A caveat worth keeping:** an earlier version of this driver silently
+   "passed" because the player drifted into a house and it went on watching
+   entities that no longer existed. Any future version of this check must
+   assert the map has not changed and must re-resolve entities each frame.
+
+These three are closed on this evidence. If any of them resurfaces in manual
+play, it is a **new** regression from something after 2026-09-18, and the
+drivers above are the fastest way to show it.
+
 ## Process notes for whoever picks this up
 
 - **Always verify with a driver + screenshot read-back**, not just by
