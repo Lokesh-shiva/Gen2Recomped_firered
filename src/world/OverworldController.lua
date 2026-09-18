@@ -4512,14 +4512,18 @@ end
 
 -- Fly to a visited town (called from the party menu).
 
--- HOENN'S REGION MAP, from wherever asks for it: the Pokemon Centre wall, the
--- PokeNav, FLY, and the cartridge's own FieldShowRegionMap special.  Refuses
--- rather than crashing on a cache imported before the section rectangles were
--- kept, which is every Gen 3 cache built before today.
+-- GEN 3'S REGION MAP, from wherever asks for it: the Pokemon Centre wall, the
+-- PokeNav, FLY, and the cartridge's own FieldShowRegionMap special.  Hoenn
+-- needs its section rectangles/place table; FireRed carries a separate
+-- cartridge grid under gen3FRLGRegionMap.  Refuse only when the active cache
+-- has neither representation.
 function OverworldState:openRegionMap(opts)
   if not GameVersion.isGen3() then return false end
   local constants = Game.data.constants or {}
-  if not (constants.gen3MapSectionRects and constants.gen3RegionMapPlaces) then
+  local hoenn = constants.gen3MapSectionRects and constants.gen3RegionMapPlaces
+  local frlg = constants.gen3FRLGRegionMap
+  local fireRed = type(frlg) == "table" and frlg.sections and frlg.sections.kanto
+  if not (hoenn or fireRed) then
     return false
   end
   local Gen3RegionMap = require("src.ui.Gen3RegionMap")
