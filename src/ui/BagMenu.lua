@@ -494,6 +494,33 @@ local function pickTargetAndUse(game, battle, id, list)
           right = ("%d"):format(mv.pp),
         })
       end
+      -- WHICH MOVE, ON WHICHEVER CARTRIDGE IS LOADED.
+      --
+      -- ListMenu paints the Game Boy's 160x144 white page, so an ETHER used
+      -- in Hoenn or Kanto opened a Gen 1 screen mid-way through a Gen 3 item
+      -- flow -- the same leak the PC's item storage had.  There is no ripped
+      -- move-picker window to reuse here, but `Menu` is bordered with the
+      -- CARTRIDGE'S own nine-slice (Font.drawBox reads the extracted
+      -- sWindowFrames), so on Gen 3 it is that frame and that font rather
+      -- than the Game Boy's page.  PP rides in the label, which is where a
+      -- one-column window has to put it.
+      local okV, V = pcall(require, "src.core.GameVersion")
+      if okV and V.isGen3() then
+        local items = {}
+        for _, row in ipairs(rows) do
+          items[#items + 1] = {
+            label = ("%s  %s"):format(row.label, row.right),
+            onSelect = function()
+              useOn(game, battle, id, mon, list, row.value)
+            end,
+          }
+        end
+        local picker = require("src.ui.Menu").new(game, items,
+                                                  { tx = 0, ty = 0, tw = 16 })
+        function picker:uiSize() return 240, 160 end
+        game.stack:push(picker)
+        return
+      end
       game.stack:push(ListMenu.new(game, "Which move?", rows, {
         onChoose = function(row, l)
           l:close()
