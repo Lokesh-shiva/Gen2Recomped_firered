@@ -32,6 +32,17 @@ function Game:load()
   self.data = Data
   Data:load()
 
+  -- ROM-extracted Gen 3 map scripts include scene tables and coordinate
+  -- events, but object interactions can compile their scripts directly and
+  -- hide that the map hooks were never attached. Install the base hooks
+  -- before mods load so FireRed's starter follow-up and rival-battle trigger
+  -- run through the same map-script registry as the rest of the field.
+  if require("src.core.GameVersion").isGen3() then
+    local Gen3ScriptVM = require("src.script.Gen3ScriptVM")
+    Gen3ScriptVM.register(Data, "talk")
+    Gen3ScriptVM.register(Data, "scenes")
+  end
+
   -- Mods are a native engine subsystem.  They load after the verified ROM
   -- data exists, so mods can register or override the same definitions that
   -- the rest of the game consumes.  A broken mod is reported and skipped by
