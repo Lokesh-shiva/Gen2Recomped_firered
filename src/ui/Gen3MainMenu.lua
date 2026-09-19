@@ -264,8 +264,9 @@ end
 
 function Gen3MainMenu:drawFireRed()
   local g = love.graphics
+  local width = select(1, self:uiSize())
   g.setColor(FRLG_BG[1], FRLG_BG[2], FRLG_BG[3], 1)
-  g.rectangle("fill", 0, 0, GBA_W, GBA_H)
+  g.rectangle("fill", 0, 0, width, GBA_H)
   g.setColor(1, 1, 1, 1)
   if self.frlgSave == nil then
     local ok, loaded = pcall(require("src.core.SaveData").load)
@@ -299,10 +300,10 @@ function Gen3MainMenu:drawFireRed()
     local top = (sel.ty - 1) * 8 + 2
     local bottom = (sel.ty + sel.th + 1) * 8 - 2
     g.setColor(0, 0, 0, 7 / 16)
-    g.rectangle("fill", 0, 0, GBA_W, top)
-    g.rectangle("fill", 0, bottom, GBA_W, GBA_H - bottom)
+    g.rectangle("fill", 0, 0, width, top)
+    g.rectangle("fill", 0, bottom, width, GBA_H - bottom)
     g.rectangle("fill", 0, top, 18, bottom - top)
-    g.rectangle("fill", 222, top, GBA_W - 222, bottom - top)
+    g.rectangle("fill", 222, top, width - 222, bottom - top)
   end
   g.setColor(1, 1, 1, 1)
 end

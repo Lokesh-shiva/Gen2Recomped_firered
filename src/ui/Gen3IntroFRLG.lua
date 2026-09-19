@@ -32,6 +32,7 @@ Gen3IntroFRLG.__index = Gen3IntroFRLG
 Gen3IntroFRLG.isOpaque = true
 
 local W, H = 240, 160
+local FIRE_RED_INTRO = "SONG_144" -- MUS_NEW_GAME_INTRO (0x0144)
 local WIN_TOP, WIN_BOTTOM = 32, 128
 
 -- gSineTable: sin(i * pi / 128) in 8.8 fixed point
@@ -114,7 +115,12 @@ end
 function Gen3IntroFRLG:enter()
   local data = self.game and self.game.data
   local song = data and Music.special(data, "intro")
-  if song and data.audio and data.audio.songs and data.audio.songs[song] then
+  local songs = data and data.audio and data.audio.songs
+  -- The generic Gen 3 role table uses Emerald's song numbers; FireRed's
+  -- intro is MUS_NEW_GAME_INTRO (0x0144). Keep a valid role override, but
+  -- fall back to FireRed's own ID when that Emerald mapping is absent/stale.
+  if not (song and songs and songs[song]) then song = FIRE_RED_INTRO end
+  if songs and songs[song] then
     pcall(Music.play, data, song)
   end
 end

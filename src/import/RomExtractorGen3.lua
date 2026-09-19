@@ -12018,7 +12018,6 @@ function RomExtractorGen3:decodeScriptAt(start, queue)
         if args[4] == nil then args[4] = false end
         args[5] = rom:u16(o + 4)
       end
-      end
       at = o + length
     else
       for i = 1, #spec do
@@ -26264,9 +26263,23 @@ function RomExtractorGen3:extractSaveLayout()
       playTimeSeconds = 0x011, playTimeVBlanks = 0x012,
       encryptionKey = 0xF20,
     })
+    -- FireRed stores the user-facing Pokedex in SaveBlock2 and keeps two
+    -- duplicate seen arrays in SaveBlock1. All three seen arrays must agree
+    -- for the cartridge to accept an entry. Offsets follow
+    -- pokefirered/include/global.h.
+    if type(fields.saveBlock2.pokedex) ~= "table" then
+      fields.saveBlock2.pokedex = {}
+    end
+    fillMissing(fields.saveBlock2.pokedex, {
+      owned = 0x028, seen = 0x05C, flagBytes = 0x34,
+      nationalMagic = 0x01B, nationalMagicValue = 0xB9,
+      nationalFlagId = 0x0840, nationalVarId = 0x404E,
+      nationalVarValue = 0x6258,
+    })
 
     local b1 = fields.saveBlock1
     if type(b1) == "table" then
+      fillMissing(b1, { pokedexSeen1 = 0x05F8, pokedexSeen2 = 0x3A18 })
       -- Six party Pokemon end exactly at money in FireRed's SaveBlock1.
       -- Measuring that run keeps the per-mon size tied to the offsets already
       -- extracted from this cartridge (56 .. 656 = six 100-byte records).
