@@ -1371,6 +1371,14 @@ local VERSION_REQUIRED_FILES = {
   -- come back with nothing at all -- no title art, and no marker here
   -- to notice it was missing.
   prism = { "assets/generated/title/prism_title.png" },
+  -- item_pc.c is FireRed-only, and an older FireRed cache otherwise has no
+  -- reason to re-run the new extraction stage: constants.lua already exists
+  -- and the shared Gen 3 required-file set is satisfied.  Requiring the one
+  -- background this stage always writes upgrades only FireRed caches.
+  firered = {
+    "assets/generated/ui/item_pc_frlg.png",
+    "assets/generated/ui/bag_male_item_pc.png",
+  },
 }
 
 local function requiredFiles(version)
@@ -1460,6 +1468,8 @@ local PAL = {
   chipSilverBot = { 96, 116, 145 },  -- #607491
   chipCrystalTop = { 138, 226, 240 }, -- #8ae2f0
   chipCrystalBot = { 38, 122, 150 },  -- #267a96
+  chipFireRedTop = { 255, 124, 72 },  -- #ff7c48  FireRed
+  chipFireRedBot = { 174, 48, 27 },   -- #ae301b
   -- Emerald: the cartridge's own green, and deliberately deeper than Prism's
   -- mint so the two greens in the row are tellable apart at a glance rather
   -- than by reading their labels -- the same rule Polished Crystal's amethyst
@@ -6836,8 +6846,11 @@ function RomImporter:_drawTabBar(x, y, w, h, chip)
     { id = "crystal", letter = "C", top = PAL.chipCrystalTop, bot = PAL.chipCrystalBot,
       under = PAL.chipCrystalTop, label = Strings("CRYSTAL"),
       ink = PAL.chipInkSilver },
-    -- Emerald sits after Crystal because it is a CARTRIDGE, and the row runs
-    -- cartridges in generation order and then the hacks -- the same rule
+    { id = "firered", letter = "FR", top = PAL.chipFireRedTop,
+      bot = PAL.chipFireRedBot, under = PAL.chipFireRedTop,
+      label = Strings("FIRERED"), ink = PAL.chipInkSilver },
+    -- FireRed and Emerald sit after Crystal because they are cartridges, and
+    -- the row runs cartridges in generation order and then the hacks -- the same rule
     -- GameVersion.ORDER follows, and the one polished_crystal_registration_test
     -- asserts.
     --
@@ -7117,6 +7130,7 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   elseif version == "gold" then accent = PAL.chipGoldTop
   elseif version == "silver" then accent = PAL.chipSilverTop
   elseif version == "crystal" then accent = PAL.chipCrystalTop
+  elseif version == "firered" then accent = PAL.chipFireRedTop
   elseif version == "emerald" then accent = PAL.chipEmeraldTop
   elseif version == "prism" then accent = PAL.chipPrismTop
   -- Without a branch here the panel silently falls back to PAL.blue, which

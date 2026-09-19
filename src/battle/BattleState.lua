@@ -594,6 +594,9 @@ end
 -- as their overworld walker. Vanilla trainers preserve the hardware-faithful
 -- MEWMON fallback used during the battle introduction.
 function BattleState.trainerPalette(data, trainer)
+  -- A GBA trainer pic is already in colour: the SGB MEWMON remap would squash
+  -- it to four shades (Trainer Tower's challengers came out purple and orange)
+  if require("src.core.GameVersion").isGen3() then return nil end
   local source = trainer and trainer.paletteSource
   if source then
     local PaletteFX = require("src.render.PaletteFX")
@@ -3054,6 +3057,13 @@ function BattleState:enter()
   -- default stays opaque for every other battle and for older saves.
   self.isOpaque = self:bgMode() ~= "world"
   self.introSlide = Timing.BATTLE_SLIDE_IN_FRAMES
+  -- FIRERED'S INTRO (battle_intro.c BattleIntroSlide1): the window opens out
+  -- of the middle for 32 frames before anything moves, then both halves of
+  -- the field and both battlers travel the whole 240 pixels at 2 a frame
+  if require("src.core.GameVersion").get() == "firered" and self:gen3Layout() then
+    self.introSlide = 120
+    self.frlgIntro = { hold = 32, t = 0, light = nil }
+  end
   self.showEnemyTrainer = self.kind == "trainer" and self.trainerPic ~= nil
   -- DrawAllPokeballs (common_text.asm:27) puts the party ball rows AND the
   -- HUD corner/underline tiles under them (PlacePlayerHUDTiles /
@@ -5985,8 +5995,18 @@ function BattleState:picOffset(slot)
 end
 
 function BattleState:updateFx()
-  if self.introSlide and self.introSlide > 0 then
+  local fi = self.frlgIntro
+  if fi then
+    fi.t = fi.t + 1
+    if fi.light then fi.light = math.min(1, fi.light + 0.1) end
+  end
+  if fi and fi.hold > 0 then
+    fi.hold = fi.hold - 1
+  elseif self.introSlide and self.introSlide > 0 then
     self.introSlide = self.introSlide - 1
+    -- the foe arrives: its palette fades back from the dark tint over ten
+    -- frames (SpriteCB_WildMonShowHealthbox)
+    if fi and self.introSlide == 0 then fi.light = 0 end
   end
   -- #407: THE THROW'S OWN CLOCK, and the fifty frames the trainer is on
   -- screen while it runs.  PlayerHandleIntroTrainerBallThrow starts the anim
@@ -7986,6 +8006,7 @@ function BattleState:askNicknameUI(mon, displayName)
       if not yes then return end
       pcall(Screens.push, game, "NamingScreen", {
         title = Strings("NICKNAME?"), maxLen = 10,
+        kind = "mon", mon = mon,
         onDone = function(name)
           if name and #name > 0 then mon.nickname = name end
         end,
@@ -9757,7 +9778,17 @@ function BattleState:drawPicsLayer(slide, sx, sy, onlySide, skipMenuClip)
                          img:getWidth() / 2, img:getHeight() / 2)
       love.graphics.setColor(1, 1, 1, 1)
     elseif self:gen3Layout() then
+      -- FireRed slides the wild Pokemon in under a dark tint
+      -- (BeginNormalPaletteFade 10/16 toward RGB(8,8,8)) and lifts it after
+      local fi = self.frlgIntro
+      if fi and self.kind ~= "trainer" and (self.introSlide or 0) > 0 then
+        love.graphics.setColor(0.5, 0.5, 0.5, 1)
+      elseif fi and fi.light and fi.light < 1 and self.kind ~= "trainer" then
+        local v = 0.5 + 0.5 * fi.light
+        love.graphics.setColor(v, v, v, 1)
+      end
       self:drawBattlerPic(self.enemy, ex, ey, s)
+      love.graphics.setColor(1, 1, 1, 1)
     else
       local dx, dy = BattleState.frontPlacement(ex, ey,
         img:getWidth(), img:getHeight(), s)
