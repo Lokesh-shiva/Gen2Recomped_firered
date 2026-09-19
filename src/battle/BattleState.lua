@@ -10080,6 +10080,24 @@ function BattleState:drawTextArea()
   Font.popStyle()
 end
 
+-- THE PARTY BUTTON, WHICH IS TWO TILES AND NOT THE SAME TWO EVERYWHERE.
+--
+-- These three menus all sat on a literal $E1 $E2 -- Gold and Silver's <PK>
+-- and <MN>, and what Crystal's <PKMN> control byte expands to.  Polished
+-- Crystal renumbered the glyph block and keeps the DIGITS at $E0-$E9, so the
+-- button read "12" (#31).  The pair comes off that cartridge's own battle
+-- menu strings now (RomExtractorGen2:gen2BattleMenuMon, field.gen2BattleMenuMon
+-- = $D2 $D3 there); the literal stays as the fallback, which is right for
+-- Crystal, Prism and every Gen 1 dataset -- none of them publish the pair and
+-- all of them really do draw it at $E1 $E2.
+function BattleState:drawMenuMonLabel(x, y)
+  local codes = (self.data and self.data.field or {}).gen2BattleMenuMon
+  if type(codes) ~= "table" or #codes == 0 then codes = { 0xE1, 0xE2 } end
+  for i = 1, #codes do
+    Font.drawCode(codes[i], x + (i - 1) * 8, y)
+  end
+end
+
 function BattleState:drawTextAreaInner()
   Font.drawBox(0, 12, 20, 6)
   love.graphics.setColor(0, 0, 0, 1)
@@ -10116,7 +10134,7 @@ function BattleState:drawTextAreaInner()
     Font.drawBox(8, 12, 12, 6)
     love.graphics.setColor(0, 0, 0, 1)
     Font.draw(Strings("FIGHT"), 80, 112)
-    Font.drawCode(0xE1, 128, 112); Font.drawCode(0xE2, 136, 112)
+    self:drawMenuMonLabel(128, 112)
     Font.draw(Strings("ITEM"), 80, 128); Font.draw(Strings("RUN"), 128, 128)
     Font.drawCode(0xED, 72, (self.demoTimer or 0) <= 80 and 112 or 128)
   elseif self.phase == "menu" then
@@ -10149,7 +10167,7 @@ function BattleState:drawTextAreaInner()
       -- have, so: text at columns 4 and 16, cursor at 3 and 15.
       Font.drawBox(2, 12, 18, 6)
       Font.draw(Strings("FIGHT"), 32, 112)
-      Font.drawCode(0xE1, 128, 112); Font.drawCode(0xE2, 136, 112)
+      self:drawMenuMonLabel(128, 112)
       Font.draw(Strings("PARKBALLx"), 32, 128)
       Font.draw(Strings("RUN"), 128, 128)
       -- .PrintParkBallsRemaining writes at hlcoord 13, 16 -- two digits,
@@ -10162,7 +10180,7 @@ function BattleState:drawTextAreaInner()
       -- ITEM  RUN" from (10,14); cursor columns 9 / 15
       Font.drawBox(8, 12, 12, 6)
       Font.draw(Strings("FIGHT"), 80, 112)
-      Font.drawCode(0xE1, 128, 112); Font.drawCode(0xE2, 136, 112)
+      self:drawMenuMonLabel(128, 112)
       Font.draw(Strings("ITEM"), 80, 128); Font.draw(Strings("RUN"), 128, 128)
       Font.drawCode(0xED, (col == 0 and 72 or 120), 112 + row * 16)
     end
