@@ -1091,7 +1091,39 @@ end
 -- the Center test reads the tileset NAME off the map def, and a Fly
 -- destination additionally has to be a TOWN or a ROUTE -- FlyFromAnim's own
 -- rule, and the same one EnterMapWarp.SetSpawn makes on the other side.
-local CACHE_FORMAT = "rom-cache-v319:"
+-- v320: Gen 3 object animations stop at their terminator, so a walk with
+--       one held frame is no longer given the next animation's frames as a
+--       second step -- and a sheet whose walks are held is marked holdStep
+--       (Rayquaza's Sky Pillar flight; he is the only row in the cartridge)
+-- v321: Polished Crystal's TM/HM pocket commands resolve their machine
+--       operand to the TM_nn/HM_nn item, and changemapblocks decodes its
+--       far pointer into the replacement block table -- both change what
+--       map_scripts.lua holds, so every Gen 2 cache rebuilds
+-- v322: field.gen2Stairs -- Polished Crystal's four stairs collision
+--       classes and the one facing each admits, read off its own
+--       DoPlayerMovement.FacingStairsTable
+-- v323: Polished Crystal's item table read one name early and at Crystal's
+--       seven-byte attribute stride -- every item wore the name of the one
+--       below it (layout.itemNameBias / itemAttrBytes / itemAttrPocketAt)
+-- v324: field.gen2BattleMenuMon -- the battle menu's party button is two
+--       glyph tiles and the pair is not $E1 $E2 everywhere; Polished
+--       Crystal keeps the digits there, so the button read "12"
+-- v325: Polished Crystal's battle HP bars were read from HPBarPals, which
+--       on that cartridge is the PARTY MENU's four-colour set; the battle
+--       screen reads HPBarInteriorPals, and its exp bar GenderAndExpBarPals
+-- v326: field.gen2Roofs -- the nine tiles an outdoor tileset does NOT own.
+--       MapGroupRoofs / MapGroupRoofGFX (or Roofs) and RoofPals, so a
+--       town wears its own roof instead of whatever the GFX blob left
+--       in tile slots 10-18
+-- v327: field.gen2MapPalettes -- SpecialBGPalettes, the seventy-four rows
+--       LoadMapPals consults BEFORE the environment row.  The Pokemon
+--       Center and the Mart are two of them and were being coloured
+--       from the generic indoor row
+-- v328: the water shimmer is read from ALL four of Polished Crystal's
+--       water routines, not just AnimateWaterTile -- Kanto, Safari,
+--       the islands and Snowtop Mountain had a frozen sea -- and the
+--       tile ids come off each script (tileset.animWaterTiles)
+local CACHE_FORMAT = "rom-cache-v328:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"

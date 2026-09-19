@@ -905,16 +905,66 @@ local BLOB_FRAME = { down = 0, up = 1, left = 2, right = 2 }
 -- SyncSurfblobPositionWithPlayer (0815577C): `blob.y = player.y + 8`.
 local BLOB_BELOW_PLAYER = 8
 
-function Player:drawSurfBlob(px, py, camX, camY, facing)
-  if not self.surfing then return end
+-- WHICH BLOB, WHICH WAY ROUND, AND WHERE -- ASKED ONCE, ANSWERED ONCE.
+--
+-- In-game location: THE SEA OFF ROUTE 118, on a surfing player, in the voxel
+-- diorama as well as the flat game.
+--
+-- Reported from play: "still missing the surf blob beneath the player when
+-- surfing ... this is with voxels on in any mode, first and third person or
+-- not". With voxels on the player is a BILLBOARD (DRAMATIC_SHAPE's
+-- VoxelScene.drawEntity) and :draw below never runs, so the one place in the
+-- program that knew the blob existed was never reached and there was nothing
+-- under the surfer at all.
+--
+-- The standing rule is that the second path ASKS rather than restates, so
+-- everything a drawing of the blob needs is published here and :draw is
+-- written in terms of it. A renderer that wants to lay the blob flat on the
+-- water instead of blitting it gets the same record, the same frame and the
+-- same offsets, and the two can never drift.
+--
+-- Returns nil for every cartridge but Gen 3: `gen3SurfBlob` is written by the
+-- Gen 3 importer alone, so Gen 1, Gen 2 and Prism fall out on the type test
+-- exactly as they did when this was all inline.
+--
+-- offX / offY are the blob's top-left in WORLD pixels relative to the
+-- player's own (px, py) -- the sheet's centring on the 16px cell, its own
+-- hang above it, and the cartridge's eight-pixel drop -- and deliberately
+-- WITHOUT the GB engine's universal four-pixel screen lift, which is a fact
+-- about blitting to a screen rather than about where the blob is. :draw adds
+-- it back on the line below, exactly where every other sprite gets it.
+--
+-- MEASURED for Emerald's own record (32x32, 3 frames, DERIVED by running
+-- data/generated/constants.lua): offX = -floor((32-16)/2) = -8 and
+-- offY = -(32-16) + 8 = -8, i.e. the 32-square blob is the player's 16px
+-- cell grown by eight pixels on every side -- centred on the very cell
+-- middle a 3D billboard is anchored to.
+-- `facing` is the POSE's facing rather than the body's: the spinner tiles
+-- whirl the sprite through all four while `self.facing` stays put (see
+-- :pose), and the blob turns with what is drawn. Defaults to the body's, for
+-- a caller that has no pose in hand.
+function Player:surfBlobCard(facing)
+  facing = facing or self.facing
+  if not self.surfing then return nil end
   -- and nothing to sit on down there: the cartridge destroys the surf blob
   -- when you dive and makes another when you come back up
-  if self:isUnderwater() then return end
+  if self:isUnderwater() then return nil end
   local Game = require("src.core.Game")
   local blob = (Game.data and Game.data.constants or {}).gen3SurfBlob
-  if type(blob) ~= "table" then return end
+  if type(blob) ~= "table" then return nil end
+  if not blob.image then return nil end
+  local fw = blob.frameWidth or 32
+  local fh = blob.frameHeight or 32
+  local frame = BLOB_FRAME[facing] or 0
+  if frame >= (blob.frames or 1) then frame = 0 end
+  return blob, frame, facing == "right",
+         -math.floor((fw - 16) / 2), -(fh - 16) + BLOB_BELOW_PLAYER
+end
+
+function Player:drawSurfBlob(px, py, camX, camY, facing)
+  local blob, frame, mirror, offX, offY = self:surfBlobCard(facing)
+  if not blob then return end
   local path = blob.image
-  if not path then return end
   if self.blobImage == nil or self.blobPath ~= path then
     local ok, img = pcall(require("src.render.Assets").image, path)
     self.blobImage = (ok and img) or false
@@ -965,9 +1015,10 @@ function Player:drawSurfBlob(px, py, camX, camY, facing)
   --     strh r0,[r4,#34]
   --
   -- so the offset is not a guess and it is not a matter of taste.
-  local mirror = facing == "right"
-  local sx = math.floor(px - camX) - math.floor((fw - 16) / 2)
-  local sy = math.floor(py - camY) - 4 - (fh - 16) + BLOB_BELOW_PLAYER
+  -- the offsets are surfBlobCard's now, so this states them nowhere: the
+  -- 4px lift is the GB screen lift every sprite here gets, and nothing else
+  local sx = math.floor(px - camX) + offX
+  local sy = math.floor(py - camY) - 4 + offY
   love.graphics.setColor(1, 1, 1, 1)
   if mirror then
     love.graphics.draw(img, quad, sx + fw, sy, 0, -1, 1)

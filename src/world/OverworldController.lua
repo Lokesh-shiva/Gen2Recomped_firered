@@ -4025,6 +4025,12 @@ function OverworldState:handleInput()
           return result
         end
       end
+      -- ...and the stairs, which the cartridge also asks about only after
+      -- the plain step has been refused (see checkGen2Stairs).
+      if result == "blocked" and why ~= "entity"
+         and self:checkGen2Stairs(dir) then
+        return
+      end
       if result == "blocked" and why ~= "entity" then
         if (self.bumpCooldown or 0) <= 0 then
           require("src.core.Sound").play(Game.data, "Collision")
@@ -4379,6 +4385,54 @@ function OverworldState:gen2LedgeAllows(standing, dir)
     if allowed == dir then return true end
   end
   return false
+end
+
+-- THE STAIRS STEP, which is the diagonal one.
+--
+-- Polished Crystal's DoPlayerMovement.TryStairs, read off the cartridge and
+-- written out by the importer as field.gen2Stairs -- see the note beside
+-- RomExtractorGen2:gen2StairsSteps for the derivation.  Keyed by the
+-- collision class the player is STANDING on, exactly as ledges are, because
+-- the cartridge reads wPlayerTileCollision for both.
+--
+-- CALLED AFTER THE PLAIN STEP HAS BEEN REFUSED, because that is the order the
+-- cartridge asks in: .Normal runs TryStep, then TryJump, then TryStairs, and
+-- each `ret c` on success.  So walking along a stairs tile where the ordinary
+-- step is open behaves ordinarily; the diagonal is what a press INTO the
+-- slope gets you instead of a bump.
+--
+-- The port has no diagonal glide, so the move is spent as two ordinary steps
+-- -- along, then up or down -- which lands the player on the same cell the
+-- cartridge does.  The landing is checked first, which the cartridge does not
+-- do: TryStairs steps unconditionally, and a port that followed it there
+-- would walk the player into scenery on any map whose stairs run to an edge.
+--
+-- Every gate here fails closed on a cartridge without stairs: Gold, Silver,
+-- Crystal and Prism have no FacingStairsTable, so field.gen2Stairs is nil and
+-- this returns on the first line.
+function OverworldState:checkGen2Stairs(dir)
+  local stairs = Game.data.field and Game.data.field.gen2Stairs
+  if not stairs then return false end
+  local p = self.player
+  if p.surfing then return false end
+  local row = stairs[self.map:cellTile(p.cellX, p.cellY)]
+  if not row then return false end
+  local allowed = false
+  for _, facing in ipairs(row.facing or {}) do
+    if facing == dir then allowed = true break end
+  end
+  if not allowed then return false end
+  local vertical = row.up and "up" or "down"
+  local sx, sy = Collision.target(p.cellX, p.cellY, dir)
+  local lx, ly = Collision.target(sx, sy, vertical)
+  if not (self.map:inBounds(lx, ly) and self.map:isWalkableCell(lx, ly))
+     or Collision.occupied(self.entities, lx, ly, p) then
+    return false
+  end
+  self:scriptMove(p, dir, 1, function()
+    self:scriptMove(p, vertical, 1, nil, true)
+  end)
+  return true
 end
 
 function OverworldState:startLedgeHop(dir, fx, fy)

@@ -903,6 +903,18 @@ end
 
 function NPC:walkPhase()
   if not self.moving then return 0 end
+  -- A SHEET WHOSE STEP IS HELD, not cycled.
+  --
+  -- Emerald writes most walk animations as four beats -- step, stand, step,
+  -- stand -- and this phase is what reproduces them.  A handful are written
+  -- as one beat that jumps to itself, which says the opposite: show the step
+  -- frame for the whole movement.  Rayquaza leaving the Sky Pillar is the one
+  -- in Hoenn; his stand is the coil, so cycling made him coil and uncoil over
+  -- and over as he flew.  The import marks those sheets (`holdStep`).
+  --
+  -- Gen 1 and Gen 2 sheets never carry the flag, so their walk is untouched.
+  local def = self.sprite and self.sprite.def
+  if def and def.holdStep then return 1 end
   local p = self.progress % 16
   return (p >= 4 and p < 12) and 1 or 0
 end
