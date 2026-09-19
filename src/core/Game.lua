@@ -5,9 +5,11 @@ local Data = require("src.core.Data")
 local FixedStep = require("src.core.FixedStep")
 local Input = require("src.core.Input")
 local Logger = require("src.core.Logger")
+local Platform = require("src.core.Platform")
 local Renderer = require("src.render.Renderer")
 local SaveData = require("src.core.SaveData")
 local StateStack = require("src.core.StateStack")
+local FrameProfile = require("src.core.FrameProfile")
 local TouchControls = require("src.core.TouchControls")
 local ModLoader = require("src.mods.Loader")
 local ModRuntime = require("src.mods.Runtime")
@@ -285,11 +287,29 @@ function Game:returnToTitle()
 end
 
 function Game:step(dt)
+  -- THE WHOLE LOGIC STEP, because `stack:update` alone accounted for under
+  -- 2 ms of a 43 ms update and everything else in here was invisible.  Run 4
+  -- to 6 times per rendered frame while the accumulator catches up, so a cost
+  -- in here is multiplied before it reaches the frame.
+  local closeStep = FrameProfile.section("  step: whole")
+  self:_step(dt)
+  closeStep()
+end
+
+function Game:_step(dt)
   -- Tool mods (autoplay, accessibility drivers, input visualizers) act on
   -- the same fixed-step boundary as a physical controller.  Run them before
   -- Input:step promotes queued edges so a button chosen here is visible to
   -- this logic tick, not one tick later.  With no wrapper this is a no-op.
-  ModRuntime.call("input.step", function() end, self, dt)
+  do
+    -- A MOD SEAM ON THE LOGIC STEP.  Timed at the call site rather than inside
+    -- the hook chain: a hook calls `next` into the rest of the chain, so a
+    -- timer around one link charges it with everything downstream.  One number
+    -- for the whole seam is honest; per-link numbers there would not be.
+    local close = FrameProfile.section("    step: mod input.step")
+    ModRuntime.call("input.step", function() end, self, dt)
+    close()
+  end
   self.input:step()
   -- A+B+SELECT+START held for 16 steps: SoftReset (home/init.asm) stops the
   -- audio, whites the palettes out and falls through into Init, i.e. the
@@ -313,9 +333,21 @@ function Game:step(dt)
   if self.linkNet and not self.linkNet.closed then
     self.linkNet:update()
   end
+  -- AN EMPTY STACK IS NOT A GAME.
+  if self:ensureStack() then return end
+  local closeStep = FrameProfile.section("  logic: stack:update")
   self.stack:update(dt)
-  -- play time for the trainer card / save screen
-  self.save.playTime = (self.save.playTime or 0) + dt
+  closeStep()
+  -- play time for the trainer card / save screen.  A save written by an older
+  -- build carries the broken-down { hours, minutes, ... } form, which would
+  -- throw here on its first frame; playSeconds normalises it, and the field is
+  -- a number from this assignment onward (SaveData.validate does the same on
+  -- load, so this is the belt to that brace).
+  local clock = self.save.playTime
+  if clock ~= nil and tonumber(clock) == nil then
+    clock = require("src.core.SaveData").playSeconds(self.save)
+  end
+  self.save.playTime = (tonumber(clock) or 0) + dt
   -- Music.update is NOT serviced here: it decrements fade counters and
   -- drives ChipAudio once per call, so running it inside the logic step
   -- would pitch music and sfx up under fast-forward. Game:update advances
@@ -348,30 +380,58 @@ function Game:update(dt)
   -- or the anti-spiral clamp quietly caps every level above ~15X.
   local speed = self:logicSpeed()
   FixedStep.maxAccum = math.max(0.25, speed * FixedStep.STEP * 1.5)
-  FixedStep:update(dt * speed)
+  do
+    local close = FrameProfile.section("  update: fixed steps")
+    FixedStep:update(dt * speed)
+    close()
+  end
   -- Audio runs off real time at a fixed 60Hz regardless of game speed or
   -- display refresh, so fades and chip synthesis keep their intended tempo
   -- whether we are at 1X, 10X, or running with vsync disabled.
   local step = FixedStep.STEP
   self.audioAccum = math.min((self.audioAccum or 0) + dt, 0.25)
-  while self.audioAccum >= step do
-    self.audioAccum = self.audioAccum - step
-    require("src.core.Music").update(Data)
+  do
+    local close = FrameProfile.section("  update: music")
+    while self.audioAccum >= step do
+      self.audioAccum = self.audioAccum - step
+      require("src.core.Music").update(Data)
+    end
+    close()
   end
   -- Overworld tilt toggle tween: presentational, so it runs on the real
   -- frame dt (not the fixed logic step) for a smooth ~0.25s glide.
-  require("src.render.Tilt").update(dt)
+  do
+    local close = FrameProfile.section("  update: tilt")
+    require("src.render.Tilt").update(dt)
+    close()
+  end
   -- mod render pipelines tween on the same real-frame clock, for the same
   -- reason: they are presentational, so fast-forward must not speed them up
-  require("src.render.Pipelines").update(dt)
-  pcall(function() require("src.core.DiscordPresence").update(dt) end)
+  do
+    local close = FrameProfile.section("  pipelines: update")
+    require("src.render.Pipelines").update(dt)
+    close()
+  end
+  do
+    local close = FrameProfile.section("  update: discord")
+    pcall(function() require("src.core.DiscordPresence").update(dt) end)
+    close()
+  end
   -- Steady-state memory backstop: advance the incremental collector one
   -- small step every rendered frame.  The heavy GPU objects are now freed
   -- explicitly (map eviction, battle exit, canvas/renderer swaps), so this
   -- only has to keep ordinary Lua-heap garbage (per-frame tables/closures)
   -- from drifting upward over a long session, and to spread collection out
   -- so the default lazy schedule never batches it into a visible pause.
-  if collectgarbage then collectgarbage("step", 1) end
+  -- ONE INCREMENTAL GC STEP PER FRAME.  Cheap on a small heap and not
+  -- obviously cheap under a mod that allocates a world's worth of geometry,
+  -- which is exactly the case being measured -- so it is named rather than
+  -- assumed.
+  if collectgarbage then
+    local close = FrameProfile.section("  update: gc step")
+    collectgarbage("step", 1)
+    close()
+  end
 end
 
 -- render.zones' identity default: unhooked, the zone list reaches the blit
@@ -417,6 +477,28 @@ function Game.wideBattleInStack(stack)
   for i = #(stack and stack.states or {}), 1, -1 do
     local state = stack.states[i]
     if state and state.isWideBattleLayout and state:isWideBattleLayout() then
+      return state
+    end
+  end
+  return nil
+end
+
+-- ...AND A STATE THAT WIDENED ITS OWN SURFACE HOLDS IT THE SAME WAY.
+--
+-- Whole-stack, for the reason above, and separate from wideBattleInStack
+-- because it is not the same layout: BATTLE LAYOUT = WIDE on a Hoenn
+-- cartridge keeps EMERALD's composition and grows its surface to the window
+-- (BattleState:holdsUISurface), and every menu, bag and dialogue box that
+-- battle opens is itself a Gen 3 screen asking for the GBA's 240x160.
+-- nativeSurfaceInStack takes the TOPMOST state with a uiSize, so without this
+-- the surface would snap back to 240 for exactly those frames and the battle
+-- underneath would redraw its wider composition clipped at the right edge.
+--
+-- Nothing in Gen 1, Gen 2 or Prism answers this, so nothing there changes.
+function Game.heldSurfaceInStack(stack)
+  for i = #(stack and stack.states or {}), 1, -1 do
+    local state = stack.states[i]
+    if state and state.holdsUISurface and state:holdsUISurface() then
       return state
     end
   end
@@ -469,6 +551,39 @@ function Game.uiAnchorsHeldInStack(stack)
     if state and state.holdsUIAnchors then return true end
   end
   return false
+end
+
+-- MAY THE LETTERBOX BE PAINTED WITH THE SURFACE'S OWN EDGE?
+--
+-- Renderer:bleedEdges pulls the outermost row and column of a Gen 3 screen
+-- outward so a menu's border appears to run to the edge of the window.  That
+-- is right for a PANEL -- a window frame drawn over something -- because its
+-- outermost column IS the frame, and wrong for anything that composes a
+-- picture of its own, because there the outermost column is artwork and
+-- smearing it duplicates artwork instead of extending a border.
+--
+-- The battle was the first screen to say so and says it through holdsUIAnchors
+-- (see Renderer).  The rest say it here: the title, the attract movie, the
+-- main menu and the START menu are all composed screens, and all four were
+-- being stretched.  Reported from play: "fix the stretching of borders on the
+-- start menu, main menu, main menu intro and the continue, new game, options,
+-- exit menus -- instead make them full screen/fit the screen without
+-- stretching".  They already fill as far as they can without distorting;
+-- wantsFillScale scales the surface to the window with the aspect kept.  What
+-- was left over was the smear, and this is what turns it off.
+--
+-- Asked of the WHOLE stack and answered by the first refusal, for the same
+-- reason the other two are: a menu opened over one of these -- OPTION from
+-- the main menu, SAVE from the START menu, a text box over either -- must not
+-- switch the smear back on for the frames it is up.
+function Game.edgeBleedAllowedInStack(stack)
+  for i = #(stack and stack.states or {}), 1, -1 do
+    local state = stack.states[i]
+    if state and state.wantsEdgeBleed and not state:wantsEdgeBleed() then
+      return false
+    end
+  end
+  return true
 end
 
 -- Where Game:draw starts drawing this frame.  Normally the topmost opaque
@@ -546,9 +661,53 @@ function Game.zonesNeedCentering(zoneOwner, classicOffset)
   return not Game.wantsThisSurface(zoneOwner)
 end
 
+-- WHERE A STATE THAT DOES NOT OWN THE SURFACE IS CENTRED IN IT.
+--
+-- Every such state used to be centred as though it were 160x144, because
+-- every such state WAS one: the only surfaces wider than the Game Boy's were
+-- the wide battle's 304x144 and the GBA's 240x160, and anything that did not
+-- own one of those was a Game Boy screen drawn in Game Boy coordinates.
+--
+-- BATTLE LAYOUT = WIDE on a Hoenn cartridge ends that.  The battle asks for a
+-- surface derived from the window -- 320 pixels on a 1920x1080 screen -- and
+-- the party menu, the bag and the dialogue box it opens are GEN 3 screens:
+-- they ask for 240x160, which is neither the surface in use nor the Game
+-- Boy's.  Centring one of those by (320 - 160) / 2 = 80 puts a 240-wide
+-- screen at x = 80 and hangs eighty pixels of it off the right edge.  Its own
+-- centre is (320 - 240) / 2 = 40.
+--
+-- So the offset is asked of the STATE, by the size it actually laid itself out
+-- in.  A state with no uiSize -- every Game Boy screen, and every state on a
+-- Gen 1, Gen 2 or Prism cartridge -- answers 160x144 and gets the arithmetic
+-- it always got, to the pixel.
+local function homeOffset(state, uw, uh)
+  local sw, sh = Renderer.WIDTH, Renderer.HEIGHT
+  if state and state.uiSize then
+    local ok, w, h = pcall(state.uiSize, state)
+    if ok and type(w) == "number" and type(h) == "number" then sw, sh = w, h end
+  end
+  return math.floor((uw - sw) / 2), math.floor((uh - sh) / 2)
+end
+
+Game.homeOffset = homeOffset
+
 Game.centerClassicZones = centerClassicZones
 
 function Game:draw()
+  local closeDraw = FrameProfile.section("draw: whole frame")
+  self:_draw()
+  closeDraw()
+  FrameProfile.frame()
+end
+
+-- F11 turns the profiler on and off.  Read in keypressed above the delegation,
+-- with the other escape hatches, for the same reason they are: the frames you
+-- most want to measure are the ones where something is holding the keyboard.
+function Game:toggleFrameProfile()
+  return FrameProfile.toggle()
+end
+
+function Game:_draw()
   -- the UI canvas clears transparent when the overworld's world pass
   -- shows through beneath it; opaque full-screen states get the classic
   -- white clear
@@ -564,7 +723,11 @@ function Game:draw()
   -- unchanged. Outside a battle, including the title screen, the option is
   -- intentionally inactive because it is a battle-layout setting.
   local wideBattle = Game.wideBattleInStack(self.stack)
-  local native = not wideBattle and Game.nativeSurfaceInStack(self.stack) or nil
+  -- ...and a Gen 3 battle that widened its own screen holds it the same way,
+  -- ahead of the topmost-uiSize pick (see Game.heldSurfaceInStack).
+  local held = not wideBattle and Game.heldSurfaceInStack(self.stack) or nil
+  local native = not wideBattle
+    and (held or Game.nativeSurfaceInStack(self.stack)) or nil
   local classicOffset, classicOffsetY = 0, 0
   if wideBattle and wideBattle.uiSize then
     Renderer:setUISize(wideBattle:uiSize())
@@ -580,6 +743,9 @@ function Game:draw()
   else
     Renderer:setUISize(Renderer.WIDTH, Renderer.HEIGHT)
   end
+  -- the surface every state below is either drawing in or being centred
+  -- inside, resolved before any of them draws
+  local surfW, surfH = Renderer:uiSize()
   -- BATTLE SIZE: scale the battle surface to the window instead of the
   -- classic integer letterbox.  Read from the whole stack, not just the top,
   -- so a party menu or text box opened mid-battle keeps the same surface.
@@ -627,9 +793,17 @@ function Game:draw()
       or (native ~= nil and state == native)
       or Game.wantsThisSurface(state)
     if state and state.draw then
+      -- ...and it is centred by ITS OWN size, not by the Game Boy's (see
+      -- Game.homeOffset).  classicOffset still gates it: a surface that is
+      -- the Game Boy's centres nothing, which is every frame outside a wide
+      -- battle and every Gen 1 / Gen 2 / Prism frame inside one.
+      local ox, oy = 0, 0
       if (classicOffset ~= 0 or classicOffsetY ~= 0) and not ownsSurface then
+        ox, oy = homeOffset(state, surfW, surfH)
+      end
+      if ox ~= 0 or oy ~= 0 then
         love.graphics.push()
-        love.graphics.translate(classicOffset, classicOffsetY)
+        love.graphics.translate(ox, oy)
         state:draw()
         love.graphics.pop()
       else
@@ -672,8 +846,16 @@ function Game:draw()
   -- surface currently in use?  More than one state can, and every one of them
   -- draws in it rather than being centred in it.  Zones follow their drawer,
   -- so they have to be asked the same question, and now they are.
-  if Game.zonesNeedCentering(zoneOwner, classicOffset) then
-    zones = centerClassicZones(zones, classicOffset)
+  -- ...and by the ZONE OWNER's own size, for the same reason the draw above
+  -- is: a 240-wide Gen 3 menu laid its zones out across 240 pixels and they
+  -- belong forty pixels into a 320-wide surface, not eighty.  The gate is
+  -- still classicOffset, so a Game Boy surface shifts nothing.
+  local zoneOffset = classicOffset
+  if classicOffset ~= 0 and zoneOwner then
+    zoneOffset = select(1, homeOffset(zoneOwner, surfW, surfH))
+  end
+  if Game.zonesNeedCentering(zoneOwner, zoneOffset) then
+    zones = centerClassicZones(zones, zoneOffset)
   end
   -- 14's render.zones: weather/lighting overlays and custom colorization
   -- recolor or add zones before the blit
@@ -719,7 +901,115 @@ function Game:wheelmoved(_, dy)
   end
 end
 
+-- WHEN THE STACK IS EMPTIED AND NOBODY PUSHES ANYTHING BACK.
+--
+-- Traced from play, straight out of the log:
+--
+--   push src/ui/Menu.lua:111 (depth 2)    <- a mod's battle-settings menu
+--   pop  src/ui/Menu.lua:111 (depth 1)    <- CANCEL closes it, correctly
+--   [DRAMATIC_SHAPE] CANCEL in Gen3 battle settings
+--   pop  mods/.../follower/control_engine.lua:2578 (depth 0)   <- and again
+--
+-- The second pop took the OVERWORLD off.  With nothing on the stack nothing
+-- updates and nothing draws, so the frame keeps whatever the last clear left:
+-- a white screen that never goes away, with no error in the log, because
+-- popping is not an error.  Cancelling a menu that has already cancelled
+-- itself is an easy mistake for a mod to make and an invisible one from the
+-- inside -- reported three times as "a white screen that doesnt go away".
+--
+-- The engine empties the stack deliberately in exactly two places -- New Game
+-- and Load -- and both push the replacement in the same breath, so an empty
+-- stack ACROSS A FRAME BOUNDARY is always a fault.  That is why this is
+-- checked at the top of the logic step and not inside pop(): here it cannot
+-- mistake a drain for a leak, and it needs no cooperation from the caller.
+--
+-- The world is put BACK rather than entered again: it never exited (the
+-- overworld has no exit), and entering it would call setMap and boot the map
+-- over the top of the player.  Returns true when the step should stop.
+function Game:ensureStack()
+  local stack = self.stack
+  if not (stack and stack.states) or stack.states[1] ~= nil then return false end
+  local world = self.overworld
+  if world and world.map then
+    Logger.warn("the state stack was emptied and nothing pushed anything back "
+      .. "-- with no state there is nothing to update and nothing to draw, "
+      .. "which is a screen that never changes. Restoring the overworld; "
+      .. "something popped one state too many, and the push/pop trace above "
+      .. "names it.")
+    stack:restore(world)
+    return false
+  end
+  Logger.warn("the state stack was emptied and there is no world to put back; "
+    .. "returning to the title screen")
+  self:returnToTitle()
+  return true
+end
+
+-- F10, as its own method so the escape-hatch block above can reach it without
+-- going through the delegation it exists to jump over.  Toggle: the manager no
+-- longer swallows the keyboard, so a second press closes it rather than
+-- stacking another.  This is the route to turning a misbehaving mod OFF, which
+-- is why it must not be swallowable.
+function Game:toggleModManager()
+  local top = self.stack and self.stack:top()
+  if top and top.screenId == "ManagerState" then
+    self.stack:pop()
+  else
+    Screens.push(self, "ManagerState")
+  end
+end
+
+-- THE WAY OUT OF A STATE THAT WILL NOT LET GO.
+--
+-- Reported twice from play, both times under a mod that draws the field in 3D:
+-- "no input is working at all ... i cant look around walk or open any menus".
+-- Nothing had crashed.  A state was sitting on top of the stack that should
+-- have been popped and was not, and the first line of keypressed below hands
+-- EVERY key to the top state's onKeyPressed without condition -- so the mod
+-- manager, the save keys, the zoom, the dev console and the only route to
+-- turning the offending mod off all went into the same hole as the D-pad.
+--
+-- F9 says what is on the stack and takes the top of it off.  It is above the
+-- delegation on purpose: an escape hatch a state can swallow is not one.  And
+-- it refuses to pop the overworld, because "input is dead while the overworld
+-- is on top" is a different fault with a different answer, and closing the
+-- world would replace a stuck game with no game.
+function Game:unstick()
+  local stack = self.stack
+  if not (stack and stack.states) then return end
+  Logger.warn("unstick (F9): %s", stack:describeAll())
+  local top = stack:top()
+  if not top then
+    Logger.warn("unstick: the stack is empty; nothing to pop")
+    Logger.flush()
+    return
+  end
+  if top == self.overworld or top.isOverworld then
+    Logger.warn("unstick: the overworld is already on top, so no state is "
+      .. "holding input -- whatever is eating it is inside the world itself")
+    Logger.flush()
+    return
+  end
+  local name = StateStack.describe(top)
+  local before = #stack.states
+  -- A state whose exit throws -- or whose screen.popped listener does -- must
+  -- not be able to stay on top BECAUSE it threw; that is the same trap twice.
+  local ok, err = pcall(stack.pop, stack)
+  if not ok then
+    if #stack.states == before then table.remove(stack.states) end
+    Logger.warn("unstick: %s threw on the way out (%s); removed it anyway",
+                name, tostring(err))
+  end
+  Logger.warn("unstick: popped %s -- stack is now %s", name,
+              stack:describeAll())
+  Logger.flush()
+end
+
 function Game:keypressed(key)
+  -- ...ahead of the delegation below, which is unconditional.
+  if key == "f9" then return self:unstick() end
+  if key == "f11" then return self:toggleFrameProfile() end
+  if key == "f10" then return self:toggleModManager() end
   if self.stack and self.stack:top() and self.stack:top().onKeyPressed then
     self.stack:top():onKeyPressed(key)
     return
@@ -730,17 +1020,6 @@ function Game:keypressed(key)
   end
   if devMode and key == "`" then
     self.stack:push(require("src.dev.Console").new(self))
-    return
-  end
-  if key == "f10" then
-    -- toggle: the manager no longer swallows the keyboard, so a second
-    -- press reaches this branch and closes it instead of stacking another
-    local top = self.stack:top()
-    if top and top.screenId == "ManagerState" then
-      self.stack:pop()
-    else
-      Screens.push(self, "ManagerState")
-    end
     return
   end
   if key == "f1" then
@@ -929,11 +1208,63 @@ end
 function Game:focus(f)
   Input:reset()
   TouchControls:reset()
+  self:audioSession(f, "focus")
 end
 
 function Game:visible(v)
   Input:reset()
   TouchControls:reset()
+  self:audioSession(v, "visibility")
+end
+
+-- AN INCOMING PHONE CALL IS AN AUDIO-SESSION LOSS, NOT A WINDOW EVENT.
+--
+-- Reported from play: "on iOS when they got a phone call the game would
+-- crash".  iOS gives the audio session to the phone app for the length of the
+-- call, and SDL reports that to the app as SDL_APP_WILLENTERBACKGROUND /
+-- SDL_APP_DIDENTERBACKGROUND -- which arrives *here*, because LOVE maps those
+-- onto love.focus(false) / love.visible(false).  OpenAL's device is
+-- invalidated at that moment, and the chip music path queues into its
+-- QueueableSource on EVERY frame (ChipAudio.update, driven from Game:update
+-- above), so within one frame the game is making AL calls against a device
+-- that no longer exists; LOVE raises OpenAL's refusal as a Lua error thrown
+-- out of Music.update, and that is the crash.  Android delivers the same app
+-- events -- and there GL context loss is the normal case rather than the
+-- exception -- so it gets the same handling even though nobody has reported it
+-- there yet.
+--
+-- MOBILE ONLY, deliberately.  On desktop, alt-tab has always kept the music
+-- playing and there is no session to lose; Platform.detect().mobile is false
+-- for Windows / macOS / Linux and for the console builds, and false under the
+-- headless test stub (which has no love.system at all), so every line this
+-- reaches is inert off a phone.  It is inert while focused too: both edges are
+-- latched on self.audioSuspended, so the focus+visible pair that a single
+-- transition delivers is acted on once.
+function Game:audioSession(active, why)
+  if not Platform.detect().mobile then return end
+  local Music = require("src.core.Music")
+  if active then
+    if not self.audioSuspended then return end
+    self.audioSuspended = false
+    Logger.info("audio session: %s regained -- rebuilding audio", why)
+    Music.resume(Data)
+    -- The app was parked inside SDL's event loop for the whole call, so the
+    -- first love.timer.step() after it returns the LENGTH OF THE CALL.
+    -- FixedStep already clamps its accumulator (FixedStep.maxAccum, 0.25s =
+    -- 15 steps), so an unbounded dt cannot spiral into thousands of catch-up
+    -- ticks here -- but 15 logic steps inside one frame still plays out as a
+    -- lurch, and a direction held when the call arrived walks the player most
+    -- of a tile before anything is drawn.  discardCatchup is the machinery
+    -- that already exists for exactly this (it absorbs one oversized frame as
+    -- a single step, for map seams); a resume from an interruption is the
+    -- largest hitch this engine will ever be handed.
+    FixedStep:discardCatchup()
+  else
+    if self.audioSuspended then return end
+    self.audioSuspended = true
+    Logger.info("audio session: %s lost -- suspending audio", why)
+    Music.suspend()
+  end
 end
 
 -- A disconnected/dropped controller can't send the button-up for whatever
@@ -964,6 +1295,13 @@ function Game:adoptSave(save, seedBuckets)
   save.modData = save.modData or {}
   local loader = self.mods
   if not loader then return end
+  -- A mod whose id changed takes its per-playthrough state with it.  Per save
+  -- rather than once at boot, because each slot carries its own modData and a
+  -- player may open several -- and here, rather than in SaveData, because this
+  -- is the first point that has both the save and the manifests.
+  pcall(function()
+    require("src.mods.ModRename").adoptModData(save.modData, loader.mods)
+  end)
   if seedBuckets then
     for id, bucket in pairs(loader.modSave or {}) do
       if save.modData[id] == nil then save.modData[id] = bucket end
@@ -997,7 +1335,12 @@ end
 -- across New Game without touching the progress save.
 function Game:writeOptions()
   if not (self.save and self.save.options) then return end
-  SaveData.saveOptions(self.save.options)
+  -- The generation this playthrough belongs to, so a row it overrides is
+  -- written back into that override rather than over everyone else's shared
+  -- value (SaveData.saveOptions / src/core/GenOptions.lua).  Nil for a game
+  -- with no overrides in play, which is the pre-existing behaviour.
+  local gen = SaveData.generationOf and SaveData.generationOf(nil) or nil
+  SaveData.saveOptions(self.save.options, nil, gen)
 end
 
 -- Push the live options table into audio + display subsystems.

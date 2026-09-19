@@ -617,6 +617,32 @@ local SETTINGS = {
     .. "costing you frames and you want to keep the shoreline. Needs WATER "
     .. "on FULL; there is no reflection to be in below that.",
     when = function() return Water.level() >= 2 end },
+  -- ...and the third half of the same question, under both of them.
+  --
+  -- `when` gates it the same way WATER SPRITES is gated and for the same
+  -- reason: below FULL the shader never reads the mirror, so the row would
+  -- decide nothing.
+  --
+  -- NOT set by the FULL preset, and that is the one place this row parts
+  -- company with WATER and WATER SPRITES. FULL pins the rows that describe
+  -- the diorama's LOOK, and this is a look the mode has never had at a price
+  -- nothing else in the mode charges -- the whole scene drawn a second time.
+  -- A preset that quietly switched it on would be the frame halving itself
+  -- on a machine whose owner asked for "the diorama", which is the opposite
+  -- of what a preset is for. So it stays where the player left it, and
+  -- because FULL does not pin it, FULL must not take it off the menu either:
+  -- it is marked `full` for exactly that reason -- a row the preset does not
+  -- set and does remove is a value the player can no longer reach, which is
+  -- the trap TILT and GBC FX are pinned to avoid.
+  { Water.planarSetting,
+    "Reflect people and scenery that the surface reflection cannot reach: "
+    .. "the world is drawn a second time, upside down under the water, so "
+    .. "characters standing BESIDE a lake appear in it and so does anything "
+    .. "just off the top of the screen. This is the most expensive row in "
+    .. "the mode -- it is the whole scene again, not an effect over it -- "
+    .. "so it is OFF unless you ask for it. Needs WATER on FULL.",
+    full = true,
+    when = function() return Water.level() >= 2 end },
   -- `full` marks a row FULL does not take away. FULL owns the diorama's own
   -- knobs; what a battle is drawn over, and how it is framed, are not that.
   -- Off the OPTIONS menu while VR is on: the headset REQUIRES staged
@@ -917,14 +943,14 @@ local HOTKEYS = {
 }
 
 -- One step of the VOXEL angle ladder: everything a "3" press does, named
--- so the pad's SELECT button (below) can make exactly the same step. The
+-- so the pad's B+SELECT combo (below) can make exactly the same step. The
 -- gate is the registry's own; the tilt/GBC FX clearing is the engine work
 -- the key has always delegated (see the wrap below for why).
 local function cycleVoxel(game)
   local Pipelines = require("src.render.Pipelines")
   -- HORDE MODE holds the rung at 1ST for as long as it runs. Refused HERE
   -- rather than at each caller because this one function IS every way a
-  -- player can step the ladder: the "3" key, the pad's SELECT, and the VR
+  -- player can step the ladder: the "3" key, the pad's B+SELECT, and the VR
   -- left-stick click all come through it.
   if Horde.viewLocked() then return false end
   local top = game.stack and game.stack:top()
@@ -987,7 +1013,7 @@ do
         -- so the registry's plain "advance one and wrap" is not what it
         -- wants; 6 still is. The gate is the registry's own either way.
         -- The whole of 3's step lives in cycleVoxel, because the pad's
-        -- SELECT button makes the same step (see the handleInput wrap).
+        -- B+SELECT makes the same step (see the handleInput wrap).
         if key == "3" then
           if cycleVoxel(self) then return end
         elseif Pipelines.hotkey(key, top, self.overworld) then
@@ -1359,22 +1385,36 @@ FreeMove.install()
 -- the free-roam look is not driving.
 CamControl.install()
 
--- ------- SELECT walks the angle ladder
+-- ------- B + SELECT walks the angle ladder
 --
--- The same step the "3" key makes, on the pad's own button: a phone (and
--- a controller) has no number row, and SELECT has no overworld job in
--- Gen 1 -- its work is all in-menu, which this wrap never sees. The seam
--- is OverworldState:handleInput, the same choke point the free walk
--- replaced: every gate above it -- menus, dialogs, scripted moves,
--- transitions -- already decided the overworld owns the buttons, so a
--- SELECT here is free-roam by construction, exactly like the key. When
--- the step is refused (mid-warp, no 3D pass) the press falls through to
--- the engine's own handling, which is a no-op, as ever.
+-- The same step the "3" key makes, on the pad's own buttons: a phone (and
+-- a controller) has no number row. The seam is OverworldState:handleInput,
+-- the same choke point the free walk replaced: every gate above it --
+-- menus, dialogs, scripted moves, transitions -- already decided the
+-- overworld owns the buttons, so a press here is free-roam by
+-- construction, exactly like the key. When the step is refused (mid-warp,
+-- no 3D pass) the press falls through to the engine's own handling, which
+-- is a no-op, as ever.
 --
--- Gen 2 is the exception: CheckRegisteredItem gives SELECT a real
--- overworld job there, so a live registration wins and the ladder is left
--- to the key, the pad's own binding and the OPTIONS row.  With nothing
--- registered SELECT is idle exactly as in Gen 1, and still steps.
+-- IT USED TO BE SELECT ON ITS OWN, and that was a borrowed seat rather
+-- than a free one. SELECT is the REGISTERED KEY ITEM's button: GSC's
+-- CheckRegisteredItem has always had it, so this carved Gen 2 out and left
+-- the ladder to the key there -- and Hoenn, whose bag registers the whole
+-- KEY ITEMS pocket, had the same claim the moment the engine stopped
+-- gating it to Gen 2. Two cartridges out of three wanting the button back
+-- is not an exception any more; it is the rule, and a carve-out per
+-- generation would grow one row at a time and take the ladder away on the
+-- very saves that have a bike to register.
+--
+-- So the ladder moves to a COMBO nothing else claims: B held, SELECT
+-- tapped. B is a modifier here and not a press -- held it is "run" in
+-- Hoenn and a wheelie on the Acro Bike, and neither of those wants SELECT
+-- -- so the pair collides with nothing, and a bare SELECT goes to the item
+-- the player registered for it.
+--
+-- A bare SELECT still steps when NOBODY owns it, which is every Gen 1 save
+-- and any save with nothing registered: the button is idle there, and an
+-- idle button may as well work.
 --
 -- Installed AFTER FreeMove.install, deliberately: its wrap must sit
 -- OUTSIDE the free walk's, or first person -- where FreeMove.tick takes
@@ -1382,24 +1422,30 @@ CamControl.install()
 -- one rung SELECT could not step off of would be 1ST itself.
 do
   local OverworldState = require("src.world.OverworldController")
-  local GameVersion = require("src.core.GameVersion")
+  -- Asked of the engine's own bag rather than of the item, because which
+  -- items may sit on SELECT is a question the two cartridges answer
+  -- differently and the bag is where both answers already live.
   local function registeredItemOwnsSelect(Game)
-    if not GameVersion.isGen2() then return false end
     local save = Game and Game.save
     local id = save and save.registeredItem
-    if not id then return false end
-    local def = Game.data and Game.data.items and Game.data.items[id]
-    return (def and def.registerable and save.inventory
-            and save.inventory[id]) and true or false
+    if not id or not (save.inventory and save.inventory[id]) then
+      return false
+    end
+    local ok, yes = pcall(function()
+      return require("src.ui.BagMenu").canRegister(Game, id)
+    end)
+    return (ok and yes) and true or false
   end
   if not OverworldState.dramaticShapeSelectHook then
     local inner = OverworldState.handleInput
     function OverworldState:handleInput(...)
       local Game = require("src.core.Game")
       local input = Game.input
-      if input and input.wasPressed and input:wasPressed("select")
-         and not registeredItemOwnsSelect(Game) then
-        if cycleVoxel(Game) then return end
+      if input and input.wasPressed and input:wasPressed("select") then
+        local held = input.isDown and input:isDown("b")
+        if held or not registeredItemOwnsSelect(Game) then
+          if cycleVoxel(Game) then return end
+        end
       end
       return inner(self, ...)
     end

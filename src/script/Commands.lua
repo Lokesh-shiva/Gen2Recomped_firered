@@ -186,6 +186,16 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
         local value = ctx.game.stringBuffer
         return value ~= nil and tostring(value) or nil
       end
+      -- A NUMBER A SCRIPT ROUTINE JUST COMPUTED.
+      --
+      -- Prism's `deciram wTempNumber, 2, 0` prints a value a callasm left in
+      -- WRAM -- the orphanage's "I have put <n> points on your card" is one
+      -- -- and there is no string buffer behind it to fill.  A command that
+      -- produces such a value records it under the symbol's own name, and
+      -- only that name resolves: an empty table leaves every token exactly as
+      -- it is today.
+      local named = ctx.g2RamValues and ctx.g2RamValues[name]
+      if named ~= nil then return tostring(named) end
       -- everything else (wPlayerName, wRivalName, wTrendyPhrase, ...) is
       -- left untouched for TextBox.substitute to resolve
       return nil
@@ -299,9 +309,39 @@ end
 --
 -- Targeted, like g2_object's: only the objects whose own eventFlag is this
 -- flag, so no other live actor is re-derived out from under a script.
+--- ...AND ONLY WHILE THE MAP IS STILL BEING SET UP, on a Game Boy cartridge.
+---
+--- The ROM does not re-sync at all: setevent/clearevent decide what the NEXT
+--- LoadMapObjects spawns, and the Tin Tower monk appears because his callback
+--- runs DURING map setup, before the player has an input frame.  A coord
+--- trigger or an NPC's own script is a different thing entirely -- the player
+--- is standing there watching -- and re-deriving an actor under one of those
+--- swaps a sprite out mid-sentence.
+---
+--- Mom's Pokegear scene is that bug, and it is worth spelling out because it
+--- looks like nothing to do with flags.  PlayersHouse1F carries FOUR Moms: one
+--- for the scene (object 1, event 1735) and three time-of-day copies (objects
+--- 2-4, event 1736), and the DAY copy stands on the very same tile facing
+--- LEFT.  Half way through the conversation the script runs
+---
+---     setscene 1 / setevent 1735 / clearevent 1736
+---     writetext ... / yesorno ...        <- the rest of the scene
+---
+--- so the Mom who had just turned to face the player was deleted and the
+--- day copy spawned in her place, still facing the wall, for the remainder of
+--- the dialogue.  Reported as "Mom looks away while talking to me".
+---
+--- Gated on the generation rather than removed: Gen 3's map scripts reveal
+--- actors this way too and its scenes are built around it, and Gen 1 has no
+--- such object model.  A Gen 2 script that is not a map callback now does what
+--- the cartridge does -- writes the flag, and lets the next map load place the
+--- objects.
 local function syncFlagObjects(ctx, name)
   local ow = ctx.overworld
   if not (ow and ow.syncObjectVisibility and ow.map and ow.map.def) then return end
+  if not ctx.mapCallback and require("src.core.GameVersion").isGen2() then
+    return
+  end
   local objects = ow.map.def.objects
   if type(objects) ~= "table" then return end
   for _, obj in ipairs(objects) do
@@ -422,10 +462,30 @@ function Commands.give_item(ctx, itemId, count, gotText)
   end
 end
 
+-- take_item <item> [count]: TAKE ALL OF IT OR NONE OF IT, and say which.
+--
+-- Script_takeitem (Crystal 25:$6466, and Prism's is the same routine byte for
+-- byte) opens `xor a / ldh [hScriptVar], a`, calls TakeItem -- which removes
+-- nothing unless the bag holds the whole quantity -- and `ret nc` leaves the
+-- variable at zero when it did not.  So the command answers a question as well
+-- as changing the bag, and the script after it branches on the answer.
+--
+-- This used to subtract and clamp at zero, which is wrong twice over: it took
+-- four sticks of dynamite off a player who needed five and had four, and it
+-- left the script variable holding whatever the row before it had put there.
+-- Mound Cave's `takeitem DYNAMITE, 5 / siffalse` is the case that shows it --
+-- the "there is still dynamite in the cave" arm was unreachable.
 function Commands.take_item(ctx, itemId, count)
   local inv = ctx.save.inventory
-  inv[itemId] = math.max(0, (inv[itemId] or 0) - (count or 1))
+  local want = count or 1
+  local held = inv[itemId] or 0
+  if held < want then
+    ctx.lastCheck = false
+    return
+  end
+  inv[itemId] = held - want
   if inv[itemId] == 0 then inv[itemId] = nil end
+  ctx.lastCheck = true
 end
 
 -- start_battle "wild" species level | start_battle "trainer" OPP_CLASS partyIndex
@@ -450,6 +510,9 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     if a == "SNORLAX" then
       require("src.core.Sound").play(ctx.game and ctx.game.data, "Pokeflute")
     end
+    -- BATTLE_TYPE_LEGENDARY, which only the three legendary specials set.
+    -- The transition reads it (see OverworldState:pushBattleTransition).
+    if opts and opts.legendary then battle.legendary = true end
   else
     battle = BattleState.newTrainer(ctx.game, a, b)
     -- the beaten trainer's own line, printed on the battle screen before

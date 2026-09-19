@@ -24,14 +24,11 @@
 -- happen to agree on that one; what they do not agree on is the menu ABOVE
 -- it, which Gen 1 does not have.
 --
--- WHAT WORKS AND WHAT DOES NOT.  Item storage shares the same underlying
--- inventory mutations, but FireRed supplies its own row set and Item PC
--- furniture (including GIVE and SELECT reorder) rather than inheriting the
--- older screen's flows wholesale.  MAILBOX and
--- DECORATION are the cartridge's rows and are shown as the cartridge shows
--- them, but this port has neither mail nor secret-base decorations yet, so
--- choosing one says so rather than doing nothing: an empty mailbox is a
--- state the cartridge has too, and it is the honest answer here.
+-- WHAT WORKS AND WHAT DOES NOT. Item storage shares save.pcItems, but its
+-- screens are cartridge-specific: FireRed keeps its own rows, Item PC
+-- furniture, GIVE path, and SELECT reorder; Emerald uses the Gen3 bag's
+-- store screens and the cartridge's row descriptions. MAILBOX and DECORATION
+-- remain the cartridge's rows, with unsupported actions reported explicitly.
 
 local Menu = require("src.ui.Menu")
 local Strings = require("src.core.Strings")
@@ -364,22 +361,46 @@ local function g3Toss(game, back)
   open()
 end
 
--- ITEM STORAGE, in the cartridge's order.
+local STORE_MODES = { "withdraw", "deposit", "toss" }
+
+local function openStore(game, mode)
+  local Gen3BagMenu = require("src.ui.Gen3BagMenu")
+  game.save.pcItems = game.save.pcItems or {}
+  game.stack:push(Gen3BagMenu.new(game, { store = mode }))
+end
+
+-- FireRed keeps the dedicated item_pc.c screens above. Emerald uses the
+-- shared Gen3 bag's store modes and exposes each row's cartridge description.
 local function itemStorage(game, onCancel)
   local words = Gen3PlayerPC.words(game, "itemStorage")
+  local constants = (game.data or {}).constants or {}
+  local bagScreen = constants.gen3BagScreen
+  local fireRed = constants.gen3FRLGItemPc ~= nil
+                  or (type(bagScreen) == "table" and bagScreen.layout == "frlg")
+  local describe = (record(game) or {}).describe or {}
   game.save.pcItems = game.save.pcItems or {}
   local rows = {}
   for i, label in ipairs(words) do
-    local word = tostring(label or ""):upper()
-    local flow = word:find("WITHDRAW", 1, true) and g3Withdraw
-      or word:find("DEPOSIT", 1, true) and g3Deposit
-      or word:find("TOSS", 1, true) and g3Toss
-      or nil
-    rows[#rows + 1] = {
-      label = Strings(label),
-      keepOpen = flow ~= nil,
-      onSelect = flow and function() flow(game) end or nil,
-    }
+    if fireRed then
+      local word = tostring(label or ""):upper()
+      local flow = word:find("WITHDRAW", 1, true) and g3Withdraw
+        or word:find("DEPOSIT", 1, true) and g3Deposit
+        or word:find("TOSS", 1, true) and g3Toss
+        or nil
+      rows[#rows + 1] = {
+        label = Strings(label),
+        keepOpen = flow ~= nil,
+        onSelect = flow and function() flow(game) end or nil,
+      }
+    else
+      local mode = STORE_MODES[i]
+      rows[#rows + 1] = {
+        label = Strings(label),
+        describe = describe[i],
+        keepOpen = mode ~= nil,
+        onSelect = mode and function() openStore(game, mode) end or nil,
+      }
+    end
   end
   -- sWindowTemplate_ItemStorageSubmenu: (1,1), 14 wide inside its frame
   local sub = Menu.new(game, rows, { noSound = true, tx = 0, ty = 0, tw = 16,

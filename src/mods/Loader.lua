@@ -5,6 +5,7 @@ local Logger = require("src.core.Logger")
 -- inside that window.  Requiring it here resolves it once, at load, with no
 -- mod in scope, so a mod is never blamed for an engine require it did not make.
 local ModImports = require("src.mods.ModImports")
+local ImportAccess = require("src.mods.ImportAccess")
 local SaveData = require("src.core.SaveData")
 local Data = require("src.core.Data")
 local Version = require("src.core.Version")
@@ -20,6 +21,7 @@ local Events = require("src.mods.Events")
 local Hooks = require("src.mods.Hooks")
 local ModStorage = require("src.mods.Storage")
 local Runtime = require("src.mods.Runtime")
+local ModGens = require("src.mods.ModGens")
 -- Module-name aliases for mods written against the Gold port's per-generation
 -- layout (src.world.gen2.Player and friends).  Installed here because this is
 -- the module that loads mods: the searcher has to be in place before the
@@ -147,7 +149,7 @@ function Loader.new(opts)
   local self = setmetatable({
     mods = {}, loaded = {}, errors = {}, initialized = false,
     events = Events.new(), hooks = Hooks.new(), content = {}, assets = {},
-    exports = {}, migrations = {}, order = {},
+    exports = {}, apis = {}, migrations = {}, order = {},
     modSave = {}, modOptions = {}, optionSchemas = {},
     optionStatus = {}, imageCache = {},
     fs = (opts and opts.fs) or (love and love.filesystem),
@@ -161,11 +163,29 @@ function Loader.new(opts)
   return self
 end
 
+-- WHICH GENERATION THIS BOOT IS.
+--
+-- The loader runs inside a game that has already been chosen, so "is this mod
+-- on" has a generation to be answered for -- see src/mods/ModGens.lua.  Read
+-- through a pcall and answered as nil when nothing is set: a headless harness
+-- constructs a Loader with no version selected, and there the per-generation
+-- chips simply do not apply and every mod resolves on its master switch.
+function Loader:_generation()
+  local okV, GameVersion = pcall(require, "src.core.GameVersion")
+  if not okV then return nil end
+  local okG, gen = pcall(GameVersion.generation)
+  return okG and gen or nil
+end
+
 function Loader:_loadState()
   self.disabled = {}
   local options = SaveData.loadOptions(self.fs)
-  for id, enabled in pairs(options.mods or {}) do
-    if enabled == false then self.disabled[id] = true end
+  local gen = self:_generation()
+  for id, value in pairs(options.mods or {}) do
+    -- `false` still means off, and a bare `true` still means on -- ModGens
+    -- only has anything to say about the record form, which is written the
+    -- moment a player unticks one of a mod's generation chips.
+    if ModGens.active(value, gen) == false then self.disabled[id] = true end
   end
   -- mod.options reads through this; M11 owns writing it back
   self.modOptions = options.modOptions or {}
@@ -191,13 +211,58 @@ function Loader:_loadState()
   end
 end
 
+-- Move the enable state and options of any mod whose id has changed onto its
+-- new id.  Runs once per launch and writes at most once ever per rename:
+-- adoptOptions only moves a key when the new id has no state of its own and
+-- the old id is not itself an installed mod, so the launch after a rename
+-- finds nothing left to do.
+function Loader:_adoptRenames()
+  local ok, moved = pcall(function()
+    local options = SaveData.loadOptions(self.fs)
+    if not require("src.mods.ModRename").adoptOptions(options, self.mods) then
+      return false
+    end
+    if self.fs.write then SaveData.saveOptions(options, self.fs) end
+    return true
+  end)
+  -- Re-read what _loadState read before the manifests were known.  Skipped
+  -- when nothing moved, which is every launch but the one after a rename.
+  if ok and moved then self:_loadState() end
+end
+
+-- THE IN-GAME SWITCH IS STILL THE MASTER SWITCH -- with one asymmetry.
+--
+-- The manager has no per-generation chips of its own (they live in the
+-- launcher), so its switch has to keep meaning what its label says:
+--
+--   OFF  writes the master, which is off EVERYWHERE, exactly as it always
+--        was -- and with every chip ticked that is still the plain `false` the
+--        loader has written since it was written.  The chips are kept, so
+--        turning it back on in the launcher restores the selection.
+--   ON   writes the master AND this generation's chip, because the other way
+--        round is a switch that cannot be switched: a mod the player narrowed
+--        to Gen 1 shows here as disabled under Emerald, and flipping only the
+--        master would leave it not loading and the switch snapping back.
+--
+-- ONLY WHAT CHANGED, which matters more than it looks.  This used to restate
+-- every mod's flag on every save, and doing that through ModGens would rewrite
+-- the record of mods nobody touched -- losing chips the player set in the
+-- launcher as a side effect of toggling something else.  Comparing against the
+-- stored resolution first means an unchanged mod is not written at all.
 function Loader:_saveState()
   -- a read-only injected fs keeps enable toggles in-memory only
   if not self.fs.write then return end
   local options = SaveData.loadOptions(self.fs)
   options.mods = options.mods or {}
-  for id in pairs(self.mods) do
-    options.mods[id] = not self.disabled[id]
+  local gen = self:_generation()
+  for id, mod in pairs(self.mods) do
+    local want = not self.disabled[id]
+    local experimental = mod.manifest and mod.manifest.experimental
+    if ModGens.resolve(options.mods[id], gen, experimental) ~= want then
+      options.mods[id] = want
+        and ModGens.withGen(options.mods[id], gen, true)
+        or ModGens.withEnabled(options.mods[id], false)
+    end
   end
   SaveData.saveOptions(options, self.fs)
 end
@@ -216,11 +281,33 @@ function Loader:_discover()
   -- touching the user's saved enable flags
   if os.getenv("POKEPORT_NO_MODS") == "1" then return end
   local roots = { "mods" }
+  -- THE SAME CONFINEMENT THE LAUNCHER APPLIES.  When the player has chosen a
+  -- game-data folder, a mod counts only if it is in it -- and the game has to
+  -- agree with the panel about that, or the launcher hides a mod and the game
+  -- loads it anyway, which is the worst of both answers.  nil (and so no
+  -- filtering at all) for an injected fs, a portable install and the ordinary
+  -- save-directory case, which is every setup that predates the setting.
+  -- Only when this loader is running on the REAL love.filesystem: a test's
+  -- injected fs has its own tree with no relationship to any root on disk, and
+  -- filtering it against one would discover nothing at all.
+  local confine = nil
+  if love and love.filesystem and self.fs == love.filesystem then
+    local okLM, LauncherMods = pcall(require, "src.mods.LauncherMods")
+    if okLM and LauncherMods and LauncherMods.confinedRoot then
+      local okRoot, root = pcall(LauncherMods.confinedRoot)
+      if okRoot then confine = root end
+    end
+  end
   for _, root in ipairs(roots) do
     if self.fs.getInfo(root) then
       for _, name in ipairs(self.fs.getDirectoryItems(root)) do
         local path = root .. "/" .. name
         local info = self.fs.getInfo(path)
+        if confine then
+          local okIn, inside = pcall(
+            require("src.mods.LauncherMods").underRoot, confine, path)
+          if okIn and not inside then info = nil end
+        end
         -- a dev-linked mod dir (ln -s) reports type "symlink" even with
         -- setSymlinksEnabled(true) -- PhysFS never resolves the symlink's
         -- own getInfo, only traversal into it. readManifest below still
@@ -236,6 +323,86 @@ function Loader:_discover()
             end
           else
             Logger.warn("mod %s ignored: %s", path, tostring(err))
+          end
+        end
+      end
+    end
+  end
+  local ok, err = pcall(self._warnShadowed, self)
+  if not ok then
+    Logger.debug("mod shadow check: %s", tostring(err))
+  end
+end
+
+-- A MOD THE SAVE DIRECTORY IS SHADOWING, SAID OUT LOUD.
+--
+-- love.filesystem reads `mods/` out of TWO homes -- the save directory and
+-- the game folder -- and it searches the SAVE DIRECTORY FIRST.  So a copy
+-- left there wins over the checkout the author is editing, and LauncherMods
+-- already names the symptom in its own words: "the author's own edits
+-- silently stop taking effect while the folder they are editing looks
+-- untouched.  That is a worse failure than not updating, and it is
+-- invisible."
+--
+-- Reported from play: "when pressing the button mapped to select in the
+-- options its still just adjusting the voxels and not working properly not
+-- using my registered item in gen3" -- with the change that stops it doing
+-- exactly that sitting in the checkout, unread, behind a save-directory copy
+-- of the same mod from two days earlier.  Every file said what it should
+-- have said; the running game was reading a different one, and nothing
+-- anywhere mentioned that a second one existed.
+--
+-- THIS IS NOT AN ERROR.  Installing a release over a checkout is a
+-- legitimate thing to do and the mod loads fine either way.  It is one line
+-- in the log naming BOTH files, which is all it ever needed to stop being
+-- invisible -- and only when the two differ, so an install of the same build
+-- says nothing.
+--
+-- The read is its own field so a test can stand in for the disk: this is the
+-- one check in the loader that deliberately goes around love.filesystem,
+-- because love.filesystem is precisely what cannot see the difference.
+function Loader.readRealFile(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local data = f:read("*a")
+  f:close()
+  return data
+end
+
+function Loader:_warnShadowed()
+  local fs = self.fs
+  if not (fs and fs.getSaveDirectory) then return end
+  local saveRoot = fs.getSaveDirectory()
+  if type(saveRoot) ~= "string" or saveRoot == "" then return end
+  local ok, Launcher = pcall(require, "src.mods.LauncherMods")
+  if not (ok and type(Launcher) == "table"
+          and type(Launcher.realFolder) == "function") then
+    return
+  end
+  local sep = package.config:sub(1, 1)
+  local read = Loader.readRealFile
+  for id, mod in pairs(self.mods) do
+    local okReal, gameDir = pcall(Launcher.realFolder, mod.path)
+    gameDir = okReal and type(gameDir) == "string" and gameDir or nil
+    if gameDir then
+      local saveDir = saveRoot .. sep .. (mod.path:gsub("/", sep))
+      -- the entry chunk is what a mod's behaviour lives in; the manifest is
+      -- the fallback so a mod whose entry is named something else is still
+      -- compared rather than skipped
+      local said = false
+      for _, name in ipairs({ "main.lua", "manifest.json" }) do
+        if not said then
+          local mine = read(saveDir .. sep .. name)
+          local theirs = read(gameDir .. sep .. name)
+          if mine and theirs and mine ~= theirs then
+            said = true
+            Logger.warn("mod %s: the copy in the save directory is the one "
+                        .. "being loaded and it is NOT the one in the game "
+                        .. "folder -- love.filesystem searches the save "
+                        .. "directory first, so edits here do nothing until "
+                        .. "that copy is refreshed or removed.  loaded: %s "
+                        .. "// ignored: %s", id, saveDir .. sep .. name,
+                        gameDir .. sep .. name)
           end
         end
       end
@@ -542,13 +709,133 @@ function Loader:_registerCommand(modId, verb, fn)
   return self.content.commands:register(verb, fn, modId)
 end
 
+-- WHICH COPY OF A MOD IS ACTUALLY RUNNING.
+--
+-- A version string answers this only when the author bumps it, and during
+-- development nobody does -- so a session that loaded a file edited thirty
+-- seconds ago and one that loaded yesterday's log the same line.  Four rounds
+-- of "it is still broken" turned out to be four launches that predated the
+-- fix, and from the log there was no way to tell.
+--
+-- So the load line carries the mod's NEWEST file and when it was written.  It
+-- costs one directory walk per mod per boot, two levels deep and capped,
+-- because the point is a stamp rather than an inventory: a mod's source lives
+-- in its root and in lib/, and a file newer than both is not what got loaded
+-- anyway.
+local FRESHNESS_CAP = 600
+
+function Loader.freshness(fs, root)
+  if not (fs and fs.getDirectoryItems and fs.getInfo and root) then return "" end
+  local newest, newestName, seen = 0, nil, 0
+  local function scan(dir, depth)
+    local okList, items = pcall(fs.getDirectoryItems, dir)
+    if not (okList and type(items) == "table") then return end
+    for _, name in ipairs(items) do
+      if seen >= FRESHNESS_CAP then return end
+      local path = dir .. "/" .. name
+      local okInfo, info = pcall(fs.getInfo, path)
+      if okInfo and type(info) == "table" then
+        if info.type == "directory" then
+          if depth < 1 then scan(path, depth + 1) end
+        else
+          seen = seen + 1
+          local t = tonumber(info.modtime)
+          if t and t > newest then newest, newestName = t, name end
+        end
+      end
+    end
+  end
+  scan(root, 0)
+  if newest <= 0 then return "" end
+  local when = os.date("!%Y-%m-%d %H:%M:%SZ", newest)
+  return (" (newest file %s, %s)"):format(tostring(newestName), when)
+end
+
 function Loader:_api(mod)
   local loader = self
   local modId = mod.manifest.id
+  -- WHICH GAME THE MOD IS RUNNING IN, read once, here.
+  --
+  -- From a log where every line is the same gap wearing a different coat, on
+  -- a mod that has a working generation 3 path:
+  --
+  --   [runtime] environment api=unknown
+  --   Colosseum UI runtime compatibility: gen1            <- on Emerald
+  --   ColosseumDex mark routing blocked: host generation unavailable
+  --   Gen 2 Colosseum battle transition class unavailable <- a white screen
+  --   pokemon.PIKACHU.types[1]: unresolved reference to type_chart "ELECTR"
+  --
+  -- A mod that spans generations has to know which one it is in before it
+  -- chooses a data set, a battle transition or a type chart -- and there was
+  -- nothing on this table to ask.  `engineRequire("src.core.GameVersion")`
+  -- reaches it, but a mod written against another port's layout does not know
+  -- that name, and the failure is not an error: it falls back to generation 1
+  -- and every symptom downstream reads as an engine fault.
+  --
+  -- Read once, when the api is built -- which is after the version is chosen
+  -- and before the mod's entry chunk runs -- and handed over as VALUES.  A
+  -- mod holding these can no more change the running game than it could
+  -- before, and the generation cannot move under it: a version change is a
+  -- new game and a new load.
+  local hostGen, hostId, hostInfo = 1, nil, nil
+  do
+    local okV, GameVersion = pcall(require, "src.core.GameVersion")
+    if okV and GameVersion then
+      local okG, g = pcall(GameVersion.generation)
+      if okG and tonumber(g) then hostGen = tonumber(g) end
+      local okI, id = pcall(GameVersion.get)
+      if okI then hostId = id end
+      local okN, info = pcall(GameVersion.info)
+      if okN then hostInfo = info end
+    end
+  end
+  local engineVersion
+  do
+    local okE, V = pcall(require, "src.core.Version")
+    engineVersion = okE and V and V.engine or nil
+  end
   local api = {
     id = modId,
     version = mod.manifest.version,
     path = mod.path,
+    -- WHETHER THE HOST IS IN DEV MODE, as a plain boolean.
+    --
+    -- A mod ported from the Gen 1 project asks this to decide whether to
+    -- register its developer-only diagnostics (an overlay, a debug command).
+    -- It is read once here and copied, so the answer a mod gets is a value
+    -- and not a door: nothing about it reaches the loader, the process
+    -- environment or the dev-mode require shim.
+    developer = loader.dev == true,
+    -- THE ENGINE'S OWN MODULES, by name.
+    --
+    -- A mod chunk already runs under the engine's searcher, so plain `require`
+    -- reaches them -- but that is a fact about the loader that no mod should
+    -- have to discover, and a mod that wraps `require` for its own libs (this
+    -- is common) loses it.  Named here so the seam is a documented field
+    -- rather than a coincidence.  Read-only in the sense that matters: it
+    -- returns the same module table the engine holds, so a mod that mutates
+    -- one is changing the engine, exactly as it always was.
+    engineRequire = engineRequire,
+    -- 1, 2 or 3.  The one field worth reaching for before anything else.
+    generation = hostGen,
+    -- the version id the launcher started: "red", "crystal", "emerald",
+    -- "prism", "polishedcrystal"
+    gameVersion = hostId,
+    -- ...and the same three plus the trimmings, for a mod that would rather
+    -- read one table than three fields.  `name` is what the game calls
+    -- itself, not an id to branch on -- branch on `generation` or `version`.
+    host = {
+      generation = hostGen,
+      version = hostId,
+      name = hostInfo and hostInfo.displayName or hostId,
+      label = hostInfo and hostInfo.label or hostId,
+      engine = engineVersion,
+      modApi = (function()
+        local okE, V = pcall(require, "src.core.Version")
+        return okE and V and V.modApi or nil
+      end)(),
+      developer = loader.dev == true,
+    },
     -- a deep copy: what a mod does to its own view never reaches the loader
     manifest = Merge.deepCopy(mod.manifest),
     content = {},
@@ -682,8 +969,66 @@ function Loader:_api(mod)
   end
   -- assets keeps the v1 alias to the content accessors and adds the file
   -- helpers on top, so mod.assets.pokemon and mod.assets:image both resolve
+  -- A RELATIVE PATH STAYS RELATIVE.
+  --
+  -- mod.assets:path, mod:read and the two listers below all end in a bare
+  -- concatenation onto mod.path, and love.filesystem is rooted at the save
+  -- directory plus the game folder -- so `mod:list("../OTHER_MOD")` is not a
+  -- host-filesystem escape, but it IS a walk out of this mod and into the
+  -- next one's folder, which is the sandbox these accessors exist to draw.
+  -- Enumeration makes it worth closing: reading a path you guessed is one
+  -- thing, listing a neighbour's folder to find out what to guess is another.
+  --
+  -- Returns nil for anything that leaves the mod, and the caller answers the
+  -- way it answers a missing file -- an escape is not a special error, it is
+  -- simply not there.
+  local function within(relative)
+    if type(relative) ~= "string" then return nil end
+    if relative == "" then return mod.path end
+    if relative:sub(1, 1) == "/" or relative:find("^%a:") then return nil end
+    if relative:find("\\", 1, true) then return nil end
+    local parts = {}
+    for segment in relative:gmatch("[^/]+") do
+      if segment == ".." then return nil end
+      if segment ~= "." then parts[#parts + 1] = segment end
+    end
+    if not parts[1] then return mod.path end
+    return mod.path .. "/" .. table.concat(parts, "/")
+  end
+
+  -- WHAT IS AT A PATH INSIDE THIS MOD, and WHAT IS IN A FOLDER OF IT.
+  --
+  -- A mod that ships a folder of optional content -- one file per species, a
+  -- pack of maps -- has to be able to see what actually arrived, and until
+  -- now the only answer was mod:read on a name it had to already know.  Sorted
+  -- because love.filesystem.getDirectoryItems is not: a mod that walks the
+  -- list and builds an index off it would otherwise order itself differently
+  -- on a different machine.
+  local function listIn(relative)
+    local dir = within(relative)
+    local fs = loader.fs
+    if not (dir and fs and fs.getDirectoryItems) then return {} end
+    local items = fs.getDirectoryItems(dir) or {}
+    local out = {}
+    for i = 1, #items do out[i] = items[i] end
+    table.sort(out)
+    return out
+  end
+
+  local function infoIn(relative)
+    local path = within(relative)
+    local fs = loader.fs
+    if not (path and fs and fs.getInfo) then return nil end
+    local info = fs.getInfo(path)
+    if not info then return nil end
+    -- a copy, not love's own record: what a mod does to it stays with the mod
+    return { type = info.type, size = info.size, modtime = info.modtime }
+  end
+
   api.assets = setmetatable({
     path = function(_, relative) return mod.path .. "/" .. relative end,
+    list = function(_, relative) return listIn(relative) end,
+    info = function(_, relative) return infoIn(relative) end,
     image = function(_, relative)
       local full = mod.path .. "/" .. relative
       local cached = loader.imageCache[full]
@@ -699,13 +1044,20 @@ function Loader:_api(mod)
     local path = self.path .. "/" .. relative
     return loader.fs.read(path)
   end
+  -- the same two on the api itself, because a Gen 1 mod spells them mod:list
+  -- and mod:info rather than mod.assets:list
+  function api:list(relative) return listIn(relative) end
+  function api:info(relative) return infoIn(relative) end
   -- `required_imports`: base files the player supplies (see
   -- src/mods/ModImports.lua).  They are written into the mod's own folder, so
   -- mod:read already reaches them -- this is the polite way to ask whether one
   -- has arrived before starting a long extract.
-  api.imports = ModImports.api(mod.manifest, function(rel)
-    return loader.fs.read(mod.path .. "/" .. rel)
-  end)
+  --
+  -- ...AND `mod.cache`, WHICH IS mod.storage UNDER THE GEN 1 NAME.  Both come
+  -- from one call so the pair is built the same way for every mod; see
+  -- src/mods/ImportAccess.lua for why neither is a second implementation.
+  api.imports, api.cache = ImportAccess.new(mod.manifest, loader.fs,
+    function(rel) return loader.fs.read(mod.path .. "/" .. rel) end)
   -- mod.world / mod.game / mod.storage all materialize on first touch, for
   -- the same reason: a headless load must not drag the world stack in, and
   -- the Game the facade acts on is still being wired when the entry chunk
@@ -750,6 +1102,17 @@ function Loader:_loadMod(mod)
     end
   end
   local api = self:_api(mod)
+  -- KEEP THE API OBJECT, not only its exports.
+  --
+  -- `self.exports[id]` has always been the mod's published surface, and that is
+  -- what OTHER MODS see.  What was thrown away is the api the mod itself holds
+  -- -- mod.imports, mod.cache, mod.assets -- which is exactly what you need
+  -- when a mod reports that its base file is missing while every engine-side
+  -- check says it is there.  Asking a freshly built api the same question
+  -- cannot answer that, because the whole question is whether the object the
+  -- mod is holding differs from the one the engine would build.
+  self.apis = self.apis or {}
+  self.apis[mod.manifest.id] = api
   local result = chunk(api)
   if type(result) == "function" then result(api) end
   -- a mod that replaced the table wholesale (mod.exports = {...}) still
@@ -899,15 +1262,69 @@ function Loader:load(data)
   require("src.mods.Builtins").install(self.content, data)
   self:_loadState()
   self:_discover()
+  -- A RENAMED MOD COLLECTS ITS OLD STATE, now and not before: adoption needs
+  -- the manifests, and the manifests are what _discover just read.  _loadState
+  -- above therefore ran against the pre-adoption options and has to be redone
+  -- -- which is why this refreshes what it read rather than only writing the
+  -- file.  See src/mods/ModRename.lua for what it will and will not move.
+  self:_adoptRenames()
   -- Experimental mods stay off until the player opts in: a missing
   -- options.mods entry normally means enabled, but experimental flips that.
   do
     local options = SaveData.loadOptions(self.fs)
     local modsOpt = options.mods or {}
+    local gen = self:_generation()
+    -- SAID ONCE PER BOOT, because a mod picking the wrong generation is
+    -- invisible from the engine's side and expensive from the mod's: the
+    -- author of one spent a session chasing a white screen that was its own
+    -- Gen 2 battle bridge installing itself under Emerald.  This line is what
+    -- a report can be checked against.
+    do
+      local okV, GameVersion = pcall(require, "src.core.GameVersion")
+      local id = okV and GameVersion and select(2, pcall(GameVersion.get))
+      Logger.info("mods: host is generation %s (%s) -- mod.generation, "
+        .. "mod.gameVersion and mod.host carry it", tostring(gen),
+        tostring(id or "?"))
+    end
     for id, mod in pairs(self.mods) do
-      if not self.disabled[id] and modsOpt[id] == nil
-          and mod.manifest.experimental then
+      if not self.disabled[id] and mod.manifest.experimental
+          and ModGens.active(modsOpt[id], gen) ~= true then
         self.disabled[id] = true
+      end
+      -- A MOD DOES NOT LOAD WHERE IT SAYS IT DOES NOT WORK.
+      --
+      -- The player's chips are a choice about where they WANT a mod; the
+      -- manifest's `generations` is the mod's own claim about where it
+      -- FUNCTIONS, and the claim wins.  A mod run outside it does not fail
+      -- cleanly -- it half-applies, and then every symptom reads as an engine
+      -- fault: a dex bridge refusing to route and saying so once a frame, a
+      -- screen bridge left installed with no transition to draw, type names
+      -- resolving against a chart that never had them.
+      --
+      -- Said out loud, because a mod that vanishes without explanation is the
+      -- other way to waste somebody's evening.
+      --
+      -- ...UNLESS THE PLAYER HAS SAID OTHERWISE, which is the door in that
+      -- refusal (ModGens.permits).  The claim is the author's, and an author
+      -- who has just taught a Gen 1/Gen 2 mod Hoenn -- or a player willing to
+      -- find out what breaks -- must not be locked out until a new release
+      -- ships.  A forced mod loads and says loudly that it is outside its own
+      -- claim, so the next log still reads straight.
+      if not self.disabled[id] then
+        local ok, why = ModGens.permits(mod.manifest, modsOpt[id], gen)
+        local claim = table.concat(mod.manifest.generations or {}, "/")
+        if not ok then
+          self.disabled[id] = true
+          mod.unsupportedGeneration = gen
+          Logger.info("%s is for generation %s; this is generation %s, so it is "
+            .. "not loaded", id, claim, tostring(gen))
+        elseif why == "forced" then
+          mod.forcedGeneration = gen
+          Logger.warn("%s says it is for generation %s and this is generation "
+            .. "%s -- loading it anyway because you asked. Anything that "
+            .. "misbehaves from here is the mod running somewhere it was not "
+            .. "written for, not the engine.", id, claim, tostring(gen))
+        end
       end
     end
   end
@@ -938,7 +1355,8 @@ function Loader:load(data)
         self.loaded[#self.loaded + 1] = mod
         self.order[#self.order + 1] = modId
         self:_checkLinkClaims(mod)
-        Logger.info("loaded mod %s %s", modId, mod.manifest.version)
+        Logger.info("loaded mod %s %s%s", modId, mod.manifest.version,
+                    Loader.freshness(self.fs, mod.path))
       else
         self:_fail(mod, "failed", tostring(err))
         self:_enforceDependencies()

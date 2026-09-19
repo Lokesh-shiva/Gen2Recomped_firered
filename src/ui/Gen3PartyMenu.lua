@@ -48,11 +48,21 @@
 -- bounce below is this port's, since the cartridge's is a sprite-callback
 -- rather than data.
 
+local Assets = require("src.render.Assets")
 local Font = require("src.render.Font")
 local Logger = require("src.core.Logger")
 local Screens = require("src.ui.Screens")
 local Strings = require("src.core.Strings")
 local Theme = require("src.ui.Theme")
+
+-- Sprites reaches back into the party screen, so it is resolved once on
+-- first use rather than required on every icon of every frame.
+local SpritesMod
+local function sprites()
+  SpritesMod = SpritesMod or require("src.pokemon.Sprites")
+  return SpritesMod
+end
+local NO_OPTS = {}
 
 local Gen3PartyMenu = {}
 Gen3PartyMenu.__index = Gen3PartyMenu
@@ -80,6 +90,8 @@ local GBA_W, GBA_H = 240, 160
 local LEAD = { tx = 0, ty = 0, tw = 13, th = 9, tall = true }
 local REST = { tx = 13, ty = 0, tw = 17, th = 4 }   -- th is ONE panel
 local CANCEL = { tx = 0, ty = 16, tw = 13, th = 4 }
+local FIRERED_CANCEL = { x = 192, y = 136, width = 48, height = 16,
+                        ballX = 198, ballY = 148 }
 local HP_BAR_W = 48
 
 -- ...and where the pieces sit INSIDE a panel, when the cartridge has not
@@ -932,10 +944,73 @@ function Gen3PartyMenu:record()
   return r
 end
 
+-- Called seven times from draw plus once per held item, every frame: the
+-- `require` inside it was eight package.loaded lookups a frame for a module
+-- that is loaded before this screen can exist.
 local function loadImage(path)
   if type(path) ~= "string" then return nil end
-  local ok, img = pcall(require("src.render.Assets").image, path)
+  local ok, img = pcall(Assets.image, path)
   return ok and img or nil
+end
+
+local function isFireRed(game)
+  local record = ((game and game.data and game.data.constants) or {}).gen3StartMenu
+  return record and record.layout == "frlg" or false
+end
+
+-- The FireRed cancel window and Poké Ball belong at the cartridge's lower
+-- right coordinates. Clear Emerald's baked-in Cancel art before drawing it.
+function Gen3PartyMenu:drawFireRedCancel(bg, images, party, ball)
+  local g = love.graphics
+  if bg then
+    local iw, ih = bg:getDimensions()
+    if iw >= 56 and ih >= 152 then
+      self.cancelClearQuad = self.cancelClearQuad
+        or g.newQuad(0, 136, 56, 16, iw, ih)
+      g.draw(bg, self.cancelClearQuad, 184, 136)
+    end
+  end
+
+  Font.drawBox(24, 17, 6, 2)
+  ball = ball or loadImage(images.ball)
+  local drewBall = false
+  if ball then
+    local iw, ih = ball:getDimensions()
+    local frameWidth = math.floor(iw / 2)
+    if frameWidth >= 32 and ih >= 32 then
+      local frame = self.index > #party and frameWidth or 0
+      g.setColor(1, 1, 1, 1)
+      g.draw(ball, g.newQuad(frame, 0, 32, 32, iw, ih),
+             FIRERED_CANCEL.ballX - 16, FIRERED_CANCEL.ballY - 16)
+      drewBall = true
+    end
+  end
+  if not drewBall then
+    local cx, cy = FIRERED_CANCEL.ballX, FIRERED_CANCEL.ballY
+    local lineWidth = g.getLineWidth()
+    g.setColor(0.94, 0.94, 0.94, 1)
+    g.circle("fill", cx, cy, 7)
+    g.setColor(0.90, 0.16, 0.20, 1)
+    g.arc("fill", cx, cy, 7, math.pi, math.pi * 2)
+    g.setColor(0.08, 0.08, 0.10, 1)
+    g.setLineWidth(1)
+    g.circle("line", cx, cy, 7)
+    g.line(cx - 7, cy, cx + 7, cy)
+    g.setColor(0.94, 0.94, 0.94, 1)
+    g.circle("fill", cx, cy, 2)
+    g.setColor(0.08, 0.08, 0.10, 1)
+    g.circle("line", cx, cy, 2)
+    g.setLineWidth(lineWidth)
+  end
+
+  g.setColor(0, 0, 0, 1)
+  local label = Strings("CANCEL")
+  local lx = FIRERED_CANCEL.x + 3
+    + math.floor((FIRERED_CANCEL.width - Font.width(label)) / 2)
+  local ly = FIRERED_CANCEL.y
+    + math.floor((FIRERED_CANCEL.height - Font.glyphHeight()) / 2)
+  Font.draw(label, lx, ly)
+  g.setColor(1, 1, 1, 1)
 end
 
 -- Where slot n's panel sits, in PIXELS.  The cartridge's window when the
@@ -972,6 +1047,19 @@ end
 -- because a party screen redraws six of them sixty times a second.
 local iconCache = {}
 local iconQuads = {}
+-- the two ball frames, keyed on the image so a reloaded asset rebuilds them
+local ballFrom, ballOpen, ballShut
+local function ballQuad(ball, open)
+  if ballFrom ~= ball then
+    local bw, bh = ball:getDimensions()
+    local fw = math.floor(bw / 2)
+    ballShut = love.graphics.newQuad(0, 0, fw, bh, bw, bh)
+    ballOpen = love.graphics.newQuad(fw, 0, fw, bh, bw, bh)
+    ballFrom = ball
+  end
+  -- the ball OPENS on the cursor slot: frame 1 rather than 0
+  return open and ballOpen or ballShut
+end
 
 function Gen3PartyMenu:iconFor(mon)
   local data = self.game and self.game.data
@@ -988,9 +1076,7 @@ function Gen3PartyMenu:iconFor(mon)
     path = entry
   end
   -- the mod seam every other icon load goes through
-  local okHook, hooked = pcall(function()
-    return require("src.pokemon.Sprites").iconPath(data, mon, path, {})
-  end)
+  local okHook, hooked = pcall(sprites().iconPath, data, mon, path, NO_OPTS)
   if okHook and type(hooked) == "string" then path = hooked end
   if not path then return nil end
   frameH = frameH or tonumber(icons and icons.frameHeight) or 32
@@ -1309,11 +1395,10 @@ function Gen3PartyMenu:draw()
     panel.selected = (n == self.index)
     if ball then
       panel.ballImage = ball
-      local bw, bh = ball:getDimensions()
-      local fw = math.floor(bw / 2)
-      -- the ball OPENS on the cursor slot: frame 1 rather than 0
-      panel.ballQuad = love.graphics.newQuad(panel.selected and fw or 0, 0,
-                                             fw, bh, bw, bh)
+      -- THE BALL HAS TWO FRAMES, so there are two quads -- not six a frame,
+      -- which is three hundred and sixty allocations a second for a picture
+      -- with two states.  Same reasoning as the icon quads above.
+      panel.ballQuad = ballQuad(ball, panel.selected)
     end
     if mon then
       local isEgg = mon.isEgg == true
@@ -1339,10 +1424,12 @@ function Gen3PartyMenu:draw()
 
   -- ---- CANCEL ------------------------------------------------------------
   --
-  -- Part of the field's own tilemap when there is one, so only the word and
-  -- the cursor are drawn over it.
+  -- Emerald's CANCEL art is in the field map; FireRed draws its own window
+  -- and selector at the cartridge coordinates over a cleared strip.
   local cancel = rec and rec.cancel
-  if bg and cancel then
+  if isFireRed(self.game) then
+    self:drawFireRedCancel(bg, images, party, ball)
+  elseif bg and cancel then
     love.graphics.setColor(0, 0, 0, 1)
     local label = Strings("CANCEL")
     local lx = cancel.x + math.floor((cancel.width - Font.width(label)) / 2)

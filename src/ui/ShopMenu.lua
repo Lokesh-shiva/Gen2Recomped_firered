@@ -58,18 +58,32 @@ local function line(game, key, fallback, vars)
   return fallback
 end
 
+-- THE MONEY SIGN, NOT THREE LETTERS.
+--
+-- The Game Boy fallback here was the literal bytes <01>"94u", so every mart
+-- price on a Game Boy cartridge read "94u300" where it should have read
+-- "\194\165300".  Reported from Prism, but Gold, Silver and Crystal print
+-- through this same line and were showing it too; only Emerald escaped,
+-- because its clerk carries his own `money` string from the cartridge and
+-- never reaches this fallback.
+--
+-- "\194\165" is U+00A5 in UTF-8, which is what the Gen 1 and Gen 2 charmaps
+-- spell $F0 as (charmap.asm) -- so Font.encode turns it straight back into
+-- the money tile the cartridge draws.  Written as escapes rather than as a
+-- literal so no editor or tool can mangle the two bytes again.
+local MONEY_GLYPH = "\194\165"
+
 -- A price in the cartridge's own currency.
 local function price(game, amount)
   local said = martText(game)
   if said and type(said.money) == "string" then
     return fill(said.money, { VAR1 = tostring(amount) })
   end
-  -- a Gen 3 font has the POKe DOLLAR itself (FireRed maps it in its
-  -- charmap); the escape below is the Game Boy font's yen tile
+  -- Gen 3 has its own POKé DOLLAR glyph; the Game Boy font uses MONEY_GLYPH.
   if require("src.core.GameVersion").isGen3() then
     return ("₽%d"):format(amount)
   end
-  return ("94u%d"):format(amount)
+  return MONEY_GLYPH .. tostring(amount)
 end
 
 local function buy(game, stock)
@@ -275,15 +289,33 @@ end
 function ShopMenu.new(game, stock, onQuit)
   local counter = gen3Counter(game)
   if counter then
+    local fireRed = require("src.core.GameVersion").get() == "firered"
     local Menu = require("src.ui.Menu")
-    local menu = Menu.new(game, {
+    local menu
+    menu = Menu.new(game, {
       { label = line(game, "buy", Strings("BUY")), keepOpen = true,
-        onSelect = function(menuSelf)
-          ShopMenu.coverWith(game, counter.new(game, { mode = "buy", stock = stock }))
+        onSelect = function()
+          if fireRed then
+            -- FireRed's extracted counter is translucent and the cartridge
+            -- removes the BUY/SELL/QUIT box while its list is open.
+            return ShopMenu.coverWith(game,
+              counter.new(game, { mode = "buy", stock = stock }))
+          end
+          -- Emerald's generic counter stays on the stack but hides its menu.
+          menu.hidden = true
+          game.stack:push(counter.new(game, {
+            mode = "buy", stock = stock, under = menu,
+          }))
         end },
       { label = line(game, "sell", Strings("SELL")), keepOpen = true,
         onSelect = function()
-          ShopMenu.coverWith(game, counter.new(game, { mode = "sell" }))
+          if fireRed then
+            return ShopMenu.coverWith(game,
+              counter.new(game, { mode = "sell" }))
+          end
+          -- Emerald sells from the bag's own pocket list.
+          if counter.openSellBag then return counter.openSellBag(game) end
+          game.stack:push(counter.new(game, { mode = "sell" }))
         end },
       { label = line(game, "quit", Strings("QUIT")), onSelect = onQuit },
     }, gen3Box(game))

@@ -143,6 +143,9 @@ L.call_if = function(ir, s)
 end
 
 L.nop = function() end
+-- $CF hands the script context a script held in save RAM and jumps into it.
+-- This port has no mystery-gift RAM script, so there is nothing to jump to.
+L.trywondercardscript = function() end
 
 -- ------------------------------------------------------- the rest of the table
 --
@@ -463,11 +466,13 @@ L.addobject = function(ir, s) emit(s, { "g3_show_object", ir[2] }) end
 L.addobjectat = function(ir, s)
   emit(s, { "g3_show_object", ir[2], ir[3], ir[4] })
 end
+-- ...and these two are NOT that pair: they write the loaded object's
+-- invisible bit and nothing else -- see Commands.g3_object_invisible.
 L.hideobjectat = function(ir, s)
-  emit(s, { "g3_hide_object", ir[2], ir[3], ir[4] })
+  emit(s, { "g3_object_invisible", ir[2], ir[3], ir[4] })
 end
 L.showobjectat = function(ir, s)
-  emit(s, { "g3_show_object", ir[2], ir[3], ir[4] })
+  emit(s, { "g3_object_visible", ir[2], ir[3], ir[4] })
 end
 L.turnobject = function(ir, s) emit(s, { "g3_turn", ir[2], ir[3] }) end
 L.setobjectxy = function(ir, s) emit(s, { "g3_place", ir[2], ir[3], ir[4] }) end
@@ -549,9 +554,20 @@ end
 -- decoder used to throw away.
 -- ir[5] is the line a DOUBLE trainer says when the party cannot field two,
 -- and it is the only one of the five that four types carry and six do not.
+-- ir[6] and ir[7] are the two shared trainer dialogue operands: the line on
+-- sight and the line on losing. FireRed's type-9 early-rival form instead
+-- stores sRivalBattleFlags in ir[6], so that value must never be lowered as
+-- text.
 L.trainerbattle = function(ir, s)
-  -- ir[6]: FireRed's early-rival flags (type 9 only)
-  emit(s, { "g3_trainer_battle", ir[2], ir[3], ir[4], ir[5], ir[6] })
+  local isFireRedEarlyRival = tonumber(ir[2]) == 9
+    and require("src.core.GameVersion").get() == "firered"
+  if isFireRedEarlyRival then
+    -- ir[6] is the raw RIVAL_BATTLE_* bitfield, passed in the handler's
+    -- sixth operand position so the early-rival path can apply it directly.
+    emit(s, { "g3_trainer_battle", ir[2], ir[3], ir[4], ir[5], ir[6] })
+  else
+    emit(s, { "g3_trainer_battle", ir[2], ir[3], ir[4], ir[5], ir[6], ir[7] })
+  end
 end
 L.dotrainerbattle = function(_, s) emit(s, { "g3_do_trainer_battle" }) end
 L.checktrainerflag = function(ir, s) emit(s, { "g3_check_trainer_flag", ir[2] }) end
@@ -573,6 +589,9 @@ L.warpdoor = warp
 L.warpteleport = warp
 L.warpmossdeepgym = warp
 L.warpwhitefade = warp
+-- $D1.  The cartridge spins the player on arrival; the destination is the
+-- same five operands every other warp carries, and the spin is cosmetic.
+L.warpspinenter = warp
 -- FALLING THROUGH A HOLE keeps your position: `warphole <group> <num>` puts
 -- you on that map at the cell you were standing on, and MAP_UNDEFINED
 -- (255, 255) means "wherever setholewarp last pointed".  Lowering it to a
@@ -684,10 +703,31 @@ L.doweather = function(_, s) emit(s, { "g3_do_weather" }) end
 -- radius table, and dropping it left every cave at whatever the map load had
 -- chosen.
 L.setflashlevel = function(ir, s) emit(s, { "g3_set_flash_level", ir[2] }) end
-L.animateflash = L.nop
+-- ...and `animateflash <n>` is the one that OPENS it, which is not a nop.
+--
+-- ScrCmd_animateflash is opcode 0x9A -- 0099C70, and gScriptCmdTable is what
+-- says so; 0099CC8 next door is `fadescreen` and is a different thing
+-- entirely.  It calls AnimateFlash (0B009C), which reads the CURRENT level's
+-- radius and the new one's out of the same table the record is made of and
+-- eases between them ONE PIXEL A FRAME, then blocks the script until the
+-- window has arrived.
+--
+-- Dropping it meant the DEWFORD GYM never got any brighter.  That gym is dark
+-- by script rather than by its header (its cave byte is 0): its ON_TRANSITION
+-- counts the trainers you have beaten and sets the level to 7 minus that, and
+-- after each win the map's own script plays a sound and calls THIS with the
+-- new one.  With it dropped the room only changed when you left and came back.
+L.animateflash = function(ir, s) emit(s, { "g3_animate_flash", ir[2] }) end
 L.dofieldeffect = function(ir, s) emit(s, { "g3_field_effect", ir[2] }) end
 L.setfieldeffectargument = function(ir, s) emit(s, { "g3_field_effect_arg", ir[2], ir[3] }) end
-L.waitfieldeffect = L.nop
+-- `waitfieldeffect` HOLDS THE SCRIPT, for the effects the port actually
+-- raises.  It lowered to nothing, which is right for an effect that never
+-- appears and wrong for one that does: the TRICK HOUSE entrance starts its
+-- sparkle, waits for it, and then delays ten frames -- run those together and
+-- the mark on the Trick Master's tile is a flicker.  See
+-- Commands.g3_field_effect_wait, which answers instantly for every effect
+-- that is not running.
+L.waitfieldeffect = function(ir, s) emit(s, { "g3_field_effect_wait", ir[2] }) end
 L.setstepcallback = L.nop
 L.incrementgamestat = function(ir, s) emit(s, { "g3_game_stat", ir[2] }) end
 L.getplayerxy = function(ir, s) emit(s, { "g3_player_xy", ir[2], ir[3] }) end
@@ -726,7 +766,9 @@ L.bufferboxname = function(ir, s) emit(s, { "g3_buffer", ir[2], "box", ir[3] }) 
 L.buffertrainername = function(ir, s) emit(s, { "g3_buffer", ir[2], "trainer", ir[3] }) end
 L.buffertrainerclassname = function(ir, s) emit(s, { "g3_buffer", ir[2], "class", ir[3] }) end
 L.bufferdecorationname = function(ir, s) emit(s, { "g3_buffer", ir[2], "decoration", ir[3] }) end
-L.buffercontesttypestring = function(ir, s) emit(s, { "g3_buffer", ir[2], "contest", ir[3] }) end
+L.buffercontestname = function(ir, s) emit(s, { "g3_buffer", ir[2], "contest", ir[3] }) end
+-- the name this slot carried while the table had it one place too high
+L.buffercontesttypestring = L.buffercontestname
 -- showmonpic carries the window's tile position as well as the species, and
 -- both are needed: the cartridge puts the box where the script says.
 L.showmonpic = function(ir, s)

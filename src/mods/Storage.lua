@@ -30,8 +30,21 @@ Storage.RECORD_EXT = ".rec"
 Storage.BYTES_EXT = ".bin"
 Storage.MAX_KEY = 180
 
+-- An injected fs always wins (the mod loader's stub, the headless tests).
+-- Otherwise modstorage/ follows the player's chosen game-data folder the same
+-- way installed mods and the ROM cache do: CacheFs.dataFs reads through
+-- love.filesystem, which sees every home at once, and routes writes at
+-- whichever root is live -- love.filesystem's own write always lands in the
+-- OS save directory, which is why this tree used to stay behind when the
+-- folder changed.
 local function fsOr(fs)
-  return fs or (love and love.filesystem) or nil
+  if fs then return fs end
+  local ok, CacheFs = pcall(require, "src.import.CacheFs")
+  if ok and CacheFs and CacheFs.dataFs then
+    local okFs, handle = pcall(CacheFs.dataFs)
+    if okFs and handle then return handle end
+  end
+  return (love and love.filesystem) or nil
 end
 
 -- id and key both land in a filesystem path, so both are validated rather
@@ -248,6 +261,30 @@ function Storage:writeBytes(_game, key, bytes)
     fs.remove(self:_path(valid, Storage.RECORD_EXT))
   end
   return true
+end
+
+-- WHAT IS AT A KEY, WITHOUT READING IT.
+--
+-- `mod.cache:exists` and any "is my payload still complete?" check on a menu
+-- row want the size and nothing else; going through read/readBytes to find
+-- out costs the whole payload, and these payloads are the reason this store
+-- exists.  "nothing there" is nil with a "not_found" code, the same answer
+-- shape read gives, never an error.
+function Storage:stat(_game, key)
+  local fs, code, message = self:_fs()
+  if not fs then return nil, code, message end
+  local valid, keyErr = validKey(key)
+  if not valid then return nil, "invalid_key", keyErr end
+  for kind, ext in pairs({ bytes = Storage.BYTES_EXT,
+                           record = Storage.RECORD_EXT }) do
+    local path = self:_path(valid, ext)
+    local info = fs.getInfo and fs.getInfo(path)
+    if info and (info.type == nil or info.type == "file") then
+      return { key = valid, kind = kind, size = info.size,
+               modtime = info.modtime }
+    end
+  end
+  return nil, "not_found", "nothing stored at " .. valid
 end
 
 function Storage:delete(_game, key)

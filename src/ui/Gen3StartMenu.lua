@@ -30,6 +30,7 @@
 
 local Font = require("src.render.Font")
 local Logger = require("src.core.Logger")
+local Runtime = require("src.mods.Runtime")
 local Screens = require("src.ui.Screens")
 local Strings = require("src.core.Strings")
 local Theme = require("src.ui.Theme")
@@ -60,6 +61,18 @@ end
 
 function Gen3StartMenu:uiSize() return GBA_W, GBA_H end
 function Gen3StartMenu:wantsFillScale() return true end
+
+-- NOT A PANEL, so its edge is not a frame to continue.
+--
+-- Renderer:bleedEdges paints the letterbox with the surface's outermost row
+-- and column so a menu's border appears to run to the window edge.  Here the
+-- outermost column is a small window in the corner with the MAP behind it -- pulling it
+-- outward stretches that sideways instead of extending a border.  Reported
+-- from play: "fix the stretching of borders on the start menu, main menu,
+-- main menu intro and the continue, new game, options, exit menus ... instead
+-- make them full screen/fit the screen without stretching".  wantsFillScale
+-- above is what makes it fill; this is what stops it smearing.
+function Gen3StartMenu:wantsEdgeBleed() return false end
 
 -- colour, not four shades: the same reasoning as Gen3Title's
 function Gen3StartMenu:sgbPalettes()
@@ -133,11 +146,36 @@ local ACTIONS = {
   { key = "exit", screen = nil },
 }
 
+local FIRERED_HELP_TUTORIAL = "fireredStartMenu"
+
+local function isFireRed(game)
+  local record = ((game and game.data and game.data.constants) or {}).gen3StartMenu
+  return record and record.layout == "frlg" or false
+end
+
 function Gen3StartMenu.new(game)
   local self = setmetatable({}, Gen3StartMenu)
   self.game = game
   self.index = 1
   self.blink = 0
+
+  local options = game.save and game.save.options
+  if type(options) ~= "table" then
+    local ok, SaveData = pcall(require, "src.core.SaveData")
+    if ok then
+      local loaded, value = pcall(SaveData.loadOptions)
+      if loaded then options = value end
+    end
+  end
+  local tutorials = type(options) == "table" and options.tutorials or nil
+  local savedHelp = type(tutorials) == "table"
+    and tutorials[FIRERED_HELP_TUTORIAL] or nil
+  self.seenHelp = {}
+  if type(savedHelp) == "table" then
+    for key, seen in pairs(savedHelp) do
+      if seen == true then self.seenHelp[key] = true end
+    end
+  end
 
   local record = (game.data.constants or {}).gen3StartMenu
   local labels = record and record.items
@@ -156,8 +194,55 @@ function Gen3StartMenu.new(game)
 
   self.rows = {}
   self:buildRows(game, labels, playerName)
+  self:refreshHelpRow()
   return self
 end
+
+function Gen3StartMenu:refreshHelpRow()
+  local row = self.rows[self.index]
+  self.helpRowKey = isFireRed(self.game) and row and row.slot
+    and not self.seenHelp[row.key] and row.key or nil
+end
+
+function Gen3StartMenu:markHelpSeen(key)
+  if not key or self.seenHelp[key] then return end
+  self.seenHelp[key] = true
+  if self.helpRowKey == key then self.helpRowKey = nil end
+
+  local save = self.game.save
+  if save then
+    if type(save.options) ~= "table" then save.options = {} end
+    if type(save.options.tutorials) ~= "table" then
+      save.options.tutorials = {}
+    end
+    local flags = save.options.tutorials[FIRERED_HELP_TUTORIAL]
+    if type(flags) ~= "table" then
+      flags = {}
+      save.options.tutorials[FIRERED_HELP_TUTORIAL] = flags
+    end
+    flags[key] = true
+  end
+
+  local ok, SaveData = pcall(require, "src.core.SaveData")
+  if ok then
+    local wrote, saved = pcall(SaveData.markTutorialSeen,
+                               FIRERED_HELP_TUTORIAL, key)
+    if not wrote or not saved then
+      Logger.warn("gen3 start menu: could not persist help tutorial for %s", key)
+    end
+  end
+end
+
+function Gen3StartMenu:markCurrentHelpSeen()
+  local row = self.rows[self.index]
+  if row and row.key and self.helpRowKey == row.key
+     and self.displayedHelpKey == row.key then
+    self:markHelpSeen(row.key)
+  end
+  self.displayedHelpKey = nil
+end
+
+local function sameRows(_, rows) return rows end
 
 -- The eight cartridge rows, plus the one this port adds.
 --
@@ -238,6 +323,49 @@ function Gen3StartMenu:buildRows(game, labels, playerName)
   if not (boot and boot.startMenuQuit == false) and not frlg then
     self.rows[#self.rows + 1] = { label = Strings("QUIT GAME"), key = "quit" }
   end
+
+  -- AND THE MODS' OWN ROWS, THROUGH THE SEAM THE OTHER VERSIONS ALREADY HAVE.
+  --
+  -- src/ui/StartMenu.lua runs its finished item list through the
+  -- `ui.start_menu.items` hook, which is how a mod adds, removes or reorders
+  -- START rows.  This screen never did, so on Emerald -- and nowhere else --
+  -- a mod's row was simply absent.  Same hook name, same fallback, same
+  -- "keep the vanilla rows" answer to a hook that returns something that is
+  -- not a list, so one mod works on all three versions without a branch.
+  --
+  -- AFTER quit, like the Game Boy menu: the hook sees the finished list,
+  -- which is the only way a mod can put a row BELOW the port's own two or
+  -- take one of them away.
+  --
+  -- Wrapped, because a mod's hook can still reach this caller: Hooks:call
+  -- swallows a link that fails on its own, but re-raises one that fails after
+  -- calling next() (src/mods/Hooks.lua) -- and the START menu is not a screen
+  -- that may refuse to open.  A throwing hook leaves the cartridge's rows and
+  -- a line on the console, which is the degradation every other seam here has.
+  local ok, hooked = pcall(Runtime.call, "ui.start_menu.items", sameRows,
+                           game, self.rows)
+  if not ok then
+    Logger.error("gen3 start menu: ui.start_menu.items failed (%s); keeping "
+                 .. "the vanilla rows", tostring(hooked))
+  elseif type(hooked) ~= "table" then
+    Logger.error("gen3 start menu: ui.start_menu.items returned %s; keeping "
+                 .. "the vanilla rows", type(hooked))
+  else
+    -- A ROW HAS TO BE DRAWABLE.  choose() tolerates a row it does not know --
+    -- it closes and says so -- but draw() indexes row.label, so one malformed
+    -- entry from a hook would take the menu down on the next frame rather
+    -- than when it was added.  Dropped with a warning naming the index.
+    local kept = {}
+    for index, row in ipairs(hooked) do
+      if type(row) == "table" and type(row.label) == "string" then
+        kept[#kept + 1] = row
+      else
+        Logger.warn("gen3 start menu: ui.start_menu.items row %d has no "
+                    .. "label; dropped", index)
+      end
+    end
+    self.rows = kept
+  end
 end
 
 function Gen3StartMenu:reopen()
@@ -298,6 +426,21 @@ function Gen3StartMenu:choose(row)
     return self.game.stack:push(LinkState.new(self.game))
   end
   if row.key == "save" then return self:startSave() end
+  -- A ROW THAT BRINGS ITS OWN HANDLER, which is how the Game Boy menu has
+  -- always let a mod add one: src/ui/StartMenu.lua builds Menu items with
+  -- `onSelect`, so a mod porting a row across arrives here with one and no
+  -- `screen`.  Without this it fell through to "not implemented yet" and the
+  -- row closed the menu and did nothing -- the hook above would have been
+  -- decoration.  Called with the menu still open, like the Game Boy's, so a
+  -- handler that wants to push a screen or close first can decide for itself.
+  if type(row.onSelect) == "function" then
+    local ok, err = pcall(row.onSelect, self.game, row)
+    if not ok then
+      Logger.error("gen3 start menu: %s handler failed: %s",
+                   tostring(row.label), tostring(err))
+    end
+    return
+  end
   if row.key == "option" then
     local boot = self.game.data.field and self.game.data.field.boot
     local screens = boot and boot.screens or {}
@@ -366,7 +509,7 @@ function Gen3StartMenu:saveInfoRows()
   end
   local owned = 0
   for _ in pairs((save.pokedex or {}).owned or {}) do owned = owned + 1 end
-  local t = math.floor(tonumber(save.playTime) or 0)
+  local t = math.floor(require("src.core.SaveData").playSeconds(save))
   -- screen order: PLAYER, BADGES, POKéDEX, TIME
   return {
     { words[1] or "PLAYER", name },
@@ -426,12 +569,18 @@ function Gen3StartMenu:update(dt)
   local n = #self.rows
   if n == 0 then return self:close() end
   if input:wasPressed("down") then
+    self:markCurrentHelpSeen()
     self.index = self.index % n + 1
+    self:refreshHelpRow()
   elseif input:wasPressed("up") then
+    self:markCurrentHelpSeen()
     self.index = (self.index - 2) % n + 1
+    self:refreshHelpRow()
   elseif input:wasPressed("a") then
+    self:markCurrentHelpSeen()
     self:choose(self.rows[self.index])
   elseif input:wasPressed("b") or input:wasPressed("start") then
+    self:markCurrentHelpSeen()
     self:close()
   end
 end
@@ -448,9 +597,7 @@ function Gen3StartMenu:drawSavePanel(inset)
   love.graphics.setColor(1, 1, 1, 1)
 end
 
--- FIRERED: the window at tile column 22, rows 15 pixels apart
--- (CreateStartMenuWindow / PrintStartMenuItems), and the help bar across
--- rows 15-19 describing the highlighted row (help_message.c).
+-- FireRed shows a row's explanation once, then remembers it in shared options.
 function Gen3StartMenu:drawFireRed(record)
   local g = love.graphics
   local n = #self.rows
@@ -472,7 +619,10 @@ function Gen3StartMenu:drawFireRed(record)
   g.setColor(1, 1, 1, 1)
   local row = self.rows[self.index]
   local desc = row and row.slot and (record.descriptions or {})[row.slot]
-  if not desc then return end
+  if not desc or self.helpRowKey ~= row.key then
+    self.displayedHelpKey = nil
+    return
+  end
   local ok, bar = false, nil
   if record.helpBar then ok, bar = pcall(require("src.render.Assets").image, record.helpBar) end
   if ok and bar then
@@ -493,6 +643,7 @@ function Gen3StartMenu:drawFireRed(record)
   end
   if two then Font.endTwoTone() end
   g.setColor(1, 1, 1, 1)
+  self.displayedHelpKey = row.key
 end
 
 function Gen3StartMenu:draw()

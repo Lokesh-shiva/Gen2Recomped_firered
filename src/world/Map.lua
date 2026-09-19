@@ -314,8 +314,40 @@ end
 -- CheckCutTreeTile (00:$1731) is `cp COLL_CUT_TREE / ret z / cp
 -- COLL_CUT_TREE_1 / ret`.  Facing either class is what arms TryCutOW, which
 -- is Gen2's overworld A-press on a tree -- Gen1 had no such hook at all.
-function Map.gen2IsCutTree(coll)
-  return coll == 0x12 or coll == 0x1A
+-- CUT'S OWN COLLISION CLASSES -- all six of them.
+--
+-- Reported from play: "some users are experiencing issues on silver where cut
+-- isn't working at all even if they have the badge".  Not Silver, and not the
+-- badge: CUT has never worked on a TREE in any Gen 2 ROM in this port, and has
+-- always worked on cuttable grass, which is what made it read as "cut does
+-- nothing at all".
+--
+-- This used to test $12 and $1A, which are CheckCutTreeTile's two values
+-- (00:$1894, `cp $12 / ret z / cp $1A / ret`).  That routine exists and those
+-- values are right -- and the field move does not call it.  CutFunction asks
+-- CheckCutCollision (05:$49F5), which runs the facing cell's class through
+-- IsInArray against a $FF-terminated list:
+--
+--     db $12, $1A, $10, $18, $14, $1C, $FF
+--
+-- TilesetJohto's cut tree is block 3, and all four of its cells are $18 --
+-- one of the four this never knew about.  The only cells in that whole
+-- tileset carrying $12 are the cuttable GRASS blocks, which is exactly the
+-- half that worked.
+--
+-- The six are written down here as well as read at import, and deliberately:
+-- a cache built before the import learned to read the array still has to cut
+-- a tree, and these are what the cartridge says.  gen2CutCollision, when the
+-- dataset carries it, wins -- a hack may cut different ground.
+Map.GEN2_CUT_COLLISION = { 0x12, 0x1A, 0x10, 0x18, 0x14, 0x1C }
+
+function Map.gen2IsCutTree(coll, list)
+  if coll == nil then return false end
+  for _, value in ipairs((type(list) == "table" and #list > 0)
+                         and list or Map.GEN2_CUT_COLLISION) do
+    if coll == value then return true end
+  end
+  return false
 end
 
 -- Side walls and side buoys ($b0-$b7 and $c0-$c7).  CollisionPermissionTable
@@ -433,6 +465,14 @@ function Map.new(def, tilesetDef)
   -- case: its beams are drawn by those rows, so the puzzle could be watched
   -- and not walked through.
   self.collisionPatch = {}
+  -- ...AND THE THIRD THING A CELL CARRIES.  A Gen 3 cell is a metatile, a
+  -- collision bit and an ELEVATION, and until now only the first two could be
+  -- changed at run time.  `setmaplayoutindex` swaps the whole map for an
+  -- alternate one, and two layouts may differ in any of the three, so all
+  -- three need somewhere to go.  (Sootopolis's pair happens to differ in the
+  -- first two only -- its rock platforms stay at the water's own elevation
+  -- and are fenced off by collision instead.)
+  self.elevationPatch = {}
   -- ...and the same answer keyed by COORDINATE rather than by a computed
   -- index.  See Map:setBlock: the index form depends on writer and reader
   -- agreeing about def.width, and a cell a script shut must not be able to
@@ -639,7 +679,10 @@ function Map:cellElevation(cx, cy)
   if cx < 0 or cy < 0 or cx >= self.widthCells or cy >= self.heightCells then
     return nil
   end
-  return cells[cy * self.def.width + cx + 1] or 0
+  local i = cy * self.def.width + cx + 1
+  local patched = self.elevationPatch and self.elevationPatch[i]
+  if patched ~= nil then return patched end
+  return cells[i] or 0
 end
 
 local ELEVATION_ANY, ELEVATION_UNDER_BRIDGE = 0, 15
@@ -885,6 +928,7 @@ function Map:clearBlockPatches()
   end
   self.blockPatch = {}
   self.collisionPatch = {}
+  self.elevationPatch = {}
   self.shutCells = {}
   self.blocksDirty = nil
   return true
@@ -959,6 +1003,61 @@ function Map:frlgWarpDirection(cx, cy)
   return b and FRLG_DIRECTIONAL_WARP[b] or nil
 end
 
+-- SWAP THE MAP FOR ITS ALTERNATE ONE.  `setmaplayoutindex`.
+--
+-- A Gen 3 map header names a layout, and a script can name a different one:
+-- the same place, redrawn.  Hoenn uses it for the few maps that change shape
+-- with the story, and Sootopolis is the one that shows -- while Groudon and
+-- Kyogre are in the lake, layout 357 puts two rock platforms under the gym
+-- for them to stand on, and the header's layout 8 is open water there.
+--
+-- Reported from play: "the islands dont appear when i first fly there ...
+-- the ones that groudon and kyogre are supposed to be on".  The command was
+-- lowered, it reached a handler, and the handler wrote `gen3LayoutOverride`
+-- on the map -- which NOTHING IN THE ENGINE EVER READ.  Recorded faithfully
+-- and ignored, like `setobjectxyperm` before it.
+--
+-- Done as a bulk patch rather than by swapping the def, deliberately.  The
+-- def is shared -- one table per map for the whole process -- so editing it
+-- would leak the alternate layout into every later visit, and there is no
+-- command that puts it back: the cartridge reloads the header's layout on
+-- every map load and lets ON_TRANSITION override it again.  A patch lives on
+-- the Map, which is rebuilt on entry, so the same thing falls out for free.
+--
+-- Only differing cells are touched, so a map whose script names the layout it
+-- already has costs one comparison per cell and changes nothing.
+function Map:applyGen3Layout(layout)
+  if not (layout and self.def) then return 0 end
+  local w, h = self.def.width or 0, self.def.height or 0
+  if (layout.width or 0) ~= w or (layout.height or 0) ~= h then
+    return nil, ("layout %s is %sx%s, this map is %dx%d")
+      :format(tostring(layout.id), tostring(layout.width),
+              tostring(layout.height), w, h)
+  end
+  local want = Map.blockArray(layout)
+  local have = Map.blockArray(self.def)
+  if not (want and have) then return nil, "no block data" end
+  self.blockPatch = self.blockPatch or {}
+  self.collisionPatch = self.collisionPatch or {}
+  self.elevationPatch = self.elevationPatch or {}
+  local changed = 0
+  for i = 1, w * h do
+    local to = want[i]
+    if to ~= nil and to ~= have[i] then
+      self.blockPatch[i] = to
+      if layout.collisionCells then
+        self.collisionPatch[i] = layout.collisionCells[i] or 0
+      end
+      if layout.elevationCells and self.def.elevationCells then
+        self.elevationPatch[i] = layout.elevationCells[i] or 0
+      end
+      changed = changed + 1
+    end
+  end
+  if changed > 0 then self.blocksDirty = true end
+  return changed
+end
+
 -- true if the cell's collision tile is a door tile
 -- (pokered IsPlayerStandingOnDoorTile)
 function Map:isDoorTileCell(cx, cy)
@@ -1000,6 +1099,26 @@ function Map:isDoorTileCell(cx, cy)
 end
 
 -- true if the cell's collision tile is a door or warp-activating tile
+-- DOES STANDING HERE TAKE YOU THROUGH?
+--
+-- IsWarpMetatileBehavior (field_control_avatar.c), which the cartridge asks
+-- before it will take a warp the player merely walked onto.  A Gen 3 warp
+-- EVENT is not by itself a door: about a tenth of them sit on ordinary floor
+-- because a script puts the player there, and the TRICK HOUSE's front door is
+-- one -- see RomExtractorGen3:warpBehaviours for how the two populations are
+-- told apart.
+--
+-- Gen 1 and Gen 2 have no such byte and answer true, so the tile lists stay
+-- the whole of the rule there; so does a Gen 3 dataset imported before the
+-- set was derived, and so does a map that brought no collision array.
+function Map:isStepWarpCell(cx, cy)
+  local set = self.tileset and self.tileset.stepWarpBehaviours
+  if not set then return true end
+  local b = self:cellBehaviour(cx, cy)
+  if b == nil then return true end
+  return set[b] == true
+end
+
 function Map:isWarpTileCell(cx, cy)
   -- GEN 3 STORES WARP EVENTS SEPARATELY FROM THEIR METATILE BEHAVIOUR.
   --
@@ -1041,6 +1160,98 @@ function Map:isWarpTileCell(cx, cy)
     return true
   end
   return false
+end
+
+-- WHICH WAY A GEN 3 ARROW WARP POINTS, and nil when the cell is not one.
+--
+-- Reported from play: "when i walk through a door into the pokemon center or
+-- any area really indoors, when i walk left or right onto the warp tiles it
+-- warps me back outside, it should only do this if walk back out facing the
+-- exit".  THE POKEMON CENTER'S EXIT MAT is the case, and it is two cells
+-- wide: Oldale's is (8,8) and (9,8) on MAP_G01_N00, both carrying the
+-- LAST_MAP warp back to the town, so one step ALONG the mat from one cell to
+-- its neighbour landed on a live warp and fired it.  So is every Mart, gym
+-- and house in Hoenn, the Mossdeep gym's own mat at (6,35)/(7,35), all
+-- twenty-four secret bases, and the truck the game opens inside -- three
+-- EAST_ARROW_WARP cells stacked at (4,1)-(4,3) on MAP_G25_N40, which today
+-- throws you out of the truck the moment you take a step up or down in it.
+--
+-- isWarpTileCell says yes to every Gen 3 warp event on purpose (see the
+-- comment on it above): the warp EVENT is the whole thing on this cartridge
+-- and the behaviour byte only says what KIND of opening it is.  This is the
+-- qualification that belonged next to it -- the Gen 3 counterpart of
+-- gen2IsDirectionalCarpet, which cannot be reused because Emerald's
+-- behaviour bytes are not Gen 2's collision classes.
+--
+-- THE CARTRIDGE DRAWS THE LINE BY BEHAVIOUR, and not with one rule for all
+-- warps.  field_control_avatar.c has three separate doors into a warp:
+--
+--   * TryStartWarpEventScript fires on ANY completed step, for the
+--     behaviours IsWarpMetatileBehavior names -- the ladder, the two
+--     escalators, the non-animated door (which on this cartridge is also the
+--     indoor staircase), Lavaridge's two, the Aqua Hideout's, Mt Pyre's
+--     holes and Mossdeep gym's pads.  Those really do take you sideways, in
+--     the game as here, and nothing below touches them.
+--   * TryDoorWarp is the animated door, gated `direction == DIR_NORTH`.
+--   * TryArrowWarp is THESE, and it is not a step at all: it fires from the
+--     d-pad HELD in the arrow's own direction (IsArrowWarpMetatileBehavior),
+--     and the arrow behaviours are deliberately absent from
+--     IsWarpMetatileBehavior so that a step can never take one.
+--
+-- The five values are STATED -- pret/pokeemerald
+-- include/constants/metatile_behaviors.h, the same header
+-- RomExtractorGen3's GEN3_BEHAVIOUR_NAMES is checked against.  The region's
+-- own geometry is the independent confirmation, and it is unanimous: of the
+-- 535 warp events in Hoenn that sit on one of these five behaviours, the
+-- cell in the arrow's own direction is out of bounds on 385 and impassable
+-- on the other 150 -- all 535, none walkable (DERIVED over data/generated).
+-- A completed step in an arrow's own direction therefore cannot happen
+-- anywhere in the game, so every step that ever fired one of these came in
+-- from the side or from behind; 528 of the 535 can be stepped onto from some
+-- other direction, and that number is the size of the reported bug.
+--
+-- MB_WEST_ARROW_WARP carries no warp event in Hoenn at all (derived: zero of
+-- the 535, and the importer's own warpTiles tally leaves it out).  It is
+-- named anyway so a mod's map can use one, the way ledgeBehaviours names the
+-- northward ledge the region does not have.
+--
+-- A tileset may override the list (arrowWarpBehaviours), which is where a
+-- future import should stamp it; until one does the stated table stands in.
+-- That is the same shape as the WATER_TILES/SHORE_TILES fallbacks at the top
+-- of this file and for the same reason: the dataset on disk predates the
+-- field, and the fix has to work on the data the player already has.
+local GEN3_ARROW_WARPS = {
+  [0x62] = "right", -- MB_EAST_ARROW_WARP          (stated)
+  [0x63] = "left",  -- MB_WEST_ARROW_WARP          (stated; unused in Hoenn)
+  [0x64] = "up",    -- MB_NORTH_ARROW_WARP         (stated)
+  [0x65] = "down",  -- MB_SOUTH_ARROW_WARP         (stated) -- the exit mat
+  [0x6D] = "down",  -- MB_WATER_SOUTH_ARROW_WARP   (stated)
+}
+
+-- published so a test -- and a mod that wants to know -- can read the rule
+-- rather than restate it
+Map.gen3ArrowWarps = GEN3_ARROW_WARPS
+
+function Map:arrowWarpDirAt(cx, cy)
+  -- ONLY WHERE WARPS ARE EVENTS, which is the one thing a Gen 3 tileset says
+  -- about itself and exactly the test isWarpTileCell already keys off.  On a
+  -- Gen 1 or Gen 2 set these five numbers mean something else entirely -- $65
+  -- is not a class Johto uses and $62 is an ordinary tile id in Kanto -- so
+  -- reading them as arrows there would quietly disable real doors, which is
+  -- the mistake Map:speaksGen2Collision exists to stop.
+  if not (self.tileset and self.tileset.warpsAreEvents) then return nil end
+  local arrows = self.tileset.arrowWarpBehaviours or GEN3_ARROW_WARPS
+  -- cellBehaviour, not cellTile: cellTile answers $FF for anything the
+  -- collision bits block, and a Gen 3 warp cell very often IS blocked -- the
+  -- collision bits shut 192 of Hoenn's 201 animated-door cells (derived), and
+  -- isWalkableCell only lets the player onto them because they carry a warp.
+  -- The mats themselves are all passable, but the reader of a behaviour must
+  -- be the one that cannot lie about it.  cellTile is the fallback for a map
+  -- that brought no collision array of its own, where it returns the
+  -- behaviour byte straight.
+  local b = self:cellBehaviour(cx, cy)
+  if b == nil then b = self:cellTile(cx, cy) end
+  return b and arrows[b] or nil
 end
 
 -- "pad"/"hole" when the cell's collision tile is a teleporter warp pad or
@@ -1133,6 +1344,32 @@ function Map:currentAt(cx, cy)
   if not currents then return nil end
   local b = self:cellBehaviour(cx, cy)
   return b and currents[b] or nil
+end
+
+-- THE TILES THAT WALK YOU FOR YOU, as one row: { way = "down", slide = true }.
+--
+-- sForcedMovementTestFuncs / sForcedMovementFuncs, paired by index and read
+-- in RomExtractorGen3:forcedMovementBehaviours.  The record covers the water
+-- currents and the waterfall as well as the eight walk/slide floors, because
+-- the cartridge really does answer all thirteen out of the same two tables --
+-- the caller decides which of them are its business.
+function Map:forcedMovementAt(cx, cy)
+  if not self.tileset.behaviourBytes then return nil end
+  local rows = self.tileset.forcedMovement
+  if not rows then return nil end
+  local b = self:cellBehaviour(cx, cy)
+  return b and rows[b] or nil
+end
+
+-- Lavaridge's two holes, as one row: { kind = "sink"|"launch", ... }.  Both
+-- are ordinary fall-through holes to the warp code; this says which of the
+-- gym's two animations the cell asks for.
+function Map:lavaridgeWarpAt(cx, cy)
+  if not self.tileset.behaviourBytes then return nil end
+  local rows = self.tileset.lavaridgeWarps
+  if not rows then return nil end
+  local b = self:cellBehaviour(cx, cy)
+  return b and rows[b] or nil
 end
 
 -- "up"/"down" when the cell is an escalator, nil otherwise.
@@ -1235,12 +1472,29 @@ end
 -- Answers nil when nothing covers the position: that is the cartridge's
 -- border block, which is impassable, and it is the honest answer rather than
 -- clamping onto a neighbour that does not reach.
-function Map:connectionFor(dir, coord, srcMax, extentOf)
+--- AND THE OFFSET IS IN BLOCKS, WHICH IS NOT THE UNIT ANYTHING ELSE HERE IS.
+---
+--- `coord`, `srcMax` and `extentOf` all speak CELLS.  A Gen 3 metatile IS the
+--- cell, so the two units coincide and this went unnoticed; a Game Boy block
+--- is four cells in a 2x2, so every Gen 2 window came out at half the offset
+--- it should have.  `cells` is how many cells a block of the map being left
+--- holds -- 1 for Hoenn, 2 for Johto and Kanto -- and defaults to 1 so a
+--- caller that already works in cells is unaffected.
+---
+--- What it cost: Route 9's south connection to Route 10 NORTH is offset 20
+--- blocks, so the strip the cartridge accepts is cells 40..60 -- the right
+--- hand third of Route 9, which is the way down to the POWER PLANT.  Halved,
+--- the window became 20..40 and the real seam was refused: an invisible wall
+--- along the whole crossing.  Route 45's west edge to Route 46 (offset 36)
+--- went the same way, and so did every other Game Boy seam with a non-zero
+--- offset.
+function Map:connectionFor(dir, coord, srcMax, extentOf, cells)
   local first = self:connection(dir)
   if not first then return nil end
+  cells = math.max(1, math.floor(tonumber(cells) or 1))
   local list = first.list or { first }
   for _, row in ipairs(list) do
-    local offset = tonumber(row.offset) or 0
+    local offset = (tonumber(row.offset) or 0) * cells
     local destMax = extentOf and extentOf(row.map)
     local lo = math.max(offset, 0)
     local hi = destMax and math.min(srcMax, destMax + offset) or srcMax

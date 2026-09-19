@@ -46,6 +46,9 @@ local GameVersion = require("src.core.GameVersion")
 -- first time a HP bar drained.
 local activeBattlers, foesOf
 
+-- the two text rows, a constant rather than a table a frame
+local TEXT_AREA_ROWS = { 112, 128 }
+
 local BattleState = {}
 BattleState.__index = BattleState
 BattleState.isOpaque = true
@@ -145,6 +148,22 @@ function BattleState:isWideBattleLayout()
   -- Hoenn has the real thing, at the size the cartridge draws it, with the
   -- cartridge's own healthboxes and window frames.  There is nothing here for
   -- it to buy, so the option is satisfied by the layout it was imitating.
+  --
+  -- ...AND THE OPTION IS ANSWERED SOMEWHERE ELSE INSTEAD.
+  --
+  -- Reported from play, with a frame: "with the wide mode selection in options
+  -- for battle, its not filling the screen like it does in my dramatic shapes
+  -- voxel mod please make it do so".  Declining here left the switch doing
+  -- NOTHING on Hoenn -- gen3Layout() below won, at the cartridge's 240x160,
+  -- integer-scaled and letterboxed, which is the pale band down each side of
+  -- that frame.
+  --
+  -- So WIDE still does not mean WideBattle here, and it now means something:
+  -- BattleState:gen3WideLayout reads the same option and grows EMERALD'S
+  -- surface to the window's shape instead (Gen3Battle.surfaceWidth), with
+  -- Emerald's own healthboxes on the surface's own edges and Emerald's own
+  -- bottom strip spanning it.  This function is the Game Boy layout's
+  -- question and keeps the Game Boy layout's answer.
   if GameVersion.isGen3() then return false end
   local options = self.game and self.game.save and self.game.save.options
   return options and options.battleLayout == "wide" or false
@@ -167,6 +186,60 @@ end
 function BattleState:gen3Layout()
   if self:isWideBattleLayout() then return false end
   return GameVersion.isGen3() and true or false
+end
+
+-- BATTLE LAYOUT = WIDE, ANSWERED IN EMERALD'S OWN TERMS.
+--
+-- The same option the Game Boy layouts read, on the layout that has a screen
+-- of its own to widen: Emerald's composition on a surface as wide as the
+-- window can show it, rather than the Game Boy's composition stretched over
+-- it (see isWideBattleLayout above for why that distinction is the whole
+-- point).  OG is the cartridge's own 240x160 and goes nowhere near any of it.
+function BattleState:gen3WideLayout()
+  if not self:gen3Layout() then return false end
+  local options = self.game and self.game.save and self.game.save.options
+  return options and options.battleLayout == "wide" or false
+end
+
+-- THE SURFACE THIS BATTLE ASKS FOR, DERIVED FROM THE WINDOW.
+--
+-- Memoised on the window size and the BATTLE SIZE setting, because uiSize()
+-- is asked several times in a single frame -- Game:draw resolves the surface
+-- with it, then Game.wantsThisSurface asks every state on the stack whether
+-- it owns that surface -- and every one of those answers has to be the SAME
+-- number.  A width that drifted between two calls in one frame would
+-- reallocate the canvas mid-frame and leave half the screen drawn at the
+-- other width.
+function BattleState:gen3SurfaceWidth()
+  if not self:gen3WideLayout() then return Gen3Battle.WIDTH end
+  local Renderer = require("src.render.Renderer")
+  local pw, ph = 0, 0
+  if Renderer.pixelSize then
+    local ok, a, b = pcall(Renderer.pixelSize, Renderer)
+    if ok and type(a) == "number" and type(b) == "number" then pw, ph = a, b end
+  end
+  local fill = self:wantsFillScale()
+  local key = pw .. "x" .. ph .. (fill and "/fill" or "/fixed")
+  if self._gen3SurfaceKey ~= key then
+    self._gen3SurfaceKey = key
+    self._gen3SurfaceW = Gen3Battle.surfaceWidth(pw, ph, fill,
+                                                 Renderer.MAX_UI_WIDTH)
+  end
+  return self._gen3SurfaceW
+end
+
+-- A WIDENED EMERALD BATTLE OWNS THE SURFACE UNTIL IT LEAVES THE STACK.
+--
+-- Same rule, and the same reason, as the Game Boy wide layout's
+-- (Game.wideBattleInStack): the party menu, the bag and the dialogue boxes a
+-- battle opens are Gen 3 screens of their OWN, and every one of them asks for
+-- the GBA's 240x160.  Game.nativeSurfaceInStack takes the TOPMOST state
+-- carrying a uiSize, so without this the canvas would snap back to 240 for
+-- exactly the frames one of those is open -- with the battle underneath
+-- redrawing its wider composition into a surface 240 wide, clipped at the
+-- right edge, and snapping back out again when the menu closed.
+function BattleState:holdsUISurface()
+  return self:gen3SurfaceWidth() > Gen3Battle.WIDTH
 end
 
 -- ---------------------------------------------------------------------------
@@ -209,7 +282,8 @@ function BattleState:layoutGeometry()
   if self:isWideBattleLayout() then return nil end
   if self:gen3Layout() then
     return Gen3Battle.geometry(BattleState.CLASSIC_GEOMETRY,
-                               self.data and self.data.constants)
+                               self.data and self.data.constants,
+                               self:gen3SurfaceWidth())
   end
   return BattleState.CLASSIC_GEOMETRY
 end
@@ -351,7 +425,13 @@ end
 -- Renderer:setUISize asks the top state for its surface before anything draws
 function BattleState:uiSize()
   if self:wideLayout() then return WideBattle.WIDTH, WideBattle.HEIGHT end
-  if self:gen3Layout() then return Gen3Battle.WIDTH, Gen3Battle.HEIGHT end
+  -- ...and on Hoenn the WIDTH is the option's (gen3SurfaceWidth answers the
+  -- cartridge's own 240 on OG).  The height is never a variable: 160 is the
+  -- cartridge's row count and every piece of art on the screen is drawn
+  -- against it.
+  if self:gen3Layout() then
+    return self:gen3SurfaceWidth(), Gen3Battle.HEIGHT
+  end
   return 160, 144
 end
 
@@ -361,7 +441,12 @@ end
 -- extra columns unremapped in the forced-mono modes (WideBattle.zones).
 function BattleState:sgbPalettes()
   if self:wideLayout() then return WideBattle.zones() end
-  if self:gen3Layout() then return Gen3Battle.zones() end
+  -- ...sized to the surface actually allocated, for exactly the reason the
+  -- note above gives: the widened columns would otherwise stay un-remapped
+  -- in the forced-mono modes.
+  if self:gen3Layout() then
+    return Gen3Battle.zones(self:gen3SurfaceWidth())
+  end
   return nil
 end
 
@@ -1356,6 +1441,18 @@ function BattleState:addOpponentTrainer(oppClass)
     return true
   end
   self.trainerB = def
+  -- ...AND THE SECOND TRAINER IS ALSO A PERSON STANDING THERE.
+  --
+  -- Two trainers walked up, and one of them was drawn.  `trainerPic` is built
+  -- once in the constructor from `self.trainer`, so the second opponent had a
+  -- team, a payout and a defeat line but no sprite: the intro showed a single
+  -- trainer and then two Pokemon came out of nowhere.  Same path as the
+  -- first -- the class's pic, the class's palette -- because this trainer is
+  -- no different from that one; there are simply two of them.
+  self.trainerPicB = getImage(
+    BattleState.trainerPicPath(self.game.data, def, oppClass, 1),
+    BattleState.trainerPalette(self.game.data, def),
+    def.trueColor)
   self.enemyPartyB = buildTrainerParty(self.game, oppClass, 1, partyDef)
   self.enemyIndexB = 1
   if self.enemyPartyB[1] then
@@ -1366,6 +1463,27 @@ function BattleState:addOpponentTrainer(oppClass)
     markSeen(self.game, self.enemyPartyB[1].species)
   end
   return true
+end
+
+-- WHAT THE BALL ROW IS COUNTING, which against two trainers is both teams.
+--
+-- The cartridge keeps ONE gEnemyParty and fills it from both of them in a
+-- TWO_OPPONENTS battle -- CreateNPCTrainerParty runs a second time writing
+-- after the first team -- so DrawPartyStatusSummary counts the lot without
+-- ever knowing there were two trainers.  This engine keeps the teams apart
+-- (`enemyParty` and `enemyPartyB`), because each trainer owes its own payout
+-- and its own defeat line, and the intro row was reading the first of them:
+-- you walked into a six-Pokemon fight and the balls said three.
+--
+-- Only the display is joined.  Everything that pays out, sends out or counts
+-- a knockout still asks the team it belongs to.
+function BattleState:foeSummaryParty()
+  local first, second = self.enemyParty, self.enemyPartyB
+  if not (second and second[1]) then return first end
+  local out = {}
+  for _, mon in ipairs(first or {}) do out[#out + 1] = mon end
+  for _, mon in ipairs(second) do out[#out + 1] = mon end
+  return out
 end
 
 -- The Battle Tower's opponents are generated, not table-driven: its 70
@@ -4136,9 +4254,27 @@ end
 -- current enemy mon (wPartyGainExpFlags).
 function BattleState:markParticipant()
   self.participants = self.participants or {}
-  if self.player and self.player.mon then
-    self.participants[self.player.mon] = true
-    HeldItems.observeParticipant(self, self.player)
+  -- BOTH OF YOURS ARE IN THE FIGHT, and only the left one was being written
+  -- down.  wPartyGainExpFlags is a bit per party slot that has faced the
+  -- current foe, and in a double battle two slots have: the partner takes
+  -- hits, lands moves and is standing there when the foe goes down.  Marking
+  -- `self.player` alone -- which is the LEFT flank's alias, not "the player's
+  -- side" -- left the right-hand Pokemon out of the participant count, so it
+  -- earned nothing all battle while its partner levelled.
+  local function mark(battler)
+    if battler and battler.mon then
+      self.participants[battler.mon] = true
+      HeldItems.observeParticipant(self, battler)
+    end
+  end
+  local slots = self.sides and self.sides[1] and self.sides[1].battlers
+  if slots then
+    -- indices rather than ipairs: the left flank is nil while it is off the
+    -- field and the right one is still owed its share
+    mark(slots[1])
+    mark(slots[2])
+  else
+    mark(self.player)
   end
 end
 
@@ -6098,11 +6234,23 @@ function BattleState:executeAction(user, target, action)
     -- trainer class AI actions (engine/battle/trainer_ai.asm)
     if action.special == "aiItem" then
       self.aiUses = (self.aiUses or 1) - 1
+      -- a Gen 3 trainer spends a SLOT, not a per-Pokemon allowance: the
+      -- cartridge nulls the entry in trainerItems as it emits the action, so
+      -- three FULL RESTOREs are three heals in the whole battle
+      if action.slot then
+        self.gen3ItemsUsed = self.gen3ItemsUsed or {}
+        self.gen3ItemsUsed[action.slot] = true
+      end
       for _, m in ipairs(TrainerAI.useItem(self, action.item)) do
         self:sayNext(prefixEnemy(m, self.enemy))
       end
       self:drainNext()
-      require("src.core.Sound").play(self.data, "Heal_Ailment")
+      -- the Gen 3 arm of useItem runs the item through ItemEffects, which
+      -- plays the cartridge's own fanfare for it; playing this one too would
+      -- put two heal sounds on the same frame
+      if not action.slot then
+        require("src.core.Sound").play(self.data, "Heal_Ailment")
+      end
       return
     end
     if action.special == "aiSwitch" then
@@ -9543,6 +9691,26 @@ function BattleState:drawPicsLayer(slide, sx, sy, onlySide, skipMenuClip)
                                              imagePathOf(img), 1)
       ex, ey = tx - slide + sx, ty + sy
     end
+    -- THE OTHER ONE, WHEN TWO OF THEM WALKED UP.
+    --
+    -- Drawn BEFORE the first, so where the two pics overlap the left-hand
+    -- trainer -- the one whose name opens the battle and whose Pokemon leads
+    -- -- is the one in front.  It takes the right-hand opponent's place out
+    -- of sBattlerCoords rather than an offset invented here, which is the
+    -- same table the two foe Pokemon are about to stand on: the trainer is
+    -- where their Pokemon will be, which is the rule the first pic already
+    -- follows.
+    if self.trainerPicB and self:gen3Layout()
+       and self.isDouble and self:isDouble() then
+      local imgB = self:picImage(self.trainerPicB)
+      if imgB then
+        local bx, by = Gen3Battle.picPlacement(self,
+          { isPlayer = false, position = BattleState.POS.OPPONENT_RIGHT },
+          imgB, imagePathOf(imgB), 1)
+        love.graphics.draw(imgB, bx - slide + sx + self:picOffset("foe"),
+                           by + sy)
+      end
+    end
     -- SlideTrainerPicOffScreen / _ScrollTrainerPicAfterBattle offset (#317)
     love.graphics.draw(img, ex + self:picOffset("foe"), ey)
   elseif onlySide ~= "player"
@@ -9959,7 +10127,7 @@ function BattleState:drawTextAreaInner()
       if self.scrollPx <= 0 then self.scrollPx = nil end
     end
     local off = self.scrollPx or 0
-    local ys = { 112, 128 }
+    local ys = TEXT_AREA_ROWS
     for li, line in ipairs(self.shown or {}) do
       local y = (ys[li] or 128) + off
       for i = 1, #line do

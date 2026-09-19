@@ -383,6 +383,33 @@ function Player:turnWindow()
 end
 
 -- Attempt to start a step; returns "moved"|"turned"|"blocked"|nil.
+-- WOULD THIS PRESS BE A STEP, or only a turn on the spot?
+--
+-- The field handlers that run BEFORE tryMove -- the ledge hop, the boulder,
+-- the rotating gates -- all act on "the player is trying to walk into this
+-- cell".  But a press is not always a step: pressing a direction you are not
+-- already facing turns you in place and costs the turn window, and a press
+-- inside that window does nothing at all.  tryMove knows this and returns
+-- "turned" or nil; a handler that ran first does not, and has already acted.
+--
+-- Reported from play, of Fortree Gym: the gates were "sometimes turnning too
+-- much or incorrectly", and separately "when i walk into one it moves but
+-- doesnt move my player".  Those are one bug seen twice.  Walk up to a gate
+-- facing along the wall and press into it: the gate is pushed, and then
+-- tryMove turns you on the spot instead of stepping.  Press again -- the push
+-- lands a SECOND time and the gate has gone half a turn for one crossing.
+--
+-- Deliberately beside tryMove and not copied into the callers: these are its
+-- own early-outs and the two must not drift.  It only ASKS -- tryMove is
+-- where facing, turnArmed and turnTimer are written, and a predicate that
+-- moved them would consume the turn it was asked about.
+function Player:stepWouldStart(dir)
+  if self.moving or self.inputLocked then return false end
+  if self.facing ~= dir and self.turnArmed then return false end
+  if (self.turnTimer or 0) > 0 then return false end
+  return true
+end
+
 function Player:tryMove(dir, map, entities)
   if self.moving or self.inputLocked then return nil end
   if self.facing ~= dir then
@@ -423,6 +450,20 @@ function Player:tryMove(dir, map, entities)
   local save = Game.save
   local frames = (save and save.onBike) and self.bikeStepFrames
                  or self.stepFrames or STEP_FRAMES
+  -- ...AND HOENN HAS TWO BIKES THAT DO NOT RIDE ALIKE.
+  --
+  -- Reported from play: "fix the acro and mach bike so they function as they
+  -- would in the emerald rom currently they both act the same".  The one
+  -- number above is the Game Boy's single BICYCLE, and it was every bike in
+  -- every game -- so the Mach Bike never pulled away and the Acro Bike had no
+  -- pace of its own.  The overworld has carried the cartridge's speeds for a
+  -- while (GetPlayerSpeed, its three-rung mach ladder and the frames each of
+  -- those speeds costs); nothing had ever asked it.  Asked here, the way
+  -- runFrames below is asked, so the RULE stays where the rules live.
+  if save and save.onBike and Game.overworld
+     and Game.overworld.bikeFrames then
+    frames = Game.overworld:bikeFrames() or frames
+  end
   -- "Downhill riding is slower when not moving down" (DoPlayerMovement .DoStep:
   -- on a bike with BIKEFLAGS_DOWNHILL_F set, only a DOWN step gets STEP_BIKE;
   -- every other direction drops to STEP_WALK).  Cycling Road is the only place
@@ -571,10 +612,13 @@ function Player:update()
     end
     return false
   end
-  local d = Collision.DELTA[self.facing]
+  -- the STEP's direction, not the nose's: they part company whenever the
+  -- facing is locked (the side jump, the muddy slope) -- see
+  -- Collision.stepDelta
+  local dx, dy = Collision.stepDelta(self)
   local px = math.floor(self.progress * 16 / stepLen)
-  self.px = self.cellX * 16 + d[1] * px
-  self.py = self.cellY * 16 + d[2] * px
+  self.px = self.cellX * 16 + dx * px
+  self.py = self.cellY * 16 + dy * px
   if self.progress >= stepLen then
     -- a step with no target cell (a malformed queue entry) keeps the cell
     -- it started from rather than nilling it out from under every later
@@ -670,7 +714,16 @@ function Player:pose()
     -- `hopping` is deliberately NOT set: that flag is the LEDGE hop's, and
     -- what reads it draws the little shadow a Pokemon leaves under itself
     -- clearing a ledge.  A rider bouncing on the spot casts no such thing.
-    self.hopClock = ((self.hopClock or 0) + 1) % 8
+    -- THE CLOCK IS THE OVERWORLD'S NOW.  It used to be ticked right here,
+    -- which meant the hop ran at the DISPLAY's rate rather than the game's --
+    -- and, worse, there was no moment in a draw to hang the cartridge's own
+    -- hop sound on.  updateAcroBike owns both; this reads the phase and keeps
+    -- its own only for a caller that has no overworld behind it.
+    if self.acroHopClock then
+      self.hopClock = self.acroHopClock
+    else
+      self.hopClock = ((self.hopClock or 0) + 1) % 8
+    end
     py = py - math.floor(4 * math.sin(self.hopClock / 8 * math.pi) + 0.5)
   elseif self.surfing then
     self.bobTimer = ((self.bobTimer or 0) + 1) % 32
