@@ -53,7 +53,7 @@ RomExtractorGen3.__index = RomExtractorGen3
 -- The progress denominator.  Kept honest with the two stage lists below: a
 -- mismatch does not break anything, it just makes the bar lie, which is the
 -- kind of small wrongness that survives for months.
-local STAGE_COUNT = 91
+local STAGE_COUNT = 92
 
 -- ---------------------------------------------------------------------------
 -- The stage tables below are keyed to Emerald's ROM.  A sibling cartridge
@@ -6885,11 +6885,35 @@ function RomExtractorGen3:extractOverworldSprites()
       local anchor = self:facingAnchor(anims)
       local order
       if anchor then
+        -- A DIRECTIONAL SPRITE DOES NOT HAVE TO WALK.
+        --
+        -- FireRed's MOM uses the standard facing/step animation table, but her
+        -- image array contains only the three standing pictures (south, north,
+        -- west). Requiring the walk animations to have backing images threw
+        -- that valid facing set away and the generic multi-frame fallback then
+        -- labelled those pictures `poseFrames`. SpriteRenderer deliberately
+        -- ignores facing for pose sequences, so her logical facing changed
+        -- while the visible sprite stayed on frame zero.
+        --
+        -- Keep the three standing directions once the animation table proves
+        -- they exist. Add walking rows only as one complete set; the renderer
+        -- already supports a three-frame turnable non-walker.
         order = {}
-        for i, slot in ipairs(GEN3_OW.POSE) do
-          local frame = self:animFirstFrame(anims, anchor + slot)
+        for i = 1, 3 do
+          local frame = self:animFirstFrame(anims, anchor + GEN3_OW.POSE[i])
           if frame == nil or frame >= available then order = nil break end
           order[i] = frame
+        end
+        if order then
+          local walk, ok = {}, true
+          for i = 4, #GEN3_OW.POSE do
+            local frame = self:animFirstFrame(anims, anchor + GEN3_OW.POSE[i])
+            if frame == nil or frame >= available then ok = false break end
+            walk[#walk + 1] = frame
+          end
+          if ok then
+            for _, frame in ipairs(walk) do order[#order + 1] = frame end
+          end
         end
       end
       -- ...AND THE SECOND STEP OF EACH WALK, appended after the six.
@@ -7033,7 +7057,9 @@ function RomExtractorGen3:extractOverworldSprites()
         id = key,
         image = ("assets/generated/overworld/g3_%03d.png"):format(id),
         frames = poseFrames and 1 or #order,
-        walker = not poseFrames and #order > 1,
+        -- Three frames are just the standing south/north/west set. A sprite is
+        -- a walker only when all three movement rows were retained too.
+        walker = not poseFrames and #order >= #GEN3_OW.POSE,
         -- how many frames of ANIMATION the sheet carries, when its frames are
         -- a sequence rather than a set of facings -- see the note above
         poseFrames = poseFrames,
@@ -7061,7 +7087,7 @@ function RomExtractorGen3:extractOverworldSprites()
                    :format(id),
         }
       end
-      if #order > 1 and not poseFrames then walkers = walkers + 1
+      if #order >= #GEN3_OW.POSE and not poseFrames then walkers = walkers + 1
       else still = still + 1 end
     end)
     if not ok then failed = failed + 1 end
@@ -7502,7 +7528,7 @@ function RomExtractorGen3:extractOverworldSprites()
                    sheets = drawn, substituted = substituted }
   self:write("sprites", out)
   Logger.info("Gen3 overworld sprites: %d rows, %d that turn and walk, %d "
-              .. "single-frame, %d unreadable, %d sheets composed, %d "
+              .. "non-walkers, %d unreadable, %d sheets composed, %d "
               .. "run-time slots standing in",
               count, walkers, still, failed, drawn, substituted)
 end
@@ -11441,6 +11467,22 @@ end
 function RomExtractorGen3:extractPCMenu()
   self:beginStage("Gen3 PC menu")
   local P = RomExtractorGen3.PC_MENU
+  local fireRed = (self.manifest or {}).frlgItemMenu ~= nil
+  local function rowsAt(at, count, stride)
+    local out = {}
+    for i = 0, count - 1 do
+      local ptr = self.rom:pointer(at + i * (stride or 8))
+      local word = ptr and self:readText(ptr, 64) or nil
+      if type(word) ~= "string" or #word < P.MIN or #word > P.MAX
+         or word:find("\n") then
+        Logger.warn("gen3 PC menu: %07X row %d does not read as a label (%s)",
+                    at, i, tostring(word))
+        return nil
+      end
+      out[i + 1] = word
+    end
+    return out
+  end
   local function rows(symbol, stride)
     local at = self:symbol(symbol)
     if not at then return nil end
@@ -11459,9 +11501,16 @@ function RomExtractorGen3:extractPCMenu()
     return out
   end
 
-  local main = rows("sPCMainMenuActions")
-  local storage = rows("sItemStorageActions")
-  local mailbox = rows("sMailboxActions")
+  -- FireRed's player_pc.c uses different symbols AND different row counts:
+  -- TopMenu is 3 rows, ItemPc is WITHDRAW / DEPOSIT / CANCEL (3), and only
+  -- the mailbox has four.  Feeding those through Emerald's four-row symbols
+  -- is what invented a TOSS row in FireRed.
+  local main = fireRed and rowsAt(0x4021E8, 3)
+               or rows("sPCMainMenuActions")
+  local storage = fireRed and rowsAt(0x402208, 3)
+                  or rows("sItemStorageActions")
+  local mailbox = fireRed and rowsAt(0x402228, 4)
+                  or rows("sMailboxActions")
   if not (main and storage and mailbox) then
     Logger.warn("gen3 PC menu: not all three menus read -- the PC keeps "
                 .. "whatever screen it had")
@@ -11469,9 +11518,10 @@ function RomExtractorGen3:extractPCMenu()
   end
   -- the descriptions are a plain array of pointers, one per storage row
   local describe = {}
-  local descAt = self:symbol("sItemStorageDescriptions")
+  local descAt = fireRed and 0x4021DC or self:symbol("sItemStorageDescriptions")
   if descAt then
-    for i = 0, P.ROWS - 1 do
+    local descCount = fireRed and 3 or P.ROWS
+    for i = 0, descCount - 1 do
       local ptr = self.rom:pointer(descAt + i * 4)
       local line = ptr and self:readText(ptr, 80) or nil
       if type(line) == "string" and #line > 0 then describe[i + 1] = line end
@@ -11525,7 +11575,23 @@ function RomExtractorGen3:extractPCMenu()
   end
 
   -- ---- WHICH ROWS EACH PC SHOWS, and the screen that blinks -------------
-  local orders = self:pcMenuOrders()
+  local orders
+  if fireRed then
+    local function readOrder(at)
+      local out, seen = {}, {}
+      for i = 0, 2 do
+        local row = self.rom:u8(at + i)
+        if row == nil or row >= 3 or seen[row] then return nil end
+        seen[row] = true
+        out[i + 1] = row + 1
+      end
+      return out
+    end
+    local bedroom, player = readOrder(0x402200), readOrder(0x402203)
+    if bedroom and player then orders = { bedroom = bedroom, player = player } end
+  else
+    orders = self:pcMenuOrders()
+  end
   local screen = self:pcScreenBlink()
   local multi = self:pcMultichoice()
 
@@ -11538,11 +11604,14 @@ function RomExtractorGen3:extractPCMenu()
     orders = orders,
     screen = screen,
     multichoice = multi,
-    source = ("ROM:sPCMainMenuActions %07X, sItemStorageActions %07X, "
-              .. "sMailboxActions %07X"):format(
-              self:symbol("sPCMainMenuActions"),
-              self:symbol("sItemStorageActions"),
-              self:symbol("sMailboxActions")),
+    source = fireRed
+      and "ROM:player_pc.c sMenuActions_TopMenu 4021E8, sMenuActions_ItemPc "
+          .. "402208, sMenuActions_MailSubmenu 402228"
+      or ("ROM:sPCMainMenuActions %07X, sItemStorageActions %07X, "
+          .. "sMailboxActions %07X"):format(
+          self:symbol("sPCMainMenuActions"),
+          self:symbol("sItemStorageActions"),
+          self:symbol("sMailboxActions")),
   }
   local constants = self._constants or {}
   constants.gen3PCMenu = record
@@ -23647,6 +23716,70 @@ function RomExtractorGen3:extractSaveLayout()
   local save = self.manifest.save
   local orders = self.manifest.substructOrders
   local fields = self.manifest.saveFields
+  -- FireRed's saveFields manifest predates the shared codec's complete
+  -- structure descriptions. Fill only absent values, using FireRed's own
+  -- structs in pokefirered/include/global.h and
+  -- pokefirered/include/pokemon_storage_system.h. The block offsets and bag
+  -- capacities still come from the FireRed manifest; the checks below verify
+  -- that these structure sizes tile those ROM-derived offsets.
+  if self:isFireRedManifest() and type(fields) == "table" then
+    local function fillMissing(target, additions)
+      for key, value in pairs(additions) do
+        if target[key] == nil then target[key] = value end
+      end
+    end
+
+    if type(fields.saveBlock2) ~= "table" then fields.saveBlock2 = {} end
+    fillMissing(fields.saveBlock2, {
+      playerName = 0x000, playerGender = 0x008, playerTrainerId = 0x00A,
+      playTimeHours = 0x00E, playTimeMinutes = 0x010,
+      playTimeSeconds = 0x011, playTimeVBlanks = 0x012,
+      encryptionKey = 0xF20,
+    })
+
+    local b1 = fields.saveBlock1
+    if type(b1) == "table" then
+      -- Six party Pokemon end exactly at money in FireRed's SaveBlock1.
+      -- Measuring that run keeps the per-mon size tied to the offsets already
+      -- extracted from this cartridge (56 .. 656 = six 100-byte records).
+      if type(fields.party) ~= "table" then fields.party = {} end
+      local party = fields.party
+      fillMissing(party, { start = b1.playerParty,
+                           count = b1.playerPartyCount, size = 6 })
+      if party.monSize == nil and party.start and party.size and b1.money then
+        local span = b1.money - party.start
+        if span <= 0 or span % party.size ~= 0 then
+          error("gen3 FireRed save layout: party records do not end at money")
+        end
+        party.monSize = span / party.size
+      end
+
+      -- ItemSlot is two halfwords. The PC slots sit between the registered
+      -- item and the first ROM-derived bag pocket, so their count is the gap.
+      if type(fields.bag) == "table" then
+        local bag = fields.bag
+        fillMissing(bag, { itemSlotSize = 4, pcItems = b1.pcItems })
+        if bag.pcItemCount == nil and bag.pcItems and bag.pockets
+           and bag.pockets[1] then
+          local span = bag.pockets[1] - bag.pcItems
+          if span < 0 or span % bag.itemSlotSize ~= 0 then
+            error("gen3 FireRed save layout: PC item slots do not end at the bag")
+          end
+          bag.pcItemCount = span / bag.itemSlotSize
+        end
+      end
+    end
+
+    -- PokemonStorage is 14 boxes of 30 80-byte records. Its one-byte active
+    -- box is followed by alignment padding, then names (8 bytes plus EOS) and
+    -- wallpapers. These extents close exactly on FireRed's 33,744-byte block.
+    if type(fields.storage) ~= "table" then fields.storage = {} end
+    fillMissing(fields.storage, {
+      currentBox = 0, boxes = 4, boxCount = 14, boxCapacity = 30,
+      boxMonSize = 80, boxNames = 33604, boxNameLength = 9,
+      boxWallpapers = 33730,
+    })
+  end
   if type(save) ~= "table" or type(orders) ~= "table" then
     Logger.warn("gen3: the manifest carries no save layout -- save import "
                 .. "will refuse rather than guess one")
@@ -35909,7 +36042,7 @@ RomExtractorGen3.BAG_SCREEN = {
 -- picture in its top-left corner.
 -- ---------------------------------------------------------------------------
 RomExtractorGen3.BAG_SCREEN_FRLG = {
-  GFX = 0xE830CC, TILEMAP = 0xE832C0,
+  GFX = 0xE830CC, TILEMAP = 0xE832C0, ITEM_PC_TILEMAP = 0xE83444,
   PALETTE = 0xE835B4, PALETTE_BANKS = 3, FEMALE_BANK0 = 0xE83604,
   TILES = 55, COLS = 32, ROWS = 20,
   WINDOWS = 0x4530C4, WINDOW_STRIDE = 8, TERMINATOR = 0xFF,
@@ -35926,14 +36059,16 @@ function RomExtractorGen3:extractBagScreenFireRed()
   local rom = self.rom
   local okG, tiles = RomExtractorGen3.lz77ok(rom, B.GFX)
   local okM, map = RomExtractorGen3.lz77ok(rom, B.TILEMAP)
+  local okI, itemPcMap = RomExtractorGen3.lz77ok(rom, B.ITEM_PC_TILEMAP)
   local okP, palRaw = RomExtractorGen3.lz77ok(rom, B.PALETTE)
   local okF, femaleRaw = RomExtractorGen3.lz77ok(rom, B.FEMALE_BANK0)
-  if not (okG and okM and okP and okF) then
+  if not (okG and okM and okI and okP and okF) then
     Logger.warn("gen3 bag screen (FRLG): a blob did not decompress -- the bag "
                   .. "keeps its own drawing")
     return
   end
   if #tiles ~= B.TILES * 32 or #map ~= 32 * 32 * 2
+     or #itemPcMap ~= 32 * 32 * 2
      or #palRaw ~= B.PALETTE_BANKS * 32 or #femaleRaw ~= 32 then
     Logger.warn("gen3 bag screen (FRLG): %d tiles, %d map bytes, %d/%d palette "
                   .. "bytes -- not the bag's run", math.floor(#tiles / 32),
@@ -35956,24 +36091,33 @@ function RomExtractorGen3:extractBagScreenFireRed()
   local images = {}
   for _, row in ipairs({ { key = "male", colors = male },
                          { key = "female", colors = female } }) do
-    local ok = pcall(function()
-      local img = ImageWriter.blank(240, 160)
-      for ty = 0, B.ROWS - 1 do
-        for tx = 0, 29 do
-          local cell = ty * B.COLS + tx
-          local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
-          local tid = e % 1024
-          local bank = math.floor(e / 4096) % 16
-          if tid < B.TILES and bank < B.PALETTE_BANKS then
-            RomExtractorGen3.partyTile(img, tiles, row.colors, tid, bank,
-                                       tx * 8, ty * 8)
+    for _, layout in ipairs({
+      { suffix = "", map = map },
+      { suffix = "_item_pc", map = itemPcMap },
+    }) do
+      local ok = pcall(function()
+        local img = ImageWriter.blank(240, 160)
+        for ty = 0, B.ROWS - 1 do
+          for tx = 0, 29 do
+            local cell = ty * B.COLS + tx
+            local e = layout.map[cell * 2 + 1] + layout.map[cell * 2 + 2] * 256
+            local tid = e % 1024
+            local bank = math.floor(e / 4096) % 16
+            if tid < B.TILES and bank < B.PALETTE_BANKS then
+              RomExtractorGen3.partyTile(img, tiles, row.colors, tid, bank,
+                                         tx * 8, ty * 8)
+            end
           end
         end
+        local leaf = "ui/bag_" .. row.key .. layout.suffix .. ".png"
+        self:saveImage(img, leaf)
+      end)
+      if ok then
+        local key = layout.suffix == "" and row.key
+          or ("itemPc" .. row.key:sub(1, 1):upper() .. row.key:sub(2))
+        images[key] = "assets/generated/ui/bag_" .. row.key
+                      .. layout.suffix .. ".png"
       end
-      self:saveImage(img, "ui/bag_" .. row.key .. ".png")
-    end)
-    if ok then
-      images[row.key] = "assets/generated/ui/bag_" .. row.key .. ".png"
     end
   end
 
@@ -36011,9 +36155,10 @@ function RomExtractorGen3:extractBagScreenFireRed()
     bag = { x = B.BAG_CENTRE.x - B.BAG_SIZE / 2,
             y = B.BAG_CENTRE.y - B.BAG_SIZE / 2, size = B.BAG_SIZE },
     itemIcon = B.ITEM_ICON,
-    source = ("ROM:gBagBg_Gfx %07X, tilemap %07X, palette %07X (+female %07X), "
+    source = ("ROM:gBagBg_Gfx %07X, tilemaps %07X/%07X, palette %07X (+female %07X), "
               .. "sDefaultBagWindowsStd %07X")
-             :format(B.GFX, B.TILEMAP, B.PALETTE, B.FEMALE_BANK0, B.WINDOWS),
+             :format(B.GFX, B.TILEMAP, B.ITEM_PC_TILEMAP, B.PALETTE,
+                     B.FEMALE_BANK0, B.WINDOWS),
   }
   local constants = self._constants or {}
   constants.gen3BagScreen = record
@@ -36024,6 +36169,127 @@ function RomExtractorGen3:extractBagScreenFireRed()
               win.list.width, win.list.height, record.list.rows,
               win.description.x, win.description.y, win.description.width,
               win.description.height)
+end
+
+-- ---------------------------------------------------------------------------
+-- FIRERED'S ITEM PC IS ITS OWN SCREEN.
+--
+-- player_pc.c sends WITHDRAW to ItemPc_Init rather than to the bag.  item_pc.c
+-- then loads these three blobs on BG1 and puts its text windows over them.  The
+-- old port reused Gen3BagMenu for the stored-item list, which got the list
+-- mechanics right but also drew the bag sprite and pocket plate here.
+--
+-- The four windows used by the ordinary withdraw view are, in item_pc.c's
+-- sWindowTemplates order: list (7,1 19x12), description (5,14 25x6), the
+-- two-line WITHDRAW ITEM label (1,1 5x4), and the quantity selector (24,15
+-- 5x4).  The next two rows are transient submenu/message windows; keeping
+-- them in the record makes the extracted layout describe the whole table.
+-- ---------------------------------------------------------------------------
+RomExtractorGen3.ITEM_PC_FRLG = {
+  GFX = 0xE85090, PALETTE = 0xE85408, TILEMAP = 0xE85458,
+  PALETTE_BANKS = 3, COLS = 32, ROWS = 20,
+  WINDOWS = 0x453F98, WINDOW_STRIDE = 8,
+  WINDOW_KEYS = { "list", "description", "label", "quantity", "submenu", "message" },
+  -- sSubwindowTemplates in item_pc.c. These are the transient framed windows
+  -- created over BG0: selected-item text, the withdraw quantity question,
+  -- and the withdraw result/refusal message.
+  SUBWINDOWS = {
+    selected = { x = 48, y = 120, width = 112, height = 32 },
+    quantityPrompt = { x = 48, y = 120, width = 128, height = 32 },
+    result = { x = 48, y = 120, width = 184, height = 32 },
+  },
+  ITEM_X = 9, CURSOR_X = 1, UP_TEXT_Y = 2, ROW_HEIGHT = 16,
+  QUANTITY_X = 110, DESC_X = 0, DESC_Y = 3, DESC_LINE = 14,
+  ITEM_ICON = { x = 8, y = 124, size = 24 },
+}
+
+function RomExtractorGen3:extractFireRedItemPc()
+  self:beginStage("Gen3 FireRed Item PC")
+  if (self.manifest or {}).frlgItemMenu == nil then return end
+  local S = RomExtractorGen3.ITEM_PC_FRLG
+  local rom = self.rom
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, S.GFX)
+  local okM, map = RomExtractorGen3.lz77ok(rom, S.TILEMAP)
+  local okP, palRaw = RomExtractorGen3.lz77ok(rom, S.PALETTE)
+  if not (okG and okM and okP) then
+    Logger.warn("gen3 FireRed Item PC: a background blob did not decompress")
+    return
+  end
+  if #tiles == 0 or #tiles % 32 ~= 0 or #map ~= 32 * 32 * 2
+     or #palRaw ~= S.PALETTE_BANKS * 32 then
+    Logger.warn("gen3 FireRed Item PC: %d tile bytes, %d map bytes, %d palette "
+                  .. "bytes -- not item_pc.c's background", #tiles, #map,
+                #palRaw)
+    return
+  end
+
+  local colors = {}
+  for i = 0, math.floor(#palRaw / 2) - 1 do
+    local r, g, b = RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256)
+    colors[i + 1] = { r, g, b }
+  end
+  local image = ImageWriter.blank(240, 160)
+  local tileCount = math.floor(#tiles / 32)
+  for ty = 0, S.ROWS - 1 do
+    for tx = 0, 29 do
+      local cell = ty * S.COLS + tx
+      local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
+      local tid = e % 1024
+      local bank = math.floor(e / 4096) % 16
+      if tid < tileCount and bank < S.PALETTE_BANKS then
+        RomExtractorGen3.partyTile(image, tiles, colors, tid, bank, tx * 8, ty * 8)
+      end
+    end
+  end
+  self:saveImage(image, "ui/item_pc_frlg.png")
+
+  local windows = {}
+  for i = 0, #S.WINDOW_KEYS - 1 do
+    local o = S.WINDOWS + i * S.WINDOW_STRIDE
+    windows[S.WINDOW_KEYS[i + 1]] = {
+      x = rom:u8(o + 1) * 8, y = rom:u8(o + 2) * 8,
+      width = rom:u8(o + 3) * 8, height = rom:u8(o + 4) * 8,
+      bg = rom:u8(o), palette = rom:u8(o + 5),
+    }
+  end
+  local list, desc, label, quantity = windows.list, windows.description,
+                                      windows.label, windows.quantity
+  local submenu, message = windows.submenu, windows.message
+  if not (list and list.x == 56 and list.y == 8 and list.width == 152
+          and list.height == 96
+          and desc and desc.x == 40 and desc.y == 112 and desc.width == 200
+          and desc.height == 48
+          and label and label.x == 8 and label.y == 8 and label.width == 40
+          and label.height == 32
+          and quantity and quantity.x == 192 and quantity.y == 120
+          and quantity.width == 40 and quantity.height == 32
+          and submenu and submenu.x == 176 and submenu.y == 104
+          and submenu.width == 56 and submenu.height == 48
+          and message and message.x == 16 and message.y == 120
+          and message.width == 208 and message.height == 32) then
+    Logger.warn("gen3 FireRed Item PC: %07X does not read as item_pc.c's "
+                  .. "sWindowTemplates", S.WINDOWS)
+    return
+  end
+
+  local constants = self._constants or {}
+  constants.gen3FRLGItemPc = {
+    image = "assets/generated/ui/item_pc_frlg.png",
+    windows = windows,
+    subwindows = S.SUBWINDOWS,
+    list = { itemX = S.ITEM_X, cursorX = S.CURSOR_X, upTextY = S.UP_TEXT_Y,
+             rowHeight = S.ROW_HEIGHT, rows = 6, quantityX = S.QUANTITY_X },
+    description = { x = S.DESC_X, y = S.DESC_Y, lineHeight = S.DESC_LINE },
+    itemIcon = S.ITEM_ICON,
+    source = ("ROM:gItemPcTiles %07X, gItemPcTilemap %07X, gItemPcBgPals %07X, "
+              .. "item_pc.c sWindowTemplates %07X")
+             :format(S.GFX, S.TILEMAP, S.PALETTE, S.WINDOWS),
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 FireRed Item PC: %d tiles; list (%d,%d) %dx%d, description "
+                .. "(%d,%d) %dx%d", tileCount, list.x, list.y, list.width,
+              list.height, desc.x, desc.y, desc.width, desc.height)
 end
 
 -- ---------------------------------------------------------------------------
@@ -46403,6 +46669,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractBattleHud",
   "extractPartyMenu",
   "extractBagScreen",
+  "extractFireRedItemPc",
   "extractTMCaseScreen",
   "extractBerryPouchScreen",
   "extractFireRedIntro",

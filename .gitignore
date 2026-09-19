@@ -109,6 +109,7 @@ mobile/ios/bundle_id.local
 !/tests/parity_frlg_ship.lua
 !/tests/parity_frlg_warp_allowlist.lua
 !/tests/parity_gen3_type_categories.lua
+!/tests/parity_frlg_save_layout.lua
 !/tests/frlg_ship_driver.lua
 !/tests/frlg_gyms_driver.lua
 !/tests/frlg_gym_puzzles_driver.lua

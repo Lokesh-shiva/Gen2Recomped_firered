@@ -152,6 +152,7 @@ function Gen3BagMenu.new(game, opts)
   -- opened mid-battle: the pick USES the item there and then, against the
   -- fight, rather than opening the field item flow (see choose())
   self.battle = opts.battle
+  self.itemPc = opts.itemPc and true or false
   self.pocket = 1
   self.index = 1
   self.top = 1
@@ -562,8 +563,13 @@ function Gen3BagMenu:background()
   local images = r.images
   if type(images) ~= "table" then return nil end
   local player = (self.game.save or {}).player or {}
-  local path = (player.gender == "girl" and images.female) or images.male
-               or images.female
+  local path
+  if self.itemPc then
+    path = (player.gender == "girl" and images.itemPcFemale)
+           or images.itemPcMale or images.itemPcFemale
+  end
+  path = path or (player.gender == "girl" and images.female) or images.male
+              or images.female
   if type(path) ~= "string" then return nil end
   local ok, img = pcall(Assets.image, path)
   return ok and img or nil

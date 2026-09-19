@@ -554,6 +554,11 @@ function NPC.new(data, mapId, objDef)
   end
 
   self.facing = (g3 and g3.facing) or FACING_FROM_RANGE[objDef.range] or "down"
+  -- Movement scripts can ask for the object's original direction.  Imported
+  -- Gen 3 defs spell that as a movement type rather than a `facing` field, so
+  -- retain both the initial resolved direction and the current type here.
+  self.spawnFacing = self.facing
+  self.gen3MovementType = objDef.movementType
   -- A fixed sheet frame from the extractor (polished's ball/cut/fruit
   -- sheet: cut trees are frame 1, fruit trees frame 2).  The renderer
   -- draws exactly this 16x16 row and skips facing entirely -- a tree has

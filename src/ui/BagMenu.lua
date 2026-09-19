@@ -609,7 +609,7 @@ BagMenu.useItem = useItem
 -- already holding something is offered the swap (TryGiveItemToMon).
 -- TryGiveItemToMon: hand `id` to `mon`, offering the swap when it is already
 -- holding something.  Key items and mail stay in the pack.
-local function handOver(game, mon, id, onChanged)
+local function handOver(game, mon, id, onChanged, opts)
   local def = game.data.items[id]
   local name = (def and def.name) or id
   local monName = mon.nickname
@@ -624,12 +624,24 @@ local function handOver(game, mon, id, onChanged)
   end
   local held = mon.item
   local function hand()
-    require("src.inventory.Bag").giveHeld(game.save, mon, id, game.data)
+    local changed
+    if opts and opts.giveHeld then
+      changed = opts.giveHeld(mon, id)
+    else
+      require("src.inventory.Bag").giveHeld(game.save, mon, id, game.data)
+      changed = true
+    end
+    if changed == false then
+      showMessages(game, { Strings("No room left to\nstore items.") })
+      return false
+    end
     if onChanged then onChanged() end
+    return true
   end
   if not held then
-    hand()
-    showMessages(game, { Strings("%s is now holding\n%s.", monName, name) })
+    if hand() then
+      showMessages(game, { Strings("%s is now holding\n%s.", monName, name) })
+    end
     return
   end
   local heldName = (game.data.items[held] or {}).name or held
@@ -640,9 +652,10 @@ local function handOver(game, mon, id, onChanged)
   }, function()
     game.stack:push(ChoiceBox.new(game, function(yes)
       if not yes then return end
-      hand()
-      showMessages(game, { Strings("Took %s and\nmade it hold %s.",
-        heldName, name) })
+      if hand() then
+        showMessages(game, { Strings("Took %s and\nmade it hold %s.",
+          heldName, name) })
+      end
     end))
   end)
 end

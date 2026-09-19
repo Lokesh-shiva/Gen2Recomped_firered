@@ -854,9 +854,18 @@ function startMovement(ctx, ow, entity, index, movementLabel, rows)
       turnTo(ctx, index, dir)
       advance()
     elseif step.kind == "faceOriginal" then
-      -- the facing the map def gave it, which is where it was standing before
-      -- the scene started moving it about
-      local home = entity.def and entity.def.facing or entity.spawnFacing
+      -- The cartridge reads the initial facing for the object's CURRENT
+      -- movement type. Imported Gen 3 defs carry `movementType`, not `facing`,
+      -- so the old lookup was nil for ROM objects (including FireRed's Mum,
+      -- whose pre-rival talk explicitly restores FACE_LEFT before release).
+      local data = ctx.game and ctx.game.data
+      local constants = data and data.constants
+      local movementTypes = constants and constants.gen3MovementTypes
+      local movementType = entity.gen3MovementType
+        or (entity.def and entity.def.movementType)
+      local movement = movementTypes and movementTypes[movementType]
+      local home = (movement and movement.facing)
+        or (entity.def and entity.def.facing) or entity.spawnFacing
       turnTo(ctx, index, home)
       advance()
     else

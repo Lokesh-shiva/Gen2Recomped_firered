@@ -1112,6 +1112,14 @@ local VERSION_REQUIRED_FILES = {
   -- come back with nothing at all -- no title art, and no marker here
   -- to notice it was missing.
   prism = { "assets/generated/title/prism_title.png" },
+  -- item_pc.c is FireRed-only, and an older FireRed cache otherwise has no
+  -- reason to re-run the new extraction stage: constants.lua already exists
+  -- and the shared Gen 3 required-file set is satisfied.  Requiring the one
+  -- background this stage always writes upgrades only FireRed caches.
+  firered = {
+    "assets/generated/ui/item_pc_frlg.png",
+    "assets/generated/ui/bag_male_item_pc.png",
+  },
 }
 
 local function requiredFiles(version)
