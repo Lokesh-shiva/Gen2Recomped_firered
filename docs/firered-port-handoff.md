@@ -6,6 +6,10 @@ Read this whole file before touching code — it's written so a fresh session
 
 Last commits, newest first:
 ```
+0a4e087 FireRed: finish Item PC and Mum parity
+bc961a5 FireRed: enforce cartridge warp trigger rules
+868d7ec Docs: log three reopened manual-play reports and the prompt to fix them
+4daa52a Docs: close the pre-PR sweep with the Gen 1 / Emerald inventory
 dd5d701 Gen3: stop the PP-item move picker falling into the Game Boy list
 b8c2292 Docs: re-check the three reopened PC/NPC items live
 921e852 Docs: log the PC item storage fix
@@ -14,6 +18,11 @@ aa9bb40 FireRed: give the PC's item storage FireRed's list, not the Game Boy's
 8008c6f FireRed: fire arrow/stair warps from the walk, not the arrival
 9a3fbcf Docs: reopen manual FireRed PC and NPC issues
 d1cedf8 FireRed: use Gen3 PC menu and constrain NPC movement
+0d869e5 Dramatic Shape: complete B30 Pokemon Tower profile
+dc5a3e0 FireRed: preserve Gen3 command overrides
+6525abf Docs: verify FireRed FLY bird sprite
+6603a21 FireRed: use the real FLY bird sprite
+8d00cca Docs: verify FireRed naming-screen fidelity
 eb86f72 FireRed: match naming-screen icons
 384269d Docs: verify FireRed FLY round trip
 d8b92bc FireRed: open Town Map for FLY
@@ -31,7 +40,6 @@ bdda3db Docs: log the Flash/Fly HM fix
 051a900 Docs: verify the naming-screen mon icon through a real catch
 0e36dc7 Docs: log the naming-screen icon fix's real-flow verification
 9de1fa0 Draw the naming screen's player/Pokémon icon (naming_screen.c sIconFunctions)
-806eb0a Docs: close the two start-flow reports, neither reproduced
 ```
 Nothing has been pushed anywhere. Never push — this is Ceedrack's
 personal-use codebase (Gen2Recomped License, see LICENSE.md); commit locally
@@ -648,7 +656,14 @@ engine has no separate Poké Flute field animation; the wake-up presentation is
 currently the cry, delay, transition, and battle entry. The focused live
 regression is complete; see the verification block above.
 
-## Pre-PR regression sweep — in progress 2026-09-18
+## Pre-PR regression sweep — closed 2026-09-19
+
+The three manual-play items that reopened this sweep are now closed. R3 is
+`bc961a5`; R1 and R2 are `0a4e087`. The older subsections below are retained
+where they explain how the bugs were found, but any text describing those
+three as "open", routing FireRed TOSS through the PC, or treating the bag-list
+screen as the final Item PC implementation is historical and superseded by the
+round-2 closure section below.
 
 Manual play before opening a PR reported three things: the item list behind
 the PC's WITHDRAW ITEM row is "gbc color", the reopened PC/NPC items below are
@@ -696,7 +711,12 @@ real two-cell mat does not warp, DOWN on it still exits, and stepping onto a
 shows the player standing on the Viridian Forest gate mat after walking along
 it.
 
-### 2. PC item storage was the Game Boy list — fixed, `aa9bb40`
+### 2. PC item storage was the Game Boy list — intermediate fix, `aa9bb40`
+
+`aa9bb40` removed the Gen 1 `ListMenu`, but this was only an intermediate fix:
+it borrowed the bag screen and also inherited an incorrect TOSS row. FireRed's
+final cartridge-faithful Item PC implementation is documented under R1 below
+and landed in `0a4e087`.
 
 The "gbc color" report. `Gen3PlayerPC`'s ITEM STORAGE rows called
 `PlayerPC.withdraw/deposit/toss` wholesale, and all three push
@@ -772,188 +792,131 @@ for the storage system and close for the rest; none of them was reported and
 none was verified pixel-for-pixel this pass. That is the honest next place to
 look if more "this screen looks like Emerald" reports come in.
 
-## REOPENED AFTER MANUAL PLAY — 2026-09-18 (round 2) — START HERE
+## Round-2 manual reports — resolved 2026-09-19
 
-Three reports from manual play *after* the sweep above. **Nothing below has
-been fixed or attempted yet** — this section is analysis and pointers only, so
-the next session must not assume any of it is verified. The three earlier
-reopened PC/NPC items further down were re-checked and are genuinely closed;
-these are new (items 1 and 3 are partly *caused* by fixes in this sweep).
+Three reports from manual play after the first sweep reopened R1/R2/R3. They
+have now all been implemented and re-verified against the retail FireRed ROM
+with mods off. The source analysis that led to each fix is summarized here so
+a later regression has a concrete cartridge reference rather than a guess.
 
-### R1. The PC's item storage is wearing the BAG's screen — my fix was half right
+### R1. FireRed Item PC — closed, `0a4e087`
 
-> "why is the bag menu ui is being used in the pc ui?"
+The second pass found an important source correction before polishing the
+half-fix: FireRed does **not** have a TOSS row in player PC item storage.
+`pokefirered/src/player_pc.c`'s `sMenuActions_ItemPc` is exactly
+`WITHDRAW ITEM / DEPOSIT ITEM / CANCEL`. The top player-PC menu is likewise
+the cartridge's three rows (`ITEM STORAGE / MAILBOX / TURN OFF`). The extractor
+now reads those FireRed tables with their real row counts instead of applying
+Emerald's four-row assumption.
 
-Fair. Commit `aa9bb40` fixed the real bug (it was the Game Boy `ListMenu`) by
-routing WITHDRAW/TOSS through `Gen3BagMenu`'s scripted-list mode — so the list,
-frame, description box and quantities are right, but the screen still draws
-**the bag sprite and the bag's pocket plate**, which the cartridge does not
-show here.
+WITHDRAW now uses a dedicated `Gen3ItemPcFRLG` built from the retail-ROM
+`gItemPcTiles`, `gItemPcTilemap` and `gItemPcBgPals`. Its source-backed layout
+matches `item_pc.c`: list `(7,1) 19x12`, description `(5,14) 25x6`, label
+`(1,1) 5x4`, quantity `(24,15) 5x4`, and action submenu `(22,13) 7x6`. Pressing
+A on an item opens the real `WITHDRAW / GIVE / CANCEL` submenu; SELECT enters
+the cartridge's insertion-style item reorder and persists that slot order via
+`save.pcOrder`.
 
-The cartridge splits these three rows across **two different screens**, and
-this is worth getting exactly right (all verified in the pret clone):
+The transient furniture is FireRed-specific too, rather than the shared
+Game-Boy-style `QuantityBox`: the withdraw question is subwindow 1 at `(6,15)
+16x4`, the number remains in window 3 with `×NNN` at local `(8,10)`, withdraw
+result/refusal text uses subwindow 2 at `(6,15) 23x4`, and the no-party GIVE
+message uses window 5 at `(2,15) 26x4`. The Item PC remains directly underneath
+all of those nonopaque states.
 
-- **DEPOSIT really does open the bag** — `player_pc.c`'s
-  `Task_DepositItem_WaitFadeAndGoToBag` calls
-  `GoToBagMenu(ITEMMENULOCATION_ITEMPC, OPEN_BAG_ITEMS, CB2_ReturnToField)`.
-  So the current deposit routing is already correct; **do not change it**.
-  (The cartridge even swaps the bag's background for this case —
-  `gBagBg_ItemPC_Tilemap`, `graphics/item_menu/bg_item_pc.bin.lz` — which this
-  port does not do yet, a nice-to-have.)
-- **WITHDRAW and TOSS open a screen of their own** — `player_pc.c`'s
-  `Task_PlayerPcWithdrawItem` calls `ItemPc_Init`, which is the whole separate
-  `src/item_pc.c` screen: its own two BG templates, its own
-  `sWindowTemplates` (list window at tilemap 7,1 19x12; message window at
-  5,14 25x6; two 5x4 corner windows at 1,1 and 24,15) and **its own background
-  art**, none of which is the bag:
-  - `gItemPcTiles` — `graphics/item_pc/bg.4bpp.lz`
-  - `gItemPcTilemap` — `graphics/item_pc/bg.bin.lz`
-  - `gItemPcBgPals` — `graphics/item_pc/bg.gbapal.lz` (three 4bpp palettes)
+DEPOSIT still opens the real FireRed bag, as `player_pc.c` requires, but now
+uses the cartridge's `gBagBg_ItemPC_Tilemap` variant instead of the ordinary bag
+background. GIVE follows `PARTY_ACTION_GIVE_PC_ITEM`: one PC item moves to the
+chosen Pokémon, and when swapping a held item the old item goes to the bag; a
+full bag rejects that swap without consuming the PC item. The existing
+50-stack capacity and key-item/HM one-at-a-time rules are retained.
 
-  So the fix is a real screen: extract those three in `RomExtractorGen3`
-  (same shape as `extractFireRedNaming`, which already does LZ77 tiles +
-  tilemap + palette and writes a `constants.gen3FRLG*` record), then add
-  `src/ui/Gen3ItemPcFRLG.lua` that draws that background and lays the list out
-  on `item_pc.c`'s window templates. Reuse `Gen3BagMenu`'s row-building and
-  cursor/quantity logic where it is furniture-independent; do not reuse its
-  `background()`/`bagFrame()`.
-- Keep everything `aa9bb40` got right: the store, the 50-stack
-  `PC_ITEM_CAPACITY` rule, the key-item/HM "always one, no prompt" rule, and
-  the quantity prompt. `src/ui/PlayerPC.lua` stays as the Gen 1/2 screen.
+Final focused validation after a **forced retail-ROM reimport** passed **50/50**
+checks in `_frlg_pc_items.lua`, including the exact three menu rows, no TOSS,
+WITHDRAW/GIVE/CANCEL, SELECT reorder, all transient window geometries, key/HM
+withdraw, 50-stack refusal, GIVE, and DEPOSIT. Screenshots read back include
+`pcitem_02_storage.png`, `pcitem_03b_submenu.png`, `pcitem_03c_reorder.png`,
+`pcitem_04_quantity.png`, `pcitem_04b_withdraw_message.png`, and
+`pcitem_06_deposit.png`. A second normal launch used the generated cache
+directly, proving the new FireRed required-file markers do not cause a reimport
+loop.
 
-### R2. The NPC in the player's house faces the wrong way and never turns
+The same forced import exposed an older FireRed manifest omission in the shared
+save decoder, so `0a4e087` also fills the source-defined FireRed SaveBlock2,
+party, PC-item and box-storage layout fields only when they are absent. The
+retained `tests/parity_frlg_save_layout.lua` regression passes **17/17** and
+explicitly confirms Emerald is not assigned those FireRed-only offsets.
 
-> "inside our house is facing the wrong default direction and she doesn't
-> turns to us when we talk to her"
+### R2. Player-house Mum facing/talk turn — closed, `0a4e087`
 
-This is Mum in the player's house (Pallet Town, the `MAP_G04_N00`-style
-interior). **Two separate faults in one object**, and note that the NPC-facing
-item I closed further down was tested on Pallet Town's *outdoor* objects, which
-do turn correctly — so whatever this is, it is specific to this object or to
-its movement type, and the closed item is not evidence about it.
+The live failure was not `NPC:update` ignoring `frozen`: the logical facing and
+talk freeze path were already correct. Mum's imported overworld sheet contains
+only the three standing directional frames (south, north, west). The extractor
+previously required a complete walking set before preserving directional
+interpretation, so those three pictures were classified as generic
+`poseFrames`; `SpriteRenderer` intentionally ignores facing for a pose
+sequence. That is why her internal direction changed while the visible sprite
+did not.
 
-Where to look:
+`RomExtractorGen3:extractOverworldSprites()` now retains a valid three-frame
+standing directional set when the animation table proves those directions
+exist and marks a row as a walker only when its complete movement set is
+present. `NPC.new` keeps both `spawnFacing` and `gen3MovementType`, and the Gen 3
+`faceOriginal` movement command resolves the object's cartridge-facing from its
+current movement type before falling back to older fields. This also makes
+Mum's pre-rival script restore `FACE_LEFT` exactly as the source does.
 
-- **Default facing.** A Gen 3 object's initial direction comes from its
-  `movementType` (`MOVEMENT_TYPE_FACE_UP/DOWN/LEFT/RIGHT`, and the
-  `FACE_*_AND_*` variants), not from a separate field. Check what
-  `RomExtractorGen3` writes for `movementType` and whether anything maps the
-  face-locked types onto a starting `facing` at spawn — if nothing does, every
-  such NPC spawns facing the engine default and Mum will look wrong while a
-  wanderer looks fine, which matches the report exactly.
-- **Not turning on talk.** `OverworldState:talkTo`
-  (`src/world/OverworldController.lua`, ~line 7532) does call
-  `npc:facePlayer(self.player)` and sets `npc.frozen = true` before it. So
-  either (a) the per-frame updater for a face-locked movement type re-applies
-  its fixed direction and does not honour `frozen`, or (b) this object's text
-  goes through a hand-ported `mapScripts.talkScript` branch that re-poses her.
-  Check (a) first: it explains both halves of this report with one cause.
-- Verify with a driver that stands the player on each of the four sides of
-  *this* object and asserts the rendered facing, not just `e.facing`.
+Focused live validation on `MAP_G04_N00`, Mum at `(8,4)`, movement type 9,
+confirmed `frames=3`, `poseFrames=nil`, `walker=false`, default visible LEFT,
+and real A-button talk from all four sides. Screenshot pixels were read back:
+left = frame 2 unflipped, right = frame 2 flipped, up = frame 1, down = frame 0,
+and the script-restored state is again frame 2 unflipped. The final shared-tree
+rerun exited 0 with no failures. A full Emerald reimport also completed with 0
+unreadable overworld rows; the only short runtime "walker" rows seen by the
+scratch smoke were pre-existing synthetic five-frame `_REFLECT` entries, not
+extractor regressions.
 
-### R3. The house exit mat still warps from the wrong cell
+### R3. FireRed warp trigger semantics — closed, `bc961a5`
 
-> "still the exit issue is there like inside the house even if I stand at the
-> right of the exit red mat"
+The narrow directional-warp fix in `8008c6f` was not enough. FireRed had still
+been treating any imported `warp_event` as an arrival warp, and after its
+directional checks `Warp.extraCheck` could fall through to pokered's unrelated
+"facing the map edge" fallback. That made ordinary destination cells live
+warps, including cells beside house mats.
 
-`8008c6f` fixed the *arrow/stair* half of this and is verified (walking along
-an outdoor two-cell mat no longer warps). It did **not** go far enough,
-because I deliberately took the narrow path: I only stopped the eight
-directional behaviours from firing on arrival and left
-`tileset.warpsAreEvents` otherwise intact, so **any warp event on any other
-behaviour still fires the moment it is stepped on**, and
-`Warp.extraCheck`'s Gen 1 fallback ("is the player facing the map edge") still
-applies to FireRed.
+`Map:isWarpTileCell()` is now FireRed-gated to the cartridge's exact
+`IsWarpMetatileBehavior` allowlist from `field_control_avatar.c`: `$60` cave
+door, `$61` ladder, `$66` fall warp, `$67` regular warp, `$68` Lavaridge 1F,
+`$69` warp door, `$6A/$6B` escalators, and `$71` Union Room. The directional
+`$62..$65` arrows/mats and `$EC..$EF` side stairs remain walk-direction
+triggers through `frlgWarpDirection`; after that FireRed returns false before
+the Gen 1 edge-facing fallback. Emerald is unchanged.
 
-The cartridge's rule is an allowlist, and this port does not implement it yet.
-From `field_control_avatar.c`, a FireRed warp fires in exactly three ways:
+The live census still imports all **486** warp destinations on ordinary `$00`
+floor, but **0** are arrival-active after the fix. That is intentional data,
+not missing extraction. Validation passed the retained exhaustive parity suite
+**264/264**, the FireRed live census/behavior driver **14/14**, directional
+mat/stair driver **9/9**, and six representative live warp classes **6/6**.
+The exact Pallet player-house round trip was rerun too: the interior exit mat is
+`$65`, standing beside it is inert, and the first DOWN press exits correctly.
+The retained regression is `tests/parity_frlg_warp_allowlist.lua`.
 
-1. **On a completed step** — `TryStartWarpEventScript`, gated by
-   `IsWarpMetatileBehavior`, which is **only**: `$60` CAVE_DOOR, `$61` LADDER,
-   `$66` FALL_WARP, `$67` REGULAR_WARP (warp pad), `$68` LAVARIDGE_1F_WARP,
-   `$69` WARP_DOOR, `$6A`/`$6B` UP/DOWN_ESCALATOR, `$71` UNION_ROOM_WARP.
-   Nothing else — **including plain ground `$00`** — fires on arrival.
-2. **Walking into an arrow/stair warp** — `TryArrowWarp`, already implemented
-   by `Map:frlgWarpDirection` + `Warp.extraCheck`.
-3. **Pressing north into a door in front of you** — `TryDoorWarp`, WARP_DOOR
-   (`$69`) only.
+### Pre-PR status after R1/R2/R3
 
-There is no "facing the map edge" rule on this cartridge at all; that is
-pokered's `ExtraWarpCheck` and it should not be reachable on FireRed.
+There are **no remaining R1/R2/R3 blockers** before Ceedrack's PR. The retained
+Gen 1 / Emerald routing audit above found no other FireRed path that currently
+drops into a Game Boy cartridge screen. A handful of reachable shared Gen 3
+screens (`Gen3MoveLearnMenu`, `Gen3EvolutionState`, `Gen3ItemMenu`,
+`Gen3StarterSelect`, `Gen3Cutscene`, `Gen3DexSearch`) are intentionally shared
+and were not pixel-compared to FireRed during this sweep; that is nonblocking
+polish to revisit only if a concrete manual report identifies a mismatch.
 
-**The likely cause of this exact report:** the census
-(`tests/drivers/_frlg_warp_census.lua`, gitignored — rewrite it if gone) found
-**486 warp events sitting on behaviour `$00`**, ordinary floor. The extractor's
-own comment calls those script destinations, which is right — but because they
-still fire on arrival (and because the edge fallback still applies), the cell
-*beside* a house's exit mat can be a live warp. Implementing rule 1 as a real
-allowlist is the fix.
-
-**Risk to weigh before doing it:** 486 warps is a lot to switch off at once.
-Do it FireRed-gated, census first, and drive a real round trip through several
-buildings (enter, walk around the mat, leave) plus a ladder, an escalator, a
-cave entrance and a warp pad before believing it. If some genuine entrance in
-this port's data turns out to sit on `$00`, that is a data/import question —
-find out which map, do not widen the allowlist to make it go away.
-
-### Prompt for the session that picks these up
-
-```
-Read docs/firered-port-handoff.md first, all of it, especially the section
-"REOPENED AFTER MANUAL PLAY — 2026-09-18 (round 2)" and the build/run/test
-notes at the top. Branch firered-port; commit locally only, never push; never
-commit tools/rom_manifest_firered.json. Test with POKEPORT_NO_MODS=1 and
-POKEPORT_NO_BOOT_REPORT=1, verify every claim with a driver plus a screenshot
-you actually read back, and update the handoff doc as you close each item so
-the work survives a session ending mid-way.
-
-Three open items, in this order:
-
-1. R3, the warp allowlist. This is the one that breaks play, so do it first.
-   FireRed currently fires a warp from ANY warp event the moment it is stepped
-   on, because the Gen 3 tileset sets warpsAreEvents and Map:isWarpTileCell
-   answers yes for every warp cell; on top of that Warp.extraCheck still falls
-   back to pokered's "facing the map edge" rule, which this cartridge does not
-   have. Implement field_control_avatar.c's real rule, FireRed-gated so
-   Emerald is untouched: a step landing on a cell fires a warp only when the
-   behaviour is one of $60 CAVE_DOOR, $61 LADDER, $66 FALL_WARP, $67
-   REGULAR_WARP, $68 LAVARIDGE_1F_WARP, $69 WARP_DOOR, $6A/$6B ESCALATORS,
-   $71 UNION_ROOM_WARP; arrow and side-stair warps keep firing only from the
-   matching walk (Map:frlgWarpDirection, already in place and verified);
-   pressing north into a $69 door in front of you fires that door; nothing
-   else fires at all. Census the imported warps by behaviour before and after
-   (486 of them sit on plain $00 today) and report the diff. Then drive a real
-   round trip: enter a house, walk across and around the exit mat from every
-   side, leave by pressing down on it, and repeat for a ladder, an escalator,
-   a cave entrance and a warp pad. The reported symptom to reproduce first and
-   then defeat: standing to the RIGHT of a house's red exit mat and still
-   being sent outside.
-
-2. R2, the player's-house NPC. She spawns facing the wrong way and does not
-   turn when talked to. Suspect one cause for both: a face-locked
-   MOVEMENT_TYPE_FACE_* object never gets its initial facing applied at spawn,
-   and its per-frame updater re-applies that fixed direction over the
-   facePlayer that OverworldState:talkTo (~line 7532) does. Check what
-   RomExtractorGen3 writes for movementType, where an object's starting facing
-   is decided, and whether the updater honours npc.frozen. Verify by standing
-   on all four sides of that exact object and checking the RENDERED pose, not
-   just e.facing. Do not generalise from Pallet Town's outdoor NPCs -- those
-   already turn correctly and were verified this session.
-
-3. R1, the PC item screen. WITHDRAW and TOSS currently borrow Gen3BagMenu, so
-   they show the bag sprite and pocket plate, which the cartridge does not
-   show. On real hardware those two rows open a separate screen entirely --
-   player_pc.c's Task_PlayerPcWithdrawItem calls ItemPc_Init, which is
-   src/item_pc.c with its own background (gItemPcTiles / gItemPcTilemap /
-   gItemPcBgPals, i.e. graphics/item_pc/bg.4bpp.lz, bg.bin.lz, bg.gbapal.lz)
-   and its own window templates (list 7,1 19x12; message 5,14 25x6; two 5x4
-   corners at 1,1 and 24,15). Extract those three the way
-   extractFireRedNaming already extracts LZ77 tiles + tilemap + palette, add
-   src/ui/Gen3ItemPcFRLG.lua, and route WITHDRAW and TOSS to it. DEPOSIT must
-   keep opening the real bag -- that IS what the cartridge does
-   (GoToBagMenu(ITEMMENULOCATION_ITEMPC, ...)) -- so leave it alone. Keep the
-   store, the 50-stack PC_ITEM_CAPACITY rule, the key-item/HM "always one"
-   rule and the quantity prompt exactly as they are now.
+The forced retail import still prints the repository's pre-existing accepted
+warning that `data/generated/scenes.lua` and `assets/generated/ui/summary_info.png`
+are not produced. The importer explicitly accepts that cache rather than
+re-importing forever; neither warning is an R1/R2/R3 regression or a known
+play blocker. The new Item PC and Item-PC bag assets *are* produced and a
+normal follow-up launch consumes them without reimporting.
 
 Ground rules learned the hard way in this repo, do not relearn them:
 - Trust the cartridge's own data over any header. This port's side stairs are
@@ -967,12 +930,12 @@ Ground rules learned the hard way in this repo, do not relearn them:
 - Grep the pret source more than one way before concluding the cartridge does
   not do something. A naming-screen feature was declared "not a bug" once
   because the grep said "Pic"/"Sprite" and the real code said "Icon".
-```
 
-## Manual verification reopened the PC/NPC issues — 2026-09-18
+## Earlier manual PC/NPC reports — rechecked and closed 2026-09-18
 
-The manual play report after commit `d1cedf8` says these issues are **still
-present** and must not be treated as closed:
+The manual play report after commit `d1cedf8` had said these issues were still
+present. They were kept open at that point pending the live re-check recorded
+immediately below:
 
 1. **Pokémon Center PC still shows the generic Gen 1 UI.** The focused driver
    can open the fallback menu and log `SOMEONE’S PC`, the player PC, and `LOG
@@ -990,9 +953,9 @@ present** and must not be treated as closed:
    imported movement range, map-cell coordinates, and the map's water/elevation
    grid. Do not close this issue from a mocked collision result alone.
 
-Commit `d1cedf8` is therefore an attempted fix, not a completed resolution.
-Keep these three items open until a real visible FireRed run reproduces the
-cartridge behavior and the screenshots/logs are read back.
+At that point `d1cedf8` was treated as an attempted fix rather than a completed
+resolution; the live runs below supplied the missing evidence and closed all
+three reports.
 
 ### Re-checked live on 2026-09-18 — none of the three reproduces
 
@@ -1056,6 +1019,7 @@ drivers above are the fastest way to show it.
   (grep by name) before writing the handler — don't guess behaviour.
 - Never commit `tools/rom_manifest_firered.json`.
 - The retained regression files include (`tests/parity_frlg_ship.lua`,
+  `tests/parity_frlg_warp_allowlist.lua`, `tests/parity_frlg_save_layout.lua`,
   `tests/parity_gen3_type_categories.lua`, `tests/frlg_ship_driver.lua`,
   `tests/frlg_gyms_driver.lua`, `tests/frlg_gym_puzzles_driver.lua`,
   `tests/frlg_rocket_driver.lua`,
@@ -1069,5 +1033,5 @@ drivers above are the fastest way to show it.
   uncommitted retained regressions plus the final gameplay/visual parity fixes
   were committed locally as `a266457` on 2026-09-17.
 - Loose top-level `frlg_*.png` files in the repo root are old manual
-  screenshots from earlier sessions, not driver output — ignore/clean them
-  up if they get in the way, they're not tracked and not load-bearing.
+  screenshots from earlier sessions, not driver output. Leave them alone for
+  this task; they are untracked and not load-bearing.
