@@ -930,6 +930,26 @@ local FRLG_DIRECTIONAL_WARP = {
   [0xED] = "left",  [0xEF] = "left",
 }
 
+-- Warp behaviours that FireRed's field controller accepts on a completed
+-- step (field_control_avatar.c IsWarpMetatileBehavior).  A warp EVENT by
+-- itself is not enough: hundreds of script destinations intentionally sit on
+-- ordinary floor and must stay inert when the player walks across them.
+--
+-- Directional arrow/mat/stair behaviours are deliberately absent.  Those are
+-- TryArrowWarp and are handled by frlgWarpDirection + Warp.extraCheck when the
+-- player walks in the behaviour's own direction.
+local FRLG_ARRIVAL_WARP = {
+  [0x60] = true, -- CAVE_DOOR
+  [0x61] = true, -- LADDER
+  [0x66] = true, -- FALL_WARP
+  [0x67] = true, -- REGULAR_WARP
+  [0x68] = true, -- LAVARIDGE_1F_WARP
+  [0x69] = true, -- WARP_DOOR
+  [0x6A] = true, -- UP_ESCALATOR
+  [0x6B] = true, -- DOWN_ESCALATOR
+  [0x71] = true, -- UNION_ROOM_WARP
+}
+
 -- The direction this cell's behaviour must be walked in for its warp to fire,
 -- or nil when the cell is not one of FireRed's directional warps.
 function Map:frlgWarpDirection(cx, cy)
@@ -981,13 +1001,14 @@ end
 
 -- true if the cell's collision tile is a door or warp-activating tile
 function Map:isWarpTileCell(cx, cy)
-  -- GEN 3 DOES NOT GATE A WARP ON THE TILE UNDER IT.
+  -- GEN 3 STORES WARP EVENTS SEPARATELY FROM THEIR METATILE BEHAVIOUR.
   --
   -- On a Game Boy map a warp only fires from a door or carpet tile, and the
-  -- tileset's two lists are that filter.  On this cartridge the warp EVENT is
-  -- the whole thing: the behaviour byte says what KIND of opening it is -- a
-  -- door you step out of, a ladder you do not -- and about a tenth of warp
-  -- events sit on ordinary ground because a script puts you there.
+  -- tileset's two lists are that filter.  Emerald's existing import treats a
+  -- warp EVENT as sufficient here, but FireRed's field controller explicitly
+  -- gates completed-step warps through IsWarpMetatileBehavior.  That distinction
+  -- matters because hundreds of FireRed warp events sit on ordinary ground as
+  -- script destinations and are not entrances the player may trigger by walking.
   --
   -- Saying so explicitly matters.  Gen 3 tilesets used to ship no lists at
   -- all, and the empty-table fallback below let every warp through by
@@ -996,6 +1017,11 @@ function Map:isWarpTileCell(cx, cy)
   -- not name stopped firing.  The tileset now states the rule instead of the
   -- engine inferring it from a gap.
   if self.tileset.warpsAreEvents then
+    if GameVersion.get() == "firered" then
+      if not self:warpAtCell(cx, cy) then return false end
+      local b = self:cellBehaviour(cx, cy)
+      return b ~= nil and FRLG_ARRIVAL_WARP[b] == true
+    end
     -- ...BUT A DIRECTIONAL WARP IS NOT ONE OF THEM.  An arrow panel, an exit
     -- mat and a side staircase are taken by walking INTO them and are inert
     -- underfoot otherwise, so they are never an arrival warp -- see

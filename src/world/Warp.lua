@@ -94,6 +94,14 @@ function Warp.extraCheck(map, carpets, cx, cy, dir)
      and map:warpAtCell(cx, cy) then
     return true
   end
+  -- FireRed has no pokered-style "face the map edge" fallback here.  Its
+  -- non-arrival input warp is TryArrowWarp above; ordinary completed-step
+  -- warps are filtered by Map:isWarpTileCell, and a north press into a WARP_DOOR
+  -- reaches that door through the normal movement/door path.  Falling through
+  -- to ExtraWarpCheck made plain-floor script destinations live whenever they
+  -- happened to sit at a map edge.
+  local GameVersion = require("src.core.GameVersion")
+  if GameVersion.get() == "firered" then return false end
   local Collision = require("src.world.Collision")
   local facingEdge =
     (dir == "up" and cy == 0)
