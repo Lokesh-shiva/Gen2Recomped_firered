@@ -39389,6 +39389,18 @@ RomExtractorGen3.HB_GENDER = {
   AT_SPECIES_A = 0x4E, AT_SPECIES_B = 0x52,
 }
 
+-- The two species whose DEFAULT names already contain a gender glyph.  Hoenn's
+-- function exposes those ids through literal loads at the offsets above, but
+-- FireRed compares against SPECIES_NIDORAN_F / SPECIES_NIDORAN_M directly and
+-- the same byte offsets are unrelated Thumb instructions.  Keep this choice in
+-- one small function so the importer can be regression-tested without a ROM.
+function RomExtractorGen3.healthboxNamedSpecies(self, rom)
+  if self:isFireRedManifest() then return { 29, 32 } end
+  local G = RomExtractorGen3.HB_GENDER
+  return { rom:u16(G.NICK_FN + G.AT_SPECIES_A) % 256,
+           rom:u16(G.NICK_FN + G.AT_SPECIES_B) % 256 }
+end
+
 -- ---------------------------------------------------------------------------
 -- THE ROW OF BALLS THAT SLIDES IN WHEN A BATTLE STARTS.
 --
@@ -44856,18 +44868,21 @@ function RomExtractorGen3:extractBattleHud()
                   paper = ink(G.PAPER),
                   inkIndex = G.INK, shadowIndex = G.SHADOW,
                   paperIndex = G.PAPER }
-      gender = {
-        male = { index = rows.male.index, color = ink(rows.male.index),
-                 glyph = rows.male.glyph, text = rows.male.text },
-        female = { index = rows.female.index, color = ink(rows.female.index),
-                   glyph = rows.female.glyph, text = rows.female.text },
+        -- FireRed used to read code bytes here and produce {71, 1}; species 1
+        -- is BULBASAUR, so an ordinary Bulbasaur silently lost its symbol.
+        -- healthboxNamedSpecies keeps the cartridge-specific source of truth.
+        local namedSpecies = RomExtractorGen3.healthboxNamedSpecies(self, rom)
+        gender = {
+          male = { index = rows.male.index, color = ink(rows.male.index),
+                   glyph = rows.male.glyph, text = rows.male.text },
+          female = { index = rows.female.index, color = ink(rows.female.index),
+                     glyph = rows.female.glyph, text = rows.female.text },
         -- ...AND THE TWO THAT SHOW NO SYMBOL AT ALL.  A NIDORAN carrying its
         -- own name already ends in one, so the healthbox prints none beside
         -- it -- 0807422E compares the species against these two and skips
         -- the symbol when the nickname has not been changed.
-        namedSpecies = { rom:u16(G.NICK_FN + G.AT_SPECIES_A) % 256,
-                         rom:u16(G.NICK_FN + G.AT_SPECIES_B) % 256 },
-      }
+          namedSpecies = namedSpecies,
+        }
     end
   end
 

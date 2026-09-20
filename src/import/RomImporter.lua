@@ -1134,7 +1134,7 @@ end
 --       glyph the reader could not decode, so whole control bars came
 --       back as one letter -- and AREA, SIZE, PAGE and AREA UNKNOWN
 --       were never asked for at all
-local CACHE_FORMAT = "rom-cache-v336:"
+local CACHE_FORMAT = "rom-cache-v337:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"
