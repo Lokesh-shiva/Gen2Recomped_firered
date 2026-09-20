@@ -7583,28 +7583,72 @@ function RomExtractorGen3:surfBlob()
 end
 
 function RomExtractorGen3:overworldFramePixels(raw, width, height, subsprites)
-  -- Ordinary sheets are already row-major. Oversized objects such as the
-  -- S.S. Anne exceed hardware OAM dimensions and store each piece separately.
-  if width <= 64 and height <= 64 then
-    return RomGba.tiles4bpp(raw, width / 8, height / 8)
-  end
-  assert(subsprites, "oversized object has no subsprite table")
   local rom = self.rom
-  local count, at = rom:u8(subsprites), rom:pointer(subsprites + 4)
-  assert(at and count > 0 and count <= 64, "invalid object subsprite table")
   local dimensions = {
     [0] = {{8,8}, {16,16}, {32,32}, {64,64}},
     [1] = {{16,8}, {32,8}, {32,16}, {64,32}},
     [2] = {{8,16}, {8,32}, {16,32}, {32,64}},
   }
+  local function dimensionsAt(at)
+    local bits = rom:u16(at + 2)
+    local dims = dimensions[bits % 4]
+    return dims and dims[math.floor(bits / 4) % 4 + 1]
+  end
+
+  -- Object-event graphics are stored in the gbagfx macroblock shape used by
+  -- their OAM pieces, not always as one row-major logical frame. FireRed's
+  -- 32x16 Town Map, for example, is two 16x16 blocks. Rebuild any rectangular
+  -- macroblock grid before falling back to the explicit subsprite compositor.
+  if subsprites then
+    local cellW, cellH
+    for tableIndex = 0, 1 do
+      local row = subsprites + tableIndex * 8
+      local count, at = rom:u8(row), rom:pointer(row + 4)
+      if at and count > 0 and count <= 64 then
+        local dim = dimensionsAt(at)
+        if dim then cellW, cellH = dim[1], dim[2] break end
+      end
+    end
+    if cellW and cellH
+       and width % cellW == 0 and height % cellH == 0
+       and width * height / 2 == #raw then
+      local cols, rows = width / cellW, height / cellH
+      if cols == 1 and rows == 1 then
+        return RomGba.tiles4bpp(raw, width / 8, height / 8)
+      end
+      local pixels = RomGba.tiles4bpp({}, width / 8, height / 8)
+      local cellBytes = cellW * cellH / 2
+      for cell = 0, cols * rows - 1 do
+        local chunk = {}
+        for j = 1, cellBytes do
+          chunk[j] = raw[cell * cellBytes + j]
+        end
+        local block = RomGba.tiles4bpp(chunk, cellW / 8, cellH / 8)
+        local dstX = (cell % cols) * cellW
+        local dstY = math.floor(cell / cols) * cellH
+        for y = 1, cellH do
+          for x = 1, cellW do
+            pixels[dstY + y][dstX + x] = block[y][x]
+          end
+        end
+      end
+      return pixels
+    end
+  end
+
+  if width <= 64 and height <= 64 then
+    return RomGba.tiles4bpp(raw, width / 8, height / 8)
+  end
+  assert(subsprites, "oversized object has no subsprite table")
+  local count, at = rom:u8(subsprites), rom:pointer(subsprites + 4)
+  assert(at and count > 0 and count <= 64, "invalid object subsprite table")
   local pieces, minX, minY, maxX, maxY = {}, math.huge, math.huge, -math.huge, -math.huge
   for i = 0, count - 1 do
     local p = at + i * 4
     local x, y, bits = rom:u8(p), rom:u8(p + 1), rom:u16(p + 2)
     if x >= 128 then x = x - 256 end
     if y >= 128 then y = y - 256 end
-    local dims = dimensions[bits % 4]
-    local dim = dims and dims[math.floor(bits / 4) % 4 + 1]
+    local dim = dimensionsAt(p)
     assert(dim, "invalid object subsprite shape")
     local offset = math.floor(bits / 16) % 1024 * 32
     local size = dim[1] * dim[2] / 2
@@ -7880,8 +7924,9 @@ function RomExtractorGen3:extractOverworldSprites()
         for i, frame in ipairs(runOrder) do
           local at = self.rom:pointer(images + frame * 8)
           if not at then runCells = nil break end
-          runCells[i] = RomGba.tiles4bpp(self.rom:bytes(at, frameBytes),
-                                         width / 8, frameHeight / 8)
+          runCells[i] = self:overworldFramePixels(
+            self.rom:bytes(at, frameBytes), width, frameHeight,
+            self.rom:pointer(info + 20))
         end
       end
 
@@ -7903,6 +7948,7 @@ function RomExtractorGen3:extractOverworldSprites()
         -- full colour: this cartridge's sprites are 16-colour, so they must
         -- not go through the DMG shade remap every Game Boy sheet does
         trueColor = true,
+        gen3ObjectEvent = true,
         frameWidth = width,
         frameHeight = frameHeight,
         -- the run cycle, when this sprite has one: its own sheet, laid out
@@ -7918,6 +7964,7 @@ function RomExtractorGen3:extractOverworldSprites()
           frames = #runCells,
           walker = true,
           trueColor = true,
+          gen3ObjectEvent = true,
           frameWidth = width,
           frameHeight = frameHeight,
           source = ("ROM:gObjectEventGraphicsInfoPointers[%d], run cycle")
