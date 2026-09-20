@@ -319,8 +319,15 @@ function Gen3StartMenu:buildRows(game, labels, playerName)
   --
   -- `boot.startMenuQuit = false` takes it away again for a dataset that wants
   -- the cartridge's menu and nothing else.
+  --
+  -- AND KANTO GETS IT TOO.  This was Hoenn-only, so FireRed's START menu was
+  -- the one place in the port with no way back to the game list: its EXIT
+  -- closes the menu, exactly as Emerald's does, and there was nothing under
+  -- it.  The row is the same row, the confirm is the same confirm and it
+  -- lands in the same place, because the reason for it -- this port runs
+  -- somewhere a GBA does not -- is the same on both cartridges.
   local boot = game.data.field and game.data.field.boot
-  if not (boot and boot.startMenuQuit == false) and not frlg then
+  if not (boot and boot.startMenuQuit == false) then
     self.rows[#self.rows + 1] = { label = Strings("QUIT GAME"), key = "quit" }
   end
 
@@ -619,50 +626,62 @@ end
 -- FireRed shows a row's explanation once, then remembers it in shared options.
 function Gen3StartMenu:drawFireRed(record)
   local g = love.graphics
+
+  -- THE HELP BAR IS A LAYER UNDER THE MENU, NOT SOMETHING PAINTED OVER IT.
+  --
+  -- On the cartridge the explanation sits on a background and the menu
+  -- window is an overlay above it; here the bar was drawn last, so it
+  -- covered whatever rows reached row 15 -- which the cartridge's seven
+  -- never do and the port's extra rows (MODS, QUIT GAME) do.  Drawn first,
+  -- the box lands on top of its right-hand end, where the bar has no text
+  -- anyway, and no row is ever hidden by it.
+  local row = self.rows[self.index]
+  local desc = row and row.slot and (record.descriptions or {})[row.slot]
+  if desc and self.helpRowKey == row.key then
+    local ok, bar = false, nil
+    if record.helpBar then
+      ok, bar = pcall(require("src.render.Assets").image, record.helpBar)
+    end
+    if ok and bar then
+      local iw, ih = bar:getDimensions()
+      local quads = { g.newQuad(0, 0, 8, 8, iw, ih), g.newQuad(0, 8, 8, 8, iw, ih),
+                      g.newQuad(0, 16, 8, 8, iw, ih) }
+      for ty = 15, 19 do
+        local q = (ty == 15 and quads[1]) or (ty == 19 and quads[3]) or quads[2]
+        for tx = 0, 29 do g.draw(bar, q, tx * 8, ty * 8) end
+      end
+    end
+    local ink = record.helpInk or { 1, 1, 1 }
+    local two = Font.beginTwoTone({ ink[1], ink[2], ink[3], 1 }, { 0.38, 0.38, 0.38, 1 })
+    local line = 0
+    for line_ in (desc .. "\n"):gmatch("([^\n]*)\n") do
+      Font.draw(line_, 2, 15 * 8 + 5 + line * 14)
+      line = line + 1
+    end
+    if two then Font.endTwoTone() end
+    g.setColor(1, 1, 1, 1)
+    self.displayedHelpKey = row.key
+  else
+    self.displayedHelpKey = nil
+  end
+
   local n = #self.rows
   local innerH = math.ceil((n * 15) / 8) + 1
   local left = 22
   local width = 7
-  -- widen for the port's own rows (QUIT GAME) so nothing spills
-  for _, row in ipairs(self.rows) do
-    width = math.max(width, math.ceil((Font.width(row.label) + 10) / 8))
+  -- widen for the port's own rows (MODS, QUIT GAME) so nothing spills
+  for _, r in ipairs(self.rows) do
+    width = math.max(width, math.ceil((Font.width(r.label) + 10) / 8))
   end
   left = math.min(left, 29 - width)
   Font.drawBox(left - 1, 0, width + 2, innerH + 2)
   g.setColor(0, 0, 0, 1)
-  for i, row in ipairs(self.rows) do
+  for i, r in ipairs(self.rows) do
     local y = 8 + (i - 1) * 15
-    Font.draw(row.label, left * 8 + 8, y)
+    Font.draw(r.label, left * 8 + 8, y)
     if i == self.index then Font.drawCode(Theme.cursor, left * 8, y) end
   end
   g.setColor(1, 1, 1, 1)
-  local row = self.rows[self.index]
-  local desc = row and row.slot and (record.descriptions or {})[row.slot]
-  if not desc or self.helpRowKey ~= row.key then
-    self.displayedHelpKey = nil
-    return
-  end
-  local ok, bar = false, nil
-  if record.helpBar then ok, bar = pcall(require("src.render.Assets").image, record.helpBar) end
-  if ok and bar then
-    local iw, ih = bar:getDimensions()
-    local quads = { g.newQuad(0, 0, 8, 8, iw, ih), g.newQuad(0, 8, 8, 8, iw, ih),
-                    g.newQuad(0, 16, 8, 8, iw, ih) }
-    for ty = 15, 19 do
-      local q = (ty == 15 and quads[1]) or (ty == 19 and quads[3]) or quads[2]
-      for tx = 0, 29 do g.draw(bar, q, tx * 8, ty * 8) end
-    end
-  end
-  local ink = record.helpInk or { 1, 1, 1 }
-  local two = Font.beginTwoTone({ ink[1], ink[2], ink[3], 1 }, { 0.38, 0.38, 0.38, 1 })
-  local line = 0
-  for text in (desc .. "\n"):gmatch("([^\n]*)\n") do
-    Font.draw(text, 2, 15 * 8 + 5 + line * 14)
-    line = line + 1
-  end
-  if two then Font.endTwoTone() end
-  g.setColor(1, 1, 1, 1)
-  self.displayedHelpKey = row.key
 end
 
 function Gen3StartMenu:draw()
