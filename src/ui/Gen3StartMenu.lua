@@ -405,12 +405,31 @@ function Gen3StartMenu:choose(row)
     return self:close()
   end
   if row.key == "quit" then
-    -- the port's own way out; see buildRows for why it is not EXIT
-    Logger.info("gen3 start menu: QUIT GAME")
+    -- THE PORT'S OWN WAY OUT, AND IT IS ONE STEP, NOT THE WHOLE WAY.
+    --
+    -- This killed the process.  The Game Boy menu's QUIT has never done that
+    -- -- StartMenu.lua asks "RETURN TO MAIN MENU?" and goes there -- and a
+    -- player pressing the same row in Hoenn or Kanto expects the same place,
+    -- not the desktop.  So: confirm, then the game's own CONTINUE / NEW GAME
+    -- menu, which is where EXIT GAME then leads on out to the launcher.
+    --
+    -- defaultNo for the same reason the Game Boy one has it: this abandons
+    -- unsaved play, and the cursor should not be resting on yes.
+    Logger.info("gen3 start menu: QUIT GAME -- confirming return to the main menu")
     pcall(function()
       require("src.core.Sound").play(self.game.data, "Press_AB")
     end)
-    if love and love.event and love.event.quit then love.event.quit() end
+    -- The menu stays UNDER the prompt, exactly as the Game Boy one does:
+    -- answering no puts the player back on the row they pressed rather than
+    -- back in the overworld.  A yes pops the whole stack anyway.
+    local game = self.game
+    local TextBox = require("src.render.TextBox")
+    game.stack:push(TextBox.new(game, Strings("RETURN TO MAIN\nMENU?"), nil, {
+      defaultNo = true,
+      choice = function(yes)
+        if yes then game:returnToTitle() end
+      end,
+    }))
     return
   end
   if row.key == "link" then
