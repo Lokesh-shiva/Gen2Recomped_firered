@@ -1905,6 +1905,14 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
     require("src.world.VsSeeker").clear(ctx.save, ctx.game.overworld, vsNpc)
     Gen3Commands.markTrainerBeaten(ctx, vsTrainer)
   end
+  -- A normal trainer loss never returns to the event script.  FireRed's
+  -- CB2_EndTrainerBattle jumps straight to CB2_WhiteOut; only a win returns
+  -- through ContinueScript.  Falling through here made gym leaders say their
+  -- post-battle/reward lines after a loss even though the badge/TM continuation
+  -- (correctly) had not run, and did the same to no-intro rival cutscenes.
+  if ctx.lastBattleResult ~= "win" then
+    return "end"
+  end
   -- The defeat line plays when the player wins. Keeping this after battle
   -- result handling also prevents duplicate trainer speech around the battle.
   if ctx.lastBattleResult == "win" and type(defeatText) == "string" then
