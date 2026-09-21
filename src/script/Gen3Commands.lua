@@ -1791,7 +1791,11 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
       local Pokemon = require("src.pokemon.Pokemon")
       for _, mon in ipairs((ctx.save or {}).party or {}) do Pokemon.heal(mon) end
     end
-    if lost and ctx.g3Trainer then
+    -- CB2_EndTrainerBattle only sets the early-rival trainer flag after a
+    -- loss when RIVAL_BATTLE_HEAL_AFTER keeps the script alive (Oak's Lab).
+    -- Route 22 uses flags=0: losing there whites out and the rival must still
+    -- be available on the next attempt.
+    if lost and healAfter and ctx.g3Trainer then
       Gen3Commands.markTrainerBeaten(ctx, ctx.g3Trainer)   -- SetBattledTrainerFlag
     end
     setVar(ctx.save, VAR_RESULT, lost and 1 or 0)
@@ -1887,6 +1891,14 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
   if vsTrainer and ctx.lastBattleResult == "win" then
     require("src.world.VsSeeker").clear(ctx.save, ctx.game.overworld, vsNpc)
     Gen3Commands.markTrainerBeaten(ctx, vsTrainer)
+  end
+  -- A normal trainer loss never returns to the event script.  FireRed's
+  -- CB2_EndTrainerBattle jumps straight to CB2_WhiteOut; only a win returns
+  -- through ContinueScript.  Falling through here made gym leaders say their
+  -- post-battle/reward lines after a loss even though the badge/TM continuation
+  -- (correctly) had not run, and did the same to no-intro rival cutscenes.
+  if ctx.lastBattleResult ~= "win" then
+    return "end"
   end
   -- The defeat line plays when the player wins. Keeping this after battle
   -- result handling also prevents duplicate trainer speech around the battle.

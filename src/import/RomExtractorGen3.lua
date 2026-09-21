@@ -53,7 +53,7 @@ RomExtractorGen3.__index = RomExtractorGen3
 -- The progress denominator.  Kept honest with the two stage lists below: a
 -- mismatch does not break anything, it just makes the bar lie, which is the
 -- kind of small wrongness that survives for months.
-local STAGE_COUNT = 92
+local STAGE_COUNT = 93
 
 -- ---------------------------------------------------------------------------
 -- The stage tables below are keyed to Emerald's ROM.  A sibling cartridge
@@ -25140,11 +25140,16 @@ function RomExtractorGen3:fieldMoveGates(scripts)
   -- The eight FLAG numbers are already derived above (they are what the field
   -- moves are gated on); this is the same eight under the name the save
   -- writes them as -- `FLAG_G3_%04X`, exactly as Gen3ScriptVM's flagName and
-  -- the field-move gate spell it.  The order is the trainer card's, which is
-  -- the badge order: Stone, Knuckle, Dynamo, Heat, Balance, Feather, Mind,
-  -- Rain.
-  local BADGE_NAMES = { "STONE", "KNUCKLE", "DYNAMO", "HEAT",
-                        "BALANCE", "FEATHER", "MIND", "RAIN" }
+  -- the field-move gate spell it.  The order is the trainer card's.  Emerald
+  -- uses Stone/Knuckle/...; FRLG's same eight positions are the Kanto set.
+  -- Keeping Hoenn ids on a FireRed cache did not break Badges.has (it keys on
+  -- `item` below), but it leaked the wrong badge identity into every consumer
+  -- that reads entry.id/name rather than only asking whether the flag is set.
+  local BADGE_NAMES = self:isFireRedManifest()
+    and { "BOULDER", "CASCADE", "THUNDER", "RAINBOW",
+          "SOUL", "MARSH", "VOLCANO", "EARTH" }
+    or  { "STONE", "KNUCKLE", "DYNAMO", "HEAT",
+          "BALANCE", "FEATHER", "MIND", "RAIN" }
   local list = {}
   for i, name in ipairs(BADGE_NAMES) do
     list[i] = {
@@ -40238,6 +40243,41 @@ RomExtractorGen3.BERRY_POUCH_SCREEN = {
   DESC_X = 2, DESC_Y = 3, DESC_LINE = 14,
 }
 
+-- teachy_tv.c's menu shell.  These are named retail FireRed symbols from the
+-- local firered3d all_symbols.tsv, not guessed offsets: gTeachyTv_Gfx,
+-- gTeachyTvScreen_Tilemap, gTeachyTvTitle_Tilemap and gTeachyTv_Pal.  The
+-- strings below are the corresponding gTeachyTvString_* / gTeachyTvText_*
+-- symbols.  Nothing extracted here is committed -- the generated PNG/text is
+-- rebuilt from the player's ROM like the TM Case and Berry Pouch above.
+RomExtractorGen3.TEACHY_TV_SCREEN = {
+  GFX = 0xE86240, SCREEN = 0xE86BE8, TITLE = 0xE86D6C, PALETTE = 0xE86F98,
+  GFX_BYTES = 0x1D20, MAP_BYTES = 0x800, PAL_BYTES = 0x80,
+  TILES = 233, COLS = 32, ROWS = 20, PALETTE_BANKS = 4,
+  -- sWindowTemplates + sListMenuTemplate in teachy_tv.c.
+  LIST = { x = 4 * 8, y = 1 * 8, width = 22 * 8, height = 12 * 8,
+           itemX = 8, cursorX = 0, upTextY = 6, noCaseUpTextY = 14,
+           rowHeight = 16, maxShowed = 6, noCaseMaxShowed = 5 },
+  MESSAGE = { x = 2 * 8, y = 15 * 8, width = 26 * 8, height = 4 * 8 },
+  LABELS = {
+    battle   = { 0x41B7A4, 0x18 },
+    status   = { 0x41B7BC, 0x1A },
+    matchups = { 0x41B7D6, 0x18 },
+    catch    = { 0x41B7EE, 0x19 },
+    tms      = { 0x41B806, 0x14 },
+    register = { 0x41B81A, 0x1B },
+    cancel   = { 0x41B836, 0x07 },
+  },
+  TEXTS = {
+    hello           = { 0x41B83C, 0x82 },
+    battleBefore    = { 0x41B8BE, 0x182 }, battleAfter    = { 0x41BA40, 0x0FF },
+    statusBefore    = { 0x41BB40, 0x1D0 }, statusAfter    = { 0x41BD10, 0x166 },
+    matchupsBefore  = { 0x41BE76, 0x239 }, matchupsAfter  = { 0x41C0AE, 0x18C },
+    catchBefore     = { 0x41C23A, 0x149 }, catchAfter     = { 0x41C384, 0x0D5 },
+    tmsBefore       = { 0x41C458, 0x12E }, tmsAfter       = { 0x41C7B4, 0x076 },
+    registerBefore  = { 0x41C82A, 0x16A }, registerAfter  = { 0x41C994, 0x1A8 },
+  },
+}
+
 -- Shared by both: an opaque 240x160 background from a 32x32 tilemap over a
 -- male/female palette split, exactly like extractBagScreenFireRed's own.
 -- `femaleMode`: "bank" replaces palette bank 0 with a second blob (the bag
@@ -40401,6 +40441,95 @@ function RomExtractorGen3:extractBerryPouchScreen()
   Logger.info("Gen3 berry pouch screen: %d tiles, list (%d,%d) %dx%d = %d rows",
               S.TILES, win.list.x, win.list.y, win.list.width,
               win.list.height, record.list.rows)
+end
+
+function RomExtractorGen3:extractFireRedTeachyTV()
+  self:beginStage("FireRed Teachy TV")
+  if (self.manifest or {}).frlgItemMenu == nil then
+    Logger.warn("gen3 Teachy TV: not a FireRed manifest -- skipped")
+    return
+  end
+
+  local S, rom = RomExtractorGen3.TEACHY_TV_SCREEN, self.rom
+  local okG, tiles = RomExtractorGen3.lz77ok(rom, S.GFX)
+  local okS, screen = RomExtractorGen3.lz77ok(rom, S.SCREEN)
+  local okT, title = RomExtractorGen3.lz77ok(rom, S.TITLE)
+  local okP, palRaw = RomExtractorGen3.lz77ok(rom, S.PALETTE)
+  if not (okG and okS and okT and okP) then
+    Logger.warn("gen3 Teachy TV: one of the four named blobs did not decompress")
+    return
+  end
+  if #tiles ~= S.GFX_BYTES or #screen ~= S.MAP_BYTES
+     or #title ~= S.MAP_BYTES or #palRaw ~= S.PAL_BYTES then
+    Logger.warn("gen3 Teachy TV: unexpected blob sizes gfx=%d screen=%d title=%d pal=%d",
+                #tiles, #screen, #title, #palRaw)
+    return
+  end
+
+  local colors = {}
+  for i = 0, S.PALETTE_BANKS * 16 - 1 do
+    local value = palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256
+    local r, g, b = RomGba.bgr555(value)
+    colors[i + 1] = { r, g, b }
+  end
+  -- TeachyTvLoadGraphic overwrites BG palette colour 0 with RGB_BLACK.
+  colors[1] = { 0, 0, 0 }
+
+  local function compose(map, key)
+    local img = ImageWriter.blank(240, 160)
+    for ty = 0, S.ROWS - 1 do
+      for tx = 0, 29 do
+        local cell = ty * S.COLS + tx
+        local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
+        local tid = e % 1024
+        local flipX = math.floor(e / 1024) % 2 == 1
+        local flipY = math.floor(e / 2048) % 2 == 1
+        local bank = math.floor(e / 4096) % 16
+        if tid < S.TILES and bank < S.PALETTE_BANKS then
+          RomExtractorGen3.partyTile(img, tiles, colors, tid, bank,
+                                     tx * 8, ty * 8, flipX, flipY, true)
+        end
+      end
+    end
+    self:saveImage(img, "ui/teachytv_" .. key .. ".png")
+    return "assets/generated/ui/teachytv_" .. key .. ".png"
+  end
+
+  -- firered3d's data-symbol map deliberately aliases some adjacent string
+  -- symbols onto the previous string's EOS byte (for example AboutTMs is
+  -- reported at 041B806, whose byte is FF and whose text begins at +1).
+  -- Accept that symbol convention here instead of silently emitting an empty
+  -- label/text.  A real empty string remains empty if the next byte is EOS too.
+  local function textStart(at)
+    if rom:u8(at) == EOS and rom:u8(at + 1) ~= EOS then return at + 1 end
+    return at
+  end
+
+  local labels, labelCount = {}, 0
+  for key, rec in pairs(S.LABELS) do
+    labels[key] = self:readString(textStart(rec[1]), rec[2] + 1)
+    if labels[key] ~= "" then labelCount = labelCount + 1 end
+  end
+  local texts = {}
+  for key, rec in pairs(S.TEXTS) do
+    local at = textStart(rec[1])
+    local text = self:readText(at, rec[2] + (at - rec[1]))
+    if type(text) == "string" and text ~= "" then texts[key] = text end
+  end
+
+  local record = {
+    images = { screen = compose(screen, "screen"), title = compose(title, "title") },
+    list = S.LIST, message = S.MESSAGE,
+    labels = labels, texts = texts,
+    source = ("ROM:gTeachyTv_Gfx %07X, screen %07X, title %07X, palette %07X")
+             :format(S.GFX, S.SCREEN, S.TITLE, S.PALETTE),
+  }
+  local constants = self._constants or {}
+  constants.gen3TeachyTV = record
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("FireRed Teachy TV: %d tiles, %d labels, cartridge screen composed",
+              S.TILES, labelCount)
 end
 
 -- ---------------------------------------------------------------------------
@@ -53907,6 +54036,7 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedItemPc",
   "extractTMCaseScreen",
   "extractBerryPouchScreen",
+  "extractFireRedTeachyTV",
   "extractFireRedIntro",
   "extractFireRedOakSpeech",
   "extractFireRedTitle",
