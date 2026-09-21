@@ -1134,6 +1134,8 @@ end
 --       glyph the reader could not decode, so whole control bars came
 --       back as one letter -- and AREA, SIZE, PAGE and AREA UNKNOWN
 --       were never asked for at all
+-- v337: Gen 3 object-event frames preserve their gbagfx macroblock layout;
+--       this fixes FireRed's 32x16 Town Map and changes generated sprite data.
 local CACHE_FORMAT = "rom-cache-v337:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
