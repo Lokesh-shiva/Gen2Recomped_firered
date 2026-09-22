@@ -897,6 +897,7 @@ local function markSeen(game, species)
   local dex = game.save.pokedex
   if dex then dex.seen[species] = true end
 end
+BattleState.markSeen = markSeen
 
 -- newly obtained mons carry the player's OT name/ID (status screen)
 --
@@ -4321,21 +4322,53 @@ function BattleState:pokedudeItemContext(onUse)
   self.game.stack:push(screen)
 end
 
-function BattleState:pokedudeUseAntidote(step)
-  local pd = self.pokedudeDemo
-  if not pd then return end
-  pd.enemyMove = step.enemyMove
-  self.phase = "messages"
-  self.afterQueue = "menu"
-  self:say(Strings("POKé DUDE used\nANTIDOTE!"))
-  local result, messages = require("src.inventory.ItemEffects")
-    .use(self.data, self.game.save, "ANTIDOTE", self.player.mon, self)
-  for _, message in ipairs(messages or {}) do self:say(message) end
-  self:syncShownStatus()
-  self:act(function()
-    self:executeAction(self.enemy, self.player, self:enemyAction())
-  end)
-  self:act(function() self:endOfTurn() end)
+function BattleState:changeStageAgainstMist(attacker, target, stat, stages)
+  if target ~= attacker and (stages or 0) < 0
+      and self:volatile(target).mist then
+    self:emit({ kind = "message",
+      text = Strings("%s's protected by MIST.", self:monName(target)) })
+    return false
+  end
+  return self:changeStage(target, stat, stages)
+end
+
+function BattleState:changeStage(target, stat, stages)
+  local applied = Effects.applyStage(self.stages[self:sideOf(target)], stat,
+    stages)
+  local name = self:monName(target)
+  if not applied then
+    -- WontRiseAnymoreText / WontDropAnymoreText (data/text/battle.asm:718-732).
+    local label = Strings(MoveEffects.STAT_NAMES[stat] or stat)
+    local source = stages > 0
+      and Strings.source("%s's %s won't rise anymore!")
+      or Strings.source("%s's %s won't drop anymore!")
+    self:emit({ kind = "message", text = Strings(source, name, label) })
+    return false
+  end
+  self:emit({ kind = "stage", side = self:sideOf(target), stat = stat,
+    stages = applied, text = MoveEffects.stageMessage(name, stat, applied) })
+  return true
+end
+
+-- wAttackMissed, modelled on the event the screen animates off.  Every path
+-- that sets it (CheckHit's .Miss arms and the effect commands' own `.failed`
+-- tails, which reach AnimateFailedMove: a delay and no animation) marks the
+-- move event, and the screen skips the attack animation for a marked one --
+-- BattleCommand_MoveAnimNoSub, engine/battle/effect_commands.asm:1958.
+function BattleState:markMissed()
+  if self.moveEvent then self.moveEvent.missed = true end
+end
+
+-- engine/battle/effect_commands.asm:3615
+BattleState.AI_FAIL_STATUSES = {
+  sleep = true, poison = true, toxic = true, paralyze = true,
+}
+
+function BattleState:screenActive(defender, physical)
+  local side = self.screens and self.screens[self:sideOf(defender)]
+  if not side then return false end
+  local turns = physical and (side.reflect or 0) or (side.lightScreen or 0)
+  return turns > 0
 end
 
 function BattleState:openPokedudeTarget(step, switchMode)
@@ -4535,6 +4568,14 @@ function BattleState:statusLabel(mon)
   return mon.status
 end
 
+
+
+function BattleState:volatile(mon)
+  if not mon then return {} end
+  mon.volatile = mon.volatile or {}
+  return mon.volatile
+end
+
 -- The one accuracy roll (MoveHitTest), hooked as battle.accuracy.
 -- accuracyRaw is a 0-255 threshold that stands in for the move's accuracy byte
 -- this turn -- Gen 2's BattleCommand_ThunderAccuracy overwrites that byte in
@@ -4557,6 +4598,23 @@ function BattleState:accuracyRoll(move, user, target, accuracyRaw)
   end
   return Damage.accuracyRoll(self.ruleset, move, user, target, self.rng,
                              accuracyRaw, self.data, Weather.current(self))
+end
+
+function BattleState:pokedudeUseAntidote(step)
+  local pd = self.pokedudeDemo
+  if not pd then return end
+  pd.enemyMove = step.enemyMove
+  self.phase = "messages"
+  self.afterQueue = "menu"
+  self:say(Strings("POKé DUDE used\nANTIDOTE!"))
+  local result, messages = require("src.inventory.ItemEffects")
+    .use(self.data, self.game.save, "ANTIDOTE", self.player.mon, self)
+  for _, message in ipairs(messages or {}) do self:say(message) end
+  self:syncShownStatus()
+  self:act(function()
+    self:executeAction(self.enemy, self.player, self:enemyAction())
+  end)
+  self:act(function() self:endOfTurn() end)
 end
 
 -- Damage.compute, hooked as battle.damage; the ctx table is only built

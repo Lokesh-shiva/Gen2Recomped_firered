@@ -514,4 +514,251 @@ function Damage.compute(ruleset, attacker, defender, move, opts)
   return math.max(d, 1), { crit = crit, typeMult = mult }
 end
 
+--------------------------------------------------------------------------------
+-- GEN 2 / SHARED NEW HELPERS
+--------------------------------------------------------------------------------
+
+function Damage.stageMultiplier(stage)
+  local entry = STAGE[math.max(-6, math.min(6, stage or 0))]
+  return entry[1], entry[2]
+end
+
+-- Apply a stat stage, flooring like the cart's Multiply/Divide pair
+function Damage.applyStage(value, stage)
+  local numerator, denominator = Damage.stageMultiplier(stage)
+  local out = math.floor(value * numerator / denominator)
+  return math.max(1, math.min(Damage.MAX_STAT_VALUE, out))
+end
+
+-- TruncateHL_BC
+function Damage.truncateStats(attack, defense, fixed)
+  local a = math.max(0, math.floor(attack or 0))
+  local d = math.max(0, math.floor(defense or 0))
+  while a > 255 or d > 255 do
+    d = math.floor(d / 4)
+    if d == 0 then d = 1 end
+    a = math.floor(a / 4)
+    if a == 0 then a = 1 end
+    if not fixed then break end
+  end
+  return a % 256, d % 256
+end
+
+function Damage.applyStage(value, stage)
+  local numerator, denominator = Damage.stageMultiplier(stage)
+  local out = math.floor(value * numerator / denominator)
+  -- ../pokecrystal/engine/battle/core.asm:6739
+  return math.max(1, math.min(Damage.MAX_STAT_VALUE, out))
+end
+
+-- Is this move physical?
+function Damage.isPhysical(moveType, types)
+  local record = types and types[moveType]
+  if record and record.category then return record.category == "physical" end
+  local PHYSICAL = {
+    NORMAL = true, FIGHTING = true, FLYING = true, POISON = true,
+    GROUND = true, ROCK = true, BUG = true, GHOST = true, STEEL = true,
+  }
+  return PHYSICAL[moveType] == true
+end
+
+-- The 1-in-N chance for a critical level.
+function Damage.criticalChance(level)
+  local capped = math.max(0, math.min(6, level or 0))
+  return Damage.CRITICAL_CHANCES[capped]
+end
+
+-- BattleCommand_Critical, as a level rather than a roll
+function Damage.criticalLevel(opts)
+  local level = 0
+  if opts.focusEnergy then level = level + 1 end
+  if opts.highCritMove then level = level + 2 end
+  if opts.scopeLens then level = level + 1 end
+  if opts.speciesItemBonus then level = level + 2 end
+  return math.min(6, level)
+end
+
+-- Roll a critical hit.
+function Damage.rollCritical(criticalLevel, random)
+  local chance = Damage.criticalChance(criticalLevel)
+  local roll
+  if random then
+    roll = random(chance)
+  elseif love and love.math then
+    roll = love.math.random(chance) - 1
+  else
+    roll = math.random(chance) - 1
+  end
+  return roll == 0
+end
+
+-- The x10 type multiplier of a move against a defender (Gen 2 explicit)
+function Damage.typeMultiplier(moveType, defenderTypes, matchups)
+  local multiplier = 10
+  for _, row in ipairs(matchups or {}) do
+    if row.attacker == moveType then
+      for _, defenderType in ipairs(defenderTypes or {}) do
+        if row.defender == defenderType then
+          multiplier = math.floor(multiplier * row.multiplier / 10)
+          break
+        end
+      end
+    end
+  end
+  return multiplier
+end
+
+-- The core formula (BattleCommand_DamageCalc):
+function Damage.base(level, power, attack, defense)
+  if (power or 0) <= 0 then return 0 end
+  defense = math.max(1, defense or 1)
+  local value = math.floor(level * 2 / 5) + 2
+  value = value * power
+  value = value * attack
+  value = math.floor(value / defense)
+  value = math.floor(value / 50)
+  return value
+end
+
+local function withGen1Names(info)
+  info.crit = info.critical
+  info.typeMult = info.effectiveness
+  return info
+end
+
+-- Gen 2 Damage `calc` structure
+function Damage.calc(opts)
+  local physical = Damage.isPhysical(opts.moveType, opts.types)
+  local attacker = opts.attacker or {}
+  local defender = opts.defender or {}
+  local stagesA = attacker.stages or {}
+  local stagesD = defender.stages or {}
+
+  local rawAttack = physical and (attacker.attack or 1)
+    or (attacker.specialAttack or attacker.special or 1)
+  local rawDefense = physical and (defender.defense or 1)
+    or (defender.specialDefense or defender.special or 1)
+  local stageA = physical and (stagesA.attack or 0)
+    or (stagesA.specialAttack or 0)
+  local stageD = physical and (stagesD.defense or 0)
+    or (stagesD.specialDefense or 0)
+
+  if opts.critical then
+    if stageA < 0 then stageA = 0 end
+    if stageD > 0 then stageD = 0 end
+  end
+
+  local attack = Damage.applyStage(rawAttack, stageA)
+  local defense = Damage.applyStage(rawDefense, stageD)
+
+  if opts.screen and not opts.critical then
+    defense = defense * 2
+  end
+
+  local fixed = opts.reflectOverflowFixed
+  if fixed == nil then
+    if GameVersion.fixes and type(GameVersion.fixes) == "function" then
+      fixed = GameVersion.fixes().reflectOverflow == true
+    else
+      fixed = false
+    end
+  end
+  attack, defense = Damage.truncateStats(attack, defense, fixed)
+
+  if opts.defenseHalved then defense = math.max(1, math.floor(defense / 2)) end
+
+  if (opts.power or 0) <= 0 then
+    return 0, withGen1Names({ effectiveness = 10, critical = false,
+      physical = physical })
+  end
+  local damage = Damage.base(opts.level or 1, opts.power or 0, attack, defense)
+
+  if opts.itemBoostPercent and opts.itemBoostPercent > 0 then
+    damage = math.floor(damage * (100 + opts.itemBoostPercent) / 100)
+  end
+
+  if opts.critical then damage = damage * 2 end
+
+  damage = math.min(damage, Damage.MAX_DAMAGE - Damage.MIN_DAMAGE)
+    + Damage.MIN_DAMAGE
+
+  if opts.weatherPercent and opts.weatherPercent ~= 10 then
+    damage = math.max(1, math.floor(damage * opts.weatherPercent / 10))
+  end
+
+  if opts.badgeTypeBoost then
+    damage = damage + math.max(1, math.floor(damage / 8))
+  end
+
+  local stab = false
+  for _, attackerType in ipairs(attacker.types or {}) do
+    if attackerType == opts.moveType then stab = true break end
+  end
+  if stab then damage = math.floor(damage * 15 / 10) end
+
+  local effectiveness = Damage.typeMultiplier(
+    opts.moveType, defender.types, opts.matchups)
+  for _, row in ipairs(opts.matchups or {}) do
+    if row.attacker == opts.moveType then
+      for _, defenderType in ipairs(defender.types or {}) do
+        if row.defender == defenderType then
+          damage = math.floor(damage * row.multiplier / 10)
+          if damage == 0 and row.multiplier > 0 then damage = 1 end
+          break
+        end
+      end
+    end
+  end
+
+  if effectiveness <= 0 or damage <= 0 then
+    return 0, withGen1Names({
+      effectiveness = effectiveness, critical = opts.critical or false,
+      physical = physical, stab = stab,
+    })
+  end
+
+  local variation = opts.variation
+  if not variation then
+    if opts.random then
+      variation = Damage.MIN_VARIATION
+        + opts.random(Damage.MAX_VARIATION - Damage.MIN_VARIATION + 1)
+    elseif love and love.math then
+      variation = love.math.random(Damage.MIN_VARIATION, Damage.MAX_VARIATION)
+    else
+      variation = math.random(Damage.MIN_VARIATION, Damage.MAX_VARIATION)
+    end
+  end
+  if damage >= 2 then
+    damage = math.floor(damage * variation / 100)
+  end
+
+  damage = math.max(1, math.min(Damage.MAX_DAMAGE, damage))
+  return damage, withGen1Names({
+    effectiveness = effectiveness,
+    critical = opts.critical or false,
+    physical = physical,
+    stab = stab,
+    variation = variation,
+  })
+end
+
+-- Accuracy check
+function Damage.rollHit(accuracy, accuracyStage, evasionStage, random)
+  if not accuracy or accuracy <= 0 then return true end
+  local numerator, denominator = Damage.stageMultiplier(accuracyStage or 0)
+  local value = math.floor(accuracy * numerator / denominator)
+  numerator, denominator = Damage.stageMultiplier(-(evasionStage or 0))
+  value = math.floor(value * numerator / denominator)
+  value = math.max(1, math.min(100, value))
+  local roll
+  if random then
+    roll = random(100)
+  elseif love and love.math then
+    roll = love.math.random(100) - 1
+  else
+    roll = math.random(100) - 1
+  end
+  return roll < value
+end
+
 return Damage
