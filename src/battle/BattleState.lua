@@ -4988,6 +4988,23 @@ end
 -- of either: choosing POKeMON for the right-hand slot used to withdraw the
 -- LEFT one, because there was no way to say which.
 function BattleState:switchPlayerInto(pos, newMon)
+  -- NOBODY IS ON THE FIELD TWICE.  Not the cartridge's -- it has no such
+  -- test, because its party menu cannot offer a Pokemon that is already
+  -- placed and neither can this one now.  It is here because the duplicate
+  -- send-out was reported from play and a second, silent one would look
+  -- exactly the same: a slot that refuses and says why in the log is a bug
+  -- report, a slot that duplicates is a save file with one Pokemon in two
+  -- places.
+  for p = 0, 3 do
+    local b = (p ~= pos) and self:battlerAt(p) or nil
+    if b and b.mon == newMon then
+      require("src.core.Logger").warn(
+        "double battle: refused to send %s into slot %d -- it is already "
+          .. "battling in slot %d; the menu that offered it twice is the bug",
+        tostring(newMon and newMon.nickname or "?"), pos, p)
+      return
+    end
+  end
   local previous = self:battlerAt(pos)
   self:restoreMimicked(previous)      -- the battle copy leaves with it
   local incoming = makeBattler(self.data, newMon, true, self.game.save)
@@ -8993,8 +9010,52 @@ function BattleState:openParty()
         for _, b in activeBattlers(self) do
           if b.isPlayer and b.mon == mon then standing = b end
         end
+        -- ...AND ONE OF THEM MAY NOT BE OUT YET.
+        --
+        -- Reported from play: "in gen 3 games emerald and firered in double
+        -- battles we have a bug / Can send out the same Pokemon twice from our
+        -- party".  The check above asks who is STANDING on the field, and in a
+        -- double both slots choose before anybody moves -- so the left slot
+        -- picking a switch to a benched Pokemon leaves it still on the bench
+        -- while the right slot's menu opens, still healthy, still not "out",
+        -- and pickable a second time.  Both switches then resolved and the
+        -- same party member walked onto the field twice.
+        --
+        -- The cartridge closes it one slot earlier, in the action loop rather
+        -- than in the menu: battle_main.c's B_ACTION_SWITCH arm opens the
+        -- party menu for battler 2 -- the player's right -- carrying
+        -- `monToSwitchIntoId[0]` as `prevSelectedPartySlot` when, and only
+        -- when, battler 0 has already chosen B_ACTION_SWITCH this turn.  Every
+        -- other opening passes PARTY_SIZE, which no slot can equal, so the
+        -- test below is inert outside the one case it exists for.
+        -- TrySwitchInPokemon (party_menu.c) then refuses that slot with
+        -- gText_PkmnAlreadySelected.
+        --
+        -- `pendingActions` is this port's monToSwitchIntoId: chooseAction has
+        -- already parked the left slot's answer there by the time the right
+        -- slot is asked.  Read for every player slot other than the one
+        -- choosing rather than for PLAYER_LEFT by name -- the cartridge names
+        -- battler 0 because battler 0 always answers first, which is a fact
+        -- about the order, not about the rule.
+        local chosen
+        if self:isDouble() and self.pendingActions then
+          local now = self:choosingSlotNow()
+          for _, p in ipairs({ BattleState.POS.PLAYER_LEFT,
+                               BattleState.POS.PLAYER_RIGHT }) do
+            local act = p ~= now and self.pendingActions[p] or nil
+            if act and act.special == "playerSwitch" and act.mon == mon then
+              chosen = true
+            end
+          end
+        end
         if standing then
           self:say(Strings("%s is\nalready out!", standing.name))
+        elseif chosen then
+          -- gText_PkmnAlreadySelected: "{STR_VAR_1} has already been\nselected."
+          self:say(Strings("%s has already been\nselected.",
+                           mon.nickname
+                             or (self.data.pokemon[mon.species] or {}).name
+                             or "?"))
         elseif Party.isEgg(mon) then
           -- CheckFirstMonIsEgg (01:$728B): an EGG can never be sent out
           self:say(self:romText("_EggNoWillText",
