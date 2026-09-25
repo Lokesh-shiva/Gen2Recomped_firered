@@ -9691,13 +9691,39 @@ function RomExtractorGen3:extractTutorMoves()
   self:beginStage("Gen3 tutor moves")
   local base = self:need("gTutorMoves", "tutor moves")
   if not (base and self._moveIds) then return end
+  -- Emerald has thirty tutor entries.  FireRed has fifteen regular one-time
+  -- tutors followed immediately in ROM by one u16 compatibility mask per
+  -- species (sTutorLearnsets).  Reading thirty entries on FireRed therefore
+  -- turned the first fifteen species masks into bogus "moves".
+  local frlg = (self.manifest or {}).frlgItemMenu ~= nil
+  local count = frlg and 15 or 30
   local list = {}
-  for i = 0, 29 do
+  for i = 0, count - 1 do
     local move = self.rom:u16(base + i * 2)
     list[i + 1] = self._moveIds[move] or move
   end
   local constants = self._constants or {}
   constants.tutorMoves = list
+  if frlg and self._pokemon then
+    local learnsets = base + count * 2
+    local compatible, none = 0, 0
+    for _, def in pairs(self._pokemon) do
+      if def.index then
+        local mask = self.rom:u16(learnsets + def.index * 2) or 0
+        local moves = {}
+        for tutor = 0, count - 1 do
+          if math.floor(mask / 2 ^ tutor) % 2 == 1 then
+            moves[#moves + 1] = list[tutor + 1]
+          end
+        end
+        def.tutorMoves = moves
+        if #moves > 0 then compatible = compatible + 1 else none = none + 1 end
+      end
+    end
+    self:write("pokemon", self._pokemon)
+    Logger.info("Gen3 tutor learnsets: %d species compatible, %d none",
+                compatible, none)
+  end
   self:write("constants", constants)
   Logger.info("Gen3 tutor moves: %d (%s ... %s)", #list, list[1], list[#list])
 end
