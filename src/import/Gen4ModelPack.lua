@@ -135,6 +135,12 @@ function Gen4ModelPack.pack(model)
       material = material and material.name or nil,
       texture = material and material.texture or nil,
       palette = material and material.palette or nil,
+      -- The material's polygon alpha, 0..31, and only when it is not fully
+      -- opaque -- 31 is the overwhelming majority and writing it on every
+      -- shape would grow the cache for a value the renderer already defaults
+      -- to.  A shadow polygon is 9.
+      alpha = (material and material.alpha and material.alpha < 31)
+              and material.alpha or nil,
     }
   end
 

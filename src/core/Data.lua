@@ -109,8 +109,19 @@ local GEN4_MODULES = {
 -- gen4_map_permissions, gen4_overworld, ...) are extractor INPUT: they are
 -- lowered into `text`, `map_scripts`, `maps` and `sprites` before the cache is
 -- written, and no running screen reads them.  They are deliberately absent.
+-- `gen4_species_sprites` IS ON THIS LIST NOW, and it was not before -- so the
+-- whole index the species stage writes was DEAD DATA: written on every import,
+-- loaded by nothing, read by nothing. The battle's own front and back pictures
+-- reach it by another route entirely, which is why nobody noticed.
+--
+-- It is loaded because the party icons ride inside it (see below), and that is
+-- also worth a look the next time somebody wants what else is in there: the
+-- per-species sheet paths, the female variants and the height offsets are all
+-- sitting in it unused.
 local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
-                        "gen4_models" }
+                        "gen4_naming", "gen4_dex", "gen4_models",
+                        "gen4_terrain", "gen4_distortion_world",
+                        "gen4_species_sprites" }
 
 -- WHAT A GEN 3 CACHE MUST NOT INHERIT.
 --
@@ -1125,6 +1136,461 @@ function Data:seedDefaults()
       end
     end
   end
+  -- SINNOH'S OWN DEFAULTS.
+  --
+  -- THESE USED TO SIT INSIDE THE GEN 3 BRANCH, which is the whole reason the
+  -- two things they set were reported as unchanged after the cache was rebuilt
+  -- for them: the branch opens `if self.isGen3Cache or isGen3()`, so on a
+  -- Platinum cache neither line ever ran.  Reported from play as *"barry is
+  -- also still there no changes really from before, textboxes still not wide
+  -- enough"* -- one placement mistake, both symptoms.
+  if self.isGen4Cache or require("src.core.GameVersion").isGen4() then
+    -- THE FLAGS A NEW GAME STARTS WITH SET.
+    --
+    -- `FieldSystem_InitNewGameState` runs one script at the start of a new
+    -- game and it is 112 `setflag`s -- the actors whose stories have not begun
+    -- are hidden, exactly as in Hoenn.  Reported from play as Barry standing
+    -- at the top of the stairs and his mother in the doorway before either of
+    -- them is due.  Same seam, same shape; the three `setvarfromvalue` rows
+    -- the script also carries need one of their own, because a Gen 4 var is
+    -- not a flag.
+    local sinnoh = (self.constants or {}).gen4NewGame
+    if type(sinnoh) == "table" then
+      if type(sinnoh.flags) == "table" and boot.initialFlags == nil then
+        boot.initialFlags = sinnoh.flags
+      end
+      if type(sinnoh.vars) == "table" and boot.initialVars == nil then
+        boot.initialVars = sinnoh.vars
+      end
+    end
+
+    -- A GEN 4 SPECIES RECORD IS THE RIGHT DATA UNDER THE WRONG NAMES, and
+    -- until this ran, BUILDING ONE RAISED.
+    --
+    -- Measured offline against the live cache, not reasoned about:
+    --
+    --     Pokemon.new(data, 387, 5)
+    --     -> Stats.lua:68: attempt to perform arithmetic on a nil value
+    --     Pokemon.movesAtLevel(def, 5)
+    --     -> attempt to index a nil value
+    --
+    -- So the starter this port now hands over, every wild encounter and every
+    -- trainer party would each have taken the game down. Four mismatches, all
+    -- of them naming rather than data:
+    --
+    --   * `baseStats.spAttack` / `spDefense` -- the engine reads `spatk` and
+    --     `spdef`, and `Stats.calc`'s Gen 1 path reads `special`.
+    --   * `evYields` -- `Stats.isGen3` tests for `evYield`, SINGULAR, and it is
+    --     the only reader: it is a presence test that decides which stat model
+    --     a record implies. Failing it put Gen 4 Pokemon on the Gen 1 model --
+    --     four DVs of 0..15, no natures, no abilities, no EVs -- which is a
+    --     worse answer than Gen 3's for a Gen 4 cartridge in every respect.
+    --   * `learnset` with no `level1Moves` -- `Pokemon.movesAtLevel` opens with
+    --     `ipairs(speciesDef.level1Moves)`, which raises on nil. The moves are
+    --     there; a Gen 4 learnset simply carries its level-1 entries inline.
+    --   * `expRate`, a NUMBER, against `growthRate`, a curve NAME. The enum is
+    --     `generated/exp_rates.txt`, zero-based: 0 MEDIUM_FAST, 1 ERRATIC,
+    --     2 FLUCTUATING, 3 MEDIUM_SLOW, 4 FAST, 5 SLOW. Turtwig is 3, and
+    --     Turtwig is Medium Slow.
+    --
+    -- Done HERE rather than in the extractor for the reason the connection
+    -- rename above is: it lands without a re-import, and a record that already
+    -- carries the engine's spelling is left alone.
+    --
+    -- ERRATIC and FLUCTUATING are named rather than mapped to a curve that
+    -- happens to exist. Neither is closed-form -- `Growth.CURVES` has the six
+    -- polynomial ones -- so `Growth.expForLevel` warns once and falls back to
+    -- MEDIUM_FAST. The exact answer is a NARC (`poketool/personal/pl_growtbl`,
+    -- one 101-entry member per rate) and belongs in the extractor; naming the
+    -- curve here means the warning says which one is missing instead of the
+    -- game quietly levelling on the wrong curve.
+    local EXP_RATE_NAME = {
+      [0] = "MEDIUM_FAST", [1] = "ERRATIC", [2] = "FLUCTUATING",
+      [3] = "MEDIUM_SLOW", [4] = "FAST", [5] = "SLOW",
+    }
+    local speciesFixed = 0
+    for _, def in pairs(self.pokemon or {}) do
+      if type(def) == "table" then
+        local changed = false
+        local bs = def.baseStats
+        if type(bs) == "table" and bs.spatk == nil and bs.spAttack ~= nil then
+          bs.spatk, bs.spdef = bs.spAttack, bs.spDefense
+          bs.special = bs.special or bs.spAttack
+          changed = true
+        end
+        if def.evYield == nil and type(def.evYields) == "table" then
+          local y = def.evYields
+          y.spatk = y.spatk or y.spAttack
+          y.spdef = y.spdef or y.spDefense
+          def.evYield = y
+          changed = true
+        end
+        if def.growthRate == nil and def.expRate ~= nil then
+          def.growthRate = EXP_RATE_NAME[tonumber(def.expRate)] or "MEDIUM_FAST"
+          changed = true
+        end
+        if def.level1Moves == nil then
+          local first = {}
+          for _, row in ipairs(def.learnset or {}) do
+            if row.move and (tonumber(row.level) or 0) <= 1 then
+              first[#first + 1] = row.move
+            end
+          end
+          def.level1Moves = first
+          changed = true
+        end
+        if changed then speciesFixed = speciesFixed + 1 end
+      end
+    end
+    -- A GEN 4 TRAINER IS ONE PARTY WHERE THE ENGINE EXPECTS A LIST OF THEM.
+    --
+    -- `BattleState.newTrainer(game, oppClass, partyIndex)` reads
+    -- `trainers[key].parties[i]` -- Gen 1 and Gen 2 put SEVERAL trainers in one
+    -- CLASS (TrainerGroups: "YOUNGSTER" holds a dozen parties), so the class is
+    -- the key and the index picks the person. Gen 4 numbers every trainer
+    -- individually and gives each one party. The record is right; it is one
+    -- level shallower than the reader.
+    --
+    -- A VIEW, NOT A CONVERSION: `parties[1]` IS `party`, so nothing is copied
+    -- and nothing can drift.
+    --
+    -- Three things the slots need on the way through, each of them the
+    -- cartridge's own rule rather than a guess:
+    --
+    --   * MOVE SLOT 0 IS EMPTY, not move 0. `trdata` stores four move ids and
+    --     pads with zero; `buildTrainerParty` would hand the battler four
+    --     moves, one of which does not exist. A party whose moves are ALL zero
+    --     is a `TRDATATYPE_BASE` row -- it has no move list at all -- and must
+    --     keep nil so the level-up set applies.
+    --   * IVS COME FROM ONE BYTE. `TrainerData_BuildParty`:
+    --         ivs = trmon[i].ivScale * MAX_IVS_SINGLE_STAT / MAX_IV_SCALE
+    --     -- 31/255 of the scale, THE SAME VALUE IN ALL SIX STATS. Written to
+    --     `dvs`, which is the parameter `Stats.calc` passes on as `ivs` for a
+    --     Gen 3-model species; `buildTrainerParty` already prefers a slot's own
+    --     over the fixed fallback.
+    --   * A DOUBLE BATTLE IS THE TRAINER'S OWN BYTE.
+    --     `Script_IsTrainerDoubleBattle` is `battleType != BATTLE_TYPE_SINGLES`,
+    --     and `BattleState` reads `trainer.doubleBattle` -- the same shape Gen 3
+    --     uses, so the battle builder needs no Gen 4 branch.
+    local trainersFixed = 0
+    for _, rec in pairs(self.trainers or {}) do
+      if type(rec) == "table" and rec.parties == nil and type(rec.party) == "table"
+      then
+        for _, slot in ipairs(rec.party) do
+          if type(slot) == "table" then
+            if type(slot.moves) == "table" then
+              local real = {}
+              for _, id in ipairs(slot.moves) do
+                if (tonumber(id) or 0) ~= 0 then real[#real + 1] = id end
+              end
+              slot.moves = (#real > 0) and real or nil
+            end
+            if slot.dvs == nil and slot.ivScale ~= nil then
+              local iv = math.floor((tonumber(slot.ivScale) or 0) * 31 / 255)
+              slot.dvs = { hp = iv, attack = iv, defense = iv,
+                           speed = iv, spatk = iv, spdef = iv,
+                           -- the Gen 1/2 formula reads one `special`; harmless
+                           -- here and correct if anything ever asks
+                           special = iv }
+            end
+          end
+        end
+        rec.parties = { rec.party }
+        if rec.doubleBattle == nil and rec.battleType ~= nil then
+          rec.doubleBattle = (tonumber(rec.battleType) or 0) ~= 0
+        end
+        trainersFixed = trainersFixed + 1
+      end
+    end
+    if trainersFixed > 0 then
+      Logger.info("gen4 trainers: %d record(s) now expose their party the way "
+                  .. "BattleState reads one", trainersFixed)
+    end
+
+    -- ...AND THE NATURE, AS A NAME RATHER THAN A NUMBER.
+    --
+    -- The Gen 4 extractor writes `natureOrder = {1..25}` and `natures` as a
+    -- LIST of names, so `Pokemon.new`'s `order[(personality % 25) + 1]` put a
+    -- bare integer on the mon. Every screen that shows a nature would have
+    -- shown "13", and a number is also what made the argument slip below fatal
+    -- rather than merely wrong.
+    --
+    -- Pointing `natureOrder` at the names costs nothing and is what the field
+    -- is for: `Stats.calcGen3` looks its modifiers up BY THE VALUE STORED ON
+    -- THE MON, so a name is the only form that can ever resolve.
+    local natureNames = (self.constants or {}).natures
+    local natureOrder = (self.constants or {}).natureOrder
+    if type(natureNames) == "table" and type(natureOrder) == "table"
+       and type(natureOrder[1]) == "number" and type(natureNames[1]) == "string"
+    then
+      local named = {}
+      for i = 1, 25 do named[i] = natureNames[i] or natureOrder[i] end
+      self.constants.natureOrder = named
+      Logger.info("gen4 natures: natureOrder now names its 25 rows, so a "
+                  .. "Pokemon carries \"%s\" rather than a bare index",
+                  tostring(named[1]))
+    end
+
+    -- ...AND THE MODIFIERS, WHICH ARE A RULE RATHER THAN A TABLE.
+    --
+    -- `Data:load` hands `constants.natures` to `Stats.setNatures`, which wants
+    -- it keyed BY NAME with a `modifiers` record -- that is the shape Gen 3's
+    -- extractor writes, read off `gNatureStatTable`.  Gen 4's extractor writes
+    -- a flat LIST of 25 names, so the lookup found nothing and every Sinnoh
+    -- Pokemon carried a nature that moved no stat.
+    --
+    -- The table does not have to be extracted, because it is derivable and the
+    -- cartridge derives it the same way.  `sNatureStatAffinities`
+    -- (src/pokemon.c) is the 25x5 pattern every generation uses:
+    --
+    --     raised  = nature / 5      lowered = nature % 5
+    --
+    -- over [attack, defense, speed, spAtk, spDef], and the two are equal for
+    -- the five neutral natures, which is what makes Hardy, Docile, Serious,
+    -- Bashful and Quirky move nothing.  `Pokemon_GetNatureStatValue` then
+    -- multiplies by 110 or 90 and divides by 100 -- and 110/90/100 is exactly
+    -- the percentage `Stats.calcGen3` expects, so no conversion either.
+    --
+    -- Checked against the cartridge rather than assumed: Lonely is nature 1,
+    -- so raised = 0 (attack) and lowered = 1 (defense) -- which is what
+    -- `sNatureStatAffinities[NATURE_LONELY]` says, line for line, and the same
+    -- for Brave, Adamant, Naughty and Bold.
+    local NATURE_STAT = { "attack", "defense", "speed", "spatk", "spdef" }
+    local natureRows = (self.constants or {}).natures
+    if type(natureRows) == "table" and type(natureRows[1]) == "string" then
+      local byName, modified = {}, 0
+      for i = 1, 25 do
+        local name = natureRows[i]
+        if type(name) == "string" and name ~= "" then
+          local n = i - 1                        -- the cartridge counts from 0
+          local up, down = NATURE_STAT[math.floor(n / 5) + 1], NATURE_STAT[(n % 5) + 1]
+          local modifiers = {}
+          for _, key in ipairs(NATURE_STAT) do modifiers[key] = 100 end
+          if up ~= down then
+            modifiers[up], modifiers[down] = 110, 90
+            modified = modified + 1
+          end
+          byName[name] = {
+            name = name, index = n, modifiers = modifiers,
+            raises = (up ~= down) and up or nil,
+            lowers = (up ~= down) and down or nil,
+          }
+        end
+      end
+      if next(byName) then
+        self.constants.natures = byName
+        require("src.pokemon.Stats").setNatures(byName)
+        Logger.info("gen4 natures: built the 25 modifier rows from the "
+                    .. "cartridge's own index rule (%d move a stat, 5 are "
+                    .. "neutral) -- a Sinnoh Pokemon's nature was worth "
+                    .. "nothing before this", modified)
+      end
+    end
+
+    if speciesFixed > 0 then
+      Logger.info("gen4 species: gave %d record(s) the field names the engine "
+                  .. "reads (spatk/spdef, evYield, level1Moves, growthRate) -- "
+                  .. "without these, building any Gen 4 Pokemon raises",
+                  speciesFixed)
+    end
+
+    -- ...AND THE EDGES OF THE REGION, UNDER THE NAME THE ENGINE READS.
+    --
+    -- The Gen 4 extractor keyed its connections by the WALKING direction --
+    -- up/down/left/right -- and `OverworldState:checkEdgeExit` asks for
+    -- `self.map:connection(COMPASS[dir])`, where COMPASS turns "up" into
+    -- "north".  So every edge answered nil and every Gen 4 map with a
+    -- neighbour ended at an invisible wall.  Reported from play: *"after
+    -- talking to my rival I'm supposed to walk out of town but there's an
+    -- invisible wall"* -- Twinleaf's north edge, which has carried a perfectly
+    -- good connection to Route 201 the whole time.
+    --
+    -- The extractor writes compass names now, so this is for the caches that
+    -- already exist: renaming them here means the fix lands WITHOUT a
+    -- re-import, and a cache that already speaks compass is left alone.
+    local COMPASS_FOR = { up = "north", down = "south",
+                          left = "west", right = "east" }
+    local renamed, touched = 0, 0
+    for _, def in pairs(self.maps or {}) do
+      local conns = type(def) == "table" and def.connections
+      if type(conns) == "table" then
+        local moved = false
+        for walking, compass in pairs(COMPASS_FOR) do
+          local row = conns[walking]
+          if row ~= nil then
+            -- The compass key wins if both somehow exist: it is the one the
+            -- engine would have been reading.
+            if conns[compass] == nil then conns[compass] = row end
+            conns[walking] = nil
+            renamed = renamed + 1
+            moved = true
+          end
+        end
+        if moved then touched = touched + 1 end
+      end
+    end
+    if renamed > 0 then
+      Logger.info("gen4 maps: renamed %d region edge(s) on %d map(s) to the "
+                  .. "compass names the engine reads", renamed, touched)
+    end
+
+    -- ...AND THE DIALOGUE BOX.
+    --
+    -- `FieldMessage_AddWindow` puts the text interior at tiles (2,19), 27 wide
+    -- and 4 tall.  The port's box is the frame AND the interior, and it starts
+    -- its text one tile in, so `tx` is one less than the cartridge's left edge
+    -- and `tw` two more than its width; the same for the rows.
+    --
+    -- `maxPixels` is the part that actually stops the spill: `maxCols` wraps by
+    -- COUNTING CHARACTERS, which is right for a fixed-width Game Boy face and
+    -- meaningless for the DS's proportional one.  27 tiles is 216 pixels, and
+    -- TextBox already knows how to wrap to a pixel width.
+    local ds = (self.constants or {}).gen4MessageWindow
+    if type(ds) == "table" and ds.width and ds.height then
+      self.field.theme = self.field.theme or {}
+      if self.field.theme.textBox == nil then
+        self.field.theme.textBox = {
+          tx = math.max(0, (ds.left or 2) - 1),
+          ty = math.max(0, (ds.top or 19) - 1),
+          tw = (ds.width or 27) + 2,
+          th = (ds.height or 4) + 2,
+          maxCols = ds.width or 27,
+          maxPixels = (ds.width or 27) * 8,
+        }
+      end
+    end
+
+    -- THE DISTORTION WORLD'S NINE LIFTS, AS WARPS.
+    --
+    -- MEASURED OVER ALL 593 MAPS, and it is why this had to be read rather than
+    -- worked around: the Distortion World has ONE warp event in the whole
+    -- dungeon (1F, back out to Turnback Cave's D05R0109), NOTHING anywhere in
+    -- Sinnoh warps into it, and nine of its eleven maps share zone_event member
+    -- 0 -- the empty one.  There is no door and no walking route between its
+    -- floors.  The only way down is the moving platforms.
+    --
+    -- 18 of the 34 moving platforms pair across floors at IDENTICAL (x, z) --
+    -- follow each one's elevator-path chain and there is a platform at the same
+    -- coordinates on the altitude it lands on whose index is this platform's
+    -- destIndex.  They form NINE SYMMETRIC PAIRS, and a lift between two floors
+    -- at the same coordinates is a WARP in a port that walks without height.
+    -- Every one of the 18 ends stands on a walkable cell of its own floor's
+    -- permission grid, 14 of them on a tile marked CAVE_FLOOR.
+    --
+    -- HERE RATHER THAN IN THE EXTRACTOR, for the reason the connection rename
+    -- above is: the pairing is DERIVED, so it can be recomputed from the
+    -- extracted tables on every boot and lands without a re-import of anything
+    -- but the Distortion World stage itself.
+    --
+    -- AND NOTHING IS WRITTEN DOWN HERE.  Every coordinate comes from
+    -- `gen4_distortion_world`; a cache imported before that stage existed has
+    -- no such record, and then this says so once and leaves the floors alone.
+    -- Cartridge data does not belong in the engine.
+    local dw = self.gen4_distortion_world
+    if type(dw) == "table" and type(dw.shuttles) == "table" and #dw.shuttles > 0
+    then
+      local defByHeader, keyByHeader = {}, {}
+      for key, def in pairs(self.maps or {}) do
+        if type(def) == "table" and def.header then
+          defByHeader[def.header] = def
+          keyByHeader[def.header] = key
+        end
+      end
+      -- IDEMPOTENT, because `seedDefaults` runs again after the mod merge.  A
+      -- second pass without this appends all eighteen a second time, and the
+      -- duplicates would win or lose the `warpAt` lookup by table order.
+      local already = false
+      for _, def in pairs(defByHeader) do
+        for _, w in ipairs(def.warps or {}) do
+          if w.distortionLift then already = true; break end
+        end
+        if already then break end
+      end
+      if not already then
+        -- TWO PASSES.  A warp's anchor is an INDEX into the DESTINATION map's
+        -- own warp list, and on the first pass half of those warps do not exist
+        -- yet -- so pass one places them and remembers where, pass two joins
+        -- each end to its partner.
+        local placed, refused = {}, 0
+        for _, s in ipairs(dw.shuttles) do
+          local def = defByHeader[s.from]
+          local info = dw.maps and dw.maps[s.from]
+          local destKey = keyByHeader[s.to]
+          if def and info and destKey then
+            local id = ("%d|%d|%d|%d"):format(s.from, s.to, s.x, s.z)
+            if placed[id] == nil then
+              def.warps = def.warps or {}
+              local slot = #def.warps + 1
+              def.warps[slot] = {
+                index = slot,
+                x = s.x - (info.offsetX or 0),
+                y = s.z - (info.offsetZ or 0),
+                destMap = destKey,
+                destHeader = s.to,
+                -- pass two; 1 is a placeholder that is always overwritten for
+                -- a paired end, and a lift that somehow lost its partner is
+                -- dropped rather than left pointing at someone else's door.
+                destWarp = nil,
+                distortionLift = true,
+              }
+              placed[id] = { def = def, slot = slot }
+            end
+          else
+            refused = refused + 1
+          end
+        end
+        -- SORTED, not `pairs`.  Both loops below depend on order: the slot
+        -- numbers this writes are the anchors a save will carry, and the
+        -- removal below shifts the indices after it.
+        local ids = {}
+        for id in pairs(placed) do ids[#ids + 1] = id end
+        table.sort(ids)
+        local paired, orphans = 0, {}
+        for _, id in ipairs(ids) do
+          local entry = placed[id]
+          local from, to, x, z = id:match("^(%d+)|(%d+)|(%-?%d+)|(%-?%d+)$")
+          local partner = placed[("%s|%s|%s|%s"):format(to, from, x, z)]
+          if partner then
+            entry.def.warps[entry.slot].destWarp = partner.slot
+            paired = paired + 1
+          else
+            orphans[#orphans + 1] = entry
+          end
+        end
+        -- A ONE-WAY LIFT IS A SOFTLOCK, so an unpaired end is removed rather
+        -- than shipped with a guessed anchor.  The extractor's own check says
+        -- there are none; this is what happens if a different build disagrees.
+        -- HIGHEST SLOT FIRST, or removing the first orphan moves the second.
+        table.sort(orphans, function(a, b) return a.slot > b.slot end)
+        for _, entry in ipairs(orphans) do
+          local list = entry.def.warps
+          if list[entry.slot] and list[entry.slot].distortionLift then
+            table.remove(list, entry.slot)
+            for i = entry.slot, #list do list[i].index = i end
+          end
+        end
+        if paired > 0 then
+          Logger.info("gen4 distortion world: %d lift(s) wired as warps across "
+                      .. "%d floor pairs -- the only route between its floors",
+                      paired, math.floor(paired / 2))
+        end
+        if refused > 0 or #orphans > 0 then
+          Logger.warn("gen4 distortion world: %d lift(s) had no map or no "
+                      .. "offsets and %d had no partner; those floors stay "
+                      .. "unreachable", refused, #orphans)
+        end
+      end
+    elseif self.isGen4Cache then
+      -- NAMED, not silent.  Without this record the Distortion World is nine
+      -- disconnected floors, which is a stop rather than a blemish, and the
+      -- fix is a re-import rather than anything a player can do.
+      Logger.info("gen4 distortion world: this cache carries no "
+                  .. "`gen4_distortion_world` record, so its floors have no "
+                  .. "lifts between them (re-import to add them)")
+    end
+
+  end
+
   if require("src.core.GameVersion").isGen2() then
     sanitizeGen2Text(self.text)
     if boot.startMap == BOOT_DEFAULTS.startMap then
@@ -1507,6 +1973,27 @@ function Data:load()
                     .. "read it fall back to the engine's own art", name,
                     tostring(mod))
       end
+    end
+
+    -- THE PARTY ICONS, PUBLISHED UNDER THE NAME EVERY SCREEN ALREADY ASKS FOR.
+    --
+    -- Reported from play: "in the pokemon party menus the pokemon party sprites
+    -- are missing". They were not broken, they were NEVER EXTRACTED -- nothing
+    -- had opened pl_poke_icon.narc -- so `data.icons` was nil and
+    -- Gen4PartyMenu:iconFor found nothing to draw.
+    --
+    -- The Gen 4 extractor writes them inside `gen4_species_sprites`, because
+    -- that is the stage that already walks the species; `icons` is where the
+    -- SCREENS look, and Gen3PartyMenu, the box, the summary page and the
+    -- Poketch's party app all look there too. Lifting it here is what lets all
+    -- of them work without a Gen 4 branch each.
+    --
+    -- Only when the cache has not brought its own -- a mod that ships `icons`
+    -- still wins, which is the rule every other lift in this file follows.
+    if self.icons == nil then
+      local sprites = self.gen4_species_sprites
+      local icons = sprites and sprites.icons
+      if icons and icons.bySpecies then self.icons = icons end
     end
   end
   -- Hand the cartridge's own battle tables to the two modules that would

@@ -36,6 +36,7 @@ local Strings = require("src.core.Strings")
 local Weather = require("src.battle.Weather")
 local WideBattle = require("src.battle.WideBattle")
 local Gen3Battle = require("src.battle.Gen3Battle")
+local Gen4Battle = require("src.battle.Gen4Battle")
 local GameVersion = require("src.core.GameVersion")
 
 -- FORWARD-DECLARED, because they are defined next to the other doubles
@@ -188,6 +189,19 @@ function BattleState:gen3Layout()
   return GameVersion.isGen3() and true or false
 end
 
+-- ...AND PLATINUM FIGHTS ON ITS OWN SCREEN TOO, for the same reason and with
+-- less room for argument: a Gen 4 cache has a 256x192 overworld, every piece of
+-- battle art the extractor wrote is authored against that, and the cartridge's
+-- own battler and healthbox positions are stated in those coordinates (see
+-- `Gen4Battle.BATTLER_POS`). A battle that answered 160x144 would put the Game
+-- Boy's composition inside a third of the screen it was drawn for.
+--
+-- No wide option here, unlike Hoenn: the DS screen IS the layout, and there is
+-- no narrower cartridge shape underneath it to widen.
+function BattleState:gen4Layout()
+  return GameVersion.isGen4() and true or false
+end
+
 -- BATTLE LAYOUT = WIDE, ANSWERED IN EMERALD'S OWN TERMS.
 --
 -- The same option the Game Boy layouts read, on the layout that has a screen
@@ -288,13 +302,26 @@ function BattleState:layoutGeometry()
   return BattleState.CLASSIC_GEOMETRY
 end
 
--- BOTH WIDE LAYOUTS LAY THE FOUR MOVES OUT AS A 2x2, so both navigate it with
--- all four directions rather than the classic vertical list.  The maths is
--- the same grid in either case and lives once; what differs is only which
--- layouts ask for it.  nil means "no direction was pressed", and the caller
--- then runs its own list navigation and its A / B / SELECT handling.
+-- EVERY WIDE LAYOUT LAYS THE FOUR MOVES OUT AS A 2x2, so all of them navigate
+-- it with all four directions rather than the classic vertical list.  The
+-- maths is the same grid in every case and lives once; what differs is only
+-- which layouts ask for it.  nil means "no direction was pressed", and the
+-- caller then runs its own list navigation and its A / B / SELECT handling.
+--
+-- SINNOH WAS MISSING FROM THIS TEST AND DREW THE GRID ANYWAY.  Reported from
+-- play: "for the selection of moves up down left right dont work for selection
+-- seems to move right when i press down".  That is exactly what a 2x2 does
+-- when the grid arm is skipped: `Gen4Battle` draws the four moves two to a row,
+-- but the caller fell through to the classic VERTICAL list, where down is
+-- simply index + 1 -- and index + 1 from the top-left of a 2x2 is the cell to
+-- its RIGHT.  Left and right then did nothing at all, because a vertical list
+-- has no use for them.  The fix is one clause, not new maths: the grid this
+-- layout already draws is the grid it should navigate.
 function BattleState:moveGridNavigate(index, count, input)
-  if not (self:isWideBattleLayout() or self:gen3Layout()) then return nil end
+  if not (self:isWideBattleLayout() or self:gen3Layout()
+          or self:gen4Layout()) then
+    return nil
+  end
   return WideBattle.navigate(index, count, input)
 end
 
@@ -304,6 +331,14 @@ end
 -- who reaches for BAG must not open the party.
 function BattleState:menuActions()
   if self:gen3Layout() then return Gen3Battle.ACTIONS end
+  -- SINNOH'S FOUR, and they are Hoenn's four in the same order rather than the
+  -- Game Boy's.  Platinum's action menu is three buttons wide on the touch
+  -- screen -- sBattleMenuButtonLayout is { {0,0,0}, {1,3,2} }, FIGHT spanning
+  -- the top with ITEM, RUN, PARTY underneath -- so a two-column menu has to
+  -- fold it, and folding the bottom row leaves ITEM then PARTY with RUN last.
+  -- That is Emerald's own cartridge-stated order; see Gen4Battle.ACTIONS for
+  -- why the agreement matters more than a third arrangement would.
+  if self:gen4Layout() then return Gen4Battle.ACTIONS end
   return BattleState.CLASSIC_ACTIONS
 end
 
@@ -431,6 +466,12 @@ function BattleState:uiSize()
   -- against it.
   if self:gen3Layout() then
     return self:gen3SurfaceWidth(), Gen3Battle.HEIGHT
+  end
+  -- The DS's own screen, and neither number is a variable: the backdrops are
+  -- 512x256 with the visible half 256x192, and the platform and battler
+  -- positions are absolute pixels on that.
+  if self:gen4Layout() then
+    return Gen4Battle.WIDTH, Gen4Battle.HEIGHT
   end
   return 160, 144
 end
@@ -985,8 +1026,13 @@ local function newBattle(game)
   -- default with a notice instead of silently switching behavior
   local rulesets = game.data.rulesets or Rulesets
   local selected = game.save.options and game.save.options.ruleset
-  local fallback = (game.data.constants and game.data.constants.defaultRuleset)
-                   or "gen1_faithful"
+  -- THE FALLBACK IS THE CARTRIDGE'S, not Kanto's.  It used to read
+  -- `constants.defaultRuleset or "gen1_faithful"`, and nothing has ever
+  -- written that constant -- so Hoenn fought under Generation One's rules on
+  -- every fresh save while `gen3_emerald.lua` sat beside it, registered and
+  -- unreferenced.  See `src/battle/RulesetDefaults.lua` for the measurement
+  -- and for why Gen 2 is deliberately left where it was.
+  local fallback = require("src.battle.RulesetDefaults").defaultFor(game)
   local ruleset = selected and rulesets[selected]
   if selected and not ruleset then
     Logger.warn("unknown ruleset %s; using %s", tostring(selected), fallback)
@@ -3734,6 +3780,33 @@ function BattleState:update(dt)
   end
   local input = self.game.input
 
+  -- L PUTS THE BOTTOM SCREEN AWAY, AND BRINGS IT BACK.
+  --
+  -- From the brief: "allow users to switch between the two with a button".
+  -- L rather than a new binding for the same reason the field's Poketch uses
+  -- it -- it is an action the controls menu already lists, so it is rebindable
+  -- without this screen knowing how rebinding works -- and it means ONE KEY
+  -- WITH ONE MEANING across the game: show or hide the bottom screen. In the
+  -- field that surface is the Poketch; in a battle it is the
+  -- FIGHT/BAG/POKeMON/RUN menu and the move list.
+  --
+  -- HERE RATHER THAN IN THE MENU BRANCH, because BOTH choosing phases put
+  -- something on that surface and a key that worked on one of them and not the
+  -- other would read as a bug. It does nothing in any other phase: while a
+  -- message is typing there is nothing down there to hide.
+  --
+  -- Gated on the Gen 4 layout, so no Gen 1-3 press changes anything. Those
+  -- cartridges have no second screen and SecondScreen.mode answers "off" for
+  -- them regardless, but the gate says so where a reader will look.
+  if input and input:wasPressed("l") and self:gen4Layout()
+     and (self.phase == "menu" or self.phase == "moveSelect") then
+    local okSS, SecondScreen = pcall(require, "src.ui.SecondScreen")
+    if okSS and SecondScreen.mode(self.game) ~= "off" then
+      SecondScreen.toggleStow(self.game)
+      return
+    end
+  end
+
   -- safety net: HP/status changed outside a queued drain (level-up heals,
   -- field effects, bag cures) snaps once the queue is idle
   if self.phase == "menu" then
@@ -3857,18 +3930,36 @@ function BattleState:update(dt)
       self:resolveTurn(locked)
       return
     end
-    local col = (self.menuIndex - 1) % 2
-    local row = math.floor((self.menuIndex - 1) / 2)
-    if input:wasPressed("left") then
-      col = math.max(0, col - 1)
-    elseif input:wasPressed("right") then
-      col = math.min(1, col + 1)
-    elseif input:wasPressed("up") then
-      row = math.max(0, row - 1)
-    elseif input:wasPressed("down") then
-      row = math.min(1, row + 1)
+    -- PLATINUM'S ACTION MENU IS NOT A 2x2, and walking it as one is what a
+    -- player feels as the cursor jumping about.
+    --
+    -- Every other game in this launcher draws FIGHT/BAG over POKeMON/RUN and
+    -- the arithmetic below is exactly right for that. Platinum draws the
+    -- cartridge's own layout -- FIGHT across the top, then ITEM, RUN, PARTY --
+    -- so its d-pad walks that grid instead. See Gen4Battle.actionMove.
+    local dir = (input:wasPressed("left") and "left")
+             or (input:wasPressed("right") and "right")
+             or (input:wasPressed("up") and "up")
+             or (input:wasPressed("down") and "down")
+    if self:gen4Layout() then
+      if dir then
+        self.menuIndex, self.gen4MenuColumn =
+          Gen4Battle.actionMove(self.menuIndex, dir, self.gen4MenuColumn)
+      end
+    else
+      local col = (self.menuIndex - 1) % 2
+      local row = math.floor((self.menuIndex - 1) / 2)
+      if dir == "left" then
+        col = math.max(0, col - 1)
+      elseif dir == "right" then
+        col = math.min(1, col + 1)
+      elseif dir == "up" then
+        row = math.max(0, row - 1)
+      elseif dir == "down" then
+        row = math.min(1, row + 1)
+      end
+      self.menuIndex = row * 2 + col + 1
     end
-    self.menuIndex = row * 2 + col + 1
     if input:wasPressed("a") then
       local choice = self:menuActions()[self.menuIndex]
       -- BattleMenu_Pack `.contest` (core.asm:4990): `ld a, PARK_BALL /
@@ -4597,18 +4688,48 @@ function BattleState:computeDamage(user, target, move, opts)
   -- rather than widening Damage.compute's signature.
   if self:isDouble() and target then
     opts = opts or {}
-    local alive = 0
-    for flank = 1, 2 do
-      local b = self.sides[target.isPlayer and 1 or 2].battlers[flank]
-      if b and b.mon and (b.mon.hp or 0) > 0 then alive = alive + 1 end
+    local function aliveOn(isPlayer)
+      local n = 0
+      for flank = 1, 2 do
+        local b = self.sides[isPlayer and 1 or 2].battlers[flank]
+        if b and b.mon and (b.mon.hp or 0) > 0 then n = n + 1 end
+      end
+      return n
     end
-    if alive == 2 then
-      if opts.doublesScreens == nil then opts.doublesScreens = true end
-      -- ...and the spread half, but ONLY for MOVE_TARGET_BOTH.  The compare
-      -- at 0806_9BA4 is `cmp #8`, not a mask: EARTHQUAKE and EXPLOSION are
-      -- $20 and are not reduced at all on this cartridge.
-      if opts.spread == nil and tonumber(move and move.target) == 0x08 then
-        opts.spread = true
+    local defenderSide = aliveOn(target.isPlayer)
+    if defenderSide == 2 and opts.doublesScreens == nil then
+      opts.doublesScreens = true
+    end
+    -- ...and the spread reduction, WHICH IS NOT ONE RULE.
+    --
+    -- This used to be a literal `move.target == 0x08` here, which was
+    -- Emerald's rule written into the engine instead of into Emerald's
+    -- ruleset -- so Platinum could not have a different one even after
+    -- somebody measured it.  It is now two fields on the ruleset:
+    -- `spreadField` names the byte (a Gen 3 move record calls it `target`,
+    -- a Gen 4 one calls it `range`, and 0x08 does not mean the same thing in
+    -- the two), and `spreadRanges` maps a value to the ALIVE COUNT that gates
+    -- it.  A ruleset with neither, like gen1_faithful, never sets `spread`
+    -- and is untouched by this.
+    --
+    --   "defenderSide"   -- both foes still up.  CountAliveBattlers(sameSide
+    --                       = TRUE) in Platinum, CountAliveMonsInBattle(
+    --                       BATTLE_ALIVE_DEF_SIDE) in Emerald: the same test.
+    --   "othersOnField"  -- two or more alive ANYWHERE except the defender.
+    --                       Platinum only, for RANGE_ALL_ADJACENT: Earthquake
+    --                       is reduced even when the defender is the last foe,
+    --                       because the user's own ally is standing in it.
+    local ruleset = self.ruleset or {}
+    local ranges = ruleset.spreadRanges
+    if opts.spread == nil and ranges then
+      local key = tonumber(move and move[ruleset.spreadField or "target"])
+      local gate = key and ranges[key]
+      if gate == "defenderSide" then
+        opts.spread = defenderSide == 2
+      elseif gate == "othersOnField" then
+        -- The defender is alive -- it is being hit -- so every other living
+        -- battler is the field total less one.
+        opts.spread = (aliveOn(true) + aliveOn(false) - 1) >= 2
       end
     end
   end
@@ -9002,6 +9123,22 @@ function BattleState:openParty()
     return self:buildScreen("PartyMenu", {
       battle = self,
       onSwitch = function(mon)
+        -- NIL IS "I CHANGED MY MIND", NOT A POKEMON.
+        --
+        -- Reported from play as a crash: "when i got inside the pokemn party
+        -- and back out of it i get a crash ... attempt to index local 'mon'
+        -- (a nil value)". A party screen that is NOT a forced switch hands its
+        -- answer back on B as well as on A -- nil for "none" -- because out of
+        -- a battle that is how a caller learns the player cancelled. This
+        -- handler was written for the answer and not for the refusal, and ran
+        -- straight into `mon.hp`.
+        --
+        -- The screen no longer hands nil to a battle (see Gen4PartyMenu:close),
+        -- and this guard stays anyway: a mod can serve PartyMenu, and a
+        -- handler that only works for well-behaved callers is one line short
+        -- of working for all of them. Returning does the right thing on its
+        -- own -- the menu phase is already what the battle goes back to.
+        if not mon then return end
         -- "ALREADY OUT" IS BOTH SLOTS IN A DOUBLE.  The partner standing
         -- beside you cannot be sent out again either, and asking `self.player`
         -- alone let the right-hand slot pick the Pokemon already fighting
@@ -10049,6 +10186,19 @@ BattleState.BATTLE_SCALE_GEN2 = { front = 1, back = 1 }
 -- pixels tall on a 160-pixel screen: the player's Pokemon filled half the
 -- field and ran off the bottom through the message window.
 BattleState.BATTLE_SCALE_GEN3 = { front = 1, back = 1 }
+-- ...AND GEN 4'S ARE 80x80, WHICH IS THE SAME BUG ONE GENERATION LATER.
+--
+-- Reported from play: "the players pokemon is way too large".  Measured rather
+-- than estimated: `back/390_chimchar.png` is 80 by 80, and the comment above
+-- about Gen 3 spells out what happens next -- with no Gen 4 arm here the
+-- resolver fell through to BATTLE_SCALE_DEFAULT, which is GEN ONE'S, and Gen 1
+-- doubles the back pic because its rips are 40x40.  80 doubled is 160 pixels on
+-- a battle surface 160 pixels tall: the player's Pokemon was not "too large",
+-- it was EXACTLY the height of the screen.
+--
+-- Gen 4's front pics are 80x80 too, so both sides are 1:1 -- the same answer
+-- Gen 2 and Gen 3 already give, for the same reason.
+BattleState.BATTLE_SCALE_GEN4 = { front = 1, back = 1 }
 
 -- image-level override for an asset path, or nil.  scales is the merged
 -- data.battle_sprite_scales table (record id -> { path, scale }).
@@ -10075,7 +10225,9 @@ function BattleState.resolveBattleScale(data, side, path, species)
   if override then return override end
   local V = require("src.core.GameVersion")
   local defaults = BattleState.BATTLE_SCALE_DEFAULT
-  if V.isGen3() then
+  if V.isGen4() then
+    defaults = BattleState.BATTLE_SCALE_GEN4
+  elseif V.isGen3() then
     defaults = BattleState.BATTLE_SCALE_GEN3
   elseif V.isGen2() then
     defaults = BattleState.BATTLE_SCALE_GEN2
@@ -10581,6 +10733,10 @@ function BattleState:drawTextArea()
   -- Gen3Battle.draw used to call its layer functions directly, which meant a
   -- mod wrapping this name never saw a Gen 3 battle at all.
   if self:gen3Layout() then return Gen3Battle.drawTextArea(self) end
+  -- ...and Platinum's, for the same reason.  Its message box is the cartridge's
+  -- own rect on the DS screen rather than the Game Boy's box translated into
+  -- the middle of it; see the text-area block in src/battle/Gen4Battle.lua.
+  if self:gen4Layout() then return Gen4Battle.drawTextArea(self) end
   -- The move list and Mimic's copy menu keep the solid paper (see
   -- WORLD_WINDOW_STYLE); everything else in here is the dialogue box and the
   -- battle menu, which are what goes to glass over a world backdrop.
@@ -10758,6 +10914,7 @@ end
 function BattleState:draw()
   if self:wideLayout() then return WideBattle.draw(self) end
   if self:gen3Layout() then return Gen3Battle.draw(self) end
+  if self:gen4Layout() then return Gen4Battle.draw(self) end
   return self:drawClassic()
 end
 
@@ -10771,6 +10928,7 @@ end
 -- method for exactly this reason.
 function BattleState:drawBattleField()
   if self:gen3Layout() then return Gen3Battle.drawField(self) end
+  if self:gen4Layout() then return Gen4Battle.drawField(self) end
   -- the classic and widescreen layouts paint their field inside their own
   -- draw, where it has always been
 end

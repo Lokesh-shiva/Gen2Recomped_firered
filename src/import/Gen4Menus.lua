@@ -228,6 +228,69 @@ Gen4Menus.OPTIONS_CONFIRM = { label = 9, dialog = 49, yes = 50, no = 51 }
 -- out, and 7 is "Now choose!".  Entries 4-6 are blank in this language -- the
 -- bottom screen's labels, which the hardware draws and this port has no second
 -- screen for yet.
+-- ---------------------------------------------------------------------------
+-- The START MENU
+-- ---------------------------------------------------------------------------
+
+-- THE HALF OF THE ORIGINAL BRIEF THAT WAS STILL A DESIGN.  "instead of showing
+-- the start menu on the bottom screen have a start menu on the main screen like
+-- the other games have the choice to switch between the two styles."
+--
+-- Bank 367 (TEXT_BANK_START_MENU), and the order is `StartMenu_MakeOptionList`'s
+-- rather than the enum's -- the two differ, and taking the enum would put
+-- RETIRE and CHAT in the wrong place.  The list is built RETIRE, CHAT, POKEDEX,
+-- POKEMON, BAG, TRAINER CASE, SAVE, OPTIONS, EXIT, each added only if its hide
+-- flag is clear; in the ordinary field the first two are hidden, so what a
+-- player sees is the last seven.
+--
+-- THERE IS NO POKETCH ROW, and that is worth stating because it is the thing a
+-- reader expects to find: the Poketch is always on the bottom screen in
+-- Platinum and is never a start-menu entry.
+--
+-- TRAINER CASE IS THE PLAYER'S NAME.  Its bank entry is `{STRVAR_1 3, 0, 0}` --
+-- a template, not a word -- and `StartMenu_InitMenu` fills it with
+-- `StringTemplate_SetPlayerName`.  Printing the entry raw puts a control code
+-- on the menu.
+Gen4Menus.START_BANK = 367
+Gen4Menus.START_ROWS = {
+  { id = "retire",      text = 8, icon = 8, hidden = true },
+  { id = "chat",        text = 7, icon = 7, hidden = true },
+  { id = "pokedex",     text = 0, icon = 0 },
+  { id = "pokemon",     text = 1, icon = 1 },
+  { id = "bag",         text = 2, icon = 2, femaleIcon = 9 },
+  { id = "trainerCase", text = 3, icon = 3, playerName = true },
+  { id = "save",        text = 4, icon = 4 },
+  { id = "options",     text = 5, icon = 5 },
+  { id = "exit",        text = 6, icon = 6 },
+}
+
+-- WHICH ICON IS WHICH, and it is not a guess: `animIdx = option *
+-- ICON_ANIM_COUNT` with ICON_ANIM_COUNT = 3, so each group of three animations
+-- (none / swell / wiggle -- they are scale animations of one picture, not three
+-- pictures) belongs to one option in ENUM order.  The one exception is spelled
+-- out in the same function: a FEMALE player's BAG uses group 9.
+--
+-- That is also why the icon sheet has TEN cells for NINE options, which is an
+-- independent confirmation rather than a restatement: nine options plus the
+-- second satchel is exactly ten.
+Gen4Menus.START_ICONS = 10
+
+-- Where it sits, from `StartMenu_InitMenu` and `sSpriteTemplates`:
+--
+--   Window_Add(..., BG_LAYER_MAIN_3, 20, 1, 11, optionCount * 3, ...)
+--   the icon sprite at x = 174, y = 20 + 24 * i
+--   the cursor sprite at x = 204, y = 20 + 24 * i
+--
+-- Tile (20, 1) is pixel (160, 8) and eleven tiles is 88 wide; three tiles per
+-- option is the 24-pixel pitch the two sprite columns already use, which is the
+-- two statements agreeing.  Both sprite x values are CENTRES.
+Gen4Menus.START_LAYOUT = {
+  panelX = 20 * 8, panelY = 1 * 8,
+  panelW = 11 * 8, rowTiles = 3,
+  pitch = 24,
+  iconX = 174, cursorX = 204, firstY = 20,
+}
+
 Gen4Menus.STARTER_BANK = 360
 Gen4Menus.STARTER_TEXT = {
   theseArePokeBalls = 0, nowChoose = 7,
@@ -243,6 +306,49 @@ Gen4Menus.STARTERS = {
   { species = 390, model = "psel_mb_b", text = 2, expect = "CHIMCHAR" },
   { species = 393, model = "psel_mb_c", text = 3, expect = "PIPLUP" },
 }
+
+-- ---------------------------------------------------------------------------
+-- The party screen
+-- ---------------------------------------------------------------------------
+
+-- BANK 453, and it is the bank the port needed before it could teach a TM in
+-- Sinnoh at all.
+--
+-- HOW IT WAS FOUND, which is the boring way and the right one: pokeplatinum's
+-- `generated/text_banks.txt` lists TEXT_BANK_PARTY_MENU on line 454, and that
+-- file's ZERO-BASED line numbers are the cartridge's bank ids -- the same rule
+-- every other bank in this file was taken from.
+--
+-- CONFIRMED AGAINST THE CARTRIDGE rather than against the list: bank 453
+-- decodes to 205 entries, which is exactly the count in
+-- res/text/party_menu.json, and entry for entry -- 33 "Teach which Pokemon?",
+-- 145 "SWITCH", 154 "ENTER", 169..174 FIRST..SIXTH, 175 "ABLE!", 176
+-- "UNABLE!", 177 "LEARNED", 200 "CONFIRM".
+--
+-- PLATINUM SAYS "UNABLE!", NOT "NOT ABLE".  Emerald's word is NOT ABLE and
+-- Gen 1's is too, so a screen that reused either would be showing a word this
+-- cartridge does not use, with an exclamation mark missing from the other two.
+Gen4Menus.PARTY_BANK = 453
+Gen4Menus.PARTY_ENTRIES = 205
+
+Gen4Menus.PARTY_TEXT = {
+  -- the question along the bottom, one per reason the screen was opened
+  choose = 29, moveWhere = 30, giveTo = 31, useOn = 32,
+  teachWhich = 33, chooseAndConfirm = 34,
+  -- the submenu
+  switch = 145, summary = 146, item = 147, mail = 148,
+  mailRead = 149, mailTake = 150, mailStore = 151, cancel = 152,
+  enter = 154, noEntry = 155, confirm = 200,
+  -- the words a panel shows instead of its HP
+  set = 166, notEntered = 167, banned = 168,
+  able = 175, unable = 176, learned = 177,
+}
+
+-- FIRST..SIXTH, in pick order.  The cartridge does NOT write "- 1 -" the way
+-- the Gen 3 screen does; it has a word for each place, and the six are
+-- consecutive, which is why this is a run and not six named keys.
+Gen4Menus.PARTY_ORDER_FIRST = 169
+Gen4Menus.PARTY_ORDER_WORDS = 6
 
 -- ---------------------------------------------------------------------------
 -- The bag
@@ -325,11 +431,35 @@ Gen4Menus.SUMMARY_CHARACTERISTICS = 25
 -- `page_skills` the same pitch from 56; and on `page_battle_moves` the changes
 -- come at 50, 82, 114 and 146, a pitch of thirty-two, which is the four move
 -- rows.  The white value boxes sit at x = 180, which is where the values go.
+--
+-- WHERE THE PICTURE GOES, and unlike the rows above it is stated TWICE.
+--
+--   STATED.  PokemonSummaryScreen_LoadMonSprite creates the Pokemon's sprite
+--   at (52, 104), and those are not a corner:
+--   PokemonSpriteManager_CreateSpriteAtIndex assigns its x and y straight to
+--   `transforms.xCenter` and `transforms.yCenter`.  The egg-hatch cutscene
+--   settles what that means -- it creates its sprite at
+--   (HW_LCD_WIDTH / 2, HW_LCD_HEIGHT / 2 + offset), which is only the middle
+--   of the screen if the pair is the CENTRE.
+--
+--   MEASURED.  Every one of the ten page tilemaps in pl_pst_gra carries the
+--   same backing plate in the left column: x 20..83, y 72..135, which is 64
+--   square, identical on all ten.  Its centre is (51.5, 103.5) -- exactly the
+--   rect a 64-pixel square centred on (52, 104) occupies, because an
+--   even-sided rect straddles its centre rather than sitting on it.
+--
+-- The old value here was the plate's TOP-LEFT CORNER with a two-pixel error in
+-- y, which nothing noticed because nothing had ever drawn into the slot.
+-- `plate` is carried so a screen can tell the two shapes apart.
+--
+-- THE PICTURE IS 80 SQUARE AND THE PLATE IS 64, so a Pokemon overhangs its
+-- plate by eight pixels on every side.  That is the cartridge's look and not a
+-- sizing mistake: shrunk to the plate it would be a different screen.
 Gen4Menus.SUMMARY_LAYOUT = {
   label = { x = 112 },
   value = { x = 180 },
   name = { x = 8, y = 42 },
-  picture = { x = 20, y = 70 },
+  picture = { x = 52, y = 104, plate = 64 },
   info = { first = 40, pitch = 16, rows = 7 },
   skills = { first = 40, pitch = 16, rows = 6, ability = 144, abilityText = 162 },
   moves = { first = 50, pitch = 32, rows = 4 },

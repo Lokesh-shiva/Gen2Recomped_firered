@@ -430,7 +430,67 @@ end
 --
 -- Returns { width, height, rgba }, rgba being width * height * 4 bytes.
 -- Palette entry 0 is transparent, as everywhere else on the hardware.
-function Gen4Graphics.compose(map, sheet, palette)
+-- STAMP one tilemap into another at a TILE offset, which is `Bg_LoadToTilemapRect`
+-- and is the thing this file could not express.
+--
+-- A Gen 4 screen is very often NOT one tilemap.  The Pokedex's entry page is
+-- four of them laid into one 32x24 grid over a single tile sheet -- and because
+-- the composer here made one picture per tilemap, each of the four came out as
+-- its own fragment drawn with a BORROWED sheet and a BORROWED palette, which is
+-- why 275 of the 282 pictures under `pokedex/` are under 400 bytes and every
+-- one of them is blank.  The parts were all there; nothing put them together.
+--
+-- Cells are copied as they are -- a cell carries its own tile index, flip bits
+-- and sub-palette -- so the result composes exactly like any other tilemap.
+-- Anything that would land outside the base is dropped rather than wrapped: a
+-- rect that does not fit is a wrong offset, and wrapping would hide it.
+function Gen4Graphics.stamp(base, patch, tileX, tileY)
+  if not (base and patch and base.cells and patch.cells) then return base end
+  local bw = floor((base.width or 0) / 8)
+  local bh = floor((base.height or 0) / 8)
+  local pw = floor((patch.width or 0) / 8)
+  local ph = floor((patch.height or 0) / 8)
+  if bw == 0 or bh == 0 or pw == 0 then return base end
+  for row = 0, ph - 1 do
+    for col = 0, pw - 1 do
+      local cell = patch.cells[row * pw + col + 1]
+      local x, y = (tileX or 0) + col, (tileY or 0) + row
+      if cell and x >= 0 and x < bw and y >= 0 and y < bh then
+        base.cells[y * bw + x + 1] = cell
+      end
+    end
+  end
+  return base
+end
+
+-- A blank 32x24 canvas, for a screen whose first tilemap is smaller than the
+-- screen.  Cell zero of a Gen 4 tile sheet is transparent by convention and
+-- `compose` skips colour index 0 anyway, so an empty cell draws nothing.
+function Gen4Graphics.canvas(tilesWide, tilesHigh)
+  local cells = {}
+  for i = 1, tilesWide * tilesHigh do
+    cells[i] = { tile = 0, flipX = false, flipY = false, palette = 0 }
+  end
+  return { width = tilesWide * 8, height = tilesHigh * 8, cells = cells }
+end
+
+-- `firstTile` is WHERE THE SHEET WAS LOADED, not an offset into the picture,
+-- and leaving it out is what made the Poke Ball step of the intro a field of
+-- one repeated tile with a hole in the middle.
+--
+-- A tilemap's cells index VRAM, not the member they were shipped beside.  The
+-- intro's ball is sixteen tiles (member 32/33/34, 512 bytes each) and its
+-- tilemap (member 40) points at tiles 32..47, because the app loads those
+-- sixteen at tile 32 of the background's character base.  Composed without
+-- that base every ball cell fell past the end of a 16-tile sheet and came out
+-- transparent, while the 736 cells that hold tile 0 -- the empty ones -- all
+-- drew the sheet's own tile 0 instead.  The picture was the exact inverse of
+-- the ball: a repeated glyph everywhere and a 48x48 hole where the ball goes.
+--
+-- Nothing else in that archive needs it and that was checked rather than
+-- assumed: the five backdrops run to tile 121 and the figures' tilemap to 127,
+-- both inside their own 128-tile sheets.  Only the ball is loaded high.
+function Gen4Graphics.compose(map, sheet, palette, firstTile)
   if not (map and sheet and palette) then return nil, "compose needs a tilemap, tiles and a palette" end
 
   local w, h = map.width, map.height
@@ -461,10 +521,12 @@ function Gen4Graphics.compose(map, sheet, palette)
     local cx = ((index - 1) % cols) * 8
     local cy = floor((index - 1) / cols) * 8
     if cy < h then
-      local base = cell.tile * perTile
-      -- A cell may point past the end of a sheet that was cut short; leave
-      -- those transparent instead of reading whatever follows.
-      if base + perTile <= #data then
+      local base = (cell.tile - (firstTile or 0)) * perTile
+      -- A cell may point past the end of a sheet that was cut short, or below
+      -- the base the sheet was loaded at; leave those transparent instead of
+      -- reading whatever follows -- or, for a negative index, whatever
+      -- precedes.
+      if base >= 0 and base + perTile <= #data then
         local shift = four and (cell.palette * 16) or 0
         for y = 0, 7 do
           local sy = cell.flipY and (7 - y) or y

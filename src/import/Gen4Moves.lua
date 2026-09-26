@@ -27,6 +27,8 @@
 -- Beam 150/90/5, Struggle 50 power with 0 accuracy and 1 PP, and Hidden Power
 -- listed at power 1 because the cartridge computes it at run time.
 
+local Gen4TypeChart = require("src.import.Gen4TypeChart")
+
 local Gen4Moves = {}
 
 Gen4Moves.RECORD_BYTES = 16
@@ -64,6 +66,11 @@ function Gen4Moves.parse(record)
     classId = u8(record, 2),
     power = u8(record, 3),
     typeId = u8(record, 4),
+    -- THE NAME AS WELL AS THE NUMBER, because `Damage.lua` reads `move.type`
+    -- in nine places and a Gen 4 move carried only the id -- so every Platinum
+    -- move was typeless: no STAB, no effectiveness, no immunity, no weather or
+    -- held-item modifier, and no crash to say so. See Gen4TypeChart.TYPES.
+    type = Gen4TypeChart.TYPES[u8(record, 4)],
     accuracy = u8(record, 5),
     pp = u8(record, 6),
     effectChance = u8(record, 7),

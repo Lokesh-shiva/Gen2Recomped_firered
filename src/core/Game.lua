@@ -1424,6 +1424,11 @@ function Game:restoreSave(loaded, recovered)
      and Bag.repairFireRedTMCase(loaded, self.data) then
     Logger.info("FireRed save repair: restored missing TM CASE for existing machines")
   end
+  -- ...AND SINNOH'S OPENING FLAGS, for a save written while they were not
+  -- reaching the engine.  Only the ones this save has never recorded a value
+  -- for are restored, so a story already advanced past is left alone; see
+  -- SaveData.repairOpeningFlags for why that test is the whole of it.
+  SaveData.repairOpeningFlags(loaded, self:bootConfig())
   -- Issue #103: 0.1.11 softlocks left CONTINUE in HALL_OF_FAME with
   -- lastOutdoor on Indigo.  One-shot relocate + heal before validate.
   if SaveData.needsPostGameRescue(loaded) then

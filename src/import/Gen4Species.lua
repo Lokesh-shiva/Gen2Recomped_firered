@@ -44,11 +44,14 @@ Gen4Species.RECORD_BYTES = 44
 
 -- Gen 4 type ids.  9 is the unused slot left between Steel and Fire where
 -- Gen 2's "bird" type sat; nothing in the cartridge uses it.
-Gen4Species.TYPES = {
-  [0] = "normal", "fighting", "flying", "poison", "ground", "rock", "bug",
-  "ghost", "steel", "unused", "fire", "water", "grass", "electric",
-  "psychic", "ice", "dragon", "dark",
-}
+--
+-- !! TAKEN FROM Gen4TypeChart RATHER THAN SPELLED AGAIN, and in UPPER CASE.
+-- This was its own lower-case copy, so a species came out `types = { "grass" }`
+-- while the type chart every other game in this launcher writes is keyed
+-- `GRASS` -- and `TypeChart` matches on string identity. Two spellings of the
+-- same eighteen names in two files is how that happened; one table is the fix
+-- that cannot drift back. See the note above Gen4TypeChart.TYPES.
+Gen4Species.TYPES = require("src.import.Gen4TypeChart").TYPES
 
 -- The message bank inside /msgdata/pl_msg.narc that holds species names,
 -- indexed by dex number.  Found by looking rather than assumed: bank 412

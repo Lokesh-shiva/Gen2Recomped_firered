@@ -473,6 +473,83 @@ OverworldState.objectVisible = objectVisible -- exposed for tests + reuse
 -- `save` is passed rather than read off the Game upvalue: this runs while
 -- neighbour strips are built too, and a test can hand it a save without
 -- standing a whole game up.
+-- AN OBJECT WHOSE SPRITE IS A VARIABLE.
+--
+-- `MapObject_GetFieldSystemGraphicsID` (map_object.c):
+--
+--     if (graphicsID >= OBJ_EVENT_GFX_VAR_0 && graphicsID <= OBJ_EVENT_GFX_VAR_F) {
+--         graphicsID -= OBJ_EVENT_GFX_VAR_0;
+--         graphicsID = FieldSystem_GetGraphicsID(fieldSystem, graphicsID);
+--     }
+--
+-- Sixteen graphics ids are not pictures at all: they name a VAR that holds the
+-- real id, and a map's entry script fills it in.  Lake Verity's counterpart is
+-- the one that matters first -- `LakeVerity_OnTransition` reads the player's
+-- gender and writes `SetVar VAR_OBJ_GFX_ID_0, OBJ_EVENT_GFX_PLAYER_F` or `_M`,
+-- because the character standing beside Rowan is whichever of Dawn and Lucas
+-- the player is not.  The port stored the sentinel as a literal id and never
+-- resolved it, so she had no sprite and did not appear.  Reported from play:
+-- *"dawn and professor are supposed to be there but they aren't"*.
+--
+-- THE CONSTANTS ARE DERIVED, NOT GUESSED.  Walking `generated/vars_flags.txt`
+-- as an enum -- a bare name takes the next id, `A = B` aliases B -- reproduces
+-- the flag ids exactly (the rival mother's 497 and Lake Verity's Galactic 448
+-- both match the cache), and the vars come out a uniform 0x3000 low against two
+-- known values, so a script var id is the table id plus 0x3000:
+--
+--     OBJ_EVENT_GFX_VAR_0 = 101 .. OBJ_EVENT_GFX_VAR_F = 116
+--     VAR_OBJ_GFX_ID_0    = 0x1020 + 0x3000 = 0x4020
+--
+-- and `Gen4ObjectGfx.name(101)` answers "var_0", which closes the loop.
+local GFX_VAR_FIRST, GFX_VAR_LAST, GFX_VAR_BASE = 101, 116, 0x4020
+local gfxVarReported = {}
+
+-- A RESOLVED ID IS NOT A SPRITE.  The def carries both, and they do not
+-- coincide: a graphics id is a key into the cartridge's own lookup table and
+-- the sprite is named after the ARCHIVE MEMBER it lands on (140 -> mom ->
+-- SPRITE_G4_119).  Both hops are needed, and both are the extractor's own --
+-- `Gen4ObjectGfx.name` and `gen4_overworld.sprites[name].member`.
+local function gen4SpriteFor(data, graphicsId)
+  local ok, Gfx = pcall(require, "src.import.Gen4ObjectGfx")
+  local name = ok and Gfx and Gfx.name(graphicsId) or nil
+  local sprites = data and data.gen4_overworld and data.gen4_overworld.sprites
+  local record = name and sprites and sprites[name]
+  local member = record and tonumber(record.member)
+  if not member then return nil, name end
+  return ("SPRITE_G4_%03d"):format(member), name
+end
+
+local function resolveGraphicsVar(save, obj)
+  local id = tonumber(obj and obj.graphicsId)
+  if not id or id < GFX_VAR_FIRST or id > GFX_VAR_LAST then return obj end
+  local data = Game and Game.data
+  local vars = save and save.gen4Vars
+  local slot = GFX_VAR_BASE + (id - GFX_VAR_FIRST)
+  local resolved = vars and tonumber(vars[slot])
+  local sprite, name = nil, nil
+  if resolved and resolved ~= 0 then sprite, name = gen4SpriteFor(data, resolved) end
+  if not sprite then
+    -- SAY SO, once per slot.  An unfilled slot is the map's entry script not
+    -- having run yet, which is an ORDERING fault and looks exactly like a
+    -- missing sprite from the outside.  Left as it was rather than guessed at:
+    -- a wrong character standing in for Dawn is worse than no character.
+    if not gfxVarReported[slot] then
+      gfxVarReported[slot] = true
+      Logger.warn("gen4 object: graphics id %d is var_%d (var 0x%04X) and it "
+                  .. "holds %s -- this object keeps the placeholder and will "
+                  .. "not draw", id, id - GFX_VAR_FIRST, slot,
+                  resolved and tostring(resolved) or "nothing yet")
+    end
+    return obj
+  end
+  local copy = {}
+  for k, v in pairs(obj) do copy[k] = v end
+  copy.graphicsId, copy.sprite, copy.spriteName = resolved, sprite, name
+  copy.noSprite = nil
+  return copy
+end
+OverworldState.resolveGraphicsVar = resolveGraphicsVar
+
 local function objectHome(save, mapId, obj)
   save = save or (Game and Game.save)
   local homes = save and save.gen3ObjectHomes and save.gen3ObjectHomes[mapId]
@@ -485,18 +562,29 @@ local function objectHome(save, mapId, obj)
   -- arrival and she is facing her map definition's way again the moment you
   -- walk out and back in.
   local posed = home and home.movementType
-  if not (placed or posed) then return obj end
+  if not (placed or posed) then return resolveGraphicsVar(save, obj) end
   local moved = {}
   for k, v in pairs(obj) do moved[k] = v end
   if placed then moved.x, moved.y = home.x, home.y end
   if posed then moved.movementType = home.movementType end
-  return moved
+  return resolveGraphicsVar(save, moved)
 end
 OverworldState.objectHome = objectHome -- exposed for tests
 
 local function pooledNPC(pool, data, mapId, obj)
   local key = mapId .. "_obj_" .. obj.index
   local npc = pool[key]
+  -- ...AND A POOLED ONE WHOSE SPRITE HAS SINCE BEEN DECIDED IS STALE.
+  --
+  -- The pool is keyed by map and object index, which is right for everything
+  -- whose art is fixed.  An object drawn from a graphics VAR is not: the map's
+  -- entry script chooses it, so the same index can legitimately be Dawn on one
+  -- visit and Lucas on another, and handing back the NPC built before the var
+  -- was filled would keep the placeholder for the rest of the session.
+  if npc then
+    local want = objectHome(nil, mapId, obj)
+    if want and npc.def and want.sprite ~= npc.def.sprite then npc = nil end
+  end
   if not npc then
     npc = NPC.new(data, mapId, objectHome(nil, mapId, obj))
     -- A BURIED TRAINER IS NOT ON SCREEN UNTIL THEY NOTICE YOU.
@@ -709,6 +797,20 @@ local DATA_DERIVED = {
 function OverworldState:enter(mapId, x, y, facing)
   Game = require("src.core.Game")
   Game.overworld = self
+  -- THE SAVED CAMERA TILT, taken up before the first map is built.
+  --
+  -- `Gen4Camera` holds the choice in the module rather than reading the save,
+  -- because the thing that needs it -- `Gen4Ground`, built by
+  -- `MapLoader.load(data, mapId)` -- is never handed a game.  That left one
+  -- gap: nothing read the SAVED value at boot, so a player who chose 60
+  -- degrees last session got the cartridge's own pitch until they opened
+  -- OPTIONS once.  This is the moment that gap closes, and it is the same
+  -- moment the cartridge-changed reset below happens for the same reason: it
+  -- is the one place every path into the world goes through.
+  --
+  -- A no-op on every other generation: the option is only ever written by the
+  -- Gen 4 OPTIONS row, and `sync` leaves the default alone when it is absent.
+  require("src.render.Gen4Camera").sync(Game)
   -- ...and this is the moment to notice the cartridge changed.  Not in
   -- bootGame: the map editor's Play and any future path into the world reach
   -- here too, and a reset that lives beside the thing it protects cannot be
@@ -1257,10 +1359,24 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
   self.pendingSeamMusic = nil
   -- a fresh map owns no leftover extras: start from nothing, then derive
   self.entities = nil
+  -- ...INCLUDING THE SCRIPTED CAMERA.  Its body is one of the entities about
+  -- to be thrown away, and a stale reference would leave `cameraTarget`
+  -- pointing at a corpse -- the view frozen on a cell of the map the player
+  -- just left.  The cartridge is no kinder: a free camera does not survive a
+  -- map change either, because the object it tracks is deleted with the rest.
+  self.gen4Camera = nil
   self:rebuildEntities()
   -- Yellow's companion Pikachu trails the player (never in
   -- self.entities: it does not block movement, pikachu_follow.asm)
   require("src.world.PikachuFollower").onMapEntered(Game, self, opts)
+  -- ...and Sinnoh's partner, who is a different animal: an escort character
+  -- who trails the player AND CROSSES MAP SEAMS WITH THEM.  Barry is marked
+  -- MAP_OBJ_STATUS_PERSISTENT on Route 201 and Verity Lakefront's arrival
+  -- scene then addresses him as LOCALID_FOLLOWER -- on a map whose event file
+  -- carries one signpost and nothing else.  This is where he is stood back up.
+  -- After rebuildEntities, so the map's own cast is already there to be
+  -- adopted when the map owns a real object for him.
+  require("src.world.Gen4Follower").onMapEntered(Game, self)
 
   -- opts.keepMusic: the Oak-escort warp keeps MUSIC_MEET_PROF_OAK
   -- playing into the lab (BIT_NO_MAP_MUSIC in wStatusFlags7);
@@ -1320,7 +1436,9 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
   -- snap the camera immediately: the overworld doesn't update while a
   -- Transition is on top, so a stale camera would show the new map at
   -- the old scroll position for the whole fade-in
-  self.camera:follow(self.player.px, self.player.py,
+  self.camera.groundScale = self:groundSin()
+  local camTarget = self:cameraTarget()
+  self.camera:follow(camTarget.px, camTarget.py,
                      Game.renderer:worldViewSize())
 
   -- ...AND THE REMATCH ROLL, which happens HERE and not on the step.
@@ -1389,6 +1507,40 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
   if GameVersion.isGen3() and Game and Game.save then
     pcall(function()
       require("src.world.Gen3Roamers").step(Game.data, Game.save, mapId)
+    end)
+  end
+
+  -- ...AND SINNOH'S SIX, WHICH MOVE ON A DIFFERENT BEAT FROM BOTH.
+  --
+  -- Gen 2's beasts and Hoenn's one hop on EVERY map load. Platinum's do not:
+  -- `FieldSystem_InitFlagsOnMapChange` calls
+  -- `RoamingPokemon_UpdatePlayerRecentRoutes` and then
+  -- `RoamingPokemon_MoveAllLocations`, while `FieldSystem_InitFlagsWarp` calls
+  -- only the first. So a Sinnoh roamer moves when you WALK ACROSS A MAP
+  -- BOUNDARY and stays put when you go through a door.
+  --
+  -- Getting that backwards would move all six several times per Pokemon Centre
+  -- visit, which is not a crash and not visible in a log -- it just makes a
+  -- roamer impossible to corner. `via` is derived the same way the
+  -- `map.entered` event above derives it, so the two cannot disagree.
+  --
+  -- The RECENT-ROUTE memory is updated on both, because the cartridge does:
+  -- that is the "do not hop onto the map the player just left" list, and a
+  -- door counts as having left.
+  if GameVersion.isGen4() and Game and Game.save then
+    local via = (opts and opts.via)
+                or (opts and opts.seamless and "connection")
+                or (fromMapId and "warp" or "boot")
+    pcall(function()
+      local Roamers = require("src.world.Gen4Roamers")
+      Roamers.noteMap(Game.save, mapId)
+      if via == "connection" then
+        local moved = Roamers.moveAll(Game.data, Game.save)
+        if moved > 0 then
+          Logger.debug("gen4 roamers: %d moved on the connection into %s",
+                       moved, tostring(mapId))
+        end
+      end
     end)
   end
 
@@ -1996,6 +2148,23 @@ function OverworldState:bikeAllowed(mapId)
   if GameVersion.isGen3() then
     local def = Game.data.maps[mapId]
     return (def and def.allowCycling) == true
+  end
+  -- ...AND SINNOH PUTS IT IN THE MAP HEADER TOO, under its own name.
+  --
+  -- `Gen4MapHeaders.parse` has always read `allowBike` out of the header flags
+  -- word, and the maps module carries it on all 593 rows -- so the exact
+  -- cartridge answer was in the cache and nothing asked. Without this arm a
+  -- Gen 4 cache fell through to the GEN 1 branch below, whose `bikeRiding`
+  -- table is a list of KANTO map ids and Kanto tileset names; a Platinum cache
+  -- writes no such table at all, so the bike was allowed on whatever
+  -- `Map.isOutdoor` happened to say rather than where Sinnoh allows it.
+  --
+  -- This matters beyond the sprite: both Cycling Road gates turn the player
+  -- away unless `checkplayeronbike` answers yes, and Route 206 is the road
+  -- south out of Eterna.
+  if GameVersion.isGen4() then
+    local def = Game.data.maps[mapId]
+    return (def and def.allowBike) == true
   end
   local br = Game.data.field.bikeRiding
   if not br then return Map.isOutdoor(self.map.def) end
@@ -3190,6 +3359,7 @@ function OverworldState:update(dt)
     npc:update(self.map, cast)
   end
   require("src.world.PikachuFollower").update(Game, self)
+  require("src.world.Gen4Follower").update(Game, self)
 
   for _, g in ipairs(self.ghosts) do
     -- the same reasoning as ghostCell: a ghost that names no neighbour is
@@ -3289,7 +3459,31 @@ function OverworldState:update(dt)
       local why = {}
       if self.runner:isRunning() then why[#why + 1] = "a script is running" end
       if #self.scriptMoves > 0 then
-        why[#why + 1] = ("%d scripted move(s) queued"):format(#self.scriptMoves)
+        -- NAME THEM, because the count alone is not a lead.
+        --
+        -- A queue that will not drain is one specific move on one specific
+        -- walker, and "1 scripted move(s) queued" is the same line whether the
+        -- walker never started, never finished, or is waiting on a pause that
+        -- cannot tick.  Those are three different bugs.  This is the guitarist
+        -- scene in Twinleaf: the move is queued against a real entity -- the
+        -- `gen4 move: no object with localId` warning never fires -- so what
+        -- is left to learn is which of its parts is stuck, and that is exactly
+        -- what these fields say.
+        local parts = {}
+        for i, mv in ipairs(self.scriptMoves) do
+          local e = mv.entity
+          parts[#parts + 1] = ("[%d] %s dir=%s remaining=%s pause=%s "
+                               .. "moving=%s cell=%s,%s target=%s,%s"):format(
+            i,
+            tostring(e and (e.id or (e == self.player and "PLAYER") or "?")
+                     or "NO ENTITY"),
+            tostring(mv.dir), tostring(mv.remaining), tostring(mv.pause),
+            tostring(e and e.moving), tostring(e and e.cellX),
+            tostring(e and e.cellY), tostring(e and e.targetX),
+            tostring(e and e.targetY))
+        end
+        why[#why + 1] = ("%d scripted move(s) queued: %s")
+                        :format(#self.scriptMoves, table.concat(parts, " | "))
       end
       if self.engaging then why[#why + 1] = "a trainer is engaging" end
       if self.emote then why[#why + 1] = "an emote bubble is up" end
@@ -3372,7 +3566,9 @@ function OverworldState:update(dt)
     self:onStepComplete()
   end
 
-  self.camera:follow(self.player.px, self.player.py,
+  self.camera.groundScale = self:groundSin()
+  local camTarget = self:cameraTarget()
+  self.camera:follow(camTarget.px, camTarget.py,
                      Game.renderer:worldViewSize())
 
   -- pan_camera offset rides on top of the follow; the ramp resumes its
@@ -4009,6 +4205,29 @@ function OverworldState:handleInput()
     Screens.push(Game, screens.startMenu or "StartMenu")
     return
   end
+  -- THE SECOND SCREEN'S OWN BUTTON, which is the first line of the original
+  -- brief: "allow users to switch between the two with a button ... with a
+  -- hotkey".  L raises the Poketch and L or B lowers it again.
+  --
+  -- L rather than SELECT because SELECT is already the registered key item
+  -- below, and rather than a new binding because L is an action the controls
+  -- menu already lists -- so it is rebindable without this screen knowing how
+  -- rebinding works.  Gated on the cartridge HAVING a second screen, so no
+  -- Gen 1-3 press changes behaviour.
+  if input:wasPressed("l") then
+    local SecondScreen = require("src.ui.SecondScreen")
+    if SecondScreen.available(Game) then
+      Game.secondScreenUp = true
+      -- By its own id, not through an alias: there is no Game Boy Poketch for
+      -- `GEN4_ALIASES` to stand in front of, so an alias would be a redirect
+      -- from a screen that does not exist.
+      Screens.push(Game, "Gen4Poketch", {
+        onCancel = function() Game.secondScreenUp = false end,
+      })
+      return
+    end
+  end
+
   -- SELECT runs the registered key item without opening the pack.
   --
   -- HOENN REGISTERS TOO, and this was the line that said it could not.  The
@@ -4583,6 +4802,12 @@ function OverworldState:connectionLanding(dir)
   if not conn then return nil end
   local dest = Game.data.maps[conn.map]
   if not dest then return nil end
+  -- The seam reads the NEIGHBOUR'S OWN COLLISION, which means the neighbour
+  -- needs some.  A Gen 4 map that references a shared grid instead of carrying
+  -- one has no `blocks` until it is loaded, and `Map.defPassable` below would
+  -- read nil and refuse every cell of the seam.  Idempotent and a no-op on
+  -- every other generation.
+  MapLoader.resolveBlocks(Game.data, dest)
   local ts = Game.data.tilesets[dest.tileset]
   if not ts then return nil end
   local p = self.player
@@ -4712,6 +4937,7 @@ function OverworldState:crossConnection(dir, conn, scripted)
       self.entities[#self.entities + 1] = e
     end
   end
+  self.camera.groundScale = self:groundSin()
   self.camera:follow(p.px, p.py)
   p.facing = dir
   p.targetX, p.targetY = x, y
@@ -5419,20 +5645,62 @@ function OverworldState:beginTeleportOut(onDone, opts)
                       escape = opts and opts.escape or nil }
 end
 
+-- HOW MUCH A MAP PIXEL OF DEPTH IS WORTH ON SCREEN.
+--
+-- One everywhere except a Gen 4 map, which is drawn at a pitch and whose
+-- ground is `sin(pitch)` screen pixels per map pixel.  The camera needs it to
+-- put the player in the middle of the screen (`Camera:follow`), and it is read
+-- from the ground itself rather than from the camera table so the two can
+-- never disagree about which pitch is in force.
+-- WHO THE CAMERA IS LOOKING AT, which is not always the player.
+--
+-- A Gen 4 cutscene pans by standing an INVISIBLE map object where it wants the
+-- view and walking it: `ScrCmd_AddFreeCamera` creates one with
+-- OBJ_EVENT_GFX_INVISIBLE and points `Camera_TrackTarget` at its position,
+-- `ApplyFreeCameraMovement` (which is just `ApplyMovement LOCALID_CAMERA`)
+-- walks it, and `ScrCmd_RestoreCamera` deletes it and tracks the player again.
+-- Lake Verity Low Water's arrival is the first one the player meets: the view
+-- leaves the player, finds Cyrus at the water, and comes back.
+--
+-- So the whole feature is an entity the script can already walk plus this one
+-- decision.  `src/script/Gen4Commands` owns the body; nothing else in this
+-- file needs to know it exists.
+function OverworldState:cameraTarget()
+  return self.gen4Camera or self.player
+end
+
+function OverworldState:groundSin()
+  local ground = self.map and self.map.renderer and self.map.renderer.gen4Ground
+  if not (ground and ground.scale) then return 1 end
+  local ok, sin = pcall(ground.scale, ground)
+  sin = ok and tonumber(sin) or nil
+  if not (sin and sin > 0) then return 1 end
+  return sin
+end
+
 function OverworldState:npcAtCell(cx, cy)
   for _, npc in ipairs(self.npcs) do
-    local big = npc.big or (npc.sprite and npc.sprite.big)
-      or (npc.def and (npc.def.sprite == "SPRITE_BIG_SNORLAX"
-                      or npc.def.sprite == "SPRITE_BIG_LAPRAS"
-                      or npc.def.big))
-    if big then
-      local x, y = npc.cellX, npc.cellY
-      if x and y and cx >= x and cx <= x + 1 and cy >= y and cy <= y + 1 then
+    -- SOMEBODY A SCRIPT REMOVED IS NOT THERE TO BE TALKED TO.
+    --
+    -- The same rule `Collision.occupied` applies, for the same reason: the
+    -- doorway the log reported as "no text for Twinleaf Town/nil" was the
+    -- rival, removed at the end of his scene and still answering A from the
+    -- tile he used to stand on.  A BURIED trainer is covered up rather than
+    -- gone, so they still answer -- which is how they spot you.
+    if not (npc.hidden and not npc.buried) then
+      local big = npc.big or (npc.sprite and npc.sprite.big)
+        or (npc.def and (npc.def.sprite == "SPRITE_BIG_SNORLAX"
+                        or npc.def.sprite == "SPRITE_BIG_LAPRAS"
+                        or npc.def.big))
+      if big then
+        local x, y = npc.cellX, npc.cellY
+        if x and y and cx >= x and cx <= x + 1 and cy >= y and cy <= y + 1 then
+          return npc
+        end
+      elseif (npc.cellX == cx and npc.cellY == cy) or
+             (npc.targetX == cx and npc.targetY == cy) then
         return npc
       end
-    elseif (npc.cellX == cx and npc.cellY == cy) or
-           (npc.targetX == cx and npc.targetY == cy) then
-      return npc
     end
   end
   return nil
@@ -9315,6 +9583,20 @@ end
 
 function OverworldState:trainerDefeated(npc)
   if Game.save.defeatedTrainers[npc.id] then return true end
+  -- A GEN 4 TRAINER IS BEATEN WHEN `settrainerflag` HAS NAMED THEM.
+  --
+  -- The shared trainer script ends `getapproachingtrainerid / setvarfromvar /
+  -- settrainerflag <id>`, and `Gen4Commands` keeps those in their own table --
+  -- `save.gen4TrainerFlags`, a separate bank on the cartridge and a separate
+  -- table here, so a trainer id cannot collide with a Gen 1-3 event flag.  That
+  -- table is the whole record of the fight and therefore the whole test; without
+  -- it every trainer in Sinnoh would challenge again on sight, forever.
+  local gen4Id = npc.def and type(npc.def.trainer) == "table"
+                 and tonumber(npc.def.trainer.id)
+  if gen4Id then
+    local flags = Game.save.gen4TrainerFlags
+    return (flags and flags[gen4Id]) and true or false
+  end
   -- A GEN 3 TRAINER IS BEATEN WHEN THEIR OWN FLAG IS SET.
   --
   -- There is no trainer header on this cartridge: the object says it is a
@@ -9576,7 +9858,21 @@ function OverworldState:checkTrainerSight()
     -- The talk-script exclusion is Gen 1/2's -- there, an NPC with authored
     -- dialogue is a talker rather than a fighter.  A Gen 3 trainer's script
     -- IS the battle, so it must not exclude itself.
-    local isTrainer = d.gen3Trainer or
+    -- A GEN 4 TRAINER IS ONE THE BAND SAYS IS ONE.  There is no `trainerClass`
+    -- and no `gen3Trainer` on this cartridge: the object's script id lands in
+    -- `single_battles` (3000+) or `double_battles` (5000+) and the extractor
+    -- resolved that at import into `trainer = { id, class, className, party }`.
+    -- Nothing in this file read it, so all 417 of Sinnoh's trainers fell out of
+    -- the scan on its very first test and not one of them ever noticed anybody.
+    -- The talk-script exclusion below must not apply to them for the same
+    -- reason it does not apply to Gen 3: their script IS the battle.
+    -- `type(...) == "table"` rather than a bare truth test: Prism's and
+    -- Polished Crystal's map caches are not staged here to be inventoried, and
+    -- indexing a NUMBER named `trainer` would take the overworld down on those
+    -- two rather than simply answering no.  Crystal, Gold and FireRed were
+    -- checked and carry no such field on any of their 4,457 objects.
+    local gen4Trainer = type(d.trainer) == "table" and d.trainer.id ~= nil
+    local isTrainer = d.gen3Trainer or gen4Trainer or
       (d.trainerClass and (d.trainerObject
                            or not mapScripts.talkScript(self.map.id, d.text)))
     -- A buried trainer you have already beaten is standing in the open: they
@@ -9611,8 +9907,25 @@ function OverworldState:checkTrainerSight()
       -- Route 113, and the eight in Lavaridge Gym -- who stand on the gym's
       -- sand-hole tiles, where the player arrives from whichever side they
       -- fell in from, so a single facing would have been meaningless.
+      --
+      -- GEN 4 STATES THE ANSWER AT IMPORT, because its raw type number is not
+      -- orderable.  `GetTrainerType` (trainer_encounter.c) rewrites FACE_SIDES
+      -- (4) and the four turners and spinners (5-8) to NORMAL (1) before asking
+      -- about distance, so all five look ONE way despite outnumbering
+      -- VIEW_ALL_DIRECTIONS (2), which looks four; NONE (0) and UNK_003 (3)
+      -- match neither branch and never spot at all.  Emerald's `>= 2` rule is
+      -- therefore wrong here on 21 of the 417 objects, and RomExtractorGen4
+      -- writes `sightWays` as a COUNT OF DIRECTIONS -- 0, 1 or 4 -- so the
+      -- collapse happens once, beside the pret reference, instead of being
+      -- re-derived from a number whose ordering means nothing.
       local ways = { npc.facing }
-      if (tonumber(d.gen3TrainerType) or 1) >= 2 then
+      local sightWays = tonumber(d.sightWays)
+      if sightWays then
+        -- 0 is "this kind never spots": the range is irrelevant and saying so
+        -- here keeps the geometry below from having to know about it.
+        if sightWays == 0 then range = 0 end
+        if sightWays >= 4 then ways = { "up", "down", "left", "right" } end
+      elseif (tonumber(d.gen3TrainerType) or 1) >= 2 then
         ways = { "up", "down", "left", "right" }
       end
       for _, way in ipairs(ways) do
@@ -9767,7 +10080,19 @@ function OverworldState:startTrainerApproach(npc, dist, partner)
     -- header, the battle, the won text, the flags -- and none of those parts
     -- exist on this cartridge.  Here the object's own script does all four,
     -- starting with the trainerbattle, so the approach hands over to it.
-    if npc.def and npc.def.gen3Trainer then
+    --
+    -- ...AND SO IS A GEN 4 ONE, for the same reason and through the same rows.
+    -- The cartridge reaches a spotted trainer through its own approach script
+    -- (`startapproachingtrainertask` and the wait loop behind it), and this
+    -- engine synthesizes that walk above rather than lowering those commands --
+    -- so what is left for the script to do is exactly what the talk path does:
+    -- the encounter BGM, the pre-battle line, the battle, the flag.  Handing
+    -- over to the object's own rows is therefore both halves at once, and it is
+    -- also the only path that knows WHICH trainer this is: `g4_get_trainer_id`
+    -- reads `ctx.npc.def.trainer.id`, so the one shared block serves all 417.
+    if npc.def and (npc.def.gen3Trainer
+                    or (type(npc.def.trainer) == "table"
+                        and npc.def.trainer.id)) then
       local rows = mapScripts.talkScript(self.map.id, npc.def.text)
       if rows then
         -- THE SECOND TRAINER RIDES ON THE CONTEXT.
@@ -10262,6 +10587,14 @@ end
 
 function OverworldState:onStepComplete()
   local p = self.player
+  -- THE POKETCH'S PEDOMETER, which is a step counter and has to be counted
+  -- where steps are.  Gated on the cartridge having a second screen at all, so
+  -- no Gen 1-3 step pays for it, and kept on the save because closing the watch
+  -- is not meant to reset it.
+  if require("src.ui.SecondScreen").available(Game) and Game.save then
+    Game.save.poketch = Game.save.poketch or {}
+    Game.save.poketch.steps = (Game.save.poketch.steps or 0) + 1
+  end
   -- THE REMATCH STEP COUNTER.
   --
   -- IncrementRematchStepCounter (0x080B215C) runs once per step and only
@@ -10694,6 +11027,32 @@ function OverworldState:onStepComplete()
         enc, roamer = one, "gen3"
       end
     end
+  elseif enc and GameVersion.isGen4() then
+    -- SINNOH ASKS IN THE OTHER ORDER, and that is the whole difference.
+    --
+    -- Gen 2 rolls a SLOT and then looks at where that one is, so three beasts
+    -- on your route are no likelier than one. `TryEncounterRoamer` gathers
+    -- every active roamer ON THIS MAP first and only then spends one flat
+    -- `LCRNG_RandMod(2)` -- so presence decides whether a coin is flipped at
+    -- all and the count only decides which one you meet. With Eterna's three
+    -- birds loose on one route that is 1/2 x 1/3 each, not Gen 2's
+    -- 75/256 x 1/6: a factor of five, and nothing would have reported it.
+    --
+    -- NO `onWater` TEST HERE. Gen 2 refuses a beast while surfing outright;
+    -- Gen 4 does not -- its exclusions are Poke Radar patches and double
+    -- battles, and Route 218, Route 219, Route 220, Route 221 and Route 222
+    -- are in the roaming table precisely because a roamer can be met on the
+    -- water there.
+    local Roamers = require("src.world.Gen4Roamers")
+    local slot, it = Roamers.check(Game.data, Game.save, self.map.id,
+                                   love.math.random)
+    if slot then
+      local one = Roamers.encounterFor(slot, it)
+      if one and one.species then
+        enc, roamer = one, "gen4"
+        self.gen4RoamerSlot = slot
+      end
+    end
   elseif enc and not onWater then
     local RoamMons = require("src.world.RoamMons")
     local name, info = RoamMons.check(Game.save, self.map.id, onWater,
@@ -10704,6 +11063,14 @@ function OverworldState:onStepComplete()
         enc, roamer = beast, name
       end
     end
+  end
+  -- ...AND THE 30% NOBODY WOULD GUESS. `RoamerAfterBattle_UpdateRoamers` runs
+  -- after EVERY wild battle in Sinnoh, and when the battle was an ORDINARY wild
+  -- one it still scares every roamer off this map three times in ten. So the
+  -- slot has to be remembered even when the encounter is not a roamer -- nil
+  -- is the "ordinary wild" case the rule needs, not the absence of a rule.
+  if enc and GameVersion.isGen4() and roamer ~= "gen4" then
+    self.gen4RoamerSlot = nil
   end
 
   if enc then
@@ -11166,7 +11533,34 @@ function OverworldState:afterBattle(result, battle)
   -- Escaping writes the HP back instead. That is the point of chasing one:
   -- damage carries between meetings, and a beast on a sliver stays on a
   -- sliver until you finally land the ball.
-  if battle and battle.roamer then
+  -- SINNOH FIRST, BECAUSE IT RUNS WHETHER A ROAMER WAS FOUGHT OR NOT.
+  --
+  -- The other two generations only care about a roamer battle. Platinum's
+  -- after-battle pass is on the way out of ANY wild encounter and has two arms:
+  -- met one -> write its HP and status back (or retire it) and then every
+  -- roamer ON THIS MAP takes a long hop; met an ordinary wild -> a 30% chance
+  -- they all leave anyway. The second arm is why this sits outside the
+  -- `battle.roamer` test.
+  if GameVersion.isGen4() and Game and Game.save and battle
+     and battle.kind == "wild" then
+    local slot = (battle.roamer == "gen4") and self.gen4RoamerSlot or nil
+    local enemy = battle.enemy
+    local hp = enemy and enemy.mon and enemy.mon.hp or 0
+    local status = enemy and enemy.mon and enemy.mon.status
+    local gone = result == "caught" or result == "win" or hp <= 0
+    self.gen4RoamerSlot = nil
+    pcall(function()
+      local Roamers = require("src.world.Gen4Roamers")
+      local left, how = Roamers.afterBattle(Game.data, Game.save,
+                                            self.map and self.map.id,
+                                            slot, hp, status, gone)
+      if left and left > 0 then
+        Logger.debug("gen4 roamers: %d left %s after the battle (%s)",
+                     left, tostring(self.map and self.map.id), tostring(how))
+      end
+    end)
+  end
+  if battle and battle.roamer and battle.roamer ~= "gen4" then
     local enemy = battle.enemy
     local hp = enemy and enemy.mon and enemy.mon.hp or 0
     local gone = result == "caught" or result == "win" or hp <= 0
@@ -11308,6 +11702,16 @@ function OverworldState:takeWarp(warpDef)
   -- still with a line in the log beats handing MapLoader an id that does not
   -- exist, which raises under the player's feet.
   if not destMap then return end
+  -- GEN 4'S LIFTS REMEMBER THE FLOOR YOU GOT ON AT, and the door you are
+  -- taking is the only place that knows it.  Stepping into a lift car
+  -- overwrites the special location with the floor being left
+  -- (field_map_change.c 232), which is how Hearthome's and the Vista
+  -- Lighthouse's panel-less cars know which way to go, and how walking
+  -- straight back out of any car returns you here.  A no-op on every warp that
+  -- is not a car door, which is 1,207 of Sinnoh's 1,213.
+  Warp.noteGen4Entrance(Game.data, Game.save, warpDef, destMap, fromMap,
+                        self.player.cellX, self.player.cellY,
+                        self.player.facing)
   -- EnterMapWarp stores the warp being left through as the backup, so a
   -- LAST_WARP door on the far side comes straight back here
   self.backupWarp = { id = fromMap, x = self.player.cellX, y = self.player.cellY }
@@ -12259,9 +12663,40 @@ function OverworldState:updateScriptMoves()
             goto stepped
           end
         end
-        e.targetX, e.targetY = tx, ty
-        e.moving = true
-        e.progress = 0
+        -- AN OBJECT EVENT BELONGS TO ITS MAP, AND A SCRIPTED WALK CANNOT
+        -- POST IT OUT OF ONE.
+        --
+        -- The crossing above is deliberately the player's alone -- the comment
+        -- there says so, and the cartridge rebuilds its object array per map
+        -- load for the same reason.  But nothing then stopped a non-player
+        -- walker being stepped off the edge anyway, and off the edge is where
+        -- an entity stops being updated: its step never completes, `moving`
+        -- stays true for ever, and the `scriptMoves` queue it sits in never
+        -- drains.  That is a held input gate with nothing on screen, which is
+        -- exactly what Twinleaf's guitarist produced --
+        --
+        --   [1] T01_obj_4 dir=up remaining=0 pause=nil moving=true
+        --   cell=15,-3 target=15,-4
+        --
+        -- -- once repeated triggers had walked him three tiles north at a time
+        -- off the top of a 32-tile map.  Refusing the step retires the move
+        -- instead of stranding it, so the scene ends and the gate opens.
+        local offMapStep = e ~= self.player and self.map and self.map.inBounds
+                           and not self.map:inBounds(tx, ty)
+        if offMapStep then
+          if not self.reportedOffMapWalk then
+            self.reportedOffMapWalk = true
+            Logger.warn("scripted walk on %s would step %s off %s to %d,%d -- "
+                        .. "refused, and the move is retired so the queue can "
+                        .. "drain", tostring(e.id or "?"), tostring(mv.dir),
+                        tostring(self.map and self.map.id), tx, ty)
+          end
+          mv.remaining = 0
+        else
+          e.targetX, e.targetY = tx, ty
+          e.moving = true
+          e.progress = 0
+        end
       end
       mv.remaining = mv.remaining - 1
       ::stepped::
@@ -14030,6 +14465,52 @@ function OverworldState:drawWorld()
     -- the final one.
     local grassColors = PaletteFX.usesSpriteObp()
       and PaletteFX.pal(Game.data, self:paletteNameFor(self.map)) or nil
+    -- WHOEVER IS STANDING ON THE GROUND HAS TO LEAN WITH IT.
+    --
+    -- Gen 4 draws its chunks at the map header's own camera pitch, which means
+    -- height leans up the screen (`Gen4Camera`, `Gen4Ground`).  The tile grid
+    -- is untouched by that -- the ground plane still maps one to one, which is
+    -- the whole reason the oblique projection was chosen -- but a character on
+    -- a hill, a bridge or a flight of steps is drawn at the grid's height and
+    -- not the terrain's, so they walk THROUGH what they are meant to be on.
+    --
+    -- `rise` is that lift in pixels, and it is zero on every Gen 1/2/3 map and
+    -- on any Gen 4 map drawn straight down -- `gen4Ground` is nil in the first
+    -- case and `lean` is 0 in the second, so this costs one nil test a frame
+    -- for everything that is not Sinnoh.
+    --
+    -- Passing it as a shifted CAMERA rather than a shifted position is what
+    -- keeps it to one seam: every sprite path in the engine ends in
+    -- `py - camY`, so lifting the camera lifts the sprite and nothing else has
+    -- to learn about elevation.
+    local ground = self.map.renderer and self.map.renderer.gen4Ground
+    -- WHERE A SPRITE GOES ONCE THE GROUND IS NO LONGER ONE TO ONE.
+    --
+    -- The Gen 4 ground is drawn at the cartridge's own pitch, which COMPRESSES
+    -- it: a point `z` map pixels down the map lands `z * sin(pitch)` pixels
+    -- down the screen, and anything standing `h` above the ground rises
+    -- `h * cos(pitch)`.  Every sprite in this engine draws at `py - camY`, so
+    -- the whole of that projection can be expressed as a per-entity CAMERA
+    -- OFFSET -- which is the seam this function already was:
+    --
+    --     py - camY' = (py - camY) * sin - rise
+    --     camY'      = camY + (py - camY) * (1 - sin) + rise
+    --
+    -- so the offset added to the camera is `(py - camY) * (1 - sin) + rise`.
+    -- At pitch 90 sin is 1 and that is exactly `rise`, which is what every
+    -- other generation and the flat bake get -- no second path, and nothing
+    -- outside this closure has to learn about the projection.
+    --
+    -- The COLLISION GRID IS UNTOUCHED by any of this.  It is in map pixels and
+    -- stays there; only the picture is projected, which is why a compressed
+    -- world still walks the same.
+    local groundSin = ground and ground.scale and select(1, ground:scale()) or 1
+    local function riseOf(e)
+      if not ground then return 0 end
+      local rise = ground:rise(e.px + (e.shiftPx or 0) + 8, e.py + 8)
+      if groundSin >= 1 then return rise end
+      return (e.py - cam.y) * (1 - groundSin) + rise
+    end
     for _, g in ipairs(self.ghosts) do
       g.npc:draw(cam.x - g.ox, cam.y - g.oy)
     end
@@ -14045,10 +14526,24 @@ function OverworldState:drawWorld()
     -- is planted, grows and is picked without the map reloading, so its
     -- emptiness is asked at draw time rather than remembered at spawn.
     local plotEmpty = plotIsEmpty
+    -- SINNOH'S CHARACTERS STAND ON SOMETHING.  Built once per frame rather
+    -- than per entity, and nil on every other generation -- see
+    -- `src/render/Gen4Shadows`, and `src/import/Gen4Shadow` for where the
+    -- cartridge's rules came from.
+    local shadows = self.gen4Shadows
+    if shadows == nil then
+      shadows = require("src.render.Gen4Shadows").forMap(Game.data) or false
+      self.gen4Shadows = shadows
+    end
     local function drawEntity(e)
       if not (self.flyAnim and self:hasFlyBird() and e == self.player)
          and not e.hidden and not plotEmpty(e) then
-        e:draw(cam.x, cam.y)
+        -- UNDER the sprite, and lifted by the same terrain rise it is, so a
+        -- character on a slope keeps their feet on it.
+        if shadows then
+          shadows:draw(self.map, e, cam.x, cam.y, e == self.player, riseOf(e))
+        end
+        e:draw(cam.x, cam.y + riseOf(e))
         -- tall grass overdraws the sprite's feet (GB sprite priority);
         -- the overdraw is BG tiles, so it rides the shake offset too
         love.graphics.setColor(1, 1, 1, 1)

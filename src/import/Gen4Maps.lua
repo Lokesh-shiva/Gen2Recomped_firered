@@ -90,7 +90,64 @@ local Gen4Maps = {}
 Gen4Maps.CHUNK = 32                  -- tiles per side of a land chunk
 Gen4Maps.PERMISSION_BYTES = 2048     -- 32 * 32 * 2
 Gen4Maps.OBJECT_BYTES = 48
-Gen4Maps.VOID = 0x8000               -- bit 15: this tile is not part of the map
+-- BIT 15 IS COLLISION, NOT "NOT PART OF THE MAP", and this file called it the
+-- second thing for a long time.  The behaviour was right by luck -- both
+-- readings make the tile impassable -- but the NAME sent every later reader
+-- looking for a wall table that does not need to exist.
+--
+-- `TERRAIN_ATTRIBUTES_COLLISION_MASK` is 0x8000 and
+-- `TerrainCollisionManager_CheckCollision` reads exactly that bit and nothing
+-- else.  Measured against this cartridge's own 681,984 tiles, three ways that
+-- cannot borrow from each other:
+--
+--   * 335,165 tiles have it set -- 49.1% of Sinnoh.  Half a region is not
+--     missing; that is walls, cliffs, building footprints and sea.
+--   * The per-chunk share is spread across EVERY decile (88 chunks under 10%,
+--     107 at 10-20%, 101 above 90%).  "Off the map" would be bimodal: a chunk
+--     is either land or it is not.  Per-tile collision is not.
+--   * 26 behaviour values occur both blocked AND open.  A tile that is not
+--     part of the map does not also carry a behaviour that is walkable
+--     elsewhere, so the bit is an independent fact about the tile.
+--
+-- And the rest of the high byte carries nothing at all: bits 8-14 are clear on
+-- every one of the 681,984 tiles, and the highest word in the cartridge is
+-- 0x80E5.  So the word is exactly a collision bit and a behaviour byte.
+Gen4Maps.COLLISION = 0x8000
+
+-- ...AND THE ENGINE'S GRID HAS NO ROOM FOR IT WHERE THIS USED TO PUT IT.
+--
+-- Reported from play: *"still able to walk out of bounds"*, and a screenshot of
+-- the player standing in the black above a bedroom.  Both are one bug.
+--
+-- `mapDef` below packs each cell into the same 16-bit word Gen 3 uses, and it
+-- used to write the collision flag at BIT 10 -- `behaviour + collision * 1024`
+-- -- because that is where Gen 3 keeps its own collision bits.  But Gen 3 does
+-- not READ them from there: `RomExtractorGen3` splits the word at import into
+-- `blocks`, `collisionCells` and `elevationCells`, and the engine's shared
+-- decoder, `Map.blockArray`, therefore ends with `% 1024` -- it is extracting
+-- Gen 3's metatile id and deliberately dropping everything above it.
+--
+-- So every Gen 4 collision bit was masked off between the importer and the
+-- map.  Measured through the real decoder over 200,000 cells of the overworld
+-- matrix: the grid marks 199,560 of them blocked and the engine concluded
+-- **zero**.  All 335,165 blocked tiles in Sinnoh -- 49.1% of the region, every
+-- wall, cliff, building footprint and stretch of sea -- were walkable.
+--
+-- The fix is to stop encoding it as a flag at all and give a blocked cell its
+-- own RESERVED CELL VALUE, inside the ten bits that survive.  255 is free and
+-- provably so: across all 681,984 tiles the behaviour byte takes 94 distinct
+-- values topping out at 229 (0xE5), the highest word in the cartridge is
+-- 0x80E5, and the stand-in tileset's walkable set is 0..254 -- so 255 is a
+-- value the cartridge never emits AND one the engine already refuses.
+--
+-- WHAT THIS COSTS: the behaviour of a blocked tile.  Nothing, in practice --
+-- the old encoding wrote `behaviour = 0` for a blocked cell too, so that
+-- information was already being dropped; it is just now dropped in a way that
+-- survives the journey.
+Gen4Maps.BLOCKED_CELL = 255
+-- The old name, kept so nothing that reads it breaks.  New code asks
+-- `Gen4Maps.blocks`.
+Gen4Maps.VOID = Gen4Maps.COLLISION
 
 -- 20.12 fixed point: the DS's usual coordinate format.
 Gen4Maps.FIXED_ONE = 4096
@@ -187,14 +244,20 @@ function Gen4Maps.permissionAt(land, x, y)
   return u16(land.permissions, (y * Gen4Maps.CHUNK + x) * 2)
 end
 
--- Is this tile part of the map at all?  Bit 15 says no, and a chunk is mostly
--- this at the edges of the land.
-function Gen4Maps.isVoid(word)
-  return word == nil or word >= Gen4Maps.VOID
+-- Can the player stand here?  Bit 15 says no.  A tile outside the chunk is
+-- also blocked, which is the one case where the old "void" reading and this
+-- one still agree.
+function Gen4Maps.blocks(word)
+  return word == nil or word >= Gen4Maps.COLLISION
 end
 
--- The terrain behaviour, which is the low byte -- the high byte carries only
--- the void flag.
+-- The old name for the same test.  Kept because it is called from the map
+-- builder below and from the terrain work's own checks, and renaming a call
+-- site is not worth a merge conflict with the reader who is looking at it.
+Gen4Maps.isVoid = Gen4Maps.blocks
+
+-- The terrain behaviour, which is the low byte, and the low byte is all of it:
+-- bits 8-14 are clear on every tile in the cartridge.
 function Gen4Maps.behaviour(word)
   return word and word % 256 or nil
 end
@@ -257,16 +320,21 @@ end
 -- Gen 4 can map behaviour to appearance; one that does not still gets a grid
 -- of the right size with the right holes in it.
 --
--- WHAT THIS DOES NOT CLAIM.  Collision is set from the VOID BIT ONLY, which is
--- certain: bit 15 means the tile is not part of the map.  Which of the 54
--- behaviour values are walls is NOT established, so no other tile is marked
--- impassable here.  A player dropped into one of these maps would walk
--- through fences.  Filling that in needs the behaviour bytes classified
--- against the cartridge, and inventing it now would put a wrong wall in the
--- cache that later looks like a map bug rather than a missing stage.
+-- COLLISION IS COMPLETE, and the note that used to sit here saying it was not
+-- was wrong.  It read: "Which of the 54 behaviour values are walls is NOT
+-- established ... a player dropped into one of these maps would walk through
+-- fences."  There is no such classification to make.  The cartridge keeps
+-- collision in its OWN BIT -- bit 15, see the measurement above -- and the
+-- behaviour byte says what a tile IS (grass, water, a doorway), not whether
+-- you may stand on it.  A fence carries bit 15 and already blocks.
 --
--- Elevation is left 0 for the same reason: Gen 4 keeps height in the BDHC
--- block, which is not parsed.
+-- The behaviour byte is carried through anyway, because a renderer and the
+-- encounter tables both want it; it is just not what a wall is made of.  There
+-- are 94 distinct values in this cartridge, not 54.
+--
+-- Elevation is still left 0, and that one IS a gap: Gen 4 keeps height in the
+-- BDHC block, which IS parsed now -- see `Gen4Ground:heightsAt` -- but nothing
+-- writes it into this grid, so a bridge and the path under it are one cell.
 
 Gen4Maps.CELL_BYTES = 2
 
@@ -287,13 +355,10 @@ function Gen4Maps.mapDef(matrix, chunkFor)
         local base = row * W + cx * Gen4Maps.CHUNK
         for tx = 0, Gen4Maps.CHUNK - 1 do
           local word = land and u16(land.permissions, (ty * Gen4Maps.CHUNK + tx) * 2)
-          local behaviour, collision
-          if Gen4Maps.isVoid(word) then
-            behaviour, collision = 0, 1
-          else
-            behaviour, collision = word % 256, 0
-          end
-          local v = behaviour + collision * 1024
+          -- A tile with no chunk behind it is off the map, which is blocked
+          -- for the same reason a wall is.
+          local v = (word == nil or Gen4Maps.blocks(word))
+                    and Gen4Maps.BLOCKED_CELL or (word % 256)
           cells[base + tx + 1] = string.char(v % 256, floor(v / 256))
         end
       end
@@ -304,8 +369,11 @@ function Gen4Maps.mapDef(matrix, chunkFor)
     width = W,
     height = H,
     blocks = table.concat(cells),
-    -- Every cell outside the map reads as void, which is what the border is.
-    borderBlock = 0,
+    -- Every cell outside the map reads as blocked, which is what the border
+    -- is.  This was 0 -- an ordinary walkable behaviour -- so `Map:blockAt`
+    -- answered "plain ground" for every coordinate past the edge and the
+    -- border was the second way out of bounds.
+    borderBlock = Gen4Maps.BLOCKED_CELL,
     generation = 4,
   }
 end
