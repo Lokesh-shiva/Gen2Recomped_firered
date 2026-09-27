@@ -1138,7 +1138,9 @@ end
 --       this fixes FireRed's 32x16 Town Map and changes generated sprite data.
 -- v338: FireRed exports its fifteen tutor moves and per-species tutor
 --       compatibility instead of overreading sTutorLearnsets as moves.
-local CACHE_FORMAT = "rom-cache-v338:"
+-- v339: Gen 3 battle panels bake every user frame through gUserFrames' real
+--       tile/palette pointers, so FireRed battles follow Frame Type 1-10.
+local CACHE_FORMAT = "rom-cache-v339:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"
