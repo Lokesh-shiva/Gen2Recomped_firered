@@ -1203,7 +1203,17 @@ end
 --       rows, 230 of them casting one), the `kage` texture out of fldeff
 --       member 0x11, the five sizes and the nine tile behaviours that turn it
 --       off.  Sinnoh's characters have stood on nothing until now.
-local CACHE_FORMAT = "rom-cache-v359:"
+-- v360: MERGED FROM main, which had independently taken v338 for a different
+--       change: "FireRed exports its fifteen tutor moves and per-species tutor
+--       compatibility instead of overreading sTutorLearnsets as moves."
+--
+--       THE NUMBER HAD TO MOVE PAST BOTH. Platinum's chain reached v359 and
+--       main's reached v338, and the two v338s describe different work, so
+--       neither value invalidates the other side's caches. `CACHE_FORMAT` is
+--       the one gate that forces a re-import, and main's change alters what a
+--       FireRed cache CONTAINS -- so keeping v359 would let a FireRed cache
+--       built before the tutor fix pass as current. v360 invalidates both.
+local CACHE_FORMAT = "rom-cache-v360:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"

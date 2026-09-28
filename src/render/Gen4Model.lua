@@ -771,11 +771,33 @@ local WALL_MIN_TEXELS = 4
 --
 -- The list is names because only names are available, and it is one table so
 -- that importing another region's texture set is a one-line change. Only the
--- materials this install could actually be LOOKED at are in it; the other
--- grass-ish names in the cartridge (`l_grass_u/m/d`, `s_grass`, `bf_ngrass`)
--- live in texture sets that are not extracted here, and adding them unseen
--- would be guessing at what they depict.
-local GRASS_MATERIALS = { nectgr = true }
+-- materials that have actually been LOOKED at are in it.
+--
+-- THE OTHER GRASS-ISH NAMES, now that they ARE extracted -- the note that used
+-- to sit here said they were not, and that stopped being true some imports ago.
+-- Census over all 666 land chunks, then each texture opened and viewed:
+--
+--   `ngrass` (224 shapes) -- OUT. The lawn: 4 colours, 86.7% one flat green,
+--     border 100%. Stood up it is a slab that blanks the path behind it.
+--   `bf_ngrass` (9) -- OUT, and it is the same thing under another area's
+--     prefix: 8 colours, 66.4% flat, border 90.6%, and it looks like a lawn.
+--   `l_grass_u` / `_m` / `_d` (16 between them) -- OUT, and this one is worth
+--     the sentence: stacked u-m-d they form ONE CONTINUOUS COLUMN of grass
+--     blades three tiles tall, with the ground band at the foot of `_d`. That
+--     is grass the cartridge ALREADY DRAWS STANDING, on a vertical face.
+--     Standing it again would double it, and there is nothing to cut out --
+--     the blades run edge to edge, which is why their border agreement is
+--     12-23% against `nectgr`'s 85.9%.
+--   `s_grass` (20) -- IN. A dark spiky clump on red soil: 10 colours, 41.4%
+--     flat, border 67.2%. Structurally the same picture as `nectgr` -- a plant
+--     with a uniform field colour around it -- which is exactly what the
+--     cut-out below needs and what makes a card read as a clump.
+--
+--   `nectgr` (97) -- IN, the original: 8 colours, 32.8% flat, border 85.9%.
+--
+-- The `grow_*` singles and `gym04_daigrass02` are one shape each and have not
+-- been looked at; one shape is not worth a card until someone has.
+local GRASS_MATERIALS = { nectgr = true, s_grass = true }
 
 -- THE TILE'S BACKGROUND, CUT OUT.
 --

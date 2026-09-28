@@ -26910,3 +26910,57 @@ stood up is a slab that blanks the path behind it).
 - `src/render/Gen4Model.lua` -- `addGrassCards` walks tiles per triangle instead
   of grouping triangles by tile, and takes the UV rectangle from the mapping's
   local rate.
+
+
+## Pass 128 -- which grass stands, decided by opening the pictures
+
+Pass 127 left the allow-list at one material because the others had not been
+looked at. They have now. The comment that said they "live in texture sets that
+are not extracted here" had stopped being true some imports ago -- every one of
+them is in Cedric's cache, and the terrain index names the set:
+`tex/73/s_grass.png`, `tex/72/bf_ngrass.png`, `tex/10/l_grass_{u,m,d}.png`.
+
+Measured, then viewed:
+
+| material | shapes | colours | flat % | border % | verdict |
+| --- | --- | --- | --- | --- | --- |
+| `nectgr` | 97 | 8 | 32.8 | 85.9 | IN (already) |
+| `s_grass` | 20 | 10 | 41.4 | 67.2 | **IN** |
+| `ngrass` | 224 | 4 | 86.7 | 100.0 | OUT |
+| `bf_ngrass` | 9 | 8 | 66.4 | 90.6 | OUT |
+| `l_grass_u` | 5 | 8 | 22.3 | 17.2 | OUT |
+| `l_grass_m` | 5 | 7 | 27.0 | 23.4 | OUT |
+| `l_grass_d` | 6 | 9 | 21.5 | 12.5 | OUT |
+
+"border %" is how much of the tile's outer ring is its own commonest colour --
+the test for whether a picture has a uniform FIELD around a clump, which is what
+the cut-out needs and what makes a card read as a plant instead of a rectangle.
+
+### What the pictures show
+
+`s_grass` is a dark spiky clump on red soil -- structurally the same picture as
+`nectgr`, a plant with a uniform field colour around it. It stands.
+
+`bf_ngrass` is a lawn, and is `ngrass` under another area's prefix: flat green
+with a faint pattern. Out, for the reason `ngrass` is out.
+
+!! `l_grass_u/m/d` ARE ONE PICTURE, AND IT IS ALREADY STANDING. Stacked u-m-d
+they form a continuous column of grass blades three tiles tall, with the ground
+band at the foot of `_d`. That is grass the cartridge draws on a VERTICAL face.
+Standing it again would double it, and there is nothing to cut out -- the blades
+run edge to edge, which is exactly what their 12-23% border agreement was saying
+against `nectgr`'s 85.9%.
+
+### A measurement that was too small to trust
+
+Before opening the images I tried to settle the u/m/d question numerically, by
+matching the seam rows: u-bottom against m-top scored 62.5%, m-bottom against
+d-top 56.2%, and the CONTROL -- u-top against d-bottom -- scored 87.5%, higher
+than either seam. On sixteen pixels a row that is noise wearing a number, and
+reading a conclusion out of it would have been the arithmetic deciding something
+the picture answers in a second. **Sixteen samples is not a measurement.**
+
+### Changed
+
+- `src/render/Gen4Model.lua` -- `GRASS_MATERIALS` gains `s_grass`; the stale
+  "not extracted here" note is replaced by the census and the verdicts.
