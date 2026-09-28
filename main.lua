@@ -943,7 +943,14 @@ function love.mousereleased(x, y, button)
   end
 end
 
-function love.mousemoved(x, y)
+function love.mousemoved(x, y, dx, dy)
+  -- FREE-CAMERA LOOK FIRST, and only when one is up: `Game:cameraLook`
+  -- answers false on every other map and camera, so the touch path below
+  -- keeps every case it had.
+  if Game and not (editorMode or Importer or TouchEditor)
+     and Game.cameraLook and Game:cameraLook(dx, dy) then
+    return
+  end
   if TouchEditor then
     if love.system.getOS() == "Android" then return end
     return TouchEditor.mousemoved(x, y)

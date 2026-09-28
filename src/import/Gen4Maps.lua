@@ -509,25 +509,66 @@ end
 --                     (71 each) and indexed together: one names the building
 --                     models an area uses, the other holds their textures
 --   +2 mapTexture  -> /fielddata/areadata/area_map_tex/map_tex_set.narc
---   +4 lighting    0..9
---   +6 flags       0..2
+--   +4 dummy04     unused by the cartridge, 0..9
+--   +6 areaLight   -> /data/arealight.narc, 0..2
 --
--- THE RANGES ARE WHAT PIN THE FIELDS.  Over all 75 areas +2 reaches 73 against
--- a 74-member archive and +0 reaches 70 against two 71-member ones, so +2 can
--- only be the map textures; +4 never passes 9 and +6 never passes 2, so
--- neither indexes anything here.  What +4 and +6 mean is not established and
--- they are named for what they are not.
+-- THE RANGES ARE WHAT PIN THE FIRST TWO.  Over all 75 areas +2 reaches 73
+-- against a 74-member archive and +0 reaches 70 against two 71-member ones, so
+-- +2 can only be the map textures.
+--
+-- THE NOTE THAT USED TO SIT HERE SAID +4 AND +6 WERE "NOT ESTABLISHED" AND
+-- NAMED THEM `lighting` AND `flags`. Both names were wrong, and they were wrong
+-- in the worst possible way -- the wrong one of the pair was the one the terrain
+-- stage carried onto all 593 maps. pret names every field of `AreaDataFile`:
+--
+--     u16 mapPropArchivesID;    // 0
+--     u16 mapTextureArchiveID;  // 2
+--     u16 dummy04;              // 4  "changes in the NARC, but is unused"
+--     u16 areaLightArchiveID;   // 6
+--
+-- so +4 is the field the cartridge never reads and +6 selects the area light.
+-- See `areaData` below for the measurement that settles it against the ROM.
 Gen4Maps.AREA_RECORD_BYTES = 8
 
 function Gen4Maps.areaData(record)
   if type(record) ~= "string" or #record < Gen4Maps.AREA_RECORD_BYTES then
     return nil, "area data record is too short"
   end
+  -- THE LAST TWO FIELDS WERE THE WRONG WAY ROUND, AND IT COST THE WORLD ITS LIGHT.
+  --
+  -- `AreaDataFile` is four u16s and pret names every one of them:
+  --
+  --     u16 mapPropArchivesID;    // 0
+  --     u16 mapTextureArchiveID;  // 2
+  --     u16 dummy04;              // 4  "changes in the NARC, but is unused"
+  --     u16 areaLightArchiveID;   // 6
+  --
+  -- This function used to call offset 4 `lighting` and offset 6 `flags`, which is
+  -- exactly backwards: offset 4 is the field the cartridge never reads, and
+  -- offset 6 is the `/data/arealight.narc` member. The terrain stage carried the
+  -- wrong one onto all 593 maps under the name `lighting`, and because NOTHING
+  -- read it the mistake sat there unchallenged.
+  --
+  -- THE ROM SETTLES IT AND THE CARTRIDGE'S OWN ASSERT IS THE TEST.
+  -- `AreaLightManager_New` opens with GF_ASSERT(archiveID < AREA_LIGHT_FILE_COUNT)
+  -- and that count is 4. Across the 75 area records offset 6 holds only 0, 1 and
+  -- 2 -- inside the bound with room to spare -- while offset 4 reaches 9 and
+  -- would trip the assert on nine records. A field that fails the cartridge's own
+  -- bound is not that field.
+  --
+  -- Member 3 never appears at offset 6, and that is not a gap: `ov6_0223E140.c`
+  -- is the only thing that asks for it, passing the literal 3 twice, so member 3
+  -- is reachable only from that overlay and never from an area record.
   return {
     buildings = u16(record, 0),
     mapTexture = u16(record, 2),
-    lighting = u16(record, 4),
-    flags = u16(record, 6),
+    -- Kept, named as pret names it, so nothing mistakes it for a live field again.
+    dummy04 = u16(record, 4),
+    areaLight = u16(record, 6),
+    -- `AreaDataManager_IsOutdoorsLighting`, which is the cartridge's own reading
+    -- of this byte rather than an inference about it: members 0 and 3 are outdoor
+    -- and everything else is not.
+    outdoors = (u16(record, 6) == 0 or u16(record, 6) == 3),
   }
 end
 

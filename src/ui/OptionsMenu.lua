@@ -661,6 +661,52 @@ local function buildRows(game)
         Gen4Camera.setTilt(next_)
         return true
       end }
+    -- HOW MANY REAL PIXELS THE FIRST/THIRD-PERSON VIEW GETS.
+    --
+    -- Reported from play: *"the first and third person are also really low
+    -- resolution and highly pixelated now add in a resolution option"*.
+    --
+    -- The free camera renders at the DS's own resolution because
+    -- `Renderer:fitScale` divides the window by 256x192 -- right for a 16x16
+    -- tile, wrong for perspective geometry, which has no pixel grid to keep.
+    -- `Gen4Ground` supersamples the 3D target by this factor and blits it back
+    -- down, so the view shows exactly the same amount of Sinnoh either way.
+    --
+    -- ONLY THE FREE CAMERA. The flat and tilted views are composed with the
+    -- pixel-art world canvas and are meant to be crisp at an integer scale, so
+    -- this row deliberately does not reach them.
+    --
+    -- "DS" rather than "1X" for the default, because that is what it is: the
+    -- hardware's own 256x192, and the picture every previous build drew.
+    rows[#rows + 1] = { id = "gen4RenderScale", label = Strings("3D RES"),
+      value = function(g)
+        local scale = require("src.render.Gen4Ground").syncRenderScale(g)
+        if scale == 1 then return Strings("DS") end
+        return Strings("%dX", scale)
+      end,
+      -- LEFT GOES BACK, and the first version of this row ignored `dir`.
+      --
+      -- `Gen4Options:cycle` passes the direction through as
+      -- `row.engine.step(self.game, delta)` -- -1 for left, +1 for right and A
+      -- -- and a step that always advances makes both keys do the same thing.
+      -- With four rungs that is worse than it sounds: from 4X the next press of
+      -- EITHER key wraps to DS, so a player raising the setting to look at it
+      -- lands back on the default and sees nothing change.
+      --
+      -- Reported exactly that way: *"for the resolution it doesnt seem to
+      -- change the camera resolution at all"* -- while the log for that session
+      -- showed one frame drawn at a 4096x3072 target, so the pass was working
+      -- and the row had wrapped past it.
+      step = function(g, dir)
+        local Gen4Ground = require("src.render.Gen4Ground")
+        local _, at = Gen4Ground.syncRenderScale(g)
+        local rungs = #Gen4Ground.RENDER_SCALES
+        local by = (tonumber(dir) or 1) < 0 and -1 or 1
+        local next_ = (at - 1 + by) % rungs + 1
+        g.save.options.gen4RenderScale = next_
+        Gen4Ground.setRenderScale(next_)
+        return true
+      end }
     rows[#rows + 1] = { id = "startMenuStyle", label = Strings("START MENU"),
       value = function(g)
         return (g.save.options.gen4StartMenuStyle == "bottom")

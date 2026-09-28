@@ -1229,6 +1229,15 @@ L.gettimeofday = function(ins, s) emit(s, { "g4_time_of_day", ins.args[1] }) end
 L.countbadgesacquired = function(ins, s)
   emit(s, { "g4_count_badges", ins.args[1] })
 end
+-- `ScrCmd_CheckRunningShoesAcquired`: `*destVar = PlayerData_HasRunningShoes()`.
+--
+-- 0x159 was in the opcode table and had no lowering, which for a command that
+-- writes a var is the bad case described above: the `gotoif` after it read
+-- whatever the last comparison left behind, so a script asking whether the
+-- player has the shoes got an answer with nothing to do with the shoes.
+L.checkrunningshoesacquired = function(ins, s)
+  emit(s, { "g4_has_running_shoes", ins.args[1] })
+end
 L.checkpoketchappregistered = function(ins, s)
   emit(s, { "g4_poketch_registered", ins.args[1], ins.args[2] })
 end

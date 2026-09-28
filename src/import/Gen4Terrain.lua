@@ -130,6 +130,27 @@ function Gen4Terrain.append(state, chunk)
       indexAt = iAt, indexBytes = #shape.indices, triangleCount = shape.triangleCount,
       texture = shape.texture, palette = shape.palette,
       material = shape.material,
+      -- ...AND THE ALPHA THAT MATERIAL STATES, which is the only field of the
+      -- pack this index dropped.  `Gen4ModelPack` has computed it since the
+      -- house shadows came out black -- polyAttr bits 16..20, kept only when
+      -- it is under 31 -- and the value stopped HERE, one line short of the
+      -- cache, so every terrain shape in Sinnoh drew fully opaque.
+      --
+      -- MEASURED FROM THE CARTRIDGE over all 666 chunks, not assumed: 155 of
+      -- 7,346 terrain materials state an alpha below 31, across 107 chunks.
+      --
+      --   sea                13/31 x12, 21/31 x12
+      --   water01            13/31        water02   15/31
+      --   shadowchip         12/31 x27  -- the ground shadow decals
+      --   dun_shadow         10..19/31 x8
+      --   wtk_kabe_garasu3   16..20/31  -- `garasu`: a glass window
+      --   h_kage etc         3..15/31  x30
+      --
+      -- `Gen4Model.shapeAlpha` has honoured `shape.alpha` all along, so this
+      -- one field is the whole fix on the read side.  It needs a re-import to
+      -- take effect: a cache written before today carries no alpha, which is
+      -- what the name fallback over there is for.
+      alpha = shape.alpha,
     }
   end
 

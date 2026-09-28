@@ -37,6 +37,7 @@ local Font = require("src.render.Font")
 local Gen4Anim = require("src.import.Gen4Anim")
 local Gen4Model = require("src.render.Gen4Model")
 local Logger = require("src.core.Logger")
+local Sprites = require("src.pokemon.Sprites")
 local Strings = require("src.core.Strings")
 local Theme = require("src.ui.Theme")
 
@@ -123,8 +124,103 @@ local CAMERA_FROM = { pitch = math.rad(-30), distance = 300, targetZ = 0 }
 local CAMERA_TO   = { pitch = math.rad(-50), distance = 200, targetZ = 36 }
 local CAMERA_STEPS = 6
 
+-- !! AND REMOVING THAT ROTATION LEFT A FLIP BEHIND IT.
+--
+-- Reported from play: "the starter selection briefcase seems to be upside
+-- down and the pokeballs too".  They were: the balls drew white half up, and
+-- the case opened its lid DOWNWARDS and tipped the balls out upwards.
+--
+-- The cause is written down in `Gen4Title`, which hit it first and said so:
+-- a custom `position()` in a LOVE shader returns clip coordinates directly,
+-- and A CANVAS'S FRAMEBUFFER COUNTS ITS ROWS THE OPPOSITE WAY ROUND FROM THE
+-- SCREEN.  Its note even names this file as the reason it had not been seen
+-- everywhere -- "`Gen4Model.orbit` does not hit this because the starter
+-- select composes it with a Z-up-to-Y-up rotation that inverts the axis on
+-- the way past".
+--
+-- So the `Z_UP_TO_Y_UP` the block above removed was wrong AND was cancelling
+-- this, and taking the wrong one away uncovered the one it had been hiding.
+-- Two mistakes that had been making a right picture; the block above fixed
+-- the first and nothing put anything in the second's place.
+--
+-- Negating clip Y rather than the up vector, for the reason `Gen4Title`
+-- gives: flipping `up` would swap the handedness of the side vector too and
+-- mirror the case left to right, trading one wrong picture for another.
+local FLIP_Y = {
+  1, 0, 0, 0,
+  0, -1, 0, 0,
+  0, 0, 1, 0,
+  0, 0, 0, 1,
+}
+
 -- Straight up is Y, which is the whole point of the block above.
+-- WHERE THE CHOSEN ONE APPEARS, and it appears ONLY THEN.
+--
+-- Reported from play: "in the rom it doesnt show the name or picture of the
+-- pokemon until you click it".  Right on both counts, and this screen had it
+-- wrong in both directions at once: it drew ALL THREE NAMES in a row under
+-- the case from the moment the case finished opening, and it never drew a
+-- picture at all.
+--
+-- `AdvancePokeballConfirmGraphics` is the cartridge's own sequence, and every
+-- part of it waits for the button: on A it hides the cursor, DELETES THE
+-- SUBPLANE WINDOW -- the bottom screen where the three names live, which is
+-- why they were never on this screen to begin with -- slides the preview
+-- window in, clears `MON_SPRITE_HIDE` on that one sprite, plays its cry, and
+-- only then prints bank 360's entry `1 + cursorPosition`, which is the line
+-- that names the species.  Cancel slides it back out, re-hides the sprite and
+-- prints entry 7 again.
+--
+-- So the name was never a thing to draw separately: it arrives inside the
+-- offer text, and the offer text arrives on A.
+--
+-- `POKEMON_SPRITE_POS_X` is 128 and `POKEMON_SPRITE_POS_Y` 96 -- the middle
+-- of the DS screen -- and `StartPreviewGraphicsMovement` ends at exactly that
+-- pair at scale 1.0, so that is where the picture settles.
+local MON_X, MON_Y = 128, 96
+
 local SELECTED_LIFT = 12.0
+
+
+-- WHERE THE THREE BALLS STAND ONCE THE CASE IS OPEN, from the cartridge's own
+-- `selectionMatrix` in choose_starter_app.c:
+--     [0] = { -44, -4, 32 }   [1] = { 0, -4, 62 }   [2] = { 38, -4, 26 }
+-- and `SetSelectionMatrixObjects` feeds exactly those to Set3DGraphicsPosition
+-- for starter3DGraphics[2..4].
+--
+-- CONFIRMED TWICE, FROM TWO SOURCES THAT NEVER MET.  The last frame of
+-- `psel_all`'s own animation leaves its ball joints at (-44,-4,32), (0,-4,62)
+-- and (38,-4,26) -- read out of the track data -- which is the same three
+-- triples to the unit.  The animation carries the balls out of the case and
+-- the separate ball models are then planted exactly where it left them.
+local BALL_STANDS = {
+  { -44, -4, 32 },
+  {   0, -4, 62 },
+  {  38, -4, 26 },
+}
+
+-- ...AND WHERE THE FLOOR GOES.  `Make3DGraphics` gives starter3DGraphics[5]
+-- (`pmsel_bg`) a position, a scale and a half turn, and this screen used to
+-- draw it with NO matrix at all -- which is why no ground ever reached the
+-- frame:
+--     Set3DGraphicsPosition(.., 0, -28 * FX32_ONE, 40 * FX32_ONE)
+--     Set3DGraphicsScale(.., FX32_CONST(3.50f), FX32_ONE, FX32_CONST(3.50f))
+--     Set3DGraphicsRotation(.., 0, (180 * 0xffff) / 360, 0)
+-- A half turn about Y is (-1, 1, -1) on the diagonal, so the scale and the
+-- rotation fold into one matrix rather than being multiplied at run time.
+local GROUND_MATRIX = {
+  -3.5, 0, 0,    0,
+     0, 1, 0,  -28,
+     0, 0, -3.5, 40,
+     0, 0, 0,    1,
+}
+
+local function translation(x, y, z)
+  return { 1, 0, 0, x,
+           0, 1, 0, y,
+           0, 0, 1, z,
+           0, 0, 0, 1 }
+end
 local FRAME_STEP = 1             -- animation frames per engine frame
 
 function Gen4StarterSelect:uiSize() return W, H end
@@ -208,6 +304,35 @@ function Gen4StarterSelect.new(game, opts)
   -- The animation that opens it, paired by NAME with the model rather than by
   -- position in the archive: the two sit in different members and nothing but
   -- the name says they belong together.
+  -- THE MODELS THE CARTRIDGE SWAPS TO, and the reason this screen looked wrong.
+  --
+  -- `Make3DGraphics` builds SIX objects and shows only two: psel_all and the
+  -- floor.  The instant psel_all's animation reaches its last frame,
+  -- CHOICE_STEP_SHOW_3D_GRAPHICS hides psel_all and shows psel_trunk plus the
+  -- three ball models:
+  --
+  --     if (Advance3DGraphicsAnimationIfNotLastFrame(&starter3DGraphics[0])) {
+  --         Set3DGraphicsIsVisible(&starter3DGraphics[0], FALSE);  // psel_all
+  --         Set3DGraphicsIsVisible(&starter3DGraphics[1], TRUE);   // psel_trunk
+  --         Set3DGraphicsIsVisible(&starter3DGraphics[2..4], TRUE);// the balls
+  --
+  -- This screen never swapped, so it went on drawing psel_all at its FINAL
+  -- FRAME -- a pose nobody is meant to see, because at that instant the
+  -- cartridge stops drawing that model at all.  Reported as *"the bottom of the
+  -- briefcase seems like its not rendering right"*: the case with no bottom and
+  -- no front IS psel_all's post-open pose, and the balls below it are where its
+  -- animation left them.
+  --
+  -- `psel_trunk` is the case the player actually chooses from -- this file's own
+  -- header already described it as "the case on its own, in its own rest pose
+  -- with the lid already swung back" and then never used it.
+  self.trunk = Gen4Model.new(named(set.models, "psel_trunk"))
+  self.balls = {}
+  for i, row in ipairs(self.rows) do
+    local ballRecord = named(set.models, tostring(row.model))
+    self.balls[i] = ballRecord and Gen4Model.new(ballRecord) or nil
+  end
+
   local animation = named(set.animations, "psel_all")
   if animation and animation.tracks then
     self.tracks = {}
@@ -228,6 +353,17 @@ end
 -- Where every shape stands this frame: the animation's own matrices, with the
 -- chosen ball raised.  Rebuilt only when something changed, because the walk
 -- is cheap but not free and most frames change nothing.
+function Gen4StarterSelect:image(path)
+  if type(path) ~= "string" or path == "" then return nil end
+  self.pics = self.pics or {}
+  if self.pics[path] == nil then
+    local ok, img = pcall(require("src.render.Assets").image, path)
+    self.pics[path] = ok and img or false
+    if self.pics[path] then self.pics[path]:setFilter("nearest", "nearest") end
+  end
+  return self.pics[path] or nil
+end
+
 function Gen4StarterSelect:poseNow()
   local key = ("%d/%d/%s"):format(self.frame, self.index, tostring(self.phase))
   if self.poseKey == key then return self.pose end
@@ -344,14 +480,22 @@ function Gen4StarterSelect:update()
 
   local n = #self.rows
   if n == 0 then return end
+  -- MOVING THE CURSOR REVEALS NOTHING.  `ChangePokeballChoice` turns the ball
+  -- and moves the cursor and that is all it does; the species is not named
+  -- until A is pressed.  This used to drop into `offering` on every step,
+  -- which named all three in turn just by holding a direction.
   if input:wasPressed("left") then
     self.index = (self.index - 2) % n + 1
-    self.phase = "offering"
-    self:say(self:currentText())
+    if self.phase == "offering" then
+      self.phase = "choosing"
+      self:say(self:currentText())
+    end
   elseif input:wasPressed("right") then
     self.index = self.index % n + 1
-    self.phase = "offering"
-    self:say(self:currentText())
+    if self.phase == "offering" then
+      self.phase = "choosing"
+      self:say(self:currentText())
+    end
   elseif input:wasPressed("a") then
     if self.phase == "choosing" then
       self.phase = "offering"
@@ -400,10 +544,45 @@ function Gen4StarterSelect:drawScene()
   local view = Gen4Model.orbit(target,
                                lerp(CAMERA_FROM.distance, CAMERA_TO.distance),
                                0, lerp(CAMERA_FROM.pitch, CAMERA_TO.pitch))
-  local viewProjection = multiply(projection, view)
+  local viewProjection = multiply(FLIP_Y, multiply(projection, view))
 
-  if self.ground then self.ground:draw(viewProjection) end
-  self.scene:draw(viewProjection, pose)
+  -- THE FLOOR, WITH THE MATRIX THE CARTRIDGE GIVES IT.  Drawn with none at all
+  -- before, which is why no ground reached the frame.
+  if self.ground then
+    self.ground:draw(multiply(viewProjection, GROUND_MATRIX))
+  end
+
+  -- THE SWAP.  While the opening runs, psel_all IS the scene.  Once its
+  -- animation reaches the last frame the cartridge stops drawing psel_all and
+  -- draws psel_trunk plus the three ball models instead, each planted at its
+  -- own row of `selectionMatrix`.  Falling back to psel_all when the trunk did
+  -- not build keeps a cache without it working exactly as it did.
+  local opened = self.frames and self.frame >= self.frames - 1
+  if opened and self.trunk then
+    self.trunk:draw(viewProjection)
+    for i, ball in ipairs(self.balls or {}) do
+      local stand = BALL_STANDS[i]
+      if stand then
+        -- THE LIFT IS THIS PORT'S OWN, AND THE CARTRIDGE HAS NOTHING LIKE IT.
+        -- `MakeSelectionMatrices` and `SetSelectionMatrixObjects` are each
+        -- called ONCE, at setup: the three balls are planted and never move
+        -- again.  What marks the choice is a 2D CURSOR SPRITE over the chosen
+        -- ball, at the screen positions `otherSelectionMatrix` holds --
+        -- (78,55), (130,82), (172,50) -- bobbing plus/minus 8 on a 32-frame
+        -- sine (`SetupStarterRotation(.., 8 * FX32_ONE, 32)`, applied by
+        -- `AdvanceCursorMovement` to `Sprite_SetPosition(cursor->sprite, ..)`
+        -- and NOT to any ball).
+        --
+        -- Kept because it is the only thing telling the player which ball is
+        -- chosen until that cursor exists -- a stand-in, not the cartridge.
+        local lift = (self.phase ~= "opening" and i == self.index) and SELECTED_LIFT or 0
+        ball:draw(multiply(viewProjection,
+                           translation(stand[1], stand[2] + lift, stand[3])))
+      end
+    end
+  else
+    self.scene:draw(viewProjection, pose)
+  end
 
   g.setCanvas(previous[1] and previous or nil)
   return self.colour
@@ -435,16 +614,17 @@ function Gen4StarterSelect:draw()
     y = y + LINE_H
   end
 
-  -- The three names under the case, with the chosen one marked.  The cartridge
-  -- puts these on the bottom screen, which this port does not have yet.
-  if self.phase ~= "opening" and self.phase ~= "intro" and #self.rows > 0 then
-    local slot = math.floor(W / #self.rows)
-    for i, row in ipairs(self.rows) do
-      local x = (i - 1) * slot + 8
-      if i == self.index then
-        Font.drawCode(Theme.cursor, x - 8, (BOX.ty - 2) * 8)
-      end
-      Font.draw(tostring(row.name or ""), x, (BOX.ty - 2) * 8)
+  -- THE CHOSEN ONE'S PICTURE, and only once it has been chosen.  See MON_X
+  -- above for why there is no row of names here any more.
+  if self.phase == "offering" then
+    local row = self.rows[self.index]
+    local species = row and row.species
+    local picture = species and self:image(
+      Sprites.path(self.game.data, species, "front", { kind = "summary" }))
+    if picture then
+      local pw, ph = picture:getDimensions()
+      g.setColor(1, 1, 1, 1)
+      g.draw(picture, MON_X - pw / 2, MON_Y - ph / 2)
     end
   end
   g.setColor(1, 1, 1, 1)

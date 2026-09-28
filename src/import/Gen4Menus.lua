@@ -366,19 +366,34 @@ Gen4Menus.BAG_BANK = 395
 Gen4Menus.BAG_TAB_BANK = 396
 Gen4Menus.BAG_POCKETS = 8
 
--- The pocket icons, all thirty-two of them, in one 64x64 sheet.  Measured
--- rather than assumed: on a sixteen-pixel grid the sheet is four by four, the
--- top eight cells carry 160 opaque pixels each and the bottom eight carry 40 --
--- the icons and the small markers that sit under an unselected one.
-Gen4Menus.BAG_ICON = 16
-Gen4Menus.BAG_ICON_COLUMNS = 4
+-- THE POCKET ICONS ARE SIXTEEN CELLS IN ONE ROW, not thirty-two in a square,
+-- and the earlier reading here is worth keeping as a warning.  It said the
+-- sheet was four by four on a sixteen-pixel grid, with the top eight cells
+-- carrying 160 opaque pixels and the bottom eight 40 -- "the icons and the
+-- small markers".  Every one of those numbers was true of the file and none
+-- of them was true of the cartridge: the file had been laid out eight tiles
+-- wide instead of thirty-two (see `tilesWideFor` in Gen4Screens), so the
+-- measurement could only ever agree with whatever the mislaid file held.
+--
+-- What settles it is the cartridge stating the shape outright.
+-- `BagUI_DrawPocketSelectorIcons` blits out of a bitmap `32 * POCKET_MAX`
+-- wide by 16 tall, taking a 10x10 corner at `pocketType * 32` -- or at
+-- `+ 16` for the pocket that is open.  So: one row, two variants per pocket,
+-- sixteen pixels apart, ten of which are drawn.
+Gen4Menus.BAG_ICON = 10
+Gen4Menus.BAG_ICON_CELL = 16
+Gen4Menus.BAG_ICON_STRIDE = 32
 
 -- Where the cartridge's own bag screen puts things, measured off
 -- `bag/bag_ui_main` at its own 256x192.
+--
+-- THE POCKET STRIP AND THE POCKET NAME ARE NOT IN HERE, and that is not an
+-- omission.  Both are arithmetic the cartridge does at runtime over the
+-- number of pockets the bag was opened with -- eight in the field, five in
+-- battle -- so a cached constant cannot express either and would go stale the
+-- moment a bag opened with fewer.  `Gen4BagMenu` does the same arithmetic.
 Gen4Menus.BAG_LAYOUT = {
   list = { x = 108, y = 8, w = 142, h = 122 },
-  pocketName = { x = 6, y = 88, w = 90 },
-  pocketIcons = { x = 6, y = 106 },
   description = { x = 40, y = 146 },
   itemIcon = { x = 3, y = 150 },
 }

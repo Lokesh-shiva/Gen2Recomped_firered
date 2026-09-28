@@ -1288,6 +1288,11 @@ function TileRenderer.new(map, data)
                 tostring(ground))
   end
   self.gen4Ground = okGround and ground or nil
+  -- THE GEN 1/2 TILT STANDS DOWN ON A SINNOH MAP, and comes back on every
+  -- other one.  Written here rather than read from the map because this is the
+  -- one line in the engine that already knows which of the two world cameras
+  -- is about to own the frame.
+  require("src.render.Tilt").suppressed = (self.gen4Ground ~= nil)
   -- A GEN 3 TILESET HAS NO SHEET ON DISK, and that is not a gap: its art is
   -- two half-banks of 8x8 tiles that only become a picture once the primary
   -- and secondary tilesets are composited together, which happens below in
@@ -2080,6 +2085,12 @@ function TileRenderer:drawAbove(camX, camY, vw, vh)
   -- drawn with -- the two pictures have to line up to the pixel, and the only
   -- way to be sure of that is for one call site to give both their arguments.
   if self.gen4Ground then
+    -- ...and a neighbour's canopy stands down with its ground, or it would
+    -- paint a second copy of the same treetops over the sprites.
+    if self.gen4Neighbour then
+      self.gen4Neighbour = false
+      return false
+    end
     return self.gen4Ground:drawCanopy(camX, camY, vw, vh)
   end
   if not self.gen3 then return false end
@@ -2111,6 +2122,32 @@ end
 -- border ring is served by :drawBorderFill for the current map too -- the
 -- only remaining difference is the trueColor mark extent.
 function TileRenderer:drawMapOnly(camX, camY, vw, vh)
+  -- A SINNOH NEIGHBOUR DRAWS NOTHING, AND THAT IS NOT A SHORTCUT.
+  --
+  -- `Gen4Ground:draw` picks its chunks from the SHARED 30x30 matrix, bounded
+  -- by the grid and not by the map's own extent -- so the current map's ground
+  -- already draws every visible chunk, whoever owns the cell.  A neighbour
+  -- recomputes the identical `left/top`, resolves the identical cell, and
+  -- paints the identical picture over the top.
+  --
+  -- Measured from a play log: SIX grounds (R201, T02, T01, L01, R202, R219)
+  -- all reported `left/top=(1653,13524) -> cell (3,26) -> land 5` in one
+  -- frame, and with the live pass each was a full-screen colour+depth target
+  -- -- about 36 MB a frame, five sixths of it overwritten by the next one.
+  --
+  -- WHICH ONE SHOULD WIN IS A REAL CHOICE, because a chunk is textured from
+  -- the ground's OWN `mapTextureArchiveID` and 71 distinct sets exist across
+  -- the 593 maps.  The current map is the principled answer: it is the area
+  -- the player is standing in, and the cartridge loads that area's texture set
+  -- and no other.  The old behaviour -- last neighbour drawn wins the whole
+  -- screen -- was arbitrary in a way this is not.
+  --
+  -- The flag is read by `drawAbove`, which is called for neighbours too and
+  -- must stand down for the same reason.
+  if self.gen4Ground then
+    self.gen4Neighbour = true
+    return
+  end
   if self.trueColor then self:markTrueColor(camX, camY, 0) end
   self:drawWindow(camX, camY, vw, vh)
 end

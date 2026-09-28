@@ -231,9 +231,64 @@ function Gen4Battle.backdrop(battle)
   local game = battle and battle.game
   local background = Gen4Battle.backgroundFor(game)
   local key = background .. "_" .. Gen4Battle.timeOfDay(game, background)
+  -- `SetBgGrayscale` swaps the WHOLE picture for its grey twin, which the graphics
+  -- stage wrote beside it. Falls back to the colour one rather than declining, so a
+  -- cache imported before that stage plays those five moves in colour instead of
+  -- playing them on black.
+  if Gen4Battle.grayscale(battle) then
+    local grey = rows[key .. "_gray"] or rows[background .. "_day_gray"]
+    if grey then return image(grey.path), key .. "_gray" end
+  end
   local row = rows[key] or rows[background .. "_day"]
   if not row then return nil end
   return image(row.path), key
+end
+
+-- grayscale(battle) -> is the background grey right now
+--
+-- Only the BACKDROP. The Pokemon and the terrain platforms are OBJs in a different
+-- palette buffer and the cartridge does not touch them; the switched effect
+-- background is sub-palette 9, outside the 128 entries it greys.
+function Gen4Battle.grayscale(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.bgGrayscale) then return false end
+  local got, grey = pcall(player.bgGrayscale, player)
+  return got and grey == true
+end
+
+-- effectArt(battle, id, variant) -> image, row
+--
+-- The MOVE ANIMATION background, which is a different set of pictures from the
+-- backdrops above even though they live in the same archive: 58 of them, each with
+-- a normal, a mirrored and a contest arrangement. The graphics stage writes 81
+-- distinct images and points all 174 keys at them.
+function Gen4Battle.effectArt(battle, id, variant)
+  local gfx = graphics(battle)
+  local rows = gfx and gfx.effects
+  if not (rows and id) then return nil end
+  local row = rows[("%d_%s"):format(id, variant or "normal")]
+    or rows[("%d_normal"):format(id)]
+  if not row then return nil end
+  return image(row.path), row
+end
+
+-- backdropOffset(battle) -> dx, dy
+--
+-- WHY THE BACKDROP MOVES AT ALL. `shakebg` names a LAYER, and the layer it names
+-- 41 times out of 42 is the effect layer -- which is the layer the ordinary battle
+-- backdrop lives on when no move has switched it. 22 of those 42 calls happen with
+-- no switch up, so what they shake is this picture. The platforms and the Pokemon
+-- are on other layers and do not move with it, which is why this is an offset on
+-- one draw rather than a translate around the whole field.
+function Gen4Battle.backdropOffset(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.bgLayerState) then return 0, 0 end
+  local got, st = pcall(player.bgLayerState, player)
+  if not (got and st) then return 0, 0 end
+  -- Once a switch is up the effect layer is the switched picture, and the shake
+  -- belongs to that instead.
+  if st.id then return 0, 0 end
+  return st.offsetX or 0, st.offsetY or 0
 end
 
 -- platforms(battle) -> playerImage, enemyImage, terrainName
@@ -417,6 +472,43 @@ local function corner(cx, cy, image)
   return cx - image:getWidth() / 2, cy - image:getHeight() / 2
 end
 
+-- HOW FAR DOWN A SPECIES' PICTURE SITS IN ITS OWN FRAME.
+--
+-- Reported from play: "the enemy pokemon is standing a bit too high".  It was,
+-- and only the enemy -- the player's back sprite looked planted.
+--
+-- Every battle sprite is an 80x80 frame and the Pokemon does not fill it.
+-- MEASURED on the extracted PNGs: Piplup's front has 23 empty rows under it,
+-- Starly's 20, and Chimchar's BACK only 8.  Drawn centred on the frame, a
+-- front sprite's visible feet therefore land about fifteen pixels higher than
+-- a back sprite's -- which is the gap, and why it showed on one side only.
+--
+-- THE CARTRIDGE STATES THE CORRECTION and the port already extracts it:
+-- `BoxPokemon_SpriteYOffset` reads `poketool/pokegra/height.narc`, and the
+-- import writes it as `gen4_species_sprites.species[id].frontOffset` /
+-- `.backOffset`.  NOTHING IN `src/` HAD EVER READ EITHER.
+--
+-- AND THE TWO SOURCES AGREE EXACTLY, which is what makes this a derivation
+-- rather than a nudge: the cartridge's offset for Piplup is 23 and its PNG has
+-- 23 empty rows; Starly 20 and 20; Chimchar's back 8 and 8.  Three species,
+-- two independent sources, no discrepancy.
+--
+-- THE SIGN IS THE CARTRIDGE'S TOO.  `send_phase.c` positions with
+-- `y = (100 - 20) + BoxPokemon_SpriteYOffset(...)` -- it ADDS, so a bigger
+-- offset pushes the picture DOWN, which is what a mon with more empty space
+-- beneath it needs.
+function Gen4Battle.spriteYOffset(battle, battler)
+  local mon = battler and battler.mon
+  local id = mon and tonumber(mon.species)
+  if not id then return 0 end
+  local data = (battle and (battle.data or (battle.game or {}).data)) or {}
+  local rec = ((data.gen4_species_sprites or {}).species or {})[id]
+  if type(rec) ~= "table" then return 0 end
+  local back = (battle and battler == battle.player)
+  local n = tonumber(back and rec.backOffset or rec.frontOffset)
+  return n or 0
+end
+
 -- The field: the backdrop, then the two platforms over it.
 --
 -- THE BACKDROP IS 512 WIDE AND THE SCREEN IS 256. The cartridge scrolls it and
@@ -428,7 +520,23 @@ function Gen4Battle.drawField(battle)
   g.setColor(1, 1, 1, 1)
   local ground = Gen4Battle.backdrop(battle)
   if ground then
-    g.draw(ground, 0, 0)
+    -- `shakebg` aimed at the effect layer with no switch up moves THIS, because
+    -- outside a switch the effect layer is where the backdrop lives. Wrapped, for
+    -- the same reason the switched layer is.
+    local sx, sy = Gen4Battle.backdropOffset(battle)
+    if sx == 0 and sy == 0 then
+      g.draw(ground, 0, 0)
+    else
+      local gw, gh = ground:getWidth(), ground:getHeight()
+      local ox, oy = -(sx % gw), -(sy % gh)
+      for _, dx in ipairs({ 0, gw }) do
+        for _, dy in ipairs({ 0, gh }) do
+          if ox + dx < Gen4Battle.WIDTH and oy + dy < Gen4Battle.HEIGHT then
+            g.draw(ground, ox + dx, oy + dy)
+          end
+        end
+      end
+    end
   else
     -- No backdrop in this cache: black rather than the Game Boy's white paper,
     -- because every piece of Gen 4 art on top of it is drawn for a dark field
@@ -456,12 +564,123 @@ function Gen4Battle.drawField(battle)
   end
 end
 
+-- IS THE ANIMATION HOLDING THIS POKEMON OFF THE FIELD.
+--
+-- `Func_HideBattler` (40) is 50 calls over 16 programs and UNTIL NOW IT DREW
+-- NOTHING: the animator tracked `hidden` per side and `Player:monHidden` had no
+-- caller anywhere in the port, so every move that takes a battler off the field
+-- left the Pokemon standing there. Measured over the whole corpus, both
+-- directions: 534 frames in which a side should not have been on screen.
+--
+-- ASKED HERE RATHER THAN IN `BattleState:drawBattlerPic`, which Kanto, Johto and
+-- Hoenn also draw through -- a Gen 4 question belongs on the Gen 4 screen.
+-- ballAbsorb(battle, battler) -> scale, blend, or nil.
+--
+-- Nil for every battler a thrown ball is not swallowing, which is all of them
+-- most of the time, so the ordinary draw path is the default rather than a
+-- special case of the absorb.
+function Gen4Battle.ballAbsorb(battle, battler)
+  local ball = battle and battle.gen4Ball
+  if not (ball and ball.absorbFor and battler) then return nil end
+  local ok, scale, blend = pcall(ball.absorbFor, ball, battler == battle.player)
+  if ok and scale then return scale, blend or 0 end
+  return nil
+end
+
+function Gen4Battle.battlerHidden(battle, battler)
+  -- THE PLAYER'S POKEMON IS STILL IN ITS BALL while the trainer's back is up.
+  --
+  -- `showPlayerBack` is the engine's own flag for "the first Pokemon has not
+  -- been sent out yet", and the Gen 3 path already honours it -- this one did
+  -- not, so Sinnoh drew the Pokemon through the whole intro and, once the
+  -- trainer was drawn too, drew BOTH at once standing in the same place.
+  if battle and battle.showPlayerBack and battler and battler == battle.player then
+    return true
+  end
+
+  -- A POKEMON INSIDE A THROWN BALL IS NOT ON THE FIELD.  Asked through the
+  -- same seam a move animation uses, rather than a second hiding rule.
+  local ball = battle and battle.gen4Ball
+  if ball and ball.hidesMon and battler then
+    local okBall, hid = pcall(ball.hidesMon, ball, battler == battle.player)
+    if okBall and hid then return true end
+  end
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.monHidden and battler) then return false end
+  local got, hidden = pcall(player.monHidden, player, battler == battle.player)
+  return got and hidden == true
+end
+
+-- WHERE THE HARDWARE WINDOW CUTS THIS POKEMON OFF, as a scissor height, or nil.
+--
+-- Dark Void's window IS the void: there is no hole drawn anywhere, the Pokemon is
+-- simply not rendered below the window's top edge. `Player.MON_WINDOW` carries the
+-- two rectangles and why an inside plane of BG0-3 against an outside plane that
+-- also holds OBJ means "every sprite disappears in here".
+--
+-- A SINGLE SCISSOR IS EXACT, AND THAT IS MEASURED RATHER THAN HOPED. Both windows
+-- run from their top edge to the bottom of the screen and each covers one half
+-- horizontally, so for a battler whose picture lies INSIDE the window's x span
+-- "inside the window" reduces to "below the top edge". An 80-wide Sinnoh picture
+-- centred on 64 spans 24..104 and one centred on 192 spans 152..232, so neither
+-- solo battler straddles either window's x edge and the two-draw case does not
+-- arise -- the check asserts that rather than this comment being the argument.
+-- A picture that DID straddle gets no clip at all: drawing a whole Pokemon is a
+-- better failure than clipping the wrong half of it.
+--
+-- The scissor is in UI-surface units, which is what `Gen3RegionMap` and
+-- `Gen3TitleFRLG` already scissor in, and the caller puts back whatever was set.
+function Gen4Battle.monWindowClip(battle, pos, pic)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.monWindow and pos and pic and pic.getWidth) then
+    return nil
+  end
+  local got, win = pcall(player.monWindow, player)
+  if not (got and type(win) == "table" and win.top) then return nil end
+  local half = pic:getWidth() / 2
+  if (pos.x - half) < (win.left or 0) then return nil end
+  if (pos.x + half) > (win.right or Gen4Battle.WIDTH) then return nil end
+  return win.top
+end
+
 -- The two Pokemon, at the cartridge's own battler positions.
 --
 -- Drawn through `BattleState:drawBattlerPic` rather than by blitting here: that
 -- method carries the grow-in scale, the hit shake, the squash and the rotate,
 -- and a second draw path would have none of them. It takes a TOP-LEFT, which is
 -- why `corner` exists.
+-- THE TRAINER'S BACK, before the first Pokemon is out.
+--
+-- Item 7 of the play-test list: *"No trainer sprite in battle before the Pokemon
+-- is sent out"*.  There was none, and it was NOT because the state machine was
+-- missing: `showPlayerBack` arms correctly on a Sinnoh battle and the player's
+-- Pokemon is correctly withheld while it is set.  This file simply had no
+-- reference to a trainer back anywhere, so the player's side was empty.
+--
+-- Measured before it was written: rendered with the back picture injected as
+-- the boy, injected as the girl, and not injected at all, all three frames came
+-- out PIXEL-IDENTICAL -- which is what says the gap is the drawing rather than
+-- only the data.
+--
+-- Placed by the same `corner` the battlers use, on the player's own slot, so
+-- the trainer stands where the Pokemon it is about to send out will stand
+-- rather than at a second set of coordinates that could drift from it.
+function Gen4Battle.drawTrainerBack(battle)
+  if not (battle and battle.showPlayerBack and battle.playerBackPic) then
+    return false
+  end
+  local img = battle.picImage and battle:picImage(battle.playerBackPic)
+             or battle.playerBackPic
+  if not (img and img.getWidth) then return false end
+  local pos = Gen4Battle.BATTLER_POS and Gen4Battle.BATTLER_POS[0]
+  if not pos then return false end
+  local g = love.graphics
+  local x, y = corner(pos.x, pos.y, img)
+  g.setColor(1, 1, 1, 1)
+  g.draw(img, x, y)
+  return true
+end
+
 function Gen4Battle.drawBattlers(battle)
   local g = love.graphics
   g.setColor(1, 1, 1, 1)
@@ -473,14 +692,358 @@ function Gen4Battle.drawBattlers(battle)
   }
   for _, row in ipairs(pairs_) do
     local battler = row.battler
-    if battler and not battler.fainted then
+    if battler and not battler.fainted
+       and not Gen4Battle.battlerHidden(battle, battler) then
       local pic = battle.battlerPic and battle:battlerPic(battler)
       if pic then
         local x, y = corner(row.pos.x, row.pos.y, pic)
-        battle:drawBattlerPic(battler, x, y, 1)
+        -- ...and then down by the species' own offset, BEFORE the three
+        -- branches below, because each of them derives from this y.
+        y = y + Gen4Battle.spriteYOffset(battle, battler)
+        local clip = Gen4Battle.monWindowClip(battle, row.pos, pic)
+        if clip then
+          -- SAVE AND PUT BACK, rather than `setScissor()`: a screen that scissors
+          -- for its own reasons must not have it cleared out from under it by a
+          -- battler draw, and this runs inside whatever the caller had set.
+          local sx, sy, sw, sh = g.getScissor()
+          g.setScissor(0, 0, Gen4Battle.WIDTH, math.max(0, math.floor(clip)))
+          local drew, err = pcall(battle.drawBattlerPic, battle,
+                                  battler, x, y, 1)
+          if sx then g.setScissor(sx, sy, sw, sh) else g.setScissor() end
+          if not drew then error(err) end
+        else
+          -- BEING DRAWN INTO A BALL, if one is open under this battler: the
+          -- picture shrinks and its centre travels to the ball's, which is what
+          -- makes it read as absorbed rather than as simply switched off.
+          local scale, blend = Gen4Battle.ballAbsorb(battle, battler)
+          if scale then
+            local cx = x + pic:getWidth() / 2
+            local cy = y + pic:getHeight() / 2
+            local ball = battle.gen4Ball
+            cx = cx + ((ball.x or cx) - cx) * blend
+            cy = cy + ((ball.y or cy) - cy) * blend
+            battle:drawBattlerPic(battler,
+              cx - pic:getWidth() * scale / 2,
+              cy - pic:getHeight() * scale / 2, scale)
+          else
+            battle:drawBattlerPic(battler, x, y, 1)
+          end
+        end
       end
     end
   end
+  -- THE MOVE'S PARTICLES, IN FRONT OF BOTH POKEMON.
+  --
+  -- The cartridge draws them in a 3D scene and they genuinely pass behind a
+  -- battler sometimes; this port draws them on top, which is the simplification
+  -- rather than a claim the two look identical. Depth WITHIN the effect is
+  -- honoured -- `System:draw` sorts by z, farthest first -- so a burst that
+  -- layers over itself still layers correctly.
+  Gen4Battle.drawParticles(battle)
+  -- ...AND THE FLAT 2D SPRITES, on top of the particles. 32 of the 501 programs
+  -- build one out of four separate archives and until now they drew nothing.
+  Gen4Battle.drawCellActors(battle)
+end
+
+-- drawBackgroundFade(battle) -> true if anything was drawn
+--
+-- A FILLED RECTANGLE IS THE EXACT OPERATION, not an approximation of it.
+-- `BlendColor(src, target, fraction)` is `src + ((target - src) * fraction >> 4)`
+-- -- which is alpha compositing of `target` at `fraction/16` over `src`, the same
+-- arithmetic LOVE does for a coloured quad. So the fade the cartridge performs by
+-- rewriting sixteen palette entries is reproduced here by drawing one quad over
+-- the pixels those entries coloured. What differs is only the rounding: the DS
+-- floors a 5-bit channel, this blends in the display's own space.
+--
+-- 105 OF THE 501 MOVES REACH THIS, over 8,502 frames of the corpus. It was a
+-- `hold` task until now -- the right number of frames, nothing drawn.
+function Gen4Battle.drawBackgroundFade(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.groupTint) then return false end
+  local got, r, g, b, a = pcall(player.groupTint, player, "base")
+  if not (got and a and a > 0) then return false end
+  local gfx = love.graphics
+  gfx.setColor(r or 0, g or 0, b or 0, a)
+  gfx.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+  gfx.setColor(1, 1, 1, 1)
+  return true
+end
+
+-- THIS USED TO TINT THE PARTICLES AND THE 2D SPRITES, AND THAT WAS WRONG.
+-- `fadebg` type 2 is `BATTLE_BG_PALETTE_FLAG_EFFECT`, which is BG palette SLOT 9 --
+-- the sixteen colours of the move-animation background layer. It has nothing to do
+-- with the OBJ palettes the particles and cell actors use. Both of the cartridge's
+-- two type-2 calls are in program 87, both inside its `switchbg` window, and both
+-- are fading the switched picture toward white and back.
+--
+-- So the tint moved to `drawEffectBackground`, where the layer is, and this is kept
+-- as the identity so the two call sites below keep their shape rather than growing
+-- a branch. Deleting it outright would be tidier and would also delete the record
+-- of what it used to do.
+local function effectFade(player, r, g, b)
+  return r, g, b
+end
+
+-- drawEffectBackground(battle) -> true if anything was drawn
+--
+-- WHERE IT SITS. Between the field and the battlers, and that is the hardware's
+-- order rather than a choice: `BATTLE_BG_EFFECT` is BG3, below every OBJ, and the
+-- palette fade that blacks the field out is already drawn just above this.
+--
+-- THE TWO MODES ARE GENUINELY DIFFERENT OPERATIONS, which is why this is not one
+-- draw with a varying alpha.
+--
+--   MODE_FADE (127 of the 129 calls) never blends the two layers at all. It fades
+--   every palette but the effect one to black or white, overwrites the effect
+--   layer with the new picture while that picture is also at the fade colour, and
+--   then fades the effect palette back. So the field is simply BLACK underneath --
+--   which the base group's tint quad has already drawn -- and this layer goes on
+--   top opaquely, wearing its own tint.
+--
+--   MODE_BLEND (2 calls, both in program 433) cross-fades: EVA on the effect layer
+--   rises while EVB on the base layer falls, and the DS adds the two weighted
+--   planes. That is a dim of the field plus an ADDITIVE draw of the picture, and
+--   the sum is allowed to clip -- which is why the middle of a cross-fade looks
+--   bright on hardware and looks bright here.
+--
+-- THE TINT IS ONLY DRAWN OVER ART THAT COVERS THE SCREEN. `fadebg` type 2 blends
+-- this layer's sixteen palette entries and nothing else, so the flat quad that
+-- reproduces it is only equivalent where there are no holes for the field to show
+-- through. 35 of the 81 pictures cover the visible 256x192 completely, the thinnest
+-- covers 72.7%, and the graphics stage records which is which. The one program in
+-- the cartridge that uses the type-2 fade -- 87, twice, toward white -- switches to
+-- background 19, which is one of the 35.
+function Gen4Battle.drawEffectBackground(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.bgLayerState) then return false end
+  local got, st = pcall(player.bgLayerState, player)
+  if not (got and st and st.id) then return false end
+
+  local g = love.graphics
+  local drew = false
+
+  -- The cross-fade's half: the field dimmed to its coefficient.
+  if st.blend and (st.base or 1) < 1 then
+    g.setColor(0, 0, 0, 1 - st.base)
+    g.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+    g.setColor(1, 1, 1, 1)
+    drew = true
+  end
+
+  local art, row = Gen4Battle.effectArt(battle, st.id, st.variant)
+  if not art then
+    -- No effect art in this cache. The field is still blacked out by the fade,
+    -- which is the cartridge's own first half of the switch -- so a move plays
+    -- against black rather than against the wrong background, and that is the
+    -- honest state of an unimported cache rather than a guess at the picture.
+    return drew
+  end
+
+  local w, h = art:getWidth(), art:getHeight()
+  local ox = -((st.offsetX or 0) % w)
+  local oy = -((st.offsetY or 0) % h)
+
+  -- ADDITIVE FOR THE CROSS-FADE, ordinary alpha for the fade mode.
+  if st.blend then
+    g.setBlendMode("add", "alphamultiply")
+    local k = st.effect or 1
+    g.setColor(k, k, k, 1)
+  else
+    g.setColor(1, 1, 1, 1)
+  end
+  -- THE LAYER WRAPS, because the hardware's offset registers do: a background is a
+  -- torus and a scroll of 300 shows the left of the picture again. Two draws a axis
+  -- is enough while the picture is at least as big as the screen, and every one of
+  -- the 81 is 256 or 512 wide by 256 tall.
+  for _, dx in ipairs({ 0, w }) do
+    for _, dy in ipairs({ 0, h }) do
+      if ox + dx < Gen4Battle.WIDTH and oy + dy < Gen4Battle.HEIGHT then
+        g.draw(art, ox + dx, oy + dy)
+      end
+    end
+  end
+  if st.blend then g.setBlendMode("alpha", "alphamultiply") end
+  g.setColor(1, 1, 1, 1)
+
+  -- ...and this layer's own palette blend, where the art has no holes for it to
+  -- leak through.
+  local tint = st.tint
+  if tint and tint[4] and tint[4] > 0 and row and row.opaque then
+    g.setColor(tint[1] or 0, tint[2] or 0, tint[3] or 0, tint[4])
+    g.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+    g.setColor(1, 1, 1, 1)
+  end
+  return true
+end
+
+-- drawCellActors(battle) -> how many were drawn
+--
+-- The cartridge places these at the DEFENDER and the per-move callback moves them
+-- from there; this port honours the placement and the animation, applies the five
+-- callbacks it has read (see `SPRITE_MOTION` in the player) and names the motion
+-- it does not apply. Drawn from the sprite's own centre for the same reason the
+-- particles are: a cell bank's OAM offsets are measured from the sprite's origin,
+-- so the assembled image is centred on it.
+function Gen4Battle.drawCellActors(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not player then return 0 end
+  local got, list = pcall(player.cells, player)
+  if not (got and type(list) == "table") then return 0 end
+  local g = love.graphics
+  local drawn = 0
+  for _, s in ipairs(list) do
+    -- A BLANK FRAME IS SKIPPED, NOT TREATED AS A FAULT: see `Player:cells`.
+    local img = (not s.blank) and s.art and image(s.art.path) or nil
+    if img then
+      local ox, oy = Gen4Battle.particleOrigin(battle, s.origin,
+                                               player.attackerIsPlayer)
+      -- AN ABSOLUTE COORDINATE REPLACES THE ORIGIN'S, AND THE OFFSET WITH IT.
+      -- Two callbacks reach this and for the same reason: their position is not
+      -- an offset from a battler at all. Fissure's crack opens at a fixed screen
+      -- Y -- 126 or 32 by the defender's side -- whichever Pokemon is standing
+      -- there; IcicleSpear's icicles fly along a path BETWEEN the two battlers,
+      -- which no offset from either could express. Both axes are separate: a
+      -- record may pin its Y and still be offset in X.
+      local sx = tonumber(s.x) or 0
+      local sy = tonumber(s.y) or 0
+      local absX, absY = tonumber(s.absoluteX), tonumber(s.absoluteY)
+      if absX then ox, sx = absX, 0 end
+      if absY then oy, sy = absY, 0 end
+      -- +Y IS DOWN, as it is on the hardware. The offsets on these records are
+      -- what `ManagedSprite_OffsetPositionXY` would have added, and every
+      -- constant in pret is written in that frame -- move 265's (0, 24) puts its
+      -- sprite twenty-four pixels BELOW the battler's centre. The particle path
+      -- above adds its Y for the same reason, so the two layers now agree.
+      --
+      -- WHAT THE CALLBACK DID TO IT: a scale, a rotation, a horizontal flip and
+      -- an alpha, all identity on a sprite whose callback is not ported, so the
+      -- same four lines serve every sprite and a missing callback cannot silently
+      -- tint or shrink anything. The flip is a negative X scale about the centre,
+      -- which is what `SetFlipMode` is on the hardware.
+      local scaleX = tonumber(s.scaleX) or 1
+      local scaleY = tonumber(s.scaleY) or 1
+      if s.flipX then scaleX = -scaleX end
+      local alpha = tonumber(s.alpha)
+      if alpha == nil then alpha = 1 end
+      local cr, cg, cb = effectFade(player, 1, 1, 1)
+      g.setColor(cr, cg, cb, alpha)
+      g.draw(img, ox + sx, oy + sy, tonumber(s.rotation) or 0, scaleX, scaleY,
+             img:getWidth() / 2, img:getHeight() / 2)
+      drawn = drawn + 1
+    end
+  end
+  g.setColor(1, 1, 1, 1)
+  return drawn
+end
+
+-- WHERE AN EMITTER'S PARTICLES ARE MEASURED FROM.
+--
+-- `Gen4MoveAnimPlayer` hands over an origin NAME, not a point, because the name
+-- is what the cartridge's callback table says and the point is this screen's
+-- business. The names come from pret's own `sEmitterCallbackTable`; see the
+-- table in the player.
+--
+-- `emitter` and `midpoint` both land between the two Pokemon, and for different
+-- reasons: `midpoint` is what SetPosBasedOnBattlers means, and `emitter` is the
+-- callback that moves the emitter nowhere at all -- so its particles sit at the
+-- resource's own stored position, which is expressed relative to the middle of
+-- the field. Those two agreeing is a coincidence of this layout, not one fact.
+function Gen4Battle.particleOrigin(battle, name, attackerIsPlayer)
+  local me = Gen4Battle.BATTLER_POS[0]
+  local foe = Gen4Battle.BATTLER_POS[1]
+  if name == "player" then return me.x, me.y end
+  if name == "enemy" then return foe.x, foe.y end
+  local attacker = attackerIsPlayer and me or foe
+  local defender = attackerIsPlayer and foe or me
+  if name == "attacker" then return attacker.x, attacker.y end
+  if name == "defender" then return defender.x, defender.y end
+  return (me.x + foe.x) / 2, (me.y + foe.y) / 2
+end
+
+-- A REPEATED TEXTURE, AND THE QUAD THAT MAKES ONE.
+--
+-- `textureS = FX32_ONE << textureTileCountS`, so the field is a power-of-two
+-- repeat across the particle's own quad: 534 of the cartridge's emitters tile
+-- 2x2, 67 tile 2x1 and 46 tile 1x2. The particle does not get BIGGER -- the
+-- texture repeats inside the same footprint -- so the quad is widened and the
+-- scale divided by the same factor.
+--
+-- CACHED BY SHAPE, because a Quad allocated per particle per frame would be
+-- thousands of objects a second for a handful of distinct shapes.
+local tileQuads = {}
+
+local function tiledQuad(width, height, tileS, tileT)
+  local key = ("%d:%d:%d:%d"):format(width, height, tileS, tileT)
+  local quad = tileQuads[key]
+  if not quad then
+    quad = love.graphics.newQuad(0, 0, width * tileS, height * tileT,
+                                 width, height)
+    tileQuads[key] = quad
+  end
+  return quad
+end
+
+-- drawParticles(battle) -> how many were drawn
+--
+-- Returns the count because a silent nothing is the failure mode here: every
+-- part of this can be right and produce an empty screen if the art did not
+-- import, and a number is what a diagnostic can look at.
+function Gen4Battle.drawParticles(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not player then return 0 end
+  local got, list = pcall(player.particles, player)
+  if not (got and type(list) == "table") then return 0 end
+  local g = love.graphics
+  local drawn = 0
+  for _, q in ipairs(list) do
+    local img = q.art and image(q.art.path)
+    if img then
+      local ox, oy = Gen4Battle.particleOrigin(battle, q.origin,
+                                               player.attackerIsPlayer)
+      -- DRAWN FROM ITS CENTRE. A particle's position is its middle in the
+      -- cartridge and its scale grows both ways from there; anchoring the
+      -- top-left instead makes every effect drift down and right as it grows.
+      local w, h = img:getWidth(), img:getHeight()
+      -- TWO SCALES. 445 of the cartridge's 1,468 emitters set an aspect ratio,
+      -- and 175 of them animate only one axis, so a single scale draws a third
+      -- of the game's particles the wrong shape.
+      local sx = tonumber(q.scaleX) or tonumber(q.scale) or 1
+      local sy = tonumber(q.scaleY) or tonumber(q.scale) or 1
+      local a = tonumber(q.alpha) or 1
+      if a < 0 then a = 0 elseif a > 1 then a = 1 end
+      -- THE COLOUR ANIMATION MODULATES THE TEXTURE, which is what the DS's
+      -- polygon colour does to it. Nil when the resource has no colour curve,
+      -- and then the art is drawn as it was extracted.
+      local c = q.colour
+      if c then
+        local cr, cg, cb = effectFade(player, (c[1] or 255) / 255,
+                                     (c[2] or 255) / 255, (c[3] or 255) / 255)
+        g.setColor(cr, cg, cb, a)
+      else
+        local cr, cg, cb = effectFade(player, 1, 1, 1)
+        g.setColor(cr, cg, cb, a)
+      end
+      -- ROTATION COMES THROUGH IN RADIANS. A particle with no `hasRotation` bit
+      -- gets zero, so this costs nothing where the cartridge does not ask for it.
+      local tileS = math.max(1, math.floor(tonumber(q.tileS) or 1))
+      local tileT = math.max(1, math.floor(tonumber(q.tileT) or 1))
+      if tileS > 1 or tileT > 1 then
+        -- REPEAT WRAP IS SET ON THE IMAGE ITSELF, which is shared through the
+        -- asset cache -- safe here because a particle texture is drawn from
+        -- nowhere else, and stated so the next caller knows.
+        img:setWrap("repeat", "repeat")
+        g.draw(img, tiledQuad(w, h, tileS, tileT),
+               ox + (q.x or 0), oy + (q.y or 0), tonumber(q.rotation) or 0,
+               sx / tileS, sy / tileT, w * tileS / 2, h * tileT / 2)
+      else
+        g.draw(img, ox + (q.x or 0), oy + (q.y or 0), tonumber(q.rotation) or 0,
+               sx, sy, w / 2, h / 2)
+      end
+      drawn = drawn + 1
+    end
+  end
+  g.setColor(1, 1, 1, 1)
+  return drawn
 end
 
 -- WHERE THE ENGINE'S OWN HUD AND MESSAGE BOX GO, UNTIL PLATINUM'S EXIST.
@@ -1241,7 +1804,30 @@ function Gen4Battle.drawTextArea(battle)
   end
   g.setColor(0, 0, 0, 1)
 
-  if phase == "messages" and (battle.current or battle.animPlaying) then
+  -- THE MESSAGE PHASE IS SINNOH'S, WITH OR WITHOUT WORDS IN IT.
+  --
+  -- Item 8 of the play-test list: *"A stray extra textbox appears in battle"*.
+  -- This is it, and the condition above is where it came from.
+  --
+  -- Platinum's frame is already on screen by this point -- `drawDialogueBox`
+  -- ran a few lines up, unconditionally.  The test used to be
+  -- `phase == "messages" AND (battle.current or battle.animPlaying)`, so a
+  -- message phase with no line to show right now -- the opening, while the
+  -- queue is working through its waits and its callbacks -- matched NONE of the
+  -- branches and fell through to the fallback at the bottom, which pushes the
+  -- Game Boy's centring translate and calls `drawTextAreaInner`.  That function
+  -- opens with `Font.drawBox(0, 12, 20, 6)`.
+  --
+  -- So the screen carried Platinum's message box AND the Game Boy's, the second
+  -- one floating over the field where the centring translate put it.  Measured
+  -- in the battle harness: a white box at x 55..200, y 127..160 present at tick
+  -- 20 and gone by tick 120 -- gone because by then a line HAD arrived and the
+  -- branch was taken.
+  --
+  -- An empty message box is the right answer for a message phase with nothing
+  -- to say.  The Game Boy's box is not.
+  if phase == "messages" then
+   if battle.current or battle.animPlaying then
     -- The rolling two-line window and its one-row slide, exactly as the Game
     -- Boy path runs them -- only the rows and the pitch are Platinum's.
     if battle.scrollPx and battle.scrollPx > 0 then
@@ -1261,6 +1847,7 @@ function Gen4Battle.drawTextArea(battle)
        and (battle.frame or 0) % 60 < 30 then
       Font.drawCode(Theme.moreArrow, T.x + T.w - 10, ROWS[2] + 4)
     end
+   end
     return
   end
 
@@ -1421,18 +2008,35 @@ end
 -- Draw one gauge: `cells` tiles side by side, each showing how much of its own
 -- eight pixels is filled. This is exactly what DrawGauge does -- it picks a
 -- ramp, then copies one of FILL_0..FILL_8 into each cell's tile.
+-- !! "hp" IS NOT A RAMP THE CACHE CARRIES, AND THE GUARD ASKED FOR IT ANYWAY.
+--
+-- This opened `local gauge = rec.gauges[rampName]` and bailed on nil -- which
+-- is right for "exp" and WRONG for "hp", because there is no `gauges.hp`:
+-- the cache carries `hp_green`, `hp_yellow` and `hp_red` and the ramp is
+-- chosen from the fill BELOW, twelve lines after the guard had already
+-- returned.  So the HP bar never drew, on any box, in any battle, while the
+-- EXP bar beside it worked -- and `drawGauges` is called inside a `pcall`, so
+-- nothing said anything either.
+--
+-- The width has to come from a real ramp too, and all three are the same six
+-- cells; `hp_green` stands in for measuring it, with the other two accepted
+-- in case an odd cache carries only one.
 local function drawGauge(battle, rampName, x, y, cur, max)
   local rec, img, quads = partsFor(battle)
-  local gauge = rec and rec.gauges and rec.gauges[rampName]
-  if not (gauge and img and quads) then return false end
-  local width = gauge.width or (gauge.cells * 8)
-  local px = gaugePixels(cur, max, width)
-  local ramp = gauge
+  if not (rec and rec.gauges and img and quads) then return false end
+  local ramp = rec.gauges[rampName]
+  local sizer = ramp
   if rampName == "hp" then
-    local pick = barRamp(px, width)
-    ramp = rec.gauges[pick]
-    if not ramp then return false end
+    sizer = rec.gauges.hp_green or rec.gauges.hp_yellow or rec.gauges.hp_red
   end
+  if not sizer then return false end
+  local width = sizer.width or ((sizer.cells or 0) * 8)
+  if width <= 0 then return false end
+  local px = gaugePixels(cur, max, width)
+  if rampName == "hp" then
+    ramp = rec.gauges[barRamp(px, width)]
+  end
+  if not ramp then return false end
   love.graphics.setColor(1, 1, 1, 1)
   for i = 0, (ramp.cells or 0) - 1 do
     local filled = math.max(0, math.min(8, px - i * 8))
@@ -1825,12 +2429,66 @@ function Gen4Battle.drawBottomScreen(battle, SecondScreen, over)
   return true
 end
 
+-- THE THROWN BALL, over the Pokemon and under the HUD.
+--
+-- Over, because a ball that vanishes behind the thing it is being thrown at is
+-- the one placement that is certainly wrong; under the HUD, because the boxes
+-- are the screen's furniture and nothing in a battle draws on top of them.
+--
+-- The timing and the cell come from `Gen4BallAnim`, which reads the
+-- cartridge's own NANR; this only puts the named cell where the anim says.
+function Gen4Battle.drawThrownBall(battle)
+  local anim = battle and battle.gen4Ball
+  if not (anim and anim.visible) then return false end
+  local Gen4BattleRT = require("src.battle.Gen4Battle")
+  local name = anim.ball
+  local gfx = graphics(battle)
+  local key = Gen4BattleRT.ballThrowFrame(name, anim.cell or 0)
+  local row = gfx and gfx.battleObjects and gfx.battleObjects[key]
+  if not row then
+    -- SAID ONCE, because a ball that silently does not draw is exactly the
+    -- failure this whole item started as.
+    if not battle.saidBallMissing then
+      battle.saidBallMissing = true
+      Logger.warn("gen4 ball: no frame '%s' in the cache -- the throw will not "
+                  .. "draw (run tools/gen4_ball_throw_check.lua)", tostring(key))
+    end
+    return false
+  end
+  local img = image(row.path)
+  if not img then return false end
+  local g = love.graphics
+  local w, h = img:getDimensions()
+  g.setColor(1, 1, 1, 1)
+  -- Rotated about its own centre, so a shake rocks the ball rather than
+  -- swinging it around a corner.
+  g.draw(img, anim.x, anim.y, anim.angle or 0, 1, 1, w / 2, h / 2)
+  return true
+end
+
 function Gen4Battle.draw(battle)
   local g = love.graphics
   battle:drawBattleField()
   if battle.blankForAskName then return end
 
+  -- THE BACKGROUND'S OWN PALETTE FADE, BETWEEN THE FIELD AND THE BATTLERS.
+  -- `fadebg` blends the BACKGROUND's palettes and nothing else, so it has to land
+  -- after the field is drawn and before the Pokemon are -- a tint over the whole
+  -- screen would dim them too, which the cartridge does not.
+  Gen4Battle.drawBackgroundFade(battle)
+
+  -- ...and then the switched background itself, over the blacked-out field and
+  -- under the Pokemon, which is where BG3 sits.
+  Gen4Battle.drawEffectBackground(battle)
+
   Gen4Battle.drawBattlers(battle)
+
+  -- The trainer, while the first Pokemon is still in its ball.  Before the
+  -- thrown ball so a send-out throw draws over the trainer rather than under.
+  pcall(Gen4Battle.drawTrainerBack, battle)
+
+  -- ...and the thrown ball on top of them.
+  pcall(Gen4Battle.drawThrownBall, battle)
 
   -- Platinum's own boxes when the cache has them assembled; otherwise nothing
   -- here and the stand-in below carries the whole HUD as it did before.
@@ -1878,6 +2536,72 @@ function Gen4Battle.draw(battle)
       end
     end
   end
+end
+
+-- ---------------------------------------------------------------------------
+-- THE BALL THROW: WHICH ART EACH BALL USES
+-- ---------------------------------------------------------------------------
+--
+-- For item 6, *"Ball catching animations do not play"*.  The art was already
+-- being extracted -- `ball_throws/` has been in `OBJ_FAMILIES` above all along
+-- and the cache holds twenty sets of ten 16x16 frames -- but nothing said which
+-- set belongs to which ball, so nothing could use them.
+--
+-- THE ARCHIVE THIS PORT EXTRACTED FOR THIS IS THE WRONG ONE, and that is worth
+-- writing down because it cost a pass.  `ball_particle.narc`'s 117 effects are
+-- the BALL CAPSULE SEALS: pokeplatinum opens that NARC in exactly one place,
+-- `ov12_02235E94.c`, from `BallCapsuleSealEffect`, and nowhere else.  The throw
+-- is not a particle effect at all -- it is a 2D cell animation out of
+-- `pl_batt_obj`, the archive this file already describes.
+--
+-- THE ORDER IS `sBallThrowGraphics`, and the row is `ballId - 1`
+-- (`ov12_02235E94`), with an id outside the table falling back to row 3, the
+-- plain Poke Ball.  The ball id IS an item id -- `MON_DATA_POKEBALL` is
+-- compared straight against `ITEM_LUXURY_BALL` in `item_use_pokemon.c`.
+--
+-- CROSS-CHECKED TWO WAYS rather than taken from the one source: pret's table
+-- runs master, ultra, great, poke, safari... and this port's OWN extracted item
+-- cache numbers them 1 Master, 2 Ultra, 3 Great, 4 Poke, 5 Safari, ... 16
+-- Cherish.  The two orders agree, which is what makes `ballId - 1` a
+-- measurement rather than a guess.
+--
+-- Rows 17-19 are the Safari Zone throws -- park, mud, bait -- which are not
+-- reached by an item id and are named here so a caller can ask for them
+-- directly.
+Gen4Battle.BALL_THROWS = {
+  [0] = "master_ball",
+  "ultra_ball", "great_ball", "poke_ball", "safari_ball", "net_ball",
+  "dive_ball", "nest_ball", "repeat_ball", "timer_ball", "luxury_ball",
+  "premier_ball", "dusk_ball", "heal_ball", "quick_ball", "cherish_ball",
+  "park_ball", "mud", "bait",
+}
+
+-- The row an out-of-range id falls back to: `ov12_02235E94` answers 4 and then
+-- subtracts one, which is the plain Poke Ball and not the first row.
+Gen4Battle.BALL_THROW_DEFAULT = 3
+
+-- How the `gen4_graphics` stage names a frame of one of these.
+function Gen4Battle.ballThrowFrame(name, frame)
+  return ("ball_throws_%s_%02d"):format(tostring(name), tonumber(frame) or 0)
+end
+
+-- ballThrowFor(itemId) -> the art name, never nil.
+--
+-- `ov12_02235E94` transcribed: an id of 1..(0xFF+20) indexes directly, anything
+-- else takes the Poke Ball.  The 0xFF+ band is how the cartridge reaches the
+-- Safari throws, which have no item of their own.
+function Gen4Battle.ballThrowFor(itemId)
+  local id = tonumber(itemId)
+  local row
+  if not id or id < 1 or id > (0xFF + 20) then
+    row = Gen4Battle.BALL_THROW_DEFAULT
+  elseif id >= 0xFF then
+    row = id - 0xFF - 1
+  else
+    row = id - 1
+  end
+  return Gen4Battle.BALL_THROWS[row]
+         or Gen4Battle.BALL_THROWS[Gen4Battle.BALL_THROW_DEFAULT]
 end
 
 return Gen4Battle

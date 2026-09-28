@@ -86,8 +86,21 @@ function Gen4Camera.halfHeight(config)
   return tan(rad(config.halfFov)) * config.distance
 end
 
--- ...and therefore the pixels-per-unit the cartridge is working at, which
--- comes out within 1.3% of 1.0 for every one of the seventeen.
+-- ...and therefore the pixels-per-unit the cartridge is working at.
+--
+-- FIFTEEN OF THE SEVENTEEN, NOT ALL OF THEM. This comment used to say "every one
+-- of the seventeen" and it was wrong -- it was written from the four rows quoted
+-- further down, and checking all of them found two that miss:
+--
+--     [8]  stark_room2   half = 115.09   +19.89%
+--     [16] unused_16     half =  91.61    -4.57%
+--
+-- Both were re-read from `sCameraTypes` in pret and both MATCH: the distances,
+-- pitches and FOVs above are the cartridge's. So this is not an extraction
+-- error -- Stark Mountain's second room really does render about 1.2x wider than
+-- one unit per pixel, and a renderer that assumes 1:1 everywhere draws that map
+-- at the wrong scale. `unused_16` is named for being unreachable, so its miss
+-- costs nothing; camera 8 is used by a real map.
 function Gen4Camera.pixelsPerUnit(config)
   local half = Gen4Camera.halfHeight(config)
   if half <= 0 then return 1 end
@@ -187,10 +200,55 @@ end
 -- depth the screen covers rather than on the scale at its edges, and the
 -- number above is the one that describes what a player sees.
 
--- sin(pitch) and cos(pitch): the ground and height scales, in that order.
+-- HOW FAR THE HEIGHT SCALE MAY BE PUSHED.
+--
+-- `Gen4Ground` sizes a chunk's canvas as `chunkPx * ground + height * MAX_RISE`
+-- with MAX_RISE 384, so the height scale is what decides how tall a bake is:
+-- 1.5 puts a 512-wide chunk on a 1,015-row canvas, and sixteen of those with
+-- their depth buffers is about the most this cache should hold.  A rung
+-- steeper than the ladder below would exceed it, so the clamp is here rather
+-- than in the ladder -- a number that cannot be reached is not a limit.
+local MAX_HEIGHT_SCALE = 1.5
+
+-- cot(pitch), guarded at both ends: zero at 90 (straight down, no lean at all)
+-- and floored at 5 degrees so a bad value cannot divide by nothing.
+local function cot(pitch)
+  pitch = tonumber(pitch) or 90
+  if pitch >= 89.999 then return 0 end
+  if pitch < 5 then pitch = 5 end
+  return cos(rad(pitch)) / sin(rad(pitch))
+end
+
+-- THE GROUND SCALE AND THE HEIGHT SCALE, AND WHY THEY ARE NO LONGER ONE ANGLE.
+--
+-- On the cartridge they are: one pitch gives `sin` for ground depth and `cos`
+-- for height, and a player who wanted more lean could only get it by tilting
+-- the camera -- which SQUASHES THE MAP at the same time.  At 40 degrees a tree
+-- rises twice as far and the whole of Sinnoh loses a quarter of its depth, so
+-- the control traded one kind of wrong for another and the picture did not
+-- obviously improve.
+--
+-- Reported from play: *"make the tilt work with the 3d of the world so the 3d
+-- becomes more visible when used"*.  That is a request for a HEIGHT control,
+-- not a camera angle, so the two are separated here:
+--
+--     ground = sin(mapPitch)                    -- never moves
+--     height = sin(mapPitch) * cot(heightPitch) -- the OPTIONS row
+--
+-- `heightPitch` defaults to the map's own pitch, and there the identity
+-- `sin * cos/sin = cos` gives back EXACTLY the cartridge's pair -- so
+-- "CARTRIDGE" is bit-for-bit what it always was and every other rung raises
+-- the height alone, leaving the map's footprint where it is.
+--
+-- `Gen4Ground.projection` already takes the two as an independent pair and
+-- derives its lean and its depth row from them, so nothing downstream needed
+-- to learn about this.
 function Gen4Camera.scales(config)
   local pitch = rad((config and config.pitch) or 90)
-  return sin(pitch), cos(pitch)
+  local ground = sin(pitch)
+  local height = ground * cot((config and config.heightPitch) or (config and config.pitch) or 90)
+  if height > MAX_HEIGHT_SCALE then height = MAX_HEIGHT_SCALE end
+  return ground, height
 end
 
 -- Project a point given as an offset from the camera's TARGET, in world units,
@@ -212,12 +270,14 @@ function Gen4Camera.unprojectGround(config, screenX, screenY)
   return screenX, screenY / s
 end
 
--- cot(pitch), the height-to-screen lean.  Zero at 90 degrees.
+-- The height-to-screen lean, which is `height / ground` and therefore follows
+-- the pair above rather than the raw pitch -- otherwise a raised height scale
+-- would lean the geometry by one amount and place it by another, and a tree
+-- would shear away from its own trunk.
 function Gen4Camera.lean(config)
-  local pitch = config and config.pitch or 90
-  if pitch >= 89.999 then return 0 end
-  if pitch < 5 then pitch = 5 end
-  return cos(rad(pitch)) / sin(rad(pitch))
+  local ground, height = Gen4Camera.scales(config)
+  if ground <= 1e-6 then return 0 end
+  return height / ground
 end
 
 -- ---------------------------------------------------------------------------
@@ -228,7 +288,78 @@ end
 -- file exists to give; the fixed angles are there because a player who wants
 -- the old flat view, or more lean than Sinnoh ever uses, should not have to
 -- edit a file for it.  90 is exactly the straight-down bake.
-Gen4Camera.TILTS = { "cartridge", 90, 80, 70, 60, 50, 40 }
+-- 30 is the steepest rung, and it is the clamp above that decides that rather
+-- than taste: at the DEFAULT camera's ground scale it puts the height scale at
+-- 1.485, a hair under MAX_HEIGHT_SCALE, and a 42-unit tree at 63 screen pixels
+-- against the cartridge's 22.
+-- ...AND THE TWO FREE MODES ON THE END OF THE SAME LADDER.
+--
+-- Requested: *"have first and third person as an option within the tilt"*.
+-- They belong here rather than on a control of their own because they answer
+-- the same question every other rung does -- how much of the world's height do
+-- I want to see -- and a player who has walked the ladder from CARTRIDGE down
+-- to 30 is already asking for more of it.
+--
+-- A string rung carries no pitch, so `forMap` leaves the map header's own in
+-- place and `Gen4Ground` reads the MODE instead; every consumer that asks this
+-- table for a number still gets one for the eight numeric rungs.
+Gen4Camera.TILTS = { "cartridge", 90, 80, 70, 60, 50, 40, 30, "third", "first" }
+
+-- THE CLOSEST THE CARTRIDGE EVER PUTS THE CAMERA: HALL_OF_ORIGIN, row 14 of
+-- sCameraTypes[], distance 169.462158203125 at a 78.38 degree pitch.
+--
+-- It is here because the tilt ladder needs somewhere to interpolate the
+-- PARALLAX towards, and a number this cartridge actually puts a player behind
+-- is worth more than a round one I would have picked myself.  The far end of
+-- the interpolation is the map header's own distance, so every value in the
+-- range is a distance the ROM uses somewhere.
+local NEAREST_DISTANCE = 169.462158203125
+
+-- The shallowest numeric rung, taken FROM the ladder rather than written out
+-- again, so adding a rung cannot leave the two disagreeing.
+local SHALLOWEST = (function()
+  local least
+  for _, rung in ipairs(Gen4Camera.TILTS) do
+    local n = tonumber(rung)
+    if n and (least == nil or n < least) then least = n end
+  end
+  return least or 30
+end)()
+
+-- Which rungs hand the frame to `Gen4View` rather than to the oblique matrix.
+local FREE = { third = true, first = true }
+
+-- modeFor(chosen) -> "third" | "first" | nil
+--
+-- Answered from the CHOSEN rung rather than from a second stored flag, so the
+-- ladder stays the single source of truth about which view is up.
+function Gen4Camera.mode()
+  local chosen = Gen4Camera.TILTS[Gen4Camera.chosen]
+  if FREE[chosen] then return chosen end
+  -- A NUMERIC RUNG IS A CAMERA ANGLE, not a stretch.
+  --
+  -- Reported from play: *"changing the tilt seems to be stretching the
+  -- buildings rather than changing the tilt of the camera"*, and later
+  -- *"fixing the tilt in gen4 currently its stretching the buildings rather
+  -- than changing the 3d view of the camera like first person and third
+  -- person do"*.
+  --
+  -- It was doing exactly that, by construction: the ladder left the map's own
+  -- `pitch` alone -- so the ground never moved -- and wrote the chosen angle
+  -- into `heightPitch`, which only says HOW TALL to draw things.  Stepping the
+  -- ladder therefore stretched every standing thing vertically and moved
+  -- nothing.  That was a deliberate containment choice at the time, because
+  -- the ground plane had to stay pixel-identical for the sprites and picks
+  -- that are placed by it -- but the free camera has since solved all of that
+  -- properly, with `freeEntity` placing sprites by projection.
+  --
+  -- So a numeric rung now selects a REAL camera at that pitch, through the
+  -- same path first and third person use.  `cartridge` is unchanged and still
+  -- answers nil, which keeps the oblique pass for the one rung that asks for
+  -- the cartridge's own framing.
+  if tonumber(chosen) then return "field3d" end
+  return nil
+end
 
 -- HELD HERE RATHER THAN READ FROM THE SAVE, because the thing that needs it --
 -- `Gen4Ground`, built by `MapLoader.load(data, mapId)` -- is never handed a
@@ -281,8 +412,71 @@ function Gen4Camera.forMap(def)
   if chosen == "cartridge" then return config end
   local copy = {}
   for k, v in pairs(config) do copy[k] = v end
-  copy.pitch = tonumber(chosen) or config.pitch
+  -- `pitch` STAYS THE MAP'S OWN, and that is the change.
+  --
+  -- It used to be overwritten, which moved the ground and the height together
+  -- and squashed the map to buy the lean.  The chosen angle now names the
+  -- HEIGHT alone; everything that asks this config how deep the ground is --
+  -- the blit, the sprite placement, `unprojectGround` turning a screen row
+  -- back into a tile row -- still gets the map's own answer and needs no
+  -- second thought about which pitch it is holding.
+  copy.heightPitch = tonumber(chosen) or config.pitch
   copy.chosen = true
+
+  -- AND HOW MUCH PARALLAX, which is the other half of *"make the tilt show 3d
+  -- like the first and 3rd person do"*.
+  --
+  -- Measured before touching it: the spread is `cos(pitch)/distance` off the
+  -- map header, so it read 0.0007711 per unit on EVERY rung of the ladder --
+  -- 19.7% of the frame failing to cancel at rung 90 and 13.5% at rung 30, i.e.
+  -- stepping the ladder never added any depth at all.  And for the 300
+  -- INTERIOR_ORTHOGRAPHIC headers -- every ordinary room -- it was exactly
+  -- 0.00% at every rung, 0 pixels of 184,320, because an orthographic
+  -- projection has no parallax by construction.  The tilt could not show depth
+  -- indoors however far it was stepped.
+  --
+  -- The spread is a fact about WHERE THE CAMERA SITS, so the honest way to make
+  -- it larger is to bring the camera closer -- not to scale the term by a
+  -- number chosen to look right.  The rung interpolates the eye's distance
+  -- between the map header's own and `NEAREST_DISTANCE`, and the ROM supplies
+  -- both ends.  (Reciprocally -- see below for why that is not a detail.)
+  --
+  -- THE GROUND PLANE IS UNTOUCHED, which is the whole containment argument:
+  -- the shader's factor is `1 - y * spread`, exactly 1 at y = 0, so every
+  -- sprite, pick and tile-row answer the overworld computes from `scales()` and
+  -- `unprojectGround` reads the same as before.  `pitch`, `distance` and
+  -- `projection` are all left alone for the same reason.
+  local rung = tonumber(chosen)
+  if rung then
+    local span = 90 - SHALLOWEST
+    local t = span > 0 and (90 - rung) / span or 0
+    if t < 0 then t = 0 elseif t > 1 then t = 1 end
+    -- INTERPOLATE THE RECIPROCAL, because the spread IS proportional to 1 over
+    -- the distance.  Two things follow, and both are the reason it is written
+    -- this way round:
+    --
+    -- * An ORTHOGRAPHIC header starts at 1/D = 0, which is what orthographic
+    --   MEANS -- a camera at infinity.  So rung 90 leaves those 300 rooms
+    --   exactly as flat as the cartridge draws them, and the depth comes up
+    --   from nothing as the player steps down the ladder.  Interpolating the
+    --   distance itself instead handed rung 90 a spread of 0.0004104 and 12.13%
+    --   parallax on the FLATTEST rung, which reads as a distortion rather than
+    --   as depth: at rung 90 the height scale is 0, so nothing is raised and
+    --   the splay has nothing to belong to.
+    -- * Parallax then grows LINEARLY with the rung, which is the property a
+    --   ladder should have.
+    local nearest = 1 / NEAREST_DISTANCE
+    local base = tonumber(config.distance)
+    local invBase = (config.projection == "perspective" and base and base > 1)
+                    and (1 / base) or 0
+    local inv = invBase + t * (nearest - invBase)
+    -- nil at rung 90 on an orthographic header, and `Gen4Ground` reads that as
+    -- "no spread" -- the same answer it gave before this existed.
+    copy.spreadDistance = inv > 0 and (1 / inv) or nil
+    -- The angle stays the header's own PHYSICAL pitch: the rung moves how tall
+    -- things are drawn and how close the eye is, never where the camera is.
+    copy.spreadPitch = config.pitch
+  end
   return copy
 end
 

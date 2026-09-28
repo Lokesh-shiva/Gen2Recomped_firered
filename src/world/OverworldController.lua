@@ -587,6 +587,27 @@ local function pooledNPC(pool, data, mapId, obj)
   end
   if not npc then
     npc = NPC.new(data, mapId, objectHome(nil, mapId, obj))
+    -- ...AND WHERE IT WAS STANDING WHEN THE GAME WAS SAVED.
+    --
+    -- See `captureSave`: Gen 4 records every object's position and facing,
+    -- because a scene that walked somebody somewhere has to survive a
+    -- reload.  Applied to the LIVE position only -- the template `NPC.new`
+    -- was handed keeps the map's own x and y, which is what `xInitial` is on
+    -- the cartridge and what a wandering object walks back towards.
+    --
+    -- The pixel pair is set the same way `NPC.new` sets it, because it is
+    -- the drawn position and moving one without the other puts the sprite
+    -- and the thing you can talk to in two different places.
+    if GameVersion.isGen4() then
+      local save = Game and Game.save
+      local kept = save and save.gen4Objects and save.gen4Objects[mapId]
+      local at = kept and obj.index and kept[obj.index]
+      if at and at.x and at.y then
+        npc.cellX, npc.cellY = at.x, at.y
+        npc.px, npc.py = npc.cellX * 16, npc.cellY * 16
+        if at.facing then npc.facing = at.facing end
+      end
+    end
     -- A BURIED TRAINER IS NOT ON SCREEN UNTIL THEY NOTICE YOU.
     --
     -- MOVEMENT_TYPE_BURIED keeps the sprite invisible; the trainer rises out
@@ -811,6 +832,12 @@ function OverworldState:enter(mapId, x, y, facing)
   -- A no-op on every other generation: the option is only ever written by the
   -- Gen 4 OPTIONS row, and `sync` leaves the default alone when it is absent.
   require("src.render.Gen4Camera").sync(Game)
+  -- ...AND THE SAVED 3D RESOLUTION, which has the identical gap for the
+  -- identical reason: `Gen4Ground` is built by `MapLoader.load` and is never
+  -- handed a game, so nothing would read the saved value at boot and a player
+  -- who chose 2X last session would get the DS's own 256x192 until they opened
+  -- OPTIONS once. Also a no-op on every other generation.
+  require("src.render.Gen4Ground").syncRenderScale(Game)
   -- ...and this is the moment to notice the cartridge changed.  Not in
   -- bootGame: the map editor's Play and any future path into the world reach
   -- here too, and a reset that lives beside the thing it protects cannot be
@@ -2676,6 +2703,42 @@ function OverworldState:syncObjectVisibility(only)
     local npc = self.npcs[i]
     if keep and keep[npc.id] then
       -- out of scope for a targeted appear/disappear
+    elseif npc.gen4Follower then
+      -- THE PARTNER WALKING BEHIND YOU IS NOT THE MAP'S TO DELETE.
+      --
+      -- Reported from play: "Barry is invisible while following, then
+      -- pops in at borders".  Both halves are this line, and the cause
+      -- is in the cartridge's own script.  Route 201 makes him the
+      -- partner and hides him in the same breath:
+      --
+      --     SetHasPartner
+      --     SetMovementType LOCALID_RIVAL, MOVEMENT_TYPE_FOLLOW_PLAYER
+      --     SetObjectFlagIsPersistent LOCALID_RIVAL, TRUE
+      --     SetFlag FLAG_HIDE_ROUTE_201_RIVAL
+      --
+      -- THAT FLAG IS ABOUT THE MAP'S TEMPLATE, NOT ABOUT HIM.  Barry is
+      -- now a persistent actor traveling with the player, so Route 201
+      -- must stop spawning its own copy or you would meet a second one
+      -- standing where you left him.  `SetObjectFlagIsPersistent` is the
+      -- cartridge saying so: sub_0206184C deletes every object whose
+      -- header id is not the new map's UNLESS that status is set.
+      --
+      -- Here the flag reached `syncObjectVisibility`, which does not hide
+      -- but REMOVES, and it took the live follower out of `npcs` and
+      -- `entities` one line after he started following.  So he did not
+      -- follow at all; and on the next map `Gen4Follower.onMapEntered`
+      -- found no live object with his local id, fell through to
+      -- `spawnFollower`, and rebuilt him -- which is the "pops in".
+      --
+      -- MEASURED, replaying Route 201's four rows on a Sinnoh save:
+      -- before, `after SetFlag -- follower=GONE, 8 live entities` and
+      -- `follower=none` for every tick after it; crossing a seam then
+      -- reported `spawned=true sprite=barry`.
+      --
+      -- GEN 4 ONLY BY CONSTRUCTION: `gen4Follower` is written only by
+      -- `Gen4Follower.adopt` and cleared only by `release`, and nothing
+      -- in the Gen 1/2/3 paths sets it -- so this branch cannot be
+      -- reached on Johto, Hoenn or Kanto.
     elseif not wanted[npc.id] then
       -- Remember where it actually stood.  A Gen2 `disappear` is not a
       -- despawn-and-forget: a cutscene routinely hides an object, walks the
@@ -4244,8 +4307,92 @@ function OverworldState:handleInput()
     return
   end
 
-  for _, dir in ipairs({ "up", "down", "left", "right" }) do
-    if input:isDown(dir) then
+  -- OFF-GRID WALKING, WHEN A FREE CAMERA OWNS THE FRAME.
+  --
+  -- Requested: *"walking off the grid entirely in first or third person"* -- and
+  -- only there.  `freeGroundFor` is nil on every Gen 1/2/3 map and on every Gen 4
+  -- map whose tilt ladder is not on `third` or `first`, so the grid path below is
+  -- reached by exactly what reached it before.
+  --
+  -- The vector is rotated CONTINUOUSLY here, not quantised to quarter turns the
+  -- way `walkDirection` has to be: a grid step can only be one of four, but an
+  -- off-grid one can take the angle it was given.
+  -- ORBITAL, not merely 3D -- see `orbitalGroundFor`.
+  local freeGround = self:orbitalGroundFor()
+  if freeGround then
+    local vx, vy = 0, 0
+    if input:isDown("up") then vy = vy - 1 end
+    if input:isDown("down") then vy = vy + 1 end
+    if input:isDown("left") then vx = vx - 1 end
+    if input:isDown("right") then vx = vx + 1 end
+    local view = freeGround.view3d
+    -- Only while ORBITED, for the same reason the grid rotation is: an
+    -- unorbited camera looks the way the player walks, so rotating by its yaw
+    -- would turn the d-pad into tank controls for someone who never touched
+    -- the camera.
+    if view and view.orbiting and (vx ~= 0 or vy ~= 0) then
+      local c = math.cos(view.yaw or 0)
+      local sn = math.sin(view.yaw or 0)
+      -- screen up (0,-1) becomes the camera's forward (sin, -cos); screen
+      -- right (1,0) becomes its right (cos, sin).
+      vx, vy = vx * c - vy * sn, vx * sn + vy * c
+    end
+    -- ...AND THE THINGS A STEP HAS TO ASK BEFORE IT HAPPENS.
+    --
+    -- Reported from play: *"cant move between routes and cities now"* -- a
+    -- regression this path caused.  Walking off a map edge is not movement,
+    -- it is `checkEdgeExit`, and it lives in the per-direction loop below
+    -- that free walking skips.  So do the ledges, the whirlpool, Strength
+    -- boulders and the Hoenn gates: every one of them is a thing you reach
+    -- by walking into it, and going off-grid quietly removed all of them.
+    --
+    -- Asked in the same order as the grid loop, with the same guards, and
+    -- only for the DOMINANT direction -- these are per-facing questions and
+    -- the player only has one facing.  A check that starts a grid step is
+    -- welcome to: `Player:freeWalk` stands down while `moving` is set and
+    -- picks up again when the step lands.
+    local dir
+    if vx ~= 0 or vy ~= 0 then
+      if math.abs(vx) > math.abs(vy) then
+        dir = vx > 0 and "right" or "left"
+      else
+        dir = vy > 0 and "down" or "up"
+      end
+    end
+    if dir then
+      -- FACE IT BEFORE ASKING, exactly as `tryMove` does.  `freeWalk` sets
+      -- the facing too, but a frame later -- and every check below is a
+      -- per-facing question, so on the frame a direction is first pressed
+      -- they would all be answering about the way the player used to be
+      -- looking.  There is no turn delay off the grid to pay for this.
+      if not self.player.moving then self.player.facing = dir end
+      if self:checkGen2Whirlpool(dir) then return end
+      if not self.player.moving and self.player.facing == dir then
+        if self:checkGen2CarpetExit(dir) then return end
+        if self:checkGen3ArrowWarp(dir) then return end
+        if self:checkEdgeExit(dir) then return end
+        if self:checkLedgeHop(dir) then return end
+        if self:checkBoulderPush(dir) then return end
+        if self:checkGen3Gate(dir) then return end
+      end
+    end
+    -- Handed to the player rather than acted on here, so the overworld's
+    -- `local stepped = self.player:update()` stays the one place that says the
+    -- player arrived somewhere new -- see `Player:freeWalk`.
+    self.player.freeInput = { vx, vy, self.map, self.cast or self.entities }
+    return
+  end
+
+  for _, pressed in ipairs({ "up", "down", "left", "right" }) do
+    if input:isDown(pressed) then
+      -- WHAT THAT PRESS MEANS UNDER A SWUNG CAMERA.
+      --
+      -- Everything below this line -- turning, stepping, ledges, warps, the
+      -- whirlpool, the bike's side jump -- takes a WORLD direction and has
+      -- always been handed the key that was pressed, because until there was
+      -- a camera that could turn, those were the same thing.  Rotating here
+      -- and nowhere else means not one of them learns about cameras.
+      local dir = self:walkDirection(pressed)
       -- .Normal and .Surf both `call .CheckTile` straight after .GetAction
       -- and `ret c`, so the eddy pre-empts turning, stepping, ledges and
       -- warps alike -- and, being a bump, it never lets the player in.
@@ -4976,7 +5123,10 @@ end
 function OverworldState:noteRunGate(why)
   if self.runGateSaid == why then return why end
   self.runGateSaid = why
-  Logger.debug("gen3 running: %s", why)
+  -- Named for the question and not for one generation: Hoenn, Sinnoh and Prism
+  -- all answer here now, and a line saying "gen3" while Sinnoh refuses is worse
+  -- than no line.
+  Logger.debug("running gate: %s", why)
   return why
 end
 
@@ -4989,6 +5139,11 @@ function OverworldState:runFrames()
   local ok, GV = pcall(require, "src.core.GameVersion")
   local version = ok and GV and GV.get and GV.get() or nil
   local gen3 = ok and GV and GV.isGen3 and GV.isGen3()
+  -- Declared HERE and not inside the branch that uses it: a name that is local
+  -- further down the file resolves as a nil GLOBAL above its declaration, so an
+  -- `elseif gen4 then` written before this line is simply never taken, and takes
+  -- the refusal below instead -- silently, which is the whole problem with it.
+  local gen4 = ok and GV and GV.isGen4 and GV.isGen4()
 
   -- EMERALD HAS RUNNING SHOES, and they are a flag rather than an item.
   --
@@ -5030,6 +5185,46 @@ function OverworldState:runFrames()
        and self.map:runningBlockedAt(self.player.cellX, self.player.cellY) then
       self:noteRunGate("the ground here is one of the seven the shoes do not "
                        .. "work on")
+      return nil
+    end
+  elseif gen4 then
+    -- SINNOH'S RULE IS TWO GATES AND NOT FOUR, and this branch did not exist at
+    -- all -- every Gen 4 dataset fell into the `version ~= "prism"` refusal
+    -- below, so the shoes Mum hands over in the opening did nothing for the rest
+    -- of the game. Reported from play as "running shoes don't work".
+    --
+    -- `player_move.c` says the whole of it, three times over (the plain, the
+    -- distortion and the gravity variants all carry the same test):
+    --
+    --     if (PlayerData_HasRunningShoes(player) == TRUE
+    --         && PlayerAvatar_IsRunButtonHeld(playerAvatar, keyPress) == TRUE) {
+    --         movementAction = MOVEMENT_ACTION_RUN_NORTH;
+    --         speed = PLAYER_ACTION_SPEED_FAST;
+    --     }
+    --
+    -- and `PlayerAvatar_IsRunButtonHeld` is `pad & PAD_BUTTON_B`, which is the
+    -- same button this engine already asks about below.
+    --
+    -- THERE IS NO MAP GATE, AND THAT IS A MEASUREMENT RATHER THAN AN OMISSION.
+    -- `isRunningAllowed` is a real bitfield in pret's `MapHeader` -- bit 13 of
+    -- the flag word, which `Gen4MapHeaders` already parses as `allowRunning` --
+    -- and it is read NOWHERE in the cartridge's code. The only other places the
+    -- name appears are the header data declarations themselves. So Hoenn's
+    -- "228 of 519 maps allow it" has no Sinnoh counterpart, and running inside a
+    -- Pokemon Centre is a Gen 4 thing exactly as the note above says.
+    --
+    -- THERE IS NO GROUND GATE EITHER. Emerald has
+    -- `MetatileBehavior_IsRunningDisallowed` and seven behaviours; Platinum's run
+    -- branch tests nothing about the tile. Where Sinnoh does override movement --
+    -- ice, and the rest of `PlayerTileMovement` -- it does so by taking a
+    -- different movement function entirely, so running is bypassed structurally
+    -- rather than refused by a flag. Adding a ground check here would be
+    -- inventing a rule the cartridge does not have.
+    local shoes = Game.save
+      and (Game.save.hasRunningShoes
+           or (Game.save.player and Game.save.player.runningShoes))
+    if not shoes then
+      self:noteRunGate("the running shoes have not been given yet")
       return nil
     end
   elseif version ~= "prism" then
@@ -5676,6 +5871,89 @@ function OverworldState:groundSin()
   sin = ok and tonumber(sin) or nil
   if not (sin and sin > 0) then return 1 end
   return sin
+end
+
+-- The Gen 4 ground when a FREE camera owns the frame, or nil.
+--
+-- Nil on every Gen 1/2/3 map (`gen4Ground` is nil) and on every Gen 4 map at the
+-- cartridge rung or any numeric one (`view3d` is nil unless the ladder is on
+-- `third` or `first`).  The `freeMode` test is on the METHOD as well as its
+-- answer, so a ground built before that existed cannot raise here.
+function OverworldState:freeGroundFor()
+  local ground = self.map and self.map.renderer and self.map.renderer.gen4Ground
+  if not (ground and ground.freeMode) then return nil end
+  local ok, mode = pcall(ground.freeMode, ground)
+  return (ok and mode) and ground or nil
+end
+
+-- THE GROUND ONLY WHEN THE PLAYER IS DRIVING THE CAMERA.
+--
+-- `freeGroundFor` answers "is a 3D camera drawing this frame", which is what
+-- the camera placement needs.  OFF-GRID WALKING is a different question and
+-- needs a different answer: a tilt rung draws through the same 3D path but is
+-- the cartridge's own fixed camera, and the overworld under it walks on a grid
+-- exactly as it always has.  Reported as *"movement being free when not in 3rd
+-- or 1st person"*.
+function OverworldState:orbitalGroundFor()
+  local ground = self:freeGroundFor()
+  local view = ground and ground.view3d
+  if not (view and view.isOrbital) then return nil end
+  local ok, orbital = pcall(view.isOrbital, view)
+  return (ok and orbital) and ground or nil
+end
+
+-- PUT THE FREE CAMERA ON THE PLAYER, rather than on the middle of the view.
+--
+-- Reported from play, twice: *"players not centered on the screen in third
+-- person"*, and again after the look-at fix -- *"when zooming and rotating
+-- around the player in 3rd person the player isnt centered still"*.  The
+-- second report is a different fault from the first.  Pass 42 fixed WHERE THE
+-- CAMERA POINTS; this is WHAT IT POINTS AT.
+--
+-- `Gen4Ground:placeCamera` has existed since the free modes were added and
+-- had NO CALLERS, so every frame fell through to the estimate in `draw`:
+--
+--     view3d:follow(camX + offsetX + vw / 2,
+--                   camY + offsetY + vh / (2 * sinP), yaw)
+--
+-- -- the viewport's centre, with the vertical divided by the ground's
+-- `sin(pitch)` because that is what the FLAT pass needs.  A free camera is not
+-- the flat pass.  Measured on a 512x384 view with the player dead centre:
+-- sinP is 0.8576, so the camera was aimed 31.9 units past the player -- TWO
+-- WHOLE TILES up the view axis, in both third and first person.  Two tiles is
+-- invisible while the camera sits still behind the player and swings wide the
+-- moment you orbit or zoom, which is exactly when it was reported.
+--
+-- The player's own position has no such error, and this is the one place that
+-- knows it.  `cameraTarget` rather than `player` so a cutscene's invisible
+-- camera object still leads the view.  No facing is passed: `follow` keeps its
+-- current yaw when handed nil, which leaves the look controls and the kept
+-- heading exactly as they are -- this moves the camera, it does not aim it.
+function OverworldState:placeFreeCamera()
+  local ground = self:freeGroundFor()
+  if not (ground and ground.placeCamera) then return false end
+  local who = self:cameraTarget()
+  local px, py = who and who.px, who and who.py
+  if not (px and py) then return false end
+  return (pcall(ground.placeCamera, ground, px, py)) and true or false
+end
+
+-- Which WORLD direction a press of a direction key means right now.
+--
+-- Itself on every map this engine runs and on every camera but an ORBITED free
+-- one, where the answer comes from `Gen4View:screenToWorld` -- see there for
+-- why it is quantised to quarter turns rather than made continuous.
+--
+-- Wrapped in `pcall` for the same reason `groundSin` is: this is called from
+-- the movement path on every frame a direction is held, and a renderer that is
+-- mid-swap or a ground built before this existed must cost a dropped rotation,
+-- never a dropped step.
+function OverworldState:walkDirection(dir)
+  local ground = self.map and self.map.renderer and self.map.renderer.gen4Ground
+  local view = ground and ground.view3d
+  if not (view and view.screenToWorld) then return dir end
+  local ok, out = pcall(view.screenToWorld, view, dir)
+  return (ok and out) or dir
 end
 
 function OverworldState:npcAtCell(cx, cy)
@@ -8347,7 +8625,7 @@ end
 -- where nothing lives.
 function OverworldState:gen2SweetScent()
   local p = self.player
-  local encDef = Game.data.encounters[self.map.id]
+  local encDef = Encounter.forMap(Game.data, self.map.def, self.map.id)
   local slots = encDef and Encounter.atTime(encDef.grass, self:timeOfDay())
   if p.surfing and encDef and encDef.water
      and self.map:isWaterCell(p.cellX, p.cellY) then
@@ -10201,6 +10479,32 @@ function OverworldState:showMapText(textConst, npc, onDone)
     end
     -- the winning contribution's rows run as their owner (09 §4.4): mod:
     -- field routing, strict dispatch and error reports all read the source
+    -- VAR_LAST_TALKED, WHICH SINNOH'S SCRIPTS ADDRESS BY NAME.
+    --
+    -- `generated/vars_flags.txt`: VAR_LAST_TALKED = VAR_0x800D, and 29 of
+    -- Sinnoh's 39 variable-targeted `ApplyMovement` rows name it -- the
+    -- ordinary "the person you are talking to turns, or shows a mark over
+    -- their head" idiom.  Nothing in the Gen 4 path had ever written it.
+    --
+    -- This goes in with the object-id fix in `Gen4Commands.objectById` and
+    -- NOT after it: on its own, resolving the operand would turn a loud
+    -- failure (`no object with localId 32781 -- the movement is dropped`)
+    -- into a silent one, walking whichever object happens to be local id 0.
+    -- A fix that makes a bug quieter without making it rarer is worse than
+    -- the bug.
+    --
+    -- Gen 4 only: the Gen 3 path keeps its own VAR_LAST_TALKED (0x800F in
+    -- `Gen3Commands`, a DIFFERENT id -- they are not interchangeable), and
+    -- Gen 1/2 have no such variable at all.
+    if GameVersion.isGen4() and npc then
+      local lid = npc.localId or (npc.def and npc.def.localId)
+      if lid then
+        local okG4, Gen4Commands = pcall(require, "src.script.Gen4Commands")
+        if okG4 and Gen4Commands and Gen4Commands.setVar then
+          Gen4Commands.setVar(Game.save, 0x800D, lid)
+        end
+      end
+    end
     self.runner:run(script, { npc = npc, onDone = onDone,
       source = mapScripts.talkSource(self.map.id, textConst) })
     return
@@ -10967,7 +11271,13 @@ function OverworldState:onStepComplete()
   -- wild encounters in grass, on water while surfing, or -- on indoor
   -- maps whose tileset is not FOREST -- on EVERY tile
   -- (wild_encounters.asm: caves, towers, the Mansion, Power Plant)
-  local encDef = Game.data.encounters[self.map.id]
+  --
+  -- ASKED RATHER THAN INDEXED, because Gen 4 keys its tables by a different id
+  -- and writes them in a different shape -- `Encounter.forMap` is the one place
+  -- that knows both, and Gen 1, 2 and 3 fall through it unchanged.  Indexed
+  -- directly by map id, Sinnoh resolved 5 of its 154 wild maps, and those 5
+  -- were another map's table rather than their own.
+  local encDef = Encounter.forMap(Game.data, self.map.def, self.map.id)
   local enc
   local indoor = Game.data.field.indoorEncounters
   local env = self.map.def.environment
@@ -13744,6 +14054,10 @@ function OverworldState:drawWorld()
   -- authoritative numbers (they account for letterboxing; window / scale does
   -- not), refreshed every frame because zoom changes them.
   self.viewW, self.viewH = vw, vh
+  -- Before ANY of the draw paths below, because `Gen4Ground:draw` clears the
+  -- placed flag when it uses it and both the pipeline path and the flat
+  -- fallback reach that same draw.
+  self:placeFreeCamera()
   -- Only things that actually stand (player, NPCs, ghosts, items and the FX
   -- attached to them) leave the ground canvas to billboard upright in a
   -- separate pass anchored to the projected ground (:billboard).  Everything
@@ -14453,6 +14767,36 @@ function OverworldState:drawWorld()
     end
   end
 
+  -- HOISTED ABOVE THE BRANCH BECAUSE BOTH PATHS DRAW CHARACTERS.
+  --
+  -- This used to be a local inside the flat path, and the TILT path drew every
+  -- entity at a plain `cam.y`. That was not a small gap: with tilt on, a Sinnoh
+  -- character lost BOTH the terrain rise and the ground's sin-compression, so
+  -- they detached from the ground by the full drift -- 36 px, over two tiles, at
+  -- the far edge of the view. `Tilt.active()` is `level > 0 or angle > 0`, a
+  -- plain player option with no generation gate, so that path is reachable on
+  -- any Platinum map.
+  local groundForRise = self.map and self.map.renderer and self.map.renderer.gen4Ground
+  -- ...AND WHETHER A FREE CAMERA OWNS THE FRAME.
+  --
+  -- Nil on every Gen 1/2/3 map (`gen4Ground` itself is nil), and nil on every
+  -- Gen 4 map at the cartridge rung or any numeric one (`view3d` is nil unless
+  -- the tilt ladder is on `third` or `first`).  So the flat path below is
+  -- reached by exactly what reached it before, and the new one only by a
+  -- player who has stepped the ladder into a mode that was drawing characters
+  -- wrongly anyway.  The `freeMode` test is on the METHOD as well as its
+  -- answer, so a ground built before this existed cannot raise here.
+  local freeGround = (groundForRise and groundForRise.freeMode
+                      and groundForRise:freeMode()) and groundForRise or nil
+  local groundSin = groundForRise and groundForRise.scale
+    and select(1, groundForRise:scale()) or 1
+  local function riseOf(e)
+    if not groundForRise then return 0 end
+    local rise = groundForRise:rise(e.px + (e.shiftPx or 0) + 8, e.py + 8)
+    if groundSin >= 1 then return rise end
+    return (e.py - cam.y) * (1 - groundSin) + rise
+  end
+
   if override then
     -- the pipeline owns the whole frame; nothing else draws into the world
   elseif not tilt then
@@ -14483,7 +14827,7 @@ function OverworldState:drawWorld()
     -- keeps it to one seam: every sprite path in the engine ends in
     -- `py - camY`, so lifting the camera lifts the sprite and nothing else has
     -- to learn about elevation.
-    local ground = self.map.renderer and self.map.renderer.gen4Ground
+    local ground = groundForRise
     -- WHERE A SPRITE GOES ONCE THE GROUND IS NO LONGER ONE TO ONE.
     --
     -- The Gen 4 ground is drawn at the cartridge's own pitch, which COMPRESSES
@@ -14504,15 +14848,30 @@ function OverworldState:drawWorld()
     -- The COLLISION GRID IS UNTOUCHED by any of this.  It is in map pixels and
     -- stays there; only the picture is projected, which is why a compressed
     -- world still walks the same.
-    local groundSin = ground and ground.scale and select(1, ground:scale()) or 1
-    local function riseOf(e)
-      if not ground then return 0 end
-      local rise = ground:rise(e.px + (e.shiftPx or 0) + 8, e.py + 8)
-      if groundSin >= 1 then return rise end
-      return (e.py - cam.y) * (1 - groundSin) + rise
-    end
     for _, g in ipairs(self.ghosts) do
-      g.npc:draw(cam.x - g.ox, cam.y - g.oy)
+      -- A GHOST GOES THROUGH THE FREE CAMERA TOO.
+      --
+      -- Reported from play: *"im seeing a guitarist in the bottom left as if
+      -- it were in 2d view"* -- a character standing on the NEXT map, drawn
+      -- across the seam.  Ghosts never went through `drawEntity`, so the
+      -- projection added there missed them entirely and they kept their flat
+      -- 2D size and position while everyone on this map was placed properly.
+      --
+      -- `ox/oy` carry the neighbour's coordinates into THIS map's space, so
+      -- the position handed over is the ghost's own plus that offset, and the
+      -- draw keeps the shifted camera it has always had.
+      --
+      -- Rise is 0 because a ghost takes none on either path today -- a known
+      -- gap, and not one this line should quietly start guessing at.
+      local drawn = false
+      if freeGround then
+        drawn = freeGround:freeEntity((g.npc.px or 0) + g.ox,
+                                      (g.npc.py or 0) + g.oy, cam.x, cam.y, 0,
+                                      function()
+                                        g.npc:draw(cam.x - g.ox, cam.y - g.oy)
+                                      end)
+      end
+      if not drawn then g.npc:draw(cam.x - g.ox, cam.y - g.oy) end
     end
     -- HIDDEN MEANS HIDDEN, for the player as much as for anybody.
     --
@@ -14538,6 +14897,49 @@ function OverworldState:drawWorld()
     local function drawEntity(e)
       if not (self.flyAnim and self:hasFlyBird() and e == self.player)
          and not e.hidden and not plotEmpty(e) then
+        -- A FREE CAMERA PLACES ITS OWN CHARACTERS.
+        --
+        -- Reported from play: *"isnt keeping the player the right size"*, with a
+        -- screenshot of a third-person Twinleaf in correct perspective and two
+        -- characters standing in it at flat 2D scale.  They were drawn by the
+        -- line below, which places every sprite at `py - camY` -- the field
+        -- camera's 1:1 mapping, and simply not this camera's.
+        --
+        -- `freeEntity` runs THIS SAME DRAW inside a transform, so nothing here
+        -- learns about projection and the entity keeps owning its own sprite,
+        -- frame and palette.
+        --
+        -- In FIRST person the player is the eye, so drawing them puts their own
+        -- back across the middle of the view.
+        if freeGround then
+          if not (freeGround:freeMode() == "first" and e == self.player) then
+            local rise = riseOf(e)
+            -- ...AND WHICH WAY THEY FACE ON SCREEN.
+            --
+            -- Reported from play: *"when i orbit the camera 180 degrees if i
+            -- walk left it looks like hes walking right"*.  `screenToWorld`
+            -- turns the PRESS into a world direction, so the step is right;
+            -- the sprite then showed that world facing under a camera that is
+            -- no longer looking north, so the artwork was the one thing still
+            -- in the old frame.  `worldToScreen` is its inverse, and the pair
+            -- are inverses because the camera sits between them.
+            --
+            -- Set and restored around the draw rather than threaded through,
+            -- because `facing` is what every pose, animation and follower path
+            -- in the entity reads, and none of them should learn about cameras.
+            local view, saved = freeGround.view3d, e.facing
+            if view and view.worldToScreen then
+              e.facing = view:worldToScreen(saved)
+            end
+            freeGround:freeEntity((e.px or 0), (e.py or 0), cam.x, cam.y, rise,
+                                  function() e:draw(cam.x, cam.y + rise) end)
+            e.facing = saved
+          end
+          -- Deliberately without the flat shadow and the grass overdraw below:
+          -- both are drawn in screen space against a ground plane this camera
+          -- does not have, and a shadow in the wrong place is worse than none.
+          return
+        end
         -- UNDER the sprite, and lifted by the same terrain rise it is, so a
         -- character on a slope keeps their feet on it.
         if shadows then
@@ -14832,7 +15234,7 @@ function OverworldState:drawWorld()
         local fy = e.py - cam.y + 16
         local colors = zoneColorsAt(zones, fx, fy)
         self:billboard(fx, fy, vw, vh, colors, false,
-                       function() e:draw(cam.x, cam.y) end)
+                       function() e:draw(cam.x, cam.y + riseOf(e)) end)
         -- tall-grass feet overdraw glued to the sprite: same anchor + depth
         -- so it keeps hiding the feet, color-0-keyed palette so its white
         -- gaps still show the sprite through (drawCellBottomRaw lets the
@@ -15298,6 +15700,40 @@ function OverworldState:captureSave(save)
   -- so the original saves and restores the surf state; setMap's boot path
   -- reads this back (#536).
   save.player.surfing = self.player.surfing and true or false
+
+  -- WHERE EVERYBODY ELSE IS STANDING, which Gen 4 saves and Gen 1-3 do not.
+  --
+  -- Reported from play: "If i save when im able to pick my starter when i
+  -- reload professor rowan and dawn are in the wrong spot."  They were: the
+  -- lake scene walks them out of their map-defined places with
+  -- `applymovement`, nothing recorded where they ended up, and a reload
+  -- rebuilt every object from the map -- putting them back where the scene
+  -- had moved them FROM.
+  --
+  -- The cartridge saves the lot.  `MapObject_Save` writes x, y and z, the
+  -- initial x, y and z, the facing, moving and initial directions, the
+  -- graphics id and the movement type of every live object, and
+  -- `MapObjectMan_LoadAllObjects` puts them all back.
+  --
+  -- GEN 4 ONLY, and that is the cartridges' own difference rather than
+  -- caution on this port's part: Gen 1, 2 and 3 rebuild their objects from
+  -- the map and re-pose them from the map's callbacks, which is what this
+  -- engine already does for them.  `gen3ObjectHomes` beside this is a
+  -- different thing and stays one -- it is the TEMPLATE a script rewrote
+  -- with `setobjectxyperm`, the place a wanderer goes back to.  This is
+  -- where the object happens to be standing right now.
+  if GameVersion.isGen4() and self.map and self.map.id then
+    local here, any = {}, false
+    for _, npc in ipairs(self.npcs or {}) do
+      local index = npc.def and npc.def.index
+      if index and npc.cellX and npc.cellY then
+        here[index] = { x = npc.cellX, y = npc.cellY, facing = npc.facing }
+        any = true
+      end
+    end
+    save.gen4Objects = save.gen4Objects or {}
+    save.gen4Objects[self.map.id] = any and here or nil
+  end
 end
 
 return OverworldState

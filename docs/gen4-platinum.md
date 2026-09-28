@@ -13503,3 +13503,13410 @@ destinations; the use-before-local scanner reads 212 files, 0 sites.
 
 The gap list is **99 maps**. Everything now above `initturnbackcave` by map reach
 is Battle Frontier and Battle Tower save-and-link plumbing behind one door.
+
+
+---
+
+## The battle field, the type chart, and the move grid
+
+Three reports from play, one sitting behind each of them, and the third is the
+one worth reading twice because the file it was in was already *correct*.
+
+> *"the locations of the land the pokemon are on in battle still arent right
+> moves dont seem to be decoded and working properly scratch doesnt work and
+> doesnt show a move animation or fx, also for the selection of moves up down
+> left right dont work for selection seems to move right when i press down"*
+
+### 1. Both platforms were parked off-screen, and the counter said so
+
+`Gen4Battle.platformAt(side, step)` takes steps **elapsed**: step 0 is the
+off-screen start from `sTerrainSpriteTemplates`, step 34 is the settled position
+`battle_display.c` sets. That is what its name promises and what
+`gen4_battlescene_check.lua` has asserted since the platforms went in.
+
+`BattleState.introSlide` is frames **remaining**. `startBattle` sets it to
+`Timing.BATTLE_SLIDE_IN_FRAMES` (72) and `update` counts it *down* to 0 — which
+is exactly why `drawBattlerPic` can multiply it straight by
+`BATTLE_SLIDE_PX_PER_FRAME` and get an offset that shrinks to nothing.
+
+`drawField` passed one into the other raw. So a **settled** battle — `introSlide`
+0, which is every frame after the first 72 and every frame of a save resumed
+mid-battle — asked for step 0 and got both platforms exactly where they *begin*:
+
+| side | centre at rest | 
+|---|---|
+| player | 336, a 256-wide slab, so only x **208..256** on screen |
+| enemy | -80, 128 wide, so **-144..-16** — entirely off the left edge |
+
+Which is the whole of the report. The green-and-tan curve in the bottom-right
+corner of the screenshot is the *left edge* of the player's platform, 272 pixels
+from where it belongs, and the foe stood on nothing because its platform was off
+the side of the screen. During the intro it was inverted: 36 frames remaining
+asked for step 36, past the 34-step total, so the platforms sat settled while the
+battlers were still travelling.
+
+The fix is a named converter rather than an inline `total - step`, because the
+frame-to-step conversion is the thing that was wrong and it should have somewhere
+to be checked:
+
+```lua
+function Gen4Battle.platformSlideElapsed(battle, side)
+  local total = select(side == "player" and 1 or 2,
+                       Gen4Battle.platformSlideSteps())
+  local frames = tonumber(battle and battle.introSlide)
+  if not frames or frames <= 0 then return total end
+  local all = tonumber(Timing.BATTLE_SLIDE_IN_FRAMES)
+  if not all or all <= 0 then return total end
+  if frames >= all then return 0 end
+  return math.floor(total * (all - frames) / all + 0.5)
+end
+```
+
+**No counter at all is settled, not step zero.** A headless caller, a resumed
+save and every frame after the intro all arrive at that first branch, and reading
+"absent" as "has not started moving" is the same bug through a different door.
+
+The comment that had been sitting above the bug said `introSlide` *"counts UP
+from 0"*. It does not, and it never did. That is the recurring fault again — a
+comment that disagrees with the engine, believed instead of the code next to it.
+
+### 2. Sinnoh had no type system at all
+
+Scratch decodes perfectly: power 40, pp 35, accuracy 100, physical, effect 0,
+typeId 0. It still did nothing recognisable, because **nothing downstream could
+read its type.** Three mismatches in one chain, each invisible on its own:
+
+* a Gen 4 **move** carried `typeId` and no `type`, and `Damage.lua` reads
+  `move.type` in nine places — STAB, effectiveness, weather, held items,
+  `Abilities.normalizeType`. Every Platinum move was *typeless*.
+* a Gen 4 **species** carried `types = { "grass" }` in lower case, while every
+  other game in this launcher is keyed `GRASS`, and `TypeChart` matches on string
+  identity. Even with a chart, nothing would have matched.
+* and `Gen4TypeChart.chart` returned a nested `out[attacker][defender]` map where
+  `TypeChart.load` wants `matchups` as an **array** and `types` as a record per
+  type. So `data.type_chart.matchups` was `nil`, and there was no
+  `gen4_type_chart.lua` in the cache to load in the first place.
+
+The result was a region where Normal hit Ghost, Water did not beat Fire and no
+move ever got its own type's bonus — with no crash and no log line.
+
+The fix is one spelling: `Gen4TypeChart.TYPES`, upper case and 0-based.
+`Gen4Species.TYPES` is now `require("src.import.Gen4TypeChart").TYPES` — the same
+table by *identity*, not a second list that agrees today — and `Gen4Moves.parse`
+puts `type` beside `typeId`. Verified against the ROM: **110 matchups**, `NORMAL
+vs GHOST = 0`, `WATER vs FIRE = 20`, `FIRE vs WATER = 5`, `GRASS vs WATER = 20`,
+`ELECTRIC vs GROUND = 0`, `NORMAL vs ROCK = 5`; **471 of 471 moves typed**.
+
+**Slot 9 is the trap.** Gen 2's unused "bird" type left a hole between `STEEL`
+and `FIRE`, so every id from FIRE up is one higher than an eighteen-name list
+would suggest: `FIRE` is 10 and `WATER` is **11**. I wrote `WATER` at 10 from
+memory *while writing the check for this very fix*, and the check failed on my own
+expectation. `SPECIAL_FROM = 10` is therefore FIRE, not WATER — it is the
+pre-Gen-4 split by type, which Platinum does not use (every Gen 4 move carries
+its own `class`) and which `Damage.lua` reaches only for a mod's move or a
+damaged cache.
+
+### 3. The move grid was drawn but not navigated
+
+`BattleState:moveGridNavigate` gates the 2x2 grid arm on
+`isWideBattleLayout() or gen3Layout()`. Sinnoh is neither — `gen4Layout()` is its
+own predicate, because the DS screen *is* the layout and there is no narrower
+cartridge shape underneath it to widen. So Gen 4 drew the four moves two to a row
+and then fell through to the classic **vertical** list, where down is simply
+`index + 1` — and `index + 1` from the top-left of a 2x2 is the cell to its
+**right**. Left and right did nothing at all, because a vertical list has no use
+for them. That is *"seems to move right when i press down"*, exactly.
+
+One clause, no new maths: the grid this layout already draws is the grid it
+should navigate.
+
+### What the checks say
+
+`gen4_battlescene_check.lua`: **111 → 134 checks, 0 failures.** Fifteen of the
+new ones are the slide, and the first of those is the one that would have caught
+the original: *a platform at rest has to be on screen.* The rest pin the
+direction down, so a fix that merely clamped both ends would still fail —
+including a monotone walk over all 72 frames, which catches an off-by-one in the
+conversion as a step *backwards* rather than as a wrong endpoint.
+
+**The check's own stub caught itself, twice, and both times usefully.** This tool
+serves every `src.*` module it is not explicitly measuring from an `inert`
+stand-in that answers every field with a function. With `src.core.Timing` inert,
+`BATTLE_SLIDE_IN_FRAMES` came back as a *function*, `tonumber` made it `nil`, the
+converter took its "no intro is running" branch and every platform sat settled —
+so the two intro checks failed against the stand-in while the module was right. A
+safe fallback is correct for play and exactly wrong for a measurement. With
+`Gen4TypeChart` inert, `TYPES` was a function and indexing it *raised*, which is
+the better of the two ways for a stub to be found out. Four modules are now on
+the exemption list with that reasoning written beside them.
+
+Proved to fail: passing `introSlide` in raw again, reversing the subtraction,
+returning 0 instead of `total` for an absent counter, symmetrising `WATER>FIRE`,
+and lower-casing one name in `TYPES`.
+
+The rest of the sweep, unchanged: coverage 6/0, distribution world 57/0, branch
+6/0, icons 9/0, party 28/0, summary 20/0, seam 162 verbs / 162 handlers, lifts
+50/0, roamers 45/0; `gen4_operand_roles.py` 338 lowerings with one not
+comparable; the use-before-local scanner 216 files, 0 sites, canary ok.
+
+### These three are extractor-side and the cache is not
+
+`Gen4TypeChart`, `Gen4Species` and `Gen4Moves` all run at **import** time. The
+fixes are in the tree but the cache in `G:\Gen2Recomped` still holds the old
+tables — typeless moves, lower-case species types, and no `gen4_type_chart.lua`
+at all. **Platinum needs re-importing before any of the type work reaches play.**
+The platform and move-grid fixes are runtime and take effect on the next launch.
+
+### Still open
+
+* **Move animations and FX.** Scratch shows none. Untouched by the above: the
+  type chain explains why it did no damage, not why it drew nothing.
+* **The backdrop decode.** Flat horizontal bands with a black stripe — the
+  background stage is laying tiles out as rows of colour rather than through its
+  tilemap. Evidence image sent.
+* Whether the `"TURTWIG's / o!"` message is a separate fault or a symptom of the
+  typeless move.
+* The longer tail from `gen4_map_reach.lua`: `initturnbackcave` (20 maps, side),
+  the Battle Frontier / Battle Tower save-and-link block behind one door,
+  `activateregiruinsdot`, `gethour`, `messageunown`, `drawpokemonpreview`.
+
+
+---
+
+## The backdrop: a fifth of every tilemap in the cartridge was laid out wrong
+
+> *"the background doesnt seem right"* — and the earlier note in this file said
+> the background stage was "laying tiles out as rows of colour rather than
+> through its tilemap". That was the wrong diagnosis. It went through the
+> tilemap; it put the tilemap's cells in the wrong places.
+
+### What the ROM actually says
+
+Composed `pl_batt_bg` members 2 (NSCR), 3 (NCGR) and 172 (NCLR) from the
+cartridge with a decoder written from scratch, and got **Cedric's screenshot** —
+flat bands with a black stripe through the middle. So the port's tile, palette
+and tilemap decoders were all right and the fault was downstream of them.
+
+The DS lays a background's screen data out in **32×32-entry blocks, one per
+256×256 pixels, in reading order.** A 512×256 map is two blocks side by side, so
+its first 1024 cells are the **whole left half** — not the top two rows of the
+full width. `Gen4Graphics.compose` read the cells as one 64-wide grid, which
+interleaves the two halves every 32 cells.
+
+Member 2 states the block structure twice over, and **neither statement needs
+the art to read**:
+
+* block 0 row 0 is tiles `576, 1, 2 … 31`; block 1 row 0 is `31, 30 … 1, 576` —
+  the same run mirrored, with the H-flip bit set on **607 of block 1's cells and
+  on none of block 0's**. A 512-wide backdrop is a 256-wide gradient beside its
+  own mirror, which is what makes the hardware scroll seamless.
+* every blank cell starts at **row 20 of each block** — one clean horizontal
+  boundary at y 160, where the platforms and battlers take over. Read linearly
+  the blanks span rows 10 through 31, which *is* the stripe.
+
+Platinum's outdoor backdrops genuinely are sky-to-ground gradients — that half
+of "flat bands" is the cartridge's own art, not a decode fault. The stripe was
+the transparent bottom of each half landing in the middle of the picture.
+
+### The rule, and where it deliberately stops
+
+Applied only at the hardware's own BG sizes, which above 256×256 are exactly
+512×256, 256×512 and 512×512. Everything else stays linear:
+
+* **ten members** state sizes the hardware has no BG for at all — 352×192,
+  384×144, 448×192, 320×72, 256×400, 256×488, 256×504. Those are laid out by
+  software and splitting them would scramble screens that work.
+* **two more** state 1024×1024 (`/graphic/demo_trade` members 0 and 1). That is
+  not a text BG size either, and both carry 8,192 cells — *exactly half* the
+  grid — so both readings fill the same top half and **the data cannot tell them
+  apart.** An unverified rule applied anyway is a guess wearing a rule's
+  clothes. Left linear, and asserted as left linear.
+
+At 256 wide the two mappings are **the same arithmetic**, which is what protects
+every screen that already worked. A 256×512 map is one block column stacked, so
+it is unchanged too — stating that keeps the rule honest: the split is about
+*columns*, not about being oversized.
+
+### Blast radius
+
+Measured over the cartridge's **983 NSCR tilemaps**:
+
+| | count |
+|---|---|
+| compose differently now | **199** (131 at 512×256, 68 at 512×512) |
+| oversized, single block column, unchanged by arithmetic | 10 |
+| oversized, not a hardware BG size, left linear | 10 |
+
+So this was never only the battle backdrop. The town map, the box screens, the
+title demo and the Frontier backgrounds are all in the list — **a fifth of every
+tilemap in the game** was being composed in scrambled 256-pixel strips.
+
+A 215-tilemap regression over seven archives says which ones move: 69 changed,
+all of them 512×256 or 512×512, and 146 unchanged including every 256-wide map
+and all seven odd sizes in the sample.
+
+**The digest that regression uses had to be rebuilt once.** The first version
+counted opaque pixels per band and reported *0 of 215 changed* — because the
+same cells are opaque under either layout, so it could not tell them apart at
+all. A measurement that cannot fail says nothing. The second version paints tile
+*n* with the constant value *n*, so reading a pixel back says **which tile landed
+there**, and it separates the two layouts immediately.
+
+### Checks
+
+`gen4_battlescene_check.lua`: **134 → 144, 0 failures.** Nine new, driven
+through `compose` with that same tile-identifying sheet:
+
+* 512×256 puts cell 1024 at (256, 0) and **not** at (0, 128), which is the bug
+* the left block's first row is cells 0..31, and the row under it is cell 32 —
+  not cell 64
+* 512×512 is four blocks in reading order
+* 256×256, 256×512, 352×192 and 1024×1024 are all **unchanged**
+
+Run against the unfixed compositor the four placement checks fail and the four
+regression guards pass — which is the shape you want: the new assertions catch
+the bug and the guards hold either way.
+
+### This is extractor-side too
+
+`Gen4Graphics.compose` runs at import. **Platinum needs re-importing** for the
+corrected backdrop — and for the town map, the box screens and everything else
+in the 199 — to reach the cache.
+
+
+---
+
+## Move animations: a survey, not a fix
+
+> *"scratch doesnt work and doesnt show a move animation or fx"*
+
+The damage half of that was the type chain, and it is fixed. The animation half
+is not a bug: **Sinnoh has no move-animation engine in this port at all.**
+
+`BattleState` builds three, each behind a `pcall` so a missing one is silent:
+
+| engine | generation |
+|---|---|
+| `AnimPlayer` | Gen 1 |
+| `Gen2AnimPlayer` | Gen 2 |
+| `Gen3MoveAnim` | Emerald |
+
+There is no fourth. `src/import/Gen4Anim.lua` exists but drives **3D model**
+animation — the briefcase opening, Giratina on the title screen, a scrolling
+waterfall — not battle effects. Scratch draws nothing because nothing is asked
+to draw it.
+
+### What the cartridge holds, counted
+
+| archive | members | what |
+|---|---|---|
+| `/wazaeffect/we.arc` | **501** | the per-move animation **programs** (a NARC despite the extension) |
+| `/wazaeffect/effectdata/waza_particle.narc` | **485** | 3D particle programs, every one `SPA ` |
+| `/wazaeffect/effectclact/we{char,pltt,cell,cellanm}.narc` | 37/39/37/37 | the 2D cell-actor sprite set for effects |
+| `/battle/skill/waza_seq.narc` | 501 | per-move override; **480 of them are a single instruction** |
+| `/battle/skill/be_seq.narc`, `sub_seq.narc` | 277, 297 | effect and sub-sequences |
+| `/poketool/waza/pl_waza_tbl.narc` | 471 | the moves themselves, for scale |
+
+### pret has the whole system, which changes what this is
+
+`include/data/scripts/btlanimcmd.h` is an **85-opcode table** and
+`src/battle_anim/battle_anim_system.c` holds every handler. So this is the same
+shape as the overworld script VM: widths and semantics are **derivable from
+pret's handler bodies** rather than guessable, and `gen4_opcode_widths.py`
+already established the method — a handler's operand list is the sequence of
+read primitives it calls.
+
+Two cross-checks say the pairing is real, and neither needs the art:
+
+* **every word 0 across all 501 programs is a valid opcode** — 56
+  `INITPOKEMONSPRITEMANAGER` (414), 45 `CALLFUNC` (47), 13, 73, 64, 22, 71, 4
+  `END`. Not one out-of-range value anywhere, which is what says `we.arc` member
+  *N* really is move *N*'s program and the numbering matches pret's order.
+* **425 of the 501 programs name at least one particle file**, covering 420 of
+  the 485 members of `waza_particle.narc`.
+
+Scratch's program reads straight off:
+
+```
+56               INITPOKEMONSPRITEMANAGER
+57 0 / 1 / 2 / 3 LOADPOKEMONSPRITEDUMMYRESOURCES
+58 4 0 0 0       ADDPOKEMONSPRITE           (x4)
+45 78 1 0        CALLFUNC func 78, 1 arg
+51 0 40          LOADPARTICLESYSTEM slot 0, member 40
+...
+```
+
+`LOADPARTICLESYSTEM psIndex, memberIndex` is confirmed in the handler body, so
+**Scratch's effect is particle file 40**; Pound's is 31, move 52's is 82.
+
+### THE WIDTH TABLE DOES NOT CLOSE YET, AND THAT IS THE HEADLINE
+
+A first-draft width table derived by parsing the handlers walks **76 of the 501
+programs to their exact end** and desyncs on the other 425 — the failures
+cluster on `WAITFORALLEMITTERS`, which means the stream had already landed
+mid-operand somewhere earlier. 76 of 501 is not a floor to build on, and
+recording it as progress would be the same mistake as a coverage figure nobody
+can recompute.
+
+Several widths are already solid and were confirmed by reading the handler:
+
+* `CALLFUNC funcId argCount arg…` and `ADDSPRITEWITHFUNC` are **self-describing
+  variable length** — the count is an operand
+* `INITSPRITEMANAGER`, `ADDSPRITE` and `CREATEEMITTERFORMOVE` read fixed loops
+  of `SPRITE_RESOURCE_MAX` / `PARTICLE_RESOURCE_COUNT`, both **6**
+* `JUMPIFEQUAL` and `JUMPIFCONTEST` consume their operand on **both** branches
+  (`else { Next }`), so they are fixed width — the read sitting inside an `if`
+  is a false alarm, the same one brace-depth tracking cleared up for the
+  overworld widths
+
+What remains is the unglamorous part: reading the ~20 handlers the parser gets
+wrong, with **closure over all 501 programs as the check**. That is exactly how
+`gen4_opcode_widths.py` reached 825 of 840, and it took the same kind of effort
+there.
+
+### Scope, honestly
+
+Three layers, and only the first is nearly in reach:
+
+1. **the program decoder** — 85 opcodes, 501 programs, checkable by closure.
+   The work above is most of the way into this one.
+2. **the 2D cell-actor effects** — `wechar`/`wepltt`/`wecell`/`wecellanm` are
+   NCGR/NCLR/NCER/NANR, and this port already reads all four formats.
+3. **the SPA particle engine** — 485 programs, and this is the real cost: a
+   full 3D emitter system that Platinum renders through the DS GPU. Nothing in
+   this port reads SPA today, and it has not been surveyed.
+
+Scratch is layer 3: its program loads particle file 40 and that *is* the
+animation. So a decoder alone would put Sinnoh's moves in the same place Gen 1's
+were before `AnimPlayer` — timing, sound and screen effects real, the visible
+burst still missing.
+
+
+---
+
+## The move-animation decoder: 501 of 501
+
+The survey above said the width table did not close and that 76 of 501 was not a
+floor to build on. It closes now, on every program, and the gap between those
+two numbers is the whole of the work.
+
+### What fixed it was reading the handlers, not fitting the data
+
+`BattleAnimScript_Next` is exactly `scriptPtr += 1`. So a handler's reads and
+advances describe precisely which words its instruction occupies, and
+**simulating a pointer through the handler body** — Next moves it, ReadWord
+marks the word under it as part of the instruction — gives the width with
+nothing left to guess.
+
+Two details in that simulation are what took it from 76 to 456:
+
+* **Take the MAX over both arms of an `if`.** `jumpifbattlerside` skips an extra
+  word on the enemy path and then jumps, so it occupies **four** words even
+  though no single path through the handler touches all four. Counting one path
+  gave 3 and desynced every program that used it.
+* **A loop that reads nothing changes no width.** `end` walks its particle
+  systems to free them; an earlier version read that loop's bound as a runtime
+  operand count and made `end` variable-length, which broke *every* program at
+  once — 455 closing dropped to 1. A loop only makes a command variable when its
+  body actually reads.
+
+### The two pret cannot state, and how sharp the solution is
+
+That derivation reached **456 of 501**. The rest came down to two opcodes:
+
+* **`setextraparams`** — pret's handler is `GF_ASSERT(FALSE)`, a body that was
+  compiled out. It reads nothing and states no width, and the cartridge uses it
+  **742 times**. Solved from the data as `<count> <count values>`.
+* **`nop4`** — no body at all. Takes one operand. Occurs once.
+
+A solved width is only worth anything if the solution is sharp, so the check
+**re-solves it every run** rather than quoting a number: reading the count at
+operand 1 closes all 501; at operands 2 through 5 it closes 470 or fewer. A
+parameter that could be fitted to anything would not separate like that.
+`Gen4MoveAnim.SOLVED` names both so the distinction between *derived* and
+*solved* cannot quietly rot.
+
+### What the corpus says
+
+| | |
+|---|---|
+| programs | **501**, every one walking to its exact last word |
+| instructions | **18,620** |
+| opcodes used | **59** of 85 |
+| programs loading a particle system | 425 |
+| distinct particle files named | 419 of 485 |
+| distinct sound effects | 262 |
+
+Scratch is 24 instructions, sound 1908, and `loadparticlesystem 0, 40`.
+
+### Committed
+
+* **`src/import/Gen4MoveAnim.lua`** — the 85-name opcode table, the width table,
+  a word-addressed decoder, and `summary()` for the particles, sounds and delay
+  floor a program names.
+* **`src/import/RomExtractorGen4.lua`** — a `move_anims` stage beside the moves
+  stage, writing every decoded program to the cache. A program that fails to
+  walk is **dropped and counted**, never written half-decoded: a truncated
+  animation stops in the middle of a battle, where a wrong one merely looks
+  wrong. Exercised against the cartridge: 501 written, 0 skipped.
+* **`tools/gen4_moveanim_check.lua`** — the seventeenth standing check,
+  **19 checks, 0 failures**.
+
+Three planted faults were proved to fail it: widening one derived opcode by a
+word (5 failures), moving `setextraparams`'s count operand (4), and widening
+`delay` (7).
+
+**One bug caught while writing it, and it is the house fault in miniature.** The
+`WIDTHS` table spells `COUNTED` three times inside a table constructor. Written
+as `Gen4MoveAnim.COUNTED` it would have resolved as a bare **global**, come back
+`nil`, and put holes in the array — and it would not have raised, it would have
+silently made three widths unknown. It is now a file-local declared above the
+table, which is exactly what `lua_use_before_local.py` exists to catch.
+
+### What this does not do
+
+It decodes the program. It does not render one. The visible burst of nearly
+every move is an `SPA ` particle program, and nothing here reads SPA yet — so
+Sinnoh now has what Gen 1 had before `AnimPlayer`: timing, sound and sprite
+movement legible, the particle still missing. That is the same discipline
+`Gen4Anim` uses for keyframe values: establish the structure, check it, and do
+not guess the layer underneath.
+
+
+---
+
+## Sinnoh has an animator now
+
+The decoder decoded; nothing played it. `src/battle/Gen4MoveAnimPlayer.lua` is
+the fourth of these, after `AnimPlayer` (Gen 1), `Gen2AnimPlayer` and
+`Gen3MoveAnim`, and `BattleState` now builds, ticks and reads it.
+
+### Why this layer before the particle engine
+
+Measured over the 501 decoded programs:
+
+| | |
+|---|---|
+| move the Pokemon sprites | **440** |
+| create 3D particle emitters | 426 |
+| touch the background | 59 |
+| use 2D cell-actor sprites | 32 |
+
+and of `callfunc`'s 2,286 calls over 76 distinct functions, the ones needing no
+particle engine are most of them — RenderPokemonSprites 477, Shake 398, FadeBg
+272, FadeBattlerSprite 270, MoveBattler 129, MoveBattlerX2 86,
+ScaleBattlerSprite 53, HideBattler 50, ShakeBg 42. **The motion, timing and
+sound of nearly every move in Sinnoh are reachable without reading a single SPA
+file.** That is the whole argument for building this before the particles rather
+than after.
+
+Result over the corpus: **494 of 501 programs play a sound, 195 move a battler**,
+mean 28.6 frames, longest 132.
+
+### Three bugs the first drive found, all in one class
+
+Driving all 501 programs through the player reported **19 stuck on the frame
+budget**. Every one was an operand read wrongly:
+
+* **operands are SIGNED 32-bit.** Read unsigned, a pan of −117 arrives as
+  4,294,967,179 and a fade delay of −2 as 4,294,967,294 — and a *frame count* of
+  four billion is a task that never finishes.
+* **some operands are two 16-bit values in one word.**
+  `SCALE_BATTLER_SPRITE_FRAMES(scale, restore)` packs them as
+  `(scale << 16) | restore`, so `327685` is `0x00050005` — five frames out and
+  five back, not a third of a million.
+* **the scales are percentages of a `reference` operand**, not FX32. A program
+  reads `100, 70, 100, 100` against a reference of `100`. Dividing by 4096
+  instead would shrink every Pokemon to a fortieth of itself.
+
+After those: **0 budget hits.**
+
+### The jumps, and a comment that was wrong again
+
+The first draft carried a comment saying no program reached a jump on its main
+path, so the branch commands were counted as notes. **The check disagreed, and
+the check was right:** 77 of the 501 programs branch, and the first jump is
+often the very first instruction — `jumpifbattlerside` 37, `jumpifcontest` 32,
+`jumpifeffectchanceodd` 23, `jumpiffriendlyfire` 11.
+
+`JumpBy(offset)` is `scriptPtr += offset` with the pointer **sitting on the
+operand it just read**, so a target is (instruction start + operand index) +
+that operand's value. The import stage now stores each instruction's word offset
+so the player can resolve one. Following them took sounds 457 → **494** and
+motion 170 → **195**.
+
+That is the recurring fault once more, in its purest form: a claim written from
+an assumption rather than a measurement, caught by a test rather than by a
+player noticing a move do the wrong half of its animation.
+
+### Two checks that could not fail, and how they were found
+
+**The mirror test.** ATTACKER and DEFENDER are relative to who used the move, so
+the same program run from each side must produce mirrored x offsets. Asserting
+"every frame mirrors" failed on programs that *also* shake — a shake is
+symmetric and has no direction to flip. Relaxing it to "mirrors **or** matches"
+made it pass — and then a planted fault that **never flipped at all** passed
+too, because "never flip" makes every frame match. The fix is to count the two
+kinds separately and require both: some frame, somewhere, must be nonzero and
+strictly opposite.
+
+**The source search.** The wiring section greps `BattleState.lua` to assert the
+player is constructed, ticked, started behind a `gen4Layout()` guard and read by
+all three transform channels — the one class of bug no assertion about the
+player can see, because the player was always fine, it was simply never asked.
+Three planted faults passed it:
+
+* deleting the `gen4Layout()` guard — **the comment above it still said
+  "gen4Layout()"**
+* replacing the constructor call with `self.gen4Anim = nil` — still an
+  assignment to `self.gen4Anim`
+* a dead `if false` above the tick — the `update()` call text was untouched
+
+The first is the worst of the three: *a check a comment can satisfy is a check
+that the comment is what gets maintained.* Line comments are now stripped before
+any search, the constructor's name is required rather than the assignment, and
+the tick's **nearest guard** must name `gen4AnimPlaying` — the same rule the
+roamer check uses on its three shared hooks. All four faults fail now.
+
+### Deliberate skips are argued, not silent
+
+`Player.NOT_NEEDED` lists every command this port does not need **with the
+reason** — the cartridge's sprite manager is bookkeeping for a renderer this
+port does not have, and implementing it would draw each Pokemon twice. Anything
+not on that list that the player ignores is a real gap and `missing()` reports
+it. The check asserts both directions: nothing on the skip list is reported as
+missing, and the gaps that remain are all particle, background or 2D-cell
+commands. Same argument as `gen4_operand_roles.py`'s `IN_OUT_HANDLES`: a skip
+has to be argued for on the page.
+
+### Numbers
+
+`tools/gen4_moveanim_check.lua`: **19 → 42 checks, 0 failures.** Proved to fail
+by seven planted faults — three in the widths, one removing the sign extension,
+one reading the packed scale frames raw, one never flipping x, and four in the
+wiring.
+
+### Still missing
+
+`Scratch` runs for **one frame**: its entire visible effect is particle file 40,
+and `waitforallemitters` costs nothing when nothing owns an emitter. So Scratch
+now makes its noise and takes its turn, and still shows nothing. The gap list
+says so by name, which is the point of keeping one.
+
+
+---
+
+## The emitters: a derivation that stops at 70%, and is not committed
+
+The particle textures are the art; the **emitters** are how it moves — how many
+particles, how fast, how long, which direction, which blend. This is the last
+piece, and it is the one I said would need a derivation rather than a reading.
+Here is how far that got, and why nothing was committed.
+
+### The method, and why it is a derivation and not a fit
+
+A first attempt regressed emitter size against the header's bits with least
+squares. It produced an *exact* fit — and coefficients like 0.333, which is a
+fit satisfying itself on an underdetermined system, not a block-size table. It
+was thrown away.
+
+What worked instead needs no fitting at all. Take every **single-emitter file**
+(144 of them, so the emitter's length is simply the area size) and find pairs
+whose header words **differ in exactly one bit**. That bit's cost is the
+difference in their sizes — one subtraction, no model:
+
+| header bit | costs | conflicts |
+|---|---|---|
+| 8 | +12 bytes | none |
+| 9 | +12 bytes | none |
+| 16 | +20 bytes | none |
+| 24 | +8 bytes | none |
+| 26 | +16 bytes | none |
+| 27 | +4 bytes | none |
+| 0, 1, 2, 4, 6, 12, 13, 21 | +0 — parameters, not block selectors | none |
+
+**Every isolated bit has one consistent cost.** Not one conflict across all the
+pairs. And the emitter's length really is a function of its first four bytes:
+66 distinct header words across 144 samples, **zero ambiguous**.
+
+With those costs subtracted, the implied base struct is **96 bytes** for 57 of
+the 66 distinct headers.
+
+### Where it stops, precisely
+
+Walking every emitter in every file with `base 96 + Σ bit costs` and asking
+whether the walk lands exactly on the end of the emitter area:
+
+* **459 of 608** particle files close — **75.5%**
+* **339 of 485** move effects close — **69.9%**
+* Scratch's effect 40 **does** close
+
+The nine unexplained headers all set **bit 29**, and their residuals are +16,
++16, +16, +28 and +36 — *not* constant. So bit 29 selects a **variable-length**
+sub-block, almost certainly a child resource carrying its own flags, and reading
+it needs another level of the same derivation.
+
+### Why this is not committed
+
+A 70% emitter walk is worse than none. The failure mode is not "one effect looks
+wrong" — it is that a mis-sized emitter runs the walk into the *next* emitter's
+bytes and reads its parameters as its own, silently, producing motion that is
+confidently wrong for effects that would otherwise have been left alone. The
+same argument that kept `Gen4Anim` away from keyframe values and
+`Gen4Particle` away from these emitters in the first place.
+
+So the derivation is recorded and the decoder is not. The next session starts at
+75.5% with a measured method and a harness, rather than at zero.
+
+### The honest state of Sinnoh's move FX
+
+| layer | state |
+|---|---|
+| the program — what to play, when, which sound | **done**, 501/501 |
+| the player — timing, sound, sprite motion, fades | **done**, 494 of 501 make a sound, 195 move a battler |
+| the art — what the effect looks like | **done**, 1,724/1,724 textures, all 419 named effects resolve |
+| the emitters — how it moves | **70%**, derived, not committed |
+
+**Moves whose animation is sprite motion, timing and sound now play correctly.
+Moves whose visible effect is a particle burst still do not**, because nothing
+yet knows how to throw the picture. "All move animations render as they do in
+the ROM" is not true yet, and the missing quarter is named above rather than
+estimated.
+
+
+---
+
+## The emitters close: 608 of 608, 1,744 emitters
+
+The section above stopped at 70% and said the block was **not** committed
+because a mis-sized emitter runs into the next one's bytes silently. It closes
+now, on every particle file in the cartridge, and it is committed.
+
+### What finished it was more measurements, not a better model
+
+The 70% version had six flag bits and an implied base of 96, derived from the
+144 single-emitter files. Three things took it the rest of the way, and none of
+them was a cleverer fit:
+
+1. **Extend the measurements by subtraction.** In any file whose emitters are
+   all known but the last, the last one's length is what remains of the area.
+   That took **66 direct measurements to 106** — and immediately isolated three
+   more bits by the same single-bit-pair method: **10 → +8, 11 → +12, and 29 →
+   +16.** Bit 29 had looked like a variable-length sub-block; it is not. It was
+   simply never isolated by a pair.
+2. **The base was wrong because the bits were missing.** With 10, 11 and 29
+   accounted for, the implied base dropped from 96 to **88** for 104 of the 106
+   measurements — and the two stragglers, which both set **bit 25**, gave its
+   cost by differencing against their nearest neighbours: **+8**. That took the
+   walk to 607 of 608.
+3. **The last file named the last bit.** `waza_particle[43]`, three emitters,
+   eight bytes short; its third emitter is the only one in the cartridge with
+   **bit 28** set. **+8**, and the walk closes everywhere.
+
+### The structure
+
+**Base 88 bytes**, plus eleven optional blocks selected by the emitter's first
+word:
+
+| bit | bytes | occurrences |
+|---|---|---|
+| 8 | +12 | 1,510 |
+| 9 | +12 | 1,333 |
+| 10 | +8 | 1,681 |
+| 11 | +12 | 114 |
+| 16 | +20 | 829 |
+| 24 | +8 | 242 |
+| 25 | +8 | 13 |
+| 26 | +16 | 113 |
+| 27 | +4 | 164 |
+| 28 | +8 | **1** |
+| 29 | +16 | 59 |
+
+**Bit 28 occurs exactly once in the entire cartridge**, so its +8 rests on a
+single sample and is the only entry a second example could still move. The check
+asserts that it is flagged as such and that it really does occur once —
+"it closes" must never be read as "all eleven are equally well evidenced".
+
+### Numbers
+
+`tools/gen4_particle_check.lua`: **18 → 27 checks, 0 failures**. Every file's
+emitters tile their own area exactly (608/608), 1,744 emitters walked, 2.87 per
+effect. Four planted faults fail it: moving the base to 84, changing bit 10's
+cost, changing bit 16's, and dropping bit 29 entirely.
+
+### What this does and does not give
+
+It gives **where every emitter is and which optional blocks it carries** — which
+is precisely the thing that had to exist before any of the rest could be read
+without corrupting its neighbour. It does **not** read the fields: how many
+particles, what velocity, what lifetime, which blend. Those are the next
+derivation, and unlike the structure they are not checkable by closure, so they
+need their own argument before they are believed.
+
+### The four layers now
+
+| layer | state |
+|---|---|
+| the program — what to play, when, which sound | **done**, 501/501 |
+| the player — timing, sound, sprite motion, fades | **done** |
+| the art — what the effect looks like | **done**, 1,724/1,724 textures |
+| the emitters — where they are and what they carry | **done**, 608/608, 1,744 |
+| the emitter *fields* — how the particles actually move | not read |
+
+Still not "renders exactly as the ROM does". But the last unknown has gone from
+"a format nobody has surveyed" to "one struct whose boundaries are certain and
+whose fields are unread", which is a different kind of problem.
+
+
+---
+
+## And then pret turned out to ship the whole particle library
+
+The section above said the emitter *fields* would need their own argument
+because they are not checkable by closure. They needed a different one:
+**`/tmp/pp/lib/spl/` — the Nitro particle library, decompiled.** Every field
+named, with units.
+
+### The derivation and the library agree, having shared nothing
+
+This matters more than the fields themselves. The block table was derived from
+**byte arithmetic alone** — single-bit header pairs and subtraction — before
+anyone went looking for a reference. `spl_resource.h` names the same bits:
+
+| bit | derived cost | pret's name | struct size |
+|---|---|---|---|
+| 8 | +12 | `hasScaleAnim` | `SPLScaleAnim` 12 |
+| 9 | +12 | `hasColorAnim` | `SPLColorAnim` 12 |
+| 10 | +8 | `hasAlphaAnim` | `SPLAlphaAnim` 8 |
+| 11 | +12 | `hasTexAnim` | `SPLTexAnim` 12 |
+| 16 | +20 | `hasChildResource` | `SPLChildResource` |
+| 24 | +8 | `hasGravityBehavior` | |
+| 25 | +8 | `hasRandomBehavior` | |
+| 26 | +16 | `hasMagnetBehavior` | |
+| 27 | +4 | `hasSpinBehavior` | |
+| 28 | +8 | `hasCollisionPlaneBehavior` | |
+| 29 | +16 | `hasConvergenceBehavior` | |
+
+And the bits the arithmetic found to cost **nothing** are exactly the ones pret
+declares as parameters rather than selectors — `emissionType` (0–3), `drawType`
+(4–5), `circleAxis` (6–7), `hasRotation` (12), `randomInitAngle` (13),
+`drawChildrenFirst` (21). **Eleven selectors and eight parameters, agreed on by
+two methods sharing no assumption** — one counting bytes, one reading a struct.
+
+`SPLResourceHeader` lays out to **88 bytes**. That is the base the arithmetic
+found, confirmed field by field.
+
+### What the fields say
+
+`Gen4Particle.emitterFields` reads them by name: emission shape and count,
+radius, axis, colour, initial velocity, base scale, aspect, start delay,
+rotation range, **emitter and particle lifetimes**, the three randomisation
+attenuations, emission interval, base alpha, air resistance, and
+**`textureIndex`** — which of the file's own textures to throw.
+
+That last one is the only field testable against something **outside its own
+struct**, and it is: **every one of the 1,744 emitters in the cartridge names a
+texture its own file contains.** A wrong offset puts an arbitrary byte there,
+and an arbitrary byte lands out of range almost immediately when most files hold
+two or three textures. All 1,744 also give their particles a non-zero lifetime
+and something to emit; the longest particle life is 108 frames and the biggest
+emission count 20 — both plausible, which a wrong offset would not be.
+
+**Scratch, read as data:** emitter 1 throws the 64×64 claw **once**, at **alpha
+31 of 31**, for **8 frames**. Emitter 2 throws **three** of the 16×16 spark.
+That is the move, in numbers.
+
+### Numbers
+
+`tools/gen4_particle_check.lua`: **27 → 36 checks, 0 failures.** Four planted
+field faults fail it: shifting `textureIndex` one byte, `particleLifeTime` four,
+`emissionCount` four, and `baseAlpha` one.
+
+**A formatter turned a finding into a stack trace for the third time this
+session.** `emissionCount` is fx32 and comes back fractional; a planted offset
+made it 0.5 and `%d` raised "number has no integer representation" instead of
+reporting a wrong value. `%s` and `tostring` throughout now.
+
+### The layers
+
+| layer | state |
+|---|---|
+| the program — what to play, when, which sound | **done**, 501/501 |
+| the player — timing, sound, sprite motion, fades | **done** |
+| the art — what the effect looks like | **done**, 1,724/1,724 |
+| the emitters — where they are, what they carry | **done**, 608/608, 1,744 |
+| the emitter fields — count, lifetime, scale, alpha, texture | **done**, 1,744/1,744 |
+| **rendering them** — a particle system that runs the above | **not built** |
+
+Everything the cartridge says about a move's effect is now readable and checked.
+What does not exist is the thing that *runs* it: a per-frame particle simulation
+that spawns `emissionCount` every `emissionInterval`, ages them over
+`particleLifeTime`, applies the behaviour blocks, and draws the texture at
+`baseScale` and `baseAlpha`. That is engine work rather than cartridge
+archaeology — the data is all in hand.
+
+---
+
+## Moves, animations and effects: the layer that draws them
+
+The table above ended with "rendering them — **not built**". It is built. Every
+row of it is now wired end to end, and the way it went wrong is the more useful
+half of this entry.
+
+### The simulation
+
+`src/battle/Gen4ParticleSystem.lua` runs the emitters: spawns `emissionCount`
+particles every `emissionInterval` frames from `startDelay` until
+`emitterLifeTime`, ages each one over `particleLifeTime`, decays its velocity by
+air resistance every frame, and hands the caller a position, a scale, an alpha
+and a texture index.
+
+**Air resistance is `velocity * (airResistance + 384) / 512` per frame**, from
+`spl_emitter.c`: `airResistance = header->misc.airResistance +
+FX32_CONST(0.09375)` then `>> 9`. An unsigned byte therefore pins the multiplier
+to the band **0.75 … 1.2480**, and the check asserts that band rather than a
+taste. Measured over the cartridge: **542 emitters decay, 819 are exactly
+neutral, 107 accelerate.**
+
+**The fractional emission count carries between beats.** `emissionCount` is
+fixed point and genuinely fractional. Flooring it each beat makes any emitter
+under 1.0 emit **nothing, ever** — and exactly one effect in the cartridge is
+like that: **member 394, at 0.743 per beat**, which produced an empty animation
+until the remainder was carried the way `spl_emit.c` carries it. One effect in
+485 is precisely what nobody finds by playing. (pret's own header comments that
+field "doesn't seem to be used". It is used, four lines into
+`SPLEmitter_EmitParticles`, and 394 is the proof.)
+
+### The command layer
+
+pret has the animation script macros decoded in `asm/macros/btlanimcmd.inc`, and
+they state the operand layout of all eight particle commands. **Every one agrees
+with the widths this port derived by closure arithmetic months earlier** — 3, 4,
+8, 6, 0, 2, 3, 1 operands for `createemitter` through `unloadparticlesystem`.
+Two methods sharing no assumption, agreeing again.
+
+- `loadparticlesystem <slot> <member>` fills one of sixteen slots with a whole
+  SPA file's **resource list**.
+- `createemitter <slot> <resource> <callback>` runs **one resource out of it**.
+  That distinction matters: a whole-file simulation is right for measuring the
+  data and wrong for a battle.
+- `createemitterformove` carries **six** resource ids — three orientations for
+  the player attacking and three for the enemy. This port takes the parallel
+  (head-on) one for the attacking side, because a Sinnoh battle drawn in two
+  dimensions has one orientation.
+- `waitforallemitters` waits for every emitter regardless of slot, and **it is
+  what gives nearly every move its length** — the programs state no duration of
+  their own.
+
+`callbackID` indexes a **23-entry table of callbacks that pret has decoded and
+named** in `src/battle_anim/battle_particle_util.c`:
+`SetPosToAttacker`, `SetPosToDefender`, five convergence variants, five magnet
+variants, and so on. Each is reduced to an origin this screen can place. The
+convergence and magnet **positions** are honoured; their **pull** is not, and
+that gap is what `Gen4ParticleSystem.missing` reports.
+
+### THE BUG THAT MADE ALL OF IT INVISIBLE
+
+Two whole subsystems, proved correct, were wired to nothing.
+
+`Data` loads a Gen 4 table **by its file name**, off an explicit list. The
+import stage wrote `move_anims.lua`. `Gen4MoveAnimPlayer.new` reads
+`data.gen4_move_anims`. The name was not on the list, the field was nil on every
+boot, the constructor returned nil — and every move in Platinum fell through to
+the generic animation. Nothing errored. Nothing logged. An 800-line player with
+42 checks behind it never ran once.
+
+This is the **third** time: `gen4_species_sprites` was the first, and its own
+comment in `Data.lua` records it. So the third one gets a check of its own.
+
+**`tools/gen4_cache_wiring_check.lua`** — the nineteenth standing check, and the
+only one that measures the *seam* rather than either side of it. It compares
+every name the Gen 4 extractor writes against every name `Data` opens, and:
+
+- **every table the importer writes is opened by the engine**, or is one of
+  **nine named write-only dumps** whose content reaches the runtime through a
+  table that is opened. The list is named, not pattern-matched, so it cannot
+  grow quietly.
+- the engine opens **no `gen4_` table that is never written** — the cheaper half
+  of the same bug.
+- the three files agree on the literal names, asserted in each place, because a
+  rename touching two of three is exactly how this broke.
+- **all 1,468 emitters survive `LuaWriter` and come back bit-identical**, which
+  is what lets the cache carry decoded emitters at all.
+- **a system built from the cache and one built from the cartridge never
+  diverge** — 76,882 particle-frames compared, particle for particle, over 5,068
+  frames of simulation. The running game only ever uses the cache route and
+  every other check exercises the cartridge one; that gap is the whole reason
+  this assertion exists.
+
+### What is on the screen now
+
+`Gen4Battle.drawParticles` blits the draw list at the origin its callback names,
+from each particle's own centre, sorted farthest-first within an effect.
+
+| measurement | result |
+|---|---|
+| **Scratch** | **249 particle-frames, peak 13 at once, over 25 frames** |
+| moves that draw particles | **421 of 501** |
+| programs held at `waitforallemitters` | **3,000+ frames across the corpus** |
+| particle effects indexed | **485** |
+| systems that build | **485/485**, 451 emit, 34 legitimately have no emitter |
+| peak live particles | **311** |
+| longest effect | **130 frames** |
+
+Scratch's 64×64 claw travels **8.36 units over 23 frames** at alpha 1.00 and
+scale 0.83, with twelve small sparks behind it.
+
+### Faults planted, and the four that got through first
+
+Thirteen faults were planted against the three checks. Nine failed immediately.
+**Four passed, and each one says something:**
+
+1. **`life-no-plus1`** — cutting one frame off every particle's life. The
+   particle-frame floor was set at a comfortable 40,000 against a measured
+   57,913, and a one-frame cut does not cross that much headroom. **The floor is
+   the measurement now**, 57,913, with the coverage check's rule attached: raise
+   it when the number rises, or it stops being the current measurement.
+2. **`scale-neutral`** — halving the air-resistance divisor, turning decay into
+   growth. Every other assertion in that section is a **floor**, and a fault
+   that makes particles travel *further* passes all of them. Fixed by the
+   multiplier band above, plus a two-sided **travel band**: the sampled corpus
+   travels **17,282 units**, and with the divisor halved the same data comes out
+   at **6.9 × 10²⁷**.
+3. **`wait-free`** — making `waitforallemitters` return immediately. The
+   assertion compared a move's total length against the sum of its delays, and
+   the player's own tail defeated it: a program that reaches `end` with particles
+   in the air keeps running until they die, which is correct, and which makes the
+   total length **identical either way**. Nine assertions in that section and
+   none could see it. Fixed by counting the thing itself — how many frames the
+   program spent *held* at the wait.
+4. **`attacker-side-ignored`** — always taking the player's resource from
+   `createemitterformove`. Both sides still draw particles; they are just the
+   wrong ones for half of every battle.
+
+And one fault **still only fails a source-level assertion**: dropping the
+centre-anchor offsets from the blit. There is no graphics context in a check to
+draw into and read back, so that one is asserted from the source, and the check
+says so about itself.
+
+### My own recurring fault, twice more
+
+- I asserted **"not one emitter accelerates its particles"** and had "measured"
+  it with a scan that read `f.misc.airResistance` — a field that does not exist,
+  since those flags live flat on the fields table. Every read came back nil,
+  every nil became 0, and 0 is never above 128, so the scan reported exactly
+  what I expected and **could not have reported anything else.** 107 emitters do
+  accelerate.
+- I then wrote **"176 accelerating"** into the check as a measured count. I had
+  never counted it. The real number is 107, and the check failed on my own
+  arithmetic within a minute of being written.
+
+A measurement that cannot fail says nothing — including when it is a measurement
+of my own code.
+
+### Standing checks: 19
+
+| check | result |
+|---|---|
+| coverage | 6/0 |
+| command audit | (needs a full cache) |
+| seam | every emitted verb resolves |
+| operand roles / names / opcode widths | clean |
+| distortion world | 57/0 |
+| branch | 6/0 |
+| battle scene | **153/0** (was 144) |
+| icon | 9/0 |
+| party | 28/0 |
+| summary | 20/0 |
+| use-before-local | 221 files, 0 |
+| lift | (needs a full cache) |
+| roamer | (needs a full cache) |
+| map reach | REPORT |
+| move animations | **57/0** (was 42) |
+| particles | **59/0** (was 36) |
+| **cache wiring** | **25/0** (new) |
+
+`gen4_lift_check`, `gen4_roamer_check` and `gen4_command_audit` want a cache
+carrying `maps.lua` and `items.lua`, which the working cache here does not have;
+nothing in this change touches maps, items or script commands.
+
+### Still open
+
+- **The behaviour blocks** — gravity, magnet, spin, convergence, collision
+  plane. Read, counted, reported by `System.missing`, **not applied**. The
+  positions those callbacks imply are honoured; the forces are not.
+- **The animation blocks** — `scaleAnim`, `colorAnim`, `alphaAnim`, `texAnim`
+  are decoded but the simulation holds scale and alpha constant over a
+  particle's life.
+- **`loaddebugparticlesystem`** cannot resolve: `debug_particle.narc` is not in
+  the retail cartridge, which pret states outright.
+- **`UNITS_TO_PIXELS = 32`** is the one port-side constant with no cartridge
+  authority behind it — Platinum's particles are 3D world units under a
+  perspective camera and there is no exchange rate to read. It is set from the
+  one thing measurable: Scratch's 64-pixel claw at `baseScale` 0.83 has to land
+  on a Pokémon about that size. Named as a choice so it reads as one.
+
+---
+
+## The animation and behaviour blocks, applied
+
+The previous entry closed with two gaps: the behaviour blocks read but not
+applied, and scale and alpha held constant over a particle's life. Both are
+closed. Ten of the eleven optional blocks are implemented from pret's own
+`lib/spl/src/spl_anim.c` and `spl_behavior.c`.
+
+### Every one of the eleven block sizes is now confirmed twice
+
+The block costs were derived months ago from **byte arithmetic alone** —
+single-bit-pair subtraction over the 144 single-emitter files, extended by
+closure to 106 measurements. pret declares the same eleven structs, and they lay
+out to the same eleven sizes:
+
+| bit | struct | bytes | bit | struct | bytes |
+|---|---|---|---|---|---|
+| 8 | `SPLScaleAnim` | 12 | 24 | `SPLGravityBehavior` | 8 |
+| 9 | `SPLColorAnim` | 12 | 25 | `SPLRandomBehavior` | 8 |
+| 10 | `SPLAlphaAnim` | 8 | 26 | `SPLMagnetBehavior` | 16 |
+| 11 | `SPLTexAnim` | 12 | 27 | `SPLSpinBehavior` | 4 |
+| 16 | `SPLChildResource` | 20 | 28 | `SPLCollisionPlaneBehavior` | 8 |
+| | | | 29 | `SPLConvergenceBehavior` | 16 |
+
+**Bit 28 is no longer a single sample.** Its +8 rested on one emitter in the
+whole cartridge — `waza_particle[43]`, third emitter — and was flagged as the one
+entry a second example could move. `SPLCollisionPlaneBehavior` is `fx32 + fx16 +
+a 2-bit field in a u16` = 8 bytes **by declaration**. The weakest entry in the
+table is now the same strength as the rest.
+
+The walk order is `SPLManager_LoadResources`'s own: ascending bit order, the four
+animations, the child resource, then the six behaviours. Nothing chose that; it
+is read off the loader. And the walk is checked against the costs — `emitters()`
+refuses any file whose block decode does not land exactly where the summed bit
+costs say it will, so every emitter that reaches the simulation agreed twice.
+
+### TWO RANDOMISATION MACROS, AND THIS PORT WAS USING ONE
+
+`spl_random.h` defines both and `spl_emit.c` picks between them per field:
+
+```
+ScaledRangeFX32(num, range)       = (num * (255 - ((range * r8) >> 8))) >> 8
+DoubleScaledRangeFX32(num, range) = (num * (255 + range - ((range * r8) >> 7))) >> 8
+```
+
+The first **only reduces**. The second is centred and can reach nearly **twice**
+`num`. Lifetime uses the first; **base scale and both initial velocities use the
+second** — and this port had one hand-written "reduce by a random fraction" for
+all three. Every particle in the game with a non-zero scale or velocity
+attenuation was systematically **too small and too slow**.
+
+Measured cost of the correction: the sampled corpus went from 35,947 → **33,068**
+scale-units under the wrong macro (an 8% loss spread over every particle), and
+travel from 17,282 → **17,901** units once the velocities were right. Note the
+255/256 in both formulas: even at range 0 the value comes back slightly under
+itself. That is the cartridge's arithmetic, kept rather than tidied.
+
+### The life rate is not `255 * age / life`
+
+All four animations are driven by a **life rate on a 0–255 scale**, not by
+frames — which is what lets one curve fit particles of any lifetime. pret
+computes `lifeTimeFactor = 0xFFFF / lifeTime` once at birth, then
+`(lifeTimeFactor * age) >> 8`, and stores it in a `u8`. The two integer
+truncations do not compose into the obvious formula: **at life 6, age 5, pret
+gives 213 and `255 * age / life` gives 212.** A looping animation gets its wrap
+for free from that `u8`, using a loop factor over `loopFrames` instead.
+
+The check asserts six exact rows, including that one.
+
+### What each block does
+
+- **scale / alpha** — a three-point curve: rise to `mid` by `curve.in`, hold,
+  fall to `end` from `curve.out`. The drawn values are products: `baseScale ×
+  animScale` and `baseAlpha × (animAlpha + 1) >> 5`, with pret's defaults
+  `animScale = 1.0` and `animAlpha = 31` so a resource with no curve draws
+  exactly its base values.
+- **colour** — start, peak, end, with `interpolate` deciding between a ramp and a
+  step. **The peak is the emitter's own `colour` field, not a third value in the
+  block** — the block looks self-contained and is not.
+- **texture** — up to eight frames, switched at `step` intervals on the same
+  0–255 scale.
+- **gravity, random, magnet** — contribute to an acceleration; **spin and
+  convergence act on the position directly**, and pret's comment says so for
+  convergence: "it acts directly on the particle's position instead of its
+  acceleration".
+- **collision plane** — kill or bounce, measured from the **emitter's** height
+  because a particle's position is relative to its emitter.
+
+The per-frame order is pret's and it matters: animations, acceleration = 0,
+behaviours, rotation, **air resistance on the velocity**, acceleration added,
+then the position moved. An acceleration applied before the decay would be damped
+in the same frame it was added.
+
+### What it does to the corpus
+
+| measurement | result |
+|---|---|
+| emitters whose blocks decode | **1,468 / 1,468** |
+| particles whose **scale** changes over life | **2,216 of 2,444** |
+| ...whose **alpha** changes | **2,423 of 2,444** |
+| ...that swap texture mid-flight | **64** |
+| ...tinted by a colour curve | **1,780** |
+| ...that spin | **546** |
+| corpus scale-units | **35,947** |
+| corpus travel | **17,901** units |
+| blocks still unapplied | **one kind — the child resource** |
+
+`Gen4Battle.drawParticles` now carries the rotation (converted to radians in one
+place) and the colour curve through to the screen.
+
+### Sixteen faults planted; seven got through the first version
+
+The first pass of the new sections caught nine of sixteen. The seven that
+survived are the useful half:
+
+1. **the wrong randomisation macro for base scale** — nothing measured total
+   scale. Now a corpus scale-unit band.
+2. **the curve's in/out points swapped** — the scale still varied, so every
+   "does it change" assertion passed. Settled by the cartridge: a curve should
+   reach its middle value before leaving it, so `in ≤ out` almost always — **26
+   exceptions in 2,661 curves, and swapping the reader turns that into 2,635.**
+3. **the life rate computed the obvious way** — invisible in any corpus total.
+   Now six exact rows.
+4. **the magnet's velocity term dropped** — turns a magnet into a spring that
+   overshoots. Counted as crossings of the target: **24 with the damping, 32
+   without.**
+5. **the acceleration added before air resistance instead of after** — moved the
+   corpus travel by 0.43%, and the band was ±1%. **A band wide enough to be
+   comfortable was wide enough to hide an ordering bug.** Tightened to ±0.2%,
+   which is still 36 units of slack — far more than any float difference between
+   the check's interpreter and the engine's.
+6. **the collision KILL arm deleted** — see below.
+7. **the BOUNCE arm not flipping the velocity** — same cause.
+
+### The cartridge cannot exercise its own collision plane
+
+Its one collision emitter (effect 43, emitter 3) sets its plane at `y = -11.71`
+while its own emitter sits at `y = -0.97` and its particles live 19 frames. **They
+never fall far enough to reach it** — the oldest particle in the run dies of age
+at exactly 19. So an assertion that only counts the block passes with the whole
+KILL arm deleted, which is what the planted fault proved.
+
+The path is therefore driven with a **synthetic** emitter, labelled as one: a
+plane just below the origin, a particle thrown downwards, and a lifetime long
+enough that dying early can only mean the plane killed it. The KILL particle dies
+at frame 3 of 60; the BOUNCE one goes down and comes back up.
+
+### And a first version of an assertion that failed on real data
+
+"Removing a behaviour block must always change the trajectory" came out **7 of 12
+for convergence, 7 of 12 for random, 11 of 12 for spin** — because the cartridge
+ships blocks that are **present and inert**. Five of the first fourteen
+convergence blocks carry force 0.0 and target (0,0,0); several random blocks
+carry a magnitude of zero on all three axes; and a spin block cannot move a
+particle that never leaves the origin, whatever its angle.
+
+An inert block is not a bug, and an assertion that calls it one is an assertion
+that gets relaxed until it says nothing. So each behaviour's degeneracy is
+**defined**, the inert ones are counted, and the live ones are required to differ
+without exception — plus one more assertion that the inert ones **exist**, since
+a dead exemption is one that can quietly start covering a bug.
+
+Result: gravity 16/16 live, magnet 16/16, convergence 11/11 (5 inert), spin 15/15
+(1 inert), random 7/7 (6 inert); 12 inert blocks in the sample.
+
+### A bare global the scanner cannot see
+
+`blocks = e.parsed` inside `System:spawn(emitter)` — the parameter is named
+`emitter`, so `e` resolved as a nil global and the first run raised. The house
+scanner `lua_use_before_local.py` catches a file-local *called above its own
+`local` line*; it does not catch a name that was never a local at all. Worth
+knowing which shape of the fault it covers.
+
+### Standing checks
+
+particles 59 → **90/0**; move animations **57/0**; cache wiring **25/0**; battle
+scene **153/0**; use-before-local 221 files / 0. Sixteen planted faults, all
+sixteen now fail.
+
+### Still open
+
+- **The child resource** — an emitter whose particles emit particles of their
+  own, on 821 emitters. It needs a second particle list with its own lifetimes
+  and draw order, and a guessed version would put sparks on the screen the
+  cartridge does not.
+- **The 2D cell-actor effects** (`wechar` / `wepltt` / `wecell` / `wecellanm` =
+  NCGR/NCLR/NCER/NANR) — 32 of 501 programs use them and this port already reads
+  all four formats.
+- `UNITS_TO_PIXELS = 32` remains the one constant with no cartridge authority.
+
+---
+
+## The child resource, the pool, and the fact that a particle is not square
+
+All eleven optional blocks are applied now. The last one was the child resource —
+745 emitters carry one, on 342 effects — and implementing it turned up a hardware
+limit and two header fields that between them change the shape and density of
+most of what the game draws.
+
+### THE POOL IS TWO HUNDRED PARTICLES
+
+`include/particle_system.h` states three constants:
+
+```
+MAX_PARTICLE_SYSTEMS 16    MAX_EMITTERS 20    MAX_PARTICLES 200
+```
+
+The first two corroborate the animation macros' own operand ranges —
+"particleSystem (0-15)" and "emitterIndex (0-19)" — which is a pleasant way to
+find out a header is the same header. The third changes what reaches the screen.
+`SPLEmitter_EmitParticles` and `SPLEmitter_EmitChildren` both take their particle
+off a **fixed free list** and `return` the moment it comes back NULL, so a burst
+that asks for more than the pool holds simply stops getting them.
+
+Without the cap this port peaked at **302** of an emitter's own particles and
+**1,260** children — a spray seven times denser than the DS can draw, which is the
+kind of wrong that looks like enthusiasm. With it, the busiest effect in the
+cartridge sits at exactly **200**, and over a seventh of the corpus emission was
+refused **1,009** times. The check asserts the saturation exactly rather than
+"a plausible number", because a cap that never binds says nothing.
+
+The reduction is named: the cartridge's pool belongs to a *particle system* (one
+loaded SPA slot) and is shared by every emitter created from it; here it is per
+`System`, which is one resource's emitters. For a move that creates one emitter
+per slot the two are identical.
+
+### A child is not its parent, in four ways
+
+A child inherits its parent's position, a **fraction** of its velocity
+(`velocityRatio / 256`), a fraction of its **current** scale (base × anim, not
+base alone) and its parent's current alpha as a new base — so a child of a faded
+parent starts faded. Then it diverges:
+
+1. **The life rate is `(age << 8) / lifeTime`** — the obvious formula. The
+   parent's two stored factors are written onto the child and never used.
+2. **It has its own two animations**, not the parent's four: `SPLAnim_ChildScale`
+   ramps 1.0 → `endScale` over the whole life, `SPLAnim_ChildAlpha` fades 31 → 0.
+   Neither loops.
+3. **The behaviours are optional** — children feel them only when the child
+   block's `usesBehaviors` is set, which is true on **27** of the cartridge's 745
+   child blocks and false on **718**. The common case is the one that must *not*
+   inherit, which is the direction a port gets wrong by passing the parent's
+   blocks along.
+4. **The scale ratio is over 64, not 256** — a u8 over 64, so `scaleRatio 63`
+   means the child is exactly its parent's size and the field can *enlarge* as
+   well as shrink. Reading it as /256 makes every child in the game four times
+   too small.
+
+**And the child's last frame reads a life rate of 0.** `(age << 8) / lifeTime`
+reaches exactly 256 when `age == lifeTime`, and pret stores it in a `u8` — so it
+wraps and the child snaps back to its birth scale and alpha for one frame before
+it dies. The parent's formula cannot do this: `floor(65535/L) × L` never passes
+65535. Two formulas three lines apart in the same file, and only one of them
+wraps.
+
+`drawChildrenFirst` (259 emitters) puts the spray behind its source and
+`hideParent` (22 emitters) means only the spray is drawn at all.
+
+### A PARTICLE IS NOT SQUARE
+
+`spl_draw.c` sets `sclY = baseScale` and `sclX = baseScale × aspectRatio`, then
+multiplies the animation into one axis, the other, or both depending on
+`scaleAnimDir`. Neither field was being read.
+
+| field | measured over 1,468 emitters |
+|---|---|
+| `aspectRatio` ≠ 1 | **445** emitters, spanning **0.0298 … 7.9998** |
+| `scaleAnimDir` XY / X / Y | **1,293 / 41 / 134**, and never a fourth value |
+| `textureTileCountS/T` set | 647 emitters (not honoured — see below) |
+| `flipTextureS/T` set | 0 emitters |
+
+`scaleAnimDir` taking only its three declared values across every emitter is what
+says the 3-bit field is at the right offset; a wrong one would reach 7. The rest
+of `SPLResourceHeader.misc` decodes with it: C packs it into three u32s —
+`loopFrames` 0-7, `dbbScale` 8-23, the two tile counts 24-27, `scaleAnimDir`
+28-30, `dpolFaceEmitter` 31, then the two flips as bits 0 and 1 of a third word.
+That third word is why `misc` spans 68…79 and the base struct reaches 88 with
+`polygonX/Y` at 80/82 — the same arithmetic that closed on all 608 files.
+
+So the draw callback now hands over **two** scales, and `Gen4Battle` draws with
+both. Of 52,186 particles sampled from emitters whose direction is XY and whose
+aspect is not 1, **every one** is drawn non-square.
+
+### A bug found by the numbers moving for the wrong reason
+
+Adding the aspect ratio moved the corpus travel — which has nothing to do with
+scale. The cause: `doubleScaledRange(...)` written into three fields of the same
+particle drew three **different** random values for one scale *and* consumed two
+extra numbers from a seeded stream, shifting every later particle in the run. One
+draw, three fields.
+
+### What the corpus looks like now
+
+| measurement | result |
+|---|---|
+| effects with a child resource | **342**, and all 342 emit children |
+| child-frames over those effects | **399,352** |
+| peak children at once | **194** (held under the 200 pool) |
+| busiest effect, own particles | **200** — the pool, exactly |
+| emission refused (pool empty) | **1,009** times over a seventh of the corpus |
+| particles drawn non-square | **80,287** of 221,731 sampled draws |
+| block kinds still unapplied | **none** |
+
+### Fifteen faults planted; three got through
+
+- **the aspect ratio deleted entirely** passed "this many are drawn wider than
+  they are tall", because a `scaleAnimDir` of X or Y already separates the two
+  axes and 175 emitters set one. Re-counted on the XY-direction emitters, where
+  the aspect is the only thing that can make the axes differ — and there the
+  assertion is *all of them*, not a floor. (80 particles are born at scale zero,
+  and zero is square whatever the aspect is; those are excluded by name rather
+  than the assertion being loosened to "almost all".)
+- **the child velocity ratio set to 1** — nothing measured child trajectories.
+  Now asserted exactly on a synthetic parent: ratio 128 gives a child exactly half
+  its parent's velocity.
+- **children given the parent's behaviours unconditionally** — same gap. Now a
+  synthetic parent with gravity and `usesBehaviors` false, whose child must fall
+  at the air-decay rate alone.
+
+And one assertion I wrote was simply wrong: I claimed the parent and child life
+rates differ at age 5 of 6. Both give 213. The formula that gives 212 there is
+`255 × age / life`, a **third** arithmetic I had confused with the child's. The
+check said so within a minute, and the rows it asserts now include the cases where
+the two really do part company — the final frame (255 vs a wrapped 0) and an
+off-by-one in the middle (127 vs 128).
+
+### A gap list that refused its own entry
+
+`Gen4ParticleSystem.NOT_APPLIED` is empty now and **stays there, empty** — a
+missing-features list deleted the day it empties is one nobody notices the next
+time something is left out, so the check asserts it is empty rather than assuming
+it. What is left is not blocks but draw modes, named in `DRAW_GAPS` with a reason
+each: the three polygon draw types, view space, the S/T tile counts (647 emitters
+set one), fixed polygon ids, the directional-billboard scale.
+
+Three of those reasons said "same" until the check refused them — it requires
+every reason to be a sentence, and "same" is a cross-reference pretending to be
+one, which is exactly the shape of an unargued skip.
+
+### Standing checks
+
+particles 90 → **120/0**; cache wiring **25/0** (it now compares the **child**
+lists across the cartridge and cache routes too — 137,397 particle-frames
+compared, since children are half of what is on the screen and a comparison that
+walked only parents would call the two routes identical while the cache route
+sprayed something else); move animations **57/0**; battle scene **153/0**;
+use-before-local 221 files / 0.
+
+### Still open
+
+The 2D cell-actor effects (`wechar` / `wepltt` / `wecell` / `wecellanm` =
+NCGR/NCLR/NCER/NANR) on 32 of 501 programs — this port already reads all four
+formats. And the draw-mode gaps above, which need a 3D pass rather than a flat
+blit.
+
+---
+
+## The 2D cell actors: the third layer, and a format with no reference
+
+A move's visible effect is up to three things. The battlers moving comes from the
+program alone; the 3D particle burst is `gen4_particles`; and **thirty-two of the
+501 programs also build a flat 2D sprite** out of four separate archives. That
+third layer drew nothing at all until now.
+
+### NANR had to be derived — pret does not ship it
+
+`Gen4Cells` already read NCER and could say what one cell *looks* like. It says
+nothing about time. The animation lives in NANR, and pret expects the NitroSystem
+SDK headers for `NNSG2dAnimBankData` without shipping them — so there was no
+struct to read off. The derivation is the part worth keeping:
+
+- **The frame array was located by a signature, not by trust.** Every frame record
+  ends in the constant `0xBEEF`, so the array can be found by scanning for a run
+  of `frameCount` records at stride 8 whose last halfword is `0xBEEF`. On all 37
+  members that run begins at exactly `24 + frameOffset` — which fixes the
+  offsets' base at byte 24 and the frame stride at 8, neither assumed.
+- **The sequence stride is 16, derived the same way.** With the frame array located
+  independently, the sequence array runs from `24 + sequenceOffset` to it, and that
+  distance over `sequenceCount` is 16 on all 37. The documented NNS sequence is
+  twelve bytes of named fields; the four this port cannot name sit between them and
+  the frame offset, and are read past rather than guessed at.
+- **Then it closes, twice.** Every sequence's frame range **tiles the file's frame
+  array exactly** — 53 sequences over 186 frames, no overlap and no gap. And every
+  frame's result resolves to a cell index that **exists in the matching NCER** — a
+  cross-archive test, wecellanm against wecell, 186 for 186.
+- **A result is two bytes and its position is read, not stepped.** The frames'
+  `resultOffset` values are not evenly spaced — 0, 2, 4, 6, 8, then **12** —
+  because the cartridge pads between one sequence's results and the next with
+  `0xCCCC`. Walking at a fixed stride would read that padding as a cell index.
+
+What the cartridge actually uses, over all 53 sequences: `elementType` 0,
+`playbackMode` 1, `loopStartFrame` 0. So the transforming element types and the
+reverse playback modes are **unreached** rather than unimplemented, and the reader
+refuses them rather than pretending — a transform read as an index would name a
+cell that happens to exist and draw the wrong picture silently.
+
+### The resource operands look like slots and are not
+
+pret's macro is explicit: `AddSprite`'s `charRes` is "Index of the character
+resource to use. (Same as for LoadCharResObj)" — a **NARC member index**, not a
+slot in the manager. Reading them as slots is the obvious mistake and produces
+`nil` for 33 of 38 sprites, which is how the mistake was found.
+
+Measured over the 32 programs: **38 sprites, and `charRes == cellRes == animRes`
+on all 38** — the three always come from the same member, while the palette
+sometimes differs, which is why wepltt has 39 members where the others have 37.
+`multiCellRes`/`multiAnimRes` are 0 on all 38, confirming pret's "always 0". And
+**every sprite names a resource its own program loaded first**, which is pret's
+own note holding on all 38.
+
+All eight cell-actor opcode widths — 8, 2, 3, 2, 2, counted, 8, 1 — match pret's
+macros exactly, the same independent agreement as the particle commands.
+
+### A PALETTE THAT SAID 480 BYTES INSIDE A 56-BYTE SECTION
+
+Four sprites came out perfectly shaped and perfectly transparent. Two causes,
+both worth knowing:
+
+**The stated palette size is a VRAM allocation, not the data length.** Every one
+of wepltt's 39 members states 480 bytes — fifteen full banks — inside a TTLP
+section of **fifty-six**. `Gen4Graphics.palette` ran to 239 entries, walked off the
+end of the section, and only stopped when the file did: about twenty real colours
+followed by five made of whatever came next. It clamps to what the section holds
+now, which is the one number that cannot be a promise about VRAM. **This is exactly
+the Gen 2 `sprite_header` length-byte trap** — the VRAM allocation, not the sheet
+size. Two generations, one mistake.
+
+**And one cell bank asks for palette bank 9.** On the hardware, OBJ palette memory
+is sixteen banks of sixteen colours shared by every sprite on screen, and an
+NCER's OAM entries carry the bank they were authored against — a number about VRAM,
+not about the file. Measured over all 37 banks: **not one mixes banks within
+itself, thirty-six use bank 0, and member 0 uses bank 9.** So a member has exactly
+one answer, and this port pads the file's colours up so the wanted bank lands on
+them. For thirty-six members that is a no-op; for member 0 it is the difference
+between four 184×64 sprites and four transparent rectangles — **20,125 opaque
+pixels against none**.
+
+The script's own `loadplttres` paletteIndex operand cannot be what selects
+anything: it is **1 on all 34 calls**.
+
+### What the layer does now
+
+| measurement | result |
+|---|---|
+| animation banks parsed | **37 / 37**, 53 sequences, 186 frames |
+| frames naming a valid cell | **186 / 186** (cross-archive) |
+| resource tuples the programs name | **29**, all 29 composed |
+| images assembled | **135**, 122,212 opaque pixels |
+| programs that add a sprite | **31** |
+| sprite-frames on screen | **733** — 654 with art, 79 deliberate blanks |
+| distinct per-move callbacks seen | **25** |
+
+The sprite is placed where the cartridge places it — `AddSpriteWithFunc` builds
+its template from the **defender's** position before any callback runs — and lives
+exactly as long as its sequence, which is pret's rule: the task deletes the sprite
+the frame `ManagedSprite_IsAnimated` goes false.
+
+**The blank frames are a feature.** Cell 0 of members 17, 19 and 26 has no OAM
+entries at all and their own animations name it — a beat of nothing before the
+sprite appears. Counted apart from missing art so the two cannot be confused.
+
+### The per-move callbacks are a named gap, not a shrug
+
+`sBattleAnimSpriteFuncs` is thirty-three bespoke routines **named after their
+moves**: Constrict squeezes, Bonemerang arcs out and back, FollowMe oscillates off
+a hand-written offset table. Twenty-six occur in the cartridge, once or twice each.
+This port places the sprite and plays its animation — everything the layer shares —
+and reports each callback by name through `missing()`, so "why does Constrict's
+sprite not move" has an answer. Inventing the motion would look deliberate and be
+wrong.
+
+**The one generic callback is implemented exactly.** `OffsetAndAnimate` reads
+script vars 0 and 1 as an X/Y offset and then does nothing but tick the animation.
+Move 265 passes `0 24`, so its sprite sits 24 above the defender.
+
+And those script vars are the command's own trailing arguments — the handler copies
+them into `scriptVars[0..n-1]` and zeroes the rest, which is *why* this opcode's
+width is counted rather than fixed. **They arrive unsigned:** move 333 passes −15
+and −5 as 4294967281 and 4294967291. Signed here now, the same four-billion-frame
+trap the pan and fade operands cost once already.
+
+### Two bugs of my own, and one fault the cartridge cannot settle
+
+**A field shadowed a method.** `self.cells` for the sprite list and
+`Player:cells()` for the accessor — Lua's `:` looks at the instance before the
+metatable, so `player:cells()` found the table and raised "attempt to call a table
+value". A field and a method may not share a name; a quieter cousin of the
+use-before-local fault the house scanner exists for.
+
+**I read the resource operands as manager slots** and got `nil` for 33 of 38
+sprites before re-reading pret's macro comment.
+
+And one limit worth stating: forcing the sprite's **X** offset to zero passes every
+assertion, because the single move that uses the generic callback passes `0 24` —
+there is no cartridge data where X is non-zero. That one is asserted on a synthetic
+sprite instead, with the negatives written the way the cartridge writes them.
+
+### Faults planted: fourteen, all fourteen fail
+
+Sequence stride 12, frame stride 4, offsets based at the section instead of byte
+24, results stepped instead of read, the palette padding removed, the palette read
+unclamped, the sprite layer not wired, the offsets unsigned, a sprite that never
+dies, the draw call removed, blank frames not skipped, sequence 2 taken instead of
+sequence 1.
+
+Two plants were **not** faults and are recorded as such: removing the tiling guard
+and removing the `0xBEEF` guard change nothing on valid data. A guard is not
+behaviour — the stride faults are what prove the guards earn their place.
+
+**And a floor let one through.** "A sprite is on screen for at least 733 frames"
+passed a sprite that never dies, because never dying means *more* frames. There is
+no randomness anywhere in this layer — the durations are read and the cells are
+read — so the total is exact now, with a runaway bound beside it.
+
+### Standing checks
+
+move animations 57 → **78/0**; battle scene 153 → **157/0**; cache wiring 25 →
+**27/0**; particles **120/0**; use-before-local 222 files / 0.
+
+### All three layers of a move's animation
+
+| layer | state |
+|---|---|
+| the program — what to play, when, which sound | **done**, 501/501 |
+| the player — timing, sound, sprite motion, fades | **done** |
+| 3D particles — art, emitters, fields, simulation, children | **done** |
+| 2D cell actors — art, cells, animation, placement | **done** |
+| per-move sprite motion (26 callbacks) | **named, not applied** |
+| particle draw modes (polygon types, tiling, view space) | **named, not applied** |
+
+---
+
+## Four fifths of the game's particles were being drawn white
+
+The three layers were built; this is the first pass over what they *look* like.
+Two header fields, both pure data, both unused — and between them they decide the
+appearance of most of the particles in the game.
+
+### THE EMITTER'S OWN COLOUR
+
+`spl_draw.c` ends every draw path with
+
+```c
+G3_Color(GX_RGB(ptclR * emtrR >> 5, ptclG * emtrG >> 15, ptclB * emtrB >> 25))
+```
+
+and because `GX_RGB_G_` and `GX_RGB_B_` mask without shifting down, all three
+reduce to the same thing: a 5-bit modulate, `particle × emitter / 32`.
+
+And a particle is **born** with its emitter's colour — `ptcl->color =
+header->color` in `spl_emit.c` — whether or not a colour animation ever runs.
+
+**1,160 of the cartridge's 1,468 emitters carry a non-white colour.** Effect 0's
+is orange (255, 98, 0); effect 2's is blue (0, 148, 255). Every one of them was
+drawing as a white or grey blob. Over a seventh of the corpus that is **77,437 of
+101,991 draw calls** now coloured instead of white.
+
+`randomStartColor` is exercised too — **103 of the 1,102 colour animations set
+it** — and it makes a particle take one of *three* colours by its index: the
+curve's two ends and the emitter's own. pret drops the colour animation entirely
+for those emitters in the same breath, which is why the flag belongs in the spawn
+path rather than in the animation.
+
+### TEXTURE TILING
+
+`textureS = FX32_ONE << textureTileCountS`, so the field is a power-of-two repeat
+across the particle's own quad. Measured: **821 emitters tile 1×1, 534 tile 2×2,
+67 tile 2×1, 46 tile 1×2** — four shapes and never a fifth, which a wrong 2-bit
+offset would not produce.
+
+The particle does not get bigger: the texture repeats inside the same footprint.
+So the draw widens the quad, sets repeat wrap and **divides the scale by the same
+factor** — and the quads are cached by shape, because one allocated per particle
+per frame would be thousands of objects a second for four distinct shapes.
+
+`textureTileCount` has left `DRAW_GAPS`, and the check asserts that it has. A gap
+list is only worth having if entries leave it when they are closed.
+
+### `2 ^ 0` IS 1.0, AGAIN
+
+The tile counts travelled to the draw callback as floats, because `2 ^ n` is a
+float in Lua 5.3 — **exactly the trap the SPA shape word set once**, where a width
+came out `32.0` and every consumer expecting an integer quietly took a float. A
+`REPEATS` table spells the four values out, and the check asserts `math.type` on
+every tile count reaching the blitter.
+
+### An assertion that stopped measuring anything
+
+"This many particles are tinted by a colour curve" counted particles whose
+`colour` field was non-nil. The moment particles started being born with their
+emitter's colour — which is what the cartridge does — that became *all of them*,
+and the assertion silently stopped saying anything about colour animation. It
+asks whether the colour **moves** now, which is the curve's actual effect: 1,227
+of 2,371.
+
+### A check that was wrong in the right direction
+
+The new "the tiled branch is reachable" assertion matched the guard as *two lines
+above* the call, and broke the moment a comment sat between them — by **failing**,
+which is the right way round for a check to be wrong. It scans for the nearest
+preceding `if` now and does not care about layout. The fault it exists for is the
+same dead `if false` that once made a deleted animator guard look present.
+
+### Faults planted: six, all six fail
+
+The emitter tint dropped at spawn; the modulate replaced by the particle colour
+alone; the modulate made an add instead of a multiply; the tile count read as a
+linear field rather than a shift; the tile values left as floats; the tiled branch
+made unreachable; `randomStartColor` ignored.
+
+Two of those needed assertions that are **arithmetic rather than counts**: half
+red on a half-red emitter must draw a quarter red, and a white particle must take
+its emitter's colour unchanged. A count of coloured draws passes an add as happily
+as a multiply.
+
+### Standing checks
+
+particles 128 → **136/0**; battle scene 157 → **161/0**; move animations 78/0;
+cache wiring 27/0; use-before-local 222 files / 0.
+
+### Still open
+
+- The **26 per-move sprite callbacks**. `sBattleAnimSpriteFuncs` is bespoke
+  routines named after their moves, 12 to 89 lines of C each plus a per-frame task
+  of similar size — around 2,000 lines to port faithfully. Only five of the
+  twenty-five share an alpha-fade envelope; there is no common motion vocabulary
+  to implement once. Each needs its own reading and its own check, and guessing
+  would look deliberate.
+- The particle **polygon draw types**, view space and fixed polygon ids, which
+  need a 3D pass rather than a flat blit. Named in `DRAW_GAPS` with a reason each.
+
+---
+
+## The sprite callbacks, first pass: which sequence, and where
+
+The 26 per-move sprite callbacks are bespoke and were left named. Reading them
+turned up something that is not bespoke at all.
+
+### A CELL BANK CAN HOLD MORE THAN ONE ANIMATION, AND THIS PORT PLAYED THE FIRST
+
+**Twelve of the 37 animation banks hold more than one sequence** — nine hold two
+and three hold more — and nothing in the *script* selects one. The **callback**
+does: thirteen of the twenty-six call `ManagedSprite_SetAnim`, and three of them
+with a rule pret states plainly:
+
+| callback | rule |
+|---|---|
+| Metronome (4) | sequence 1 when the **attacker** is the enemy |
+| FollowMe (26) | identical |
+| Fissure (27) | sequence 1 when the **defender** is the player |
+
+Fissure's is the same test read from the other end, so with the player attacking
+all three want sequence 0 and with the enemy attacking all three want 1 — which is
+how the check drives it: a rule that ignored the side would give the same answer
+twice.
+
+Playing the first sequence was right by luck for the 25 single-sequence banks and
+wrong for the rest whenever the battle ran the other way up.
+
+The other ten `SetAnim` callers either drive **several** sprites with a sequence
+each (Taunt, HelpingHand, GrassWhistle) or call `SetAnimateFlag` and
+`SetAnimationFrame`, which are not sequence selection at all.
+
+### FISSURE'S CRACK OPENS AT AN ABSOLUTE HEIGHT
+
+Not an offset from a battler: the defender's X, and then **Y = 126** when the
+defender is on the player's side, **32** when it is on the enemy's — both screen
+coordinates straight out of `script_funcs_3.c`, in the DS's 256×192 space.
+
+So the draw record carries an origin name for the X and an absolute Y beside it,
+and when the absolute is present it replaces the origin's Y *and the offset with
+it*. Mixing the two would be nonsense: the record's own Y is an offset measured
+upwards from a battler, and a screen coordinate is neither an offset nor measured
+upwards. Exactly one callback in the cartridge sets one, and the check asserts
+that exactly one does — a second appearing would mean a rule had been copied where
+it does not belong.
+
+### Two faults that needed more than a corpus number
+
+- **The absolute height ignored in the draw path.** Caught by the same live-guard
+  test the tiling branch gets: `if false then` leaves every string intact, so the
+  assertion requires the nearest preceding `if` to name the variable.
+- **The sequence clamp not reporting itself.** Nothing in the cartridge asks for a
+  sequence its bank does not have, so "0 clamped" passes with the report deleted —
+  the same shape as a floor nothing can cross. Forced on a synthetic sprite
+  instead: a single-sequence bank asked for sequence 1 must say so.
+
+### Faults planted: nine, all nine fail
+
+The sequence rule removed; the side test inverted; Fissure's two heights swapped;
+its absolute height dropped; the absolute height ignored in the draw; the clamp
+silenced; every sprite forced to sequence 1.
+
+### Standing checks
+
+move animations 78 → **87/0**; battle scene 161 → **163/0**; particles 136/0;
+cache wiring 27/0; use-before-local 222 files / 0.
+
+### Still open
+
+The remaining **23 callbacks' motion**. Each is 12 to 89 lines of C plus a
+per-frame task of similar size, and they do not share a vocabulary: only five of
+the twenty-five use the alpha-fade helper, and the rest oscillate, arc, scale or
+squeeze in their own way. `PosLerpContext` (a per-frame linear interpolation with
+a fixed step count) is the one primitive several of them build on and is the
+obvious next thing to port, but each callback still needs its own reading and its
+own check — and the motion is the part that looks deliberate when it is guessed.
+
+---
+
+## 2026-09-26 — The five callbacks that can be read, and the tail that was one frame long
+
+`PosLerpContext` was the obvious next thing to port and it turned out not to be
+one thing: pret's `battle_anim_helpers.c` holds **five** fixed-point contexts and
+the per-move callbacks pick from them. Those are now `src/battle/Gen4AnimMath.lua`,
+and **five of the twenty-six callbacks** are applied on top of them.
+
+### The primitives, and the three roundings that are not interchangeable
+
+`PosLerp`, `ScaleLerp`, `ValueLerp`, `Revolution`, `AlphaFade`, and the parabola
+built from two of them. The work is not the interpolation, it is the arithmetic:
+the cartridge runs three different truncations in the same file.
+
+| where | rule | −7 ÷ 2 |
+|---|---|---|
+| `FX_Div` (the DS's hardware divider) | truncate toward zero | −3 |
+| `>> FX32_SHIFT` | floor toward −∞ | −4 |
+| `(ex - sx) / steps` on angle indices | truncate toward zero | −3 |
+
+**IcicleSpear flying left is the one call in the cartridge where two of them
+disagree.** `ValueLerpContext_Init` divides with the divider and *then* shifts the
+result down by twelve: −7282 index units over ten frames is −728.2, which floors
+to **−729** and truncates to −728. A port using one rule for both rotates the
+icicle ten index units short over its flight. The check asserts −729.
+
+`RELATIVE_SCALE(scale, ref)` is `scale * 256 / ref` as an **integer**, so Swagger's
+vein peaks at 358/256 = **1.3984×**, not 1.4×.
+
+### The sine table is the cartridge's own, and that is checkable
+
+pret does not ship NitroSystem, so `FX_SinIdx` is not in the decompilation — but
+the table is in the ROM. NitroSystem's interleaved sin/cos pairs sit in Platinum's
+**ARM9 at file offset 0xF983C**: 4096 `(sin, cos)` pairs of `s16`, and **every one
+of the 4096 equals `floor(sin(2πi/4096) × 4096 + 0.5)`** — not approximately, all
+4096 exactly. So the port computes them, and the check reads the table out of the
+cartridge and compares all 4096. The 24-byte signature that locates it occurs
+**once** in a megabyte, and the other 4090 entries are then an independent
+measurement rather than a restatement.
+
+The table's 4096 entries also mean the **bottom four bits of a 16-bit angle index
+are discarded** before the lookup. That quantisation is reproduced, not smoothed.
+
+### A FADE COSTS steps + 1 FRAMES, AND THE REASON IS THE SCHEDULER
+
+`AlphaFadeContext_Init` starts its own `SysTask` at **priority 0** while the sprite
+callback that starts it runs at **1100**, and `SysTaskManager_ExecuteTasks` walks
+the task list in **ascending priority**. Two consequences fall out of
+`SysTaskManager_InternalAddTask`, and both are load-bearing:
+
+- **The frame it is created, a new task does not run.** Either it is inserted ahead
+  of the running task (lower priority number) and the walk has already passed that
+  position, or it is marked `TASK_STATE_INACTIVE`. Whichever applies, the first
+  step is the next frame.
+- **Every frame after, the fade runs BEFORE the callback that reads it.** So the
+  frame it finishes, the callback sees `done` the same frame.
+
+An eight-frame fade therefore holds a state machine for **nine** frames, and
+FakeOut's sprite lasts its animation plus **twenty**, not plus sixteen.
+
+**The same rule applies to the sprite callbacks themselves**, which is why a
+callback's `step` does not run on the frame its sprite is created. IcicleSpear
+makes that visible in one pair of assertions: on the first frame its **angle is
+still exactly 20°** (the task has not run) while its **position is already one step
+along the parabola** (the callback takes that step by hand, before starting the
+task). A port that ran the task a frame early fails the first; one that skipped
+the manual step fails the second.
+
+### THE TAIL WAS ONE FRAME LONG FOR A WHOLE SESSION
+
+`end` stops the *script*, not what the script started — so the player returns true
+while emitters or sprites are still live. It did. And then the guard at the top of
+`update()`, one line, refused the very next frame:
+
+```lua
+if not self.playing then return false end
+```
+
+So **every program's tail was exactly one frame**. Metal Claw's claws were cut off
+at eighteen frames of forty; every burst lost its fall. The total sprite-frames
+figure moved 733 → 1930 when this was fixed, and **a total that was merely recorded
+rather than predicted could not have noticed** — the fault and the fix produce
+equally plausible numbers. The check now asserts the tail's **length** on move 232,
+which the one-frame version fails by construction, and each callback's own count,
+placement and lifetime besides.
+
+### The five callbacks
+
+| id | callback | moves | what was missing |
+|---|---|---|---|
+| 22 | MetalClaw | 232, 306, 337 | **four claws**, not the one the script adds |
+| 10 | Swagger | 207, 259, 269 | **one** sprite used **twice**, hidden between |
+| 17 | IcicleSpear | 333 (×3) | a parabola between two battlers, rotating |
+| 18 | FakeOut | 252 | the alpha envelope |
+| 25 | OffsetAndAnimate | 265 | (already applied — but see the sign, below) |
+
+**MetalClaw multiplies its sprite.** The callback clones three more from the same
+template, flips the left pair, and places them at the four corners of a 64×32 box
+round the defender. Nothing in the program says four. Its lifetime is **forty
+frames from a counter**, not its animation's forty-two.
+
+**Its right pair is frozen for ten frames, not hidden.** pret's comment says
+"delay in frames before the second claw appears"; what the code does is withhold
+`TickFrame`. That reads as an entrance only because **frame 0 of that bank is a
+blank cell** — member 17's cell 0 has no OAM entries at all and its animation's
+first frame names it. Both halves are asserted, because if the blank were ever
+lost the delay would become a frozen claw in plain sight.
+
+**Swagger's vein pops twice from one sprite** — ±24 px from the defender at −16
+then −24, five frames apart — and swells on a scale envelope that the check
+asserts **in order**: `1.0000 1.0977 1.1992 1.2969 1.3984 1.3984 1.2969 1.1992`.
+A *set* of those values cannot tell a settle from a swell (307/256 is 1.1992 either
+way), and the settle-less plant passed until the assertion became ordered.
+
+**IcicleSpear throws three icicles on three paths** — move 333 passes (−15,−5,10,32),
+(−5,−20,10,32) and (−10,−15,10,32) — each flying ten frames and each **arcing about
+26 px above its own chord**. The check separates the three by continuity and
+measures each one's bow, because a dropped arc radius draws three straight lines
+and passes everything else in the section.
+
+### +Y IS DOWN, AND IT WAS NOT
+
+`ManagedSprite_OffsetPositionXY` adds to a DS screen position, and every offset
+constant in pret is written in that frame. This port measured Y **upwards**, so
+move 265's sprite was drawn **twenty-four pixels above** the battler where the
+cartridge puts it twenty-four below. A sprite in the wrong place still draws, so
+nothing but reading the C could have caught it. The cell-actor draw path now adds
+the record's Y, which is also what the particle path already did — the two layers
+had been disagreeing.
+
+### And the script vars are shared, not private
+
+`addspritewithfunc` writes its trailing arguments into `system->scriptVars[0..n-1]`
+and zeroes the rest — **the same ten slots `setvar` and `resetvars` use**. So the
+command clobbers whatever a `setvar` before it left there, and a port keeping the
+sprite's arguments in a private list would read the wrong numbers the moment a
+program did both. They are signed on the way in: move 333's third icicle passes
+−10 and −15.
+
+### Faults planted: twenty-five, all twenty-five fail
+
+Twenty-four report a `FAIL`; one (MetalClaw making a single claw) raises, naming
+its own line. The two that did **not** fail on the first attempt are the reason
+this list is worth writing down:
+
+- **"Swagger does not settle"** passed a set-of-scales assertion, because the
+  settle's values also occur on the way up. Fixed by asserting the ordered
+  envelope.
+- **"the arc radius is ignored"** passed every icicle assertion — absolute
+  placement, ten frames, ten angles, three paths — because a straight line has all
+  of those. Fixed by measuring each flight's bow above its own chord: 26 px
+  against 0.
+
+### Standing checks
+
+move animations 87 → **145/0**; battle scene 163 → **172/0**; particles 136/0;
+cache wiring 27/0; use-before-local 222 → **223 files / 0**. Coverage 6/0, seam
+clean, distortion world 57/0, branch 6/0, icon 9/0, party 28/0, summary 20/0, and
+the three Python checks byte-identical to before.
+
+### Still open
+
+**Twenty-one callbacks' motion**: StringShot, Kinesis, Trick, Metronome, Constrict,
+Bonemerang, ScaryFace, Foresight, LockOn, MeanLook, Torment, BatonPass, Grudge,
+Taunt, HelpingHand, Assist, Ingrain, FrenzyPlant, FollowMe, Fissure's motion (its
+placement is done), and GrassWhistle (which no move program reaches). The
+primitives they need now exist, so each is a reading of 12–89 lines of C plus its
+task rather than a port of arithmetic. **ScaryFace is next** and it needs a new
+seam: it scales the **attacker's own mon sprite** as well as its face sprite, which
+is a battler channel rather than a cell-actor one. After it, Foresight and MeanLook
+(alpha plus a lerp) are the cheapest.
+
+One sign remains **assumed rather than derived**: `Gen4AnimMath.ROTATION_SIGN`.
+`Sprite_SetAffineZRotation` only stores the index; the matrix is built by
+`NNS_G2dRotZ(FX_SinIdx(a), FX_CosIdx(a))` inside NitroSystem, which pret does not
+ship. A positive index is taken to be clockwise on screen, which is what LÖVE's
+positive rotation means in the same y-down space. If an icicle ever points the
+wrong way, that constant is the one line to flip.
+
+---
+
+## 2026-09-26 (later) — Two callbacks that reach a BATTLER, and the guard that hid them
+
+ScaryFace and Foresight are the first sprite callbacks that do something to a
+Pokémon rather than only to their own sprite, and porting them turned up a guard
+that would have made both of them look broken.
+
+### 7 ScaryFace — the attacker stretches, and the face starts on the wrong Pokémon
+
+Two things at once. The face sprite grows from half size to 1.1992× over
+thirty-two frames while drifting up, then fades out over eight; and the
+**attacker's own Pokémon sprite stretches vertically** — `MON_SPRITE_SCALE_Y` from
+1.0× to **1.4961×** and back, twelve frames each way. That second half is the
+`monAffine` channel Emerald's animator already defined, so the callback reaches
+the battler through `ctx.player` instead of a second draw path.
+
+1.4961× and not 1.5×: `RELATIVE_SCALE(15, 10)` is 384, the twelve-frame step
+floors to 10 per frame, and twelve of those land on 383.
+
+**Its sprite spends one frame on the wrong Pokémon**, and that is the cartridge's
+artifact rather than a port bug. `addspritewithfunc` builds the template at the
+**defender**; the callback computes its base from the **attacker** but applies
+nothing until `ApplyPosOffsetToSprite`, which is its task's first frame — and a
+task does not run on the frame it is created. Reproduced, because a port that
+"fixed" it would be a frame out for every later one.
+
+### 8 Foresight — a zig-zag that returns to its own start, and a white flash
+
+Six straight segments of eight frames, five frames apart (`delay++` then
+`> 4`, which is five), and **each segment's end becomes the next one's base** — so
+the extent reads as ±40 from the start even though the constant is 80. The six
+offsets sum to zero and the measured path closes exactly:
+
+```
+(0,0) → (40,40) → (40,−40) → (−40,40) → (−40,−40) → (40,40) → (0,0)
+```
+
+Then two fades at once: the sprite's own alpha 16 → 0 over sixteen frames, and
+`PokemonSprite_StartFade` on the **defender's** Pokémon sprite — a palette blend
+toward white, one sixteenth per frame, 0 → 10 and back. That is the `monTint`
+channel.
+
+**The two fades are independent, and that is load-bearing.** The flash takes
+eleven frames and the sprite's fade sixteen, so the state machine has already left
+`FADE_OUT` — and its `SetDrawFlag(FALSE)` — by the time the sprite reaches zero.
+The sprite simply fades out and is deleted at cleanup. Pumping the fade inside the
+`FADE_OUT` arm instead froze it at 5/16 opacity for the rest of its life, which is
+what the port did on the first run.
+
+### THE GUARD THAT WOULD HAVE HIDDEN BOTH OF THEM
+
+`monOffset`, `monAffine`, `monTint` and `monHidden` all opened with
+
+```lua
+if not self.playing then return <neutral> end
+```
+
+`playing` goes false at `end`, and **the tail runs with `playing` false** — so
+every battler channel read as neutral for the whole tail. Move 137's script
+finishes while the face is still rising: of its twenty-four frames of stretch,
+**fifteen are in the tail**, and all fifteen reported 1.0. The channels now guard
+on `alive()` (the script is running *or* something it started still is), and
+`clearTransforms` moved from `stop()` to the frame the tail finally empties.
+
+Measured before changing it: two of 501 programs reach `end` with a battler
+displaced at all (44 and 292, by one and two pixels), and **none** with one hidden.
+
+### Faults planted: eighteen, sixteen fail
+
+The two that do not are both recorded in the check, because the alternative is
+someone discovering it again:
+
+- **Removing ScaryFace's explicit `MON_SPRITE_SCALE_Y = 0x100`.** The shrink lerp
+  lands on 256 exactly, so pret's assignment afterwards changes nothing. A guard,
+  not behaviour.
+- **Clearing the transforms at `end` instead of at the tail's end.** Deferring is
+  right, but it is unobservable on this cartridge: every channel non-neutral at
+  `end` is rewritten the next frame by a live task, and no program ends with a
+  battler hidden. An argument, not a measurement — the assertion that carries
+  weight is `alive()` and the fifteen frames.
+
+And one that needed a synthetic pair: **"Foresight's eye animates" passed**,
+because member 9's only sequence is a *single frame* — ticking it changes nothing.
+The real test drives one multi-frame bank under Foresight (never ticks) and the
+same bank under OffsetAndAnimate (ticks every frame) as the control. The bank is
+chosen by *what the test needs*: member 20 has the most frames and its first one
+lasts thirty ticks, so nothing would change inside the window and the control would
+fail while the port was right.
+
+### Standing checks
+
+move animations 145 → **179/0**. Everything else unchanged and clean: battle scene
+172/0, particles 136/0, cache wiring 27/0, coverage 6/0, distortion world 57/0,
+branch 6/0, party 28/0, summary 20/0, icon 9/0, seam clean, use-before-local
+223 files/0, and the three Python checks byte-identical.
+
+Sprite-frames **1892** (1741 with art, 151 blank) — *down* 38 from 1930, and that
+is a fix too: a callback owns its sprite's lifetime, and both new ones end it
+somewhere other than the end of its animation. ScaryFace's face is deleted after
+~43 frames of a 114-frame sequence; Foresight's eye lives 107 frames on a sequence
+of 4. A lifetime taken from the animation was wrong in both directions at once.
+
+### Still open
+
+**Nineteen callbacks' motion.** Next is **MeanLook**, and it needs a channel that
+does not exist yet: four rounds of scale pulses whose frame count and extent
+**decay by a third each round in hundredths** (`scaleFrames -= scaleFrames / 3`,
+which is why it keeps them ×100), and then a **screen-wide brightness dip** via
+`BrightnessController_StartTransition`. The pulses are ready to port; the
+brightness needs a screen channel. After it: Torment (a sine/cosine orbit),
+BatonPass and LockOn (PosLerp plus a scale), then the rest.
+
+---
+
+## 2026-09-26 (later still) — `fadebg` is a palette fade, and 108 moves were missing it
+
+`callfunc fadebg` is the second most common script function in the corpus — **272
+calls across 108 of the 501 programs** — and this port held the right number of
+frames for it and drew nothing. It is now a channel.
+
+### It is not a screen fade and not a battler fade
+
+`BattleAnimScriptFunc_FadeBg` calls `PaletteData_StartFade` on a **group of
+palettes** inside the main BG buffer, and its first operand picks the group.
+Measured over all 272 calls:
+
+| type | group | calls |
+|---|---|---|
+| 0 | the battle background's own palettes | **270** |
+| 1 | the Pokémon sprites' palettes | **0** |
+| 2 | the effect palettes | 2 |
+
+Type 1 never occurs, which is worth stating: implementing it would be code no
+cartridge path reaches. The draw side is therefore one quad for the background,
+plus four lines that blend the effect colour for the two type-2 calls.
+
+### The arithmetic is `SetTimedFadeParams`, and it is not a lerp
+
+- A **non-negative** delay means step 2 with that many frames of wait between
+  steps. A **negative** delay means step `2 + |delay|` and *no* wait — the same
+  ramp in bigger jumps. 227 calls pass 1, 36 pass 0, and **nine pass −2 or −4**, so
+  that branch is real rather than defensive.
+- The blend is applied **at** `cur` and only then does `cur` advance, so the end
+  value is always applied: 0 → 12 is **seven** applications, not six.
+- `BlendColor(src, target, f)` is `src + ((target − src) * f >> 4)` — fraction out
+  of sixteen, like every other blend in the cartridge.
+- A second fade on a group already fading is **dropped, not queued**
+  (`StartFade` skips a buffer in `selectedBuffers`). The cartridge's calls come in
+  pairs so it never happens; counted rather than assumed.
+
+The ramps *are* pairs: 0→12 then 12→0 (98 and 99 times), 0→8/8→0, 0→10/10→0. A
+port that faded and never recovered would leave the battle dimmed for the rest of
+the fight.
+
+### A filled quad is the exact operation, not an approximation
+
+`BlendColor` **is** alpha compositing of the target colour at `f/16` over the
+source — the same arithmetic LÖVE does for a coloured quad. So the fade the
+cartridge performs by rewriting sixteen palette entries is reproduced by drawing
+one quad over the pixels those entries coloured. The only difference is rounding:
+the DS floors a 5-bit channel.
+
+**Where** it is drawn is the part that could have been wrong invisibly: after the
+field, **before** the battlers, because `fadebg` blends the background's palettes
+and nothing else. Drawn last it would dim the Pokémon too. The battle-scene check
+asserts the ordering, not just the presence.
+
+### Reach
+
+**105 of the 501 programs** now tint the battle background, over **8,502 frames**
+of the corpus. (105 and not 108: three of the callers sit behind a branch this side
+of the battle does not take.)
+
+It also **fixed the timing of 272 calls**. `fadebg` was a one-frame hold; the real
+duration is seven applications two frames apart, so move 137 went from 46 frames to
+58 — which moved a number in section 11 and is why that assertion now reads 3
+frames of tail instead of 15.
+
+### And `callfunc` fills the shared script vars
+
+Same rule as `addspritewithfunc`: the handler copies its arguments into
+`system->scriptVars[0..n-1]` and zeroes the rest. The handlers read them out of the
+operand list directly, which is the same numbers — but a later `ifvar` reads the
+**vars**, and they have been clobbered. Now written.
+
+### Faults planted: thirteen, twelve fail
+
+Five passed on the first attempt and each one needed a different fix:
+
+- **The inline first blend removed** — invisible on every cartridge fade that
+  starts at 0, because a blend of zero *is* the unfaded colour. Asserted on a
+  downward fade instead, where the start value is 12/16 and must appear on the
+  command's own frame.
+- **The colour read as RGB** — nothing checked r/g/b at all. 0x001F is **red**
+  (BGR555, red in the low five bits); read the other way round, four of the
+  cartridge's calls would flash blue.
+- **`callfunc` no longer filling the vars** — no assertion read them. Move 7's last
+  `fadebg` passes (0, 1, 12, 0, 2124), and those five numbers are now asserted.
+- **The reset removed** — unobservable through a move, because the pairs always end
+  at a blend of zero. Forced directly on `clearTransforms`.
+- **`groupTint` guarded on `playing`** — genuinely unobservable here: not one of the
+  105 programs still shows a background tint after its script ends. Recorded in the
+  check as an argument rather than dressed up as a test. (It *is* measurable on the
+  battler channels — that is section 11.)
+
+### Standing checks
+
+move animations 179 → **201/0**, battle scene 172 → **177/0**. Everything else
+unchanged: particles 136/0, cache wiring 27/0, coverage 6/0, distortion world 57/0,
+branch 6/0, party 28/0, summary 20/0, icon 9/0, seam clean, use-before-local
+223 files/0, the three Python checks byte-identical.
+
+### ...and then the shake turned out to be four times too short
+
+Reading `ShakeBg` to see whether it was cheap sent me to `ShakeContext_*`, which
+`shake` (398 calls, the most-used script function after RenderPokemonSprites) also
+uses. Eleven lines of pret, and this port had both of them wrong:
+
+```c
+prevVal = *prev;  *prev = *cur;  *cur = (prevVal == 0) ? 0 : -prevVal;
+```
+
+That is **not a sign flip**. From `prev = −E, cur = 0` it produces **+E, 0, −E, 0,
++E, …** — a square wave *through the centre*, not between the two extremes. And
+`ShakeContext_Update` decrements its remaining count once every
+`MAX_CYCLES_PER_SHAKE` flips, which is **four** — so `amount` counts **cycles**.
+
+The port read `amount` as a flip count and alternated between the extremes. The
+commonest shake in the cartridge is `amount = 2, interval = 1`: **eight** frames of
+shaking where this port did **two**. A two-frame hit shake is over before it
+registers, and nothing could have seen it — the frames were spent and the offsets
+were applied; only the shape and the count were wrong.
+
+A nice consequence of the real waveform: four phases per cycle means the last one
+is always the centre, so the offset **comes home by arithmetic**. The explicit
+reset the old stepper ended with was compensating for its own wrong shape.
+
+Corpus after the fix: **287 of the 501 programs move a battler** (asserted exactly,
+not as a floor — a floor here is satisfied by a shake that never stops).
+
+### `shakebg` stays a hold, and the reason is not the arithmetic
+
+The shake context is now exactly right and the group channel exists — but **all 42
+calls target the EFFECT background layer**: var 5 is the target,
+`SHAKE_BG_TARGET_EFFECT` is 0, and every call passes five arguments, so var 5 is
+zeroed on all of them. This port draws no effect background layer at all, so there
+is nothing to shake; shaking the *base* background instead would be motion on the
+wrong layer, which looks deliberate. `shake` can name the background too, and **not
+one of its 398 calls does** — asserted, because that is what says the feature has a
+single caller.
+
+### Faults planted: five more, four fail
+
+The fifth is not a fault: removing the `extent == 0` early return changes nothing,
+because `-0` equals `0` in Lua and the phase that would negate it lands on zero
+anyway. Kept because it is pret's own `prevVal == 0` branch and states why 336 of
+the 398 calls never move vertically.
+
+move animations **210/0**.
+
+### Still open
+
+The background **shake** is the one piece of this that stayed shut, and for a
+reason that is about the missing layer rather than the missing arithmetic — see
+above. The effect background layer, which the `switchbg` family would draw, is the
+work that unblocks it.
+
+**MeanLook** still needs its own channel too, and a different one: four rounds of
+scale pulses whose frame count and extent decay by a third each round *in
+hundredths*, then a screen-wide **brightness** dip via
+`BrightnessController_StartTransition` — `G2_SetBlendBrightness`, a master
+brightness, not a palette blend, so it does not come free with this.
+
+---
+
+## 2026-09-26 (fourth pass) — the work queue was wrong by three orders of magnitude
+
+Before choosing the next callback I aggregated `Player:missing()` over all 501
+programs to rank the gaps by reach. The ranking said `setextraparams` was used
+**499,840 times across 495 moves** — a command the cartridge contains **742 times**.
+
+### `self.unsupported` was cleared in `new()`, not in `start()`
+
+So the gap report accumulated for the life of the *player*, and every program's
+gaps piled onto every later program's. For a battle that is merely untidy — one
+player, one report — but as a measurement it is useless: once a row appeared it was
+still there for every move after it, which is why almost every gap looked as though
+it touched almost every move.
+
+`duration()` already carried the compensation for the behaviour that was intended
+here — it saves the report across its second `start` and restores it, which is a
+no-op unless `start` clears it. That line pair is what says this was a bug rather
+than a decision.
+
+Fixed, and the check now runs a gappy program followed by a clean one and asserts
+that nothing carries over.
+
+### Two entries at the top of the queue were not gaps at all
+
+**`setextraparams` (159 moves).** pret's handler is `GF_ASSERT(FALSE)` — and
+GF_ASSERT is compiled out of the retail build, so on the cartridge the instruction
+reads its operands and **does nothing**. Its *width* still matters and is still
+solved against the check; what does not exist is a behaviour. Argued onto
+`NOT_NEEDED`.
+
+**pret's three "example" functions (33 moves each, 66 calls each).** Ids 1, 2 and 3
+are `AnimExample`, `SoundExample` and `GenericExample`, and the names are accurate:
+all three task bodies spend one frame in RUNNING, one in DONE, and end. Nothing
+moves, sounds or draws. What differs is only **which queue each occupies**:
+
+| id | function | queue | costs |
+|---|---|---|---|
+| 1 | AnimExample | an anim task, which `waitforanimtasks` waits for | two frames |
+| 2 | SoundExample | a sound task nothing in this player reads | nothing |
+| 3 | GenericExample | a plain SysTask nothing waits for | nothing |
+
+So two are argued skips and the first is held for two frames. The two frames are
+**unobservable on this cartridge** — all 33 callers are the example programs at the
+end of the table (moves 468 up), 60 frames long either way — and the check says so
+rather than leaving someone to plant against it and conclude the check is broken.
+It is kept because it is what the task does, and because this engine runs
+mod-authored move scripts, where a wait after the call is something somebody can
+write.
+
+### The queue, now that it is honest
+
+| gap | uses | moves |
+|---|---|---|
+| `callfunc:66` MoveEmitterA2BParabolic | 264 | **20** |
+| `switchbg` / `restorebg` / `waitforbgswitch` | 386 | **52** |
+| `callfunc:65` MoveEmitterA2BLinear | 72 | 15 |
+| `callfunc:72` RevolveEmitter | 120 | 2 |
+| `shakebg` (the effect layer) | 70 | 28 |
+| `callfunc:74` SetBgGrayscale, `:75` SetPokemonSpritePriority | 40 | 5–6 |
+| `callfunc:60` RevolveBattler | 20 | 6 |
+
+### The next piece, and its one design problem
+
+**Moving an emitter** is the top of the queue and the primitives are already in
+`Gen4AnimMath`: `MoveEmitterA2BLinear` is a `PosLerp` between two battlers' screen
+positions plus an offset × direction, with `startDelay`, `skipFrames`, `maxFrames`
+and an optional sine `curve` on Y; the parabolic variant adds the half-revolution.
+
+The obstacle is not the path, it is *where a particle remembers being born*.
+`System:draw(originX, originY, …)` adds **one** origin to every particle, and
+`spawn` places a particle at `f.basePos + offset` — relative. Move that origin and
+the whole burst slides with it, which is not a moving emitter, it is a moving
+picture of one. So each particle needs to record the emitter's position **at
+birth** (`spawn`), and the draw needs to use the per-particle base instead of a
+single origin. That is a small change in the two hottest functions in the particle
+system, and the cache-wiring check's 76,882-frame route comparison will police it.
+
+### Standing checks
+
+move animations 210 → **217/0**. Everything else unchanged.
+
+---
+
+## 2026-09-26 (fifth pass) — emitters that travel, and where a particle remembers being born
+
+Top of the honest queue: `MoveEmitterA2BLinear` (65) and
+`MoveEmitterA2BParabolic` (66) — **119 calls across 37 of the 501 programs**, every
+one of which left its emitter sitting on the spot. A beam that should cross the
+field, a projectile that should arc.
+
+### The design problem was not the path
+
+Every primitive was already in `Gen4AnimMath`. The obstacle was that
+`System:draw(originX, originY, …)` adds **one** origin to every particle, and
+`spawn` places a particle relative to it. Move that origin and the whole burst
+slides along behind — *a moving picture of an emitter, not a moving emitter*.
+
+So a particle now records where its emitter was **when it was born**, and the draw
+reads the particle's copy. Children inherit their parent's base rather than the
+emitter's current one: by the time a child appears the emitter may be elsewhere, and
+the child belongs to the particle it came from.
+
+The measurement that says this is right, on move 48 at frame 29: particles sitting
+at **three distinct birth points 91 pixels apart** while the emitter is at the far
+end. Every other assertion in the section — the path, the slot, the endpoint —
+passes either way, which is exactly why this one is in there.
+
+### The endpoints are this port's battlers, not the cartridge's 3D table
+
+pret reads `BattleAnimUtil_GetBattlerWorldPos_Normal`: a table of 3D world positions
+per battler type, per position type, per camera projection, divided by
+`BATTLE_PARTICLE_PIXEL_FACTOR` (172). Those numbers describe the scene the DS
+renders in 3D — the solo player lands near x −55 in a screen-centred frame, where
+this port draws that Pokémon at x 64. Transcribing them would put every path
+somewhere the battlers are not. So the path runs between the positions *this* screen
+uses, which is the same argument `createemitterformove` already makes about picking
+one orientation out of three.
+
+### And the arc bows the other way here
+
+pret passes `radius * -FX32_ONE`. Its world frame has **+Y up** — the table gives
+the player −1.33 and the enemy +1.07 while the player stands *lower* on screen — and
+this port's offsets are +Y down, so the same visible arc needs the radius
+**unnegated**. Calls that pass a negative radius (some do) still flip it, which is
+why the operand's sign is kept rather than folded into the conversion. Planting the
+negation drops the bow from 31.5 px to 0.
+
+### `maxFrames` parks the emitter rather than shortening its trip
+
+When `params` names a non-zero maxFrames, pret sets `frame = maxFrames + 1` at init
+and **nothing ever increments `frame`** — so the task's own guard suppresses every
+later update. The emitter is placed once, `skipFrames` steps along the path, and
+stays there. It reads like an idiom for "put this emitter part of the way along",
+and ten of the 119 calls use it. The check asserts the *exact* parked point
+(42,−22 — four of twelve steps from the attacker, each axis floored), because
+reading the packed halves the other way round still parks the emitter, just
+somewhere else.
+
+### `createemitterex`'s slot index stopped being decorative
+
+`createemitter`, `createemitterformove` and `createemitterforfriendlyfire` all write
+`system->context->emitters[0]` — pret, three times over — and only
+`createemitterex` names a slot. These motion functions then ask for a slot by
+number. The comment in this port used to read "nothing here addresses a running
+emitter by index, so it is read and not used"; move 48 addresses slot 1.
+
+### Faults planted: ten, nine fail on the first attempt
+
+The tenth — swapping the skip and max halves of `params` — passed an assertion that
+only checked the emitter *stopped* moving. Now it asserts where.
+
+### Standing checks
+
+move animations 217 → **232/0**; particles 136/0 and cache wiring 27/0 unchanged,
+which is the pair that matters most here: the wiring check compares 76,882
+particle-frames between the cache route and the cartridge route, and a change in the
+two hottest functions of the particle system had to leave them agreeing.
+
+### The queue after this
+
+`switchbg` / `restorebg` / `waitforbgswitch` (**52 moves**) is now the top item, and
+it is also what unblocks `shakebg` (28) — all three want an effect background layer
+this port does not draw. `RevolveEmitter` (72) is 120 calls but only 2 moves, and it
+uses the **`_ALT` operand layout** (emitterId, mode, type, frames, startDelay,
+params), which is worth knowing before anyone reads its ten operands as the nine the
+A2B functions take.
+
+## 2026-09-26 (sixth pass) — the effect background layer, and a shake that held for no frames
+
+`switchbg` and `restorebg` are **129 calls over 54 of the 501 programs** and were the
+largest single thing this player did not do. They are done now: the table that says
+which archive members make up a background, the extraction that turns those members
+into 81 pictures, both of pret's state machines with their frame counts, the scroll
+and the shake that ride on the layer, and the draw.
+
+### The layer is the one the backdrop already lives on
+
+`BATTLE_BG_EFFECT` is **BG3**, and outside a switch BG3 holds the ordinary battle
+backdrop — which is why `BattleBgRestore_*` ends by loading the backdrop back *into*
+the effect layer rather than by hiding it. Two consequences the port has to honour,
+and both were invisible before:
+
+* a `shakebg` aimed at the effect layer shakes **the backdrop** when no switch is up,
+  and **22 of its 42 calls** are in that state;
+* `fadebg` type 2 is `BATTLE_BG_PALETTE_FLAG_EFFECT` — BG palette **slot 9**, this
+  layer's sixteen colours. This port was applying it to the **particles and the 2D
+  sprites**, which share nothing with it. Two calls in the cartridge, both in program
+  87, both inside its switch window, both fading the switched picture toward white.
+
+### The table is read out of the cartridge, not transcribed on faith
+
+`sBgNarcIndices` is 58 rows of five archive members — a tile sheet, one sixteen-colour
+palette, and **three** tilemaps over that sheet. The three are chosen by situation:
+the first in a normal battle, the **second when the animation is mirrored** (which is
+what happens when the defender is the player), the third in a contest. A port that
+only ever loaded the first would play every enemy attack's background the wrong way
+round.
+
+It is not derivable — rows 0–4 repeat, row 47 sits in a different part of the archive
+from its neighbours, rows 28 and 30 are identical while 29 differs only in its
+palette — so it is a list, and the check **searches the cartridge's overlays for the
+1,160-byte encoding of the port's copy of it**. Found once, in overlay 12 at
+0x18D08. One digit wrong and it is found zero times.
+
+### Composing them at sub-palette 0 produces nothing, and that looked like a missing file
+
+The loader writes those sixteen colours to `PLTT_DEST(BATTLE_BG_PALETTE_EFFECT)` —
+**slot 9** — and **64,866 of the 115,712 cells** in these tilemaps name sub-palette 9
+to match. Composed the way every other sheet in this archive is composed, all 81
+pictures come out with no pixels in them: every slot-9 cell reads past the end of a
+sixteen-entry table. The first attempt at this layer therefore looked exactly like a
+cache that had not imported yet.
+
+`Gen4Graphics.paletteAtSlot` places the palette where the cells say it is, and
+`compose`'s guard moved from `#colours == 0` to `next(colours) == nil` so a sparse
+palette is admissible. The check asserts both halves: **68 of the 81 are empty at
+slot 0, and the other 13 come out as the exact complement of themselves** — their
+tilemaps are part slot-9 and part slot-0 cells, and the two halves cover every pixel
+between them, so the wrong slot draws precisely the half the switch does not load.
+
+The other 50,846 cells do name slot 0, and **11,708 of them point at a tile with ink
+in it** (tiles 1, 24 and 26). Nothing loads a slot-0 palette for this layer, so those
+are left transparent rather than painted in an invented colour.
+
+### 127 of the 129 calls fade; 2 blend
+
+That measurement decided how much of pret's machinery was worth porting.
+
+* **MODE_FADE** never blends the two layers at all. It fades every palette but the
+  effect one to black or white, overwrites the effect layer with the new picture
+  *while that picture is also at the fade colour*, then fades the effect palette back.
+  So the field is simply **black** underneath — which is the same `base` group the
+  existing `fadebg` quad already draws — and the layer goes on top opaquely.
+* **MODE_BLEND** is two calls, both in program 433, and they are a matched pair: the
+  switch uses `BLEND_PARTIAL` (the backdrop goes to half) and the restore uses
+  `BLEND_INVERSE_PARTIAL` (the picture comes up from half).
+* `setbg` (21) and `switchbgex` (34) are used **zero** times. Both are implemented
+  anyway, three lines each, and neither is exercised.
+* the flag field is only ever 0x00 (44), 0x02 MOVE (39) or 0x04 STOP (46). The two
+  **wave** flags and CANCEL never appear, so the sixteen-strip scanline scroll is
+  recorded and not drawn. `CANCEL` is absent from `ApplyFlags`' own array as well —
+  the flag, the constant and the handler all exist and nothing reaches it.
+* `setbgswitchvar` appears 9 times and every one writes var 1. Its var-3 case assigns
+  `offsetX` where it means `offsetY`; nothing uses it, and the bug is kept rather than
+  silently corrected.
+* no program switches without restoring. Six restore more than once, because a branch
+  picks the path.
+
+### Program 19, frame by frame, is the whole timing argument
+
+`switchbg 55, 0x20001` then `restorebg 55, 0x40001` — a fade-mode switch with MOVE,
+and a restore with STOP:
+
+* **f3** the switch is running. The task is created at priority 1100 from the script's
+  task at **0**, so `SysTaskManager_InternalAddTask` marks it inactive and it does not
+  run on the frame its command ran.
+* **f4** state 0 starts the backdrop's fade and puts the effect palette at full black
+  outright; **f5–f12** the fade blends at 2, 4 … 16 one frame apart; **f13** it reports
+  itself finished.
+* **f14** the picture is loaded, the effect palette starts fading back, and
+  `BATTLE_BG_SWITCH_STATE_PARTIAL` is reached — the state `waitforpartialbgswitch`
+  releases on, three calls in the cartridge.
+* the field is black for **every** frame the picture is up **plus three**: two at the
+  start and one at the end, each accounted for rather than allowed for.
+* `waitforbgswitch` holds the program for **44 frames** across the pair. While it
+  returned immediately, every one of these programs played its whole animation over
+  the unswitched backdrop and then ended.
+
+All 54 programs that name the family carry a `switchbg`; **52 of them show a picture
+when the player attacks**, the other two having theirs behind a branch this side of
+the battle does not take — the same shape as `fadebg`'s 106 of 108.
+
+### `waitforanimtasks` must not see the switch, and twelve programs hung proving it
+
+`system->activeAnimTasks` is incremented by `BattleAnimSystem_StartTask` and by
+nothing else. The switch, its scroll and its wave are plain `SysTask_Start`s and are
+invisible to that wait — which they **have** to be: the scroll never ends on its own,
+so a `waitforanimtasks` that counted it hangs. Twelve did, for one afternoon.
+`shakebg` and `fadebg` do go through `StartAnimTask` and are counted.
+
+### The palette fade guard is per BUFFER, not per group
+
+`PaletteData_StartFade` skips a buffer already in `selectedBuffers` and, having
+skipped every buffer it was given, returns FALSE having changed nothing. All three
+`fadebg` types and both of the switch's fades name `PLTTBUF_MAIN_BG_F`, and a buffer
+holds **one** `PaletteFadeControl`. This port's guard was per group. Measured before
+changing it: **0 of the 227 `fadebg` calls** the per-group guard let through would
+have been refused by the buffer-wide one — so on `fadebg` alone the difference is
+unobservable, and it is written up as an argument rather than a measurement. It stops
+being unobservable the moment the fade mode's 127 calls take the same buffer.
+
+The palette task also steps **last** now, which is its real priority: `0xFFFFFFFE` is
+the largest in the game, so every other task in a frame sees the palette as the
+previous frame left it — and the switch at 1100 asks "is a fade still running" and
+must not be answered by one that finished a moment ago in the same frame.
+
+### The shake was held for `cycles` frames, and `cycles` is 0 on 41 of the 42 calls
+
+This is the fault that was hiding behind the missing picture. `BattleAnimTask_ShakeBg`
+wraps the shake context in an **outer loop of `cycles + 1` runs**, returning the offset
+to zero between them — so its length is (cycles + 1) inner runs, each of
+`amount * 4` flips at `interval` spacing, plus one frame to zero and one more in the
+done state. The port held for `cycles` frames, which for 41 of the 42 calls is **no
+frames at all**, while the comment above it said the length was preserved. The
+commonest call — extentY 5, amount 5, interval 0 — is 21 frames, and every
+`waitforanimtasks` after one was that much short.
+
+The same comment claimed all 42 calls pass five arguments, so var 5 (the target) is
+always zeroed to `SHAKE_BG_TARGET_EFFECT`. **Program 87's passes six**, and names the
+base layer — a layer this port does not draw, and one the cartridge does not have
+switched on during a fade-mode switch either. Recorded, not drawn.
+
+### The overshoot is pret's, and it shows
+
+The cross-fade steps each side by two *until it is not less than* its target, which
+overshoots by one step, and only the frame on which both sides are finished writes the
+exact targets. So on program 433 the picture reaches **16/16 — full strength — for
+five frames** before settling at 15/16, and the restore ends on 31 and 0 rather than
+29 and 2, because it puts the overshoot back. A port that clamped the step to the
+target would never show those five frames.
+
+### The tint is only drawn where the art has no holes
+
+`fadebg` type 2 blends this layer's sixteen palette entries and nothing else, so the
+flat quad that reproduces it is only equivalent where the layer covers the screen.
+**35 of the 81 pictures cover the visible 256×192 completely and the thinnest covers
+72.7%**, so the graphics stage records which is which and the draw honours it. The one
+program that uses the type-2 fade switches to background **19**, which is one of the
+35 — so the cartridge's only use of it is exact here.
+
+`coversScreen` moved from the extractor to `Gen4Graphics` for one reason: the
+extractor cannot be loaded outside the engine, so a rule that only it knew was a rule
+no check could call. It is now asserted to separate background 19 (covered) from
+background 36 (75% covered, not).
+
+### Faults planted: twenty, and all twenty fail
+
+Two of them were **not** faults until something else moved. Swapping the two
+tilemap-column constants failed nothing at first, because `effectBackground` reached
+the columns by arithmetic on the first one and left the other two declared, unused and
+looking load-bearing; they are indexed by name now. And `coversScreen` could not be
+tested at all while it lived on the extractor.
+
+One thing that is **not** a plant: `PALETTE_BLEND_MAX` was declared below the state
+machines that need it, so the fade's end value read as a nil global, the fade became
+0 → 0, and a twenty-two-frame switch took five. `lua_use_before_local.py` does not see
+it — the name *is* a local, just later in the file — which is the same blind spot the
+bare `sin` had two passes ago.
+
+### Standing checks
+
+move animations 232 → **285/0**. battlescene 177/0, particles 136/0, cache wiring
+27/0, coverage 6/0, distortion world 57/0, branch 6/0, party 28/0, summary 20/0, icon
+9/0, seam clean, use-before-local 223 files/0, and the three Python checks
+byte-identical. Nothing outside `src/import/Gen4*`, `src/battle/Gen4*` and this one
+tool was touched, so Crystal, Gold/Silver and Prism are untouched by construction.
+
+### The queue after this
+
+* **`RevolveEmitter` (72)** — 120 calls but only 2 moves, and it uses the `_ALT`
+  operand layout (emitterId, mode, type, frames, startDelay, params), not the nine the
+  A2B functions take.
+* **nineteen sprite callbacks** whose motion is still unapplied. `MeanLook` wants a
+  screen-brightness channel — four pulse rounds decaying by a third each round *in
+  hundredths*, then `BrightnessController_StartTransition`, which is
+  `G2_SetBlendBrightness`: a master brightness, not a palette blend, so it does not
+  come free with `fadebg`.
+* the **scanline wave** (`AnimStartWave`), which no program reaches, so it stays
+  recorded rather than drawn until something does.
+* longer tail from `gen4_map_reach.lua` (99 maps): `initturnbackcave` (20 maps), the
+  Battle Frontier save-and-link block, `activateregiruinsdot`, `gethour`,
+  `messageunown`, `drawpokemonpreview`.
+
+## 2026-09-26 (seventh pass) — two revolutions, a fall from the top, and a grey field
+
+Four functions off the queue, chosen because every one of them was small and because
+the machinery all four needed had already been built: the revolution primitive, the
+travelling-emitter path, and the graphics stage's compose.
+
+| function | uses / programs | what was at risk |
+|---|---|---|
+| `RevolveBattler` (60) | 8 / 6 | the **centre**, which is not the battler |
+| `RevolveEmitter` (72) | 105 / 2 | the **Y sign**, and the 90 calls that do not rotate |
+| `MoveEmitterViewportTop` (73) | 1 / 1 | **where** the top of the viewport is |
+| `SetBgGrayscale` (74) | 18 / 5 | the **five-bit** arithmetic, and the **scope** |
+
+### The note this port carried about `RevolveEmitter` was wrong
+
+Two passes of documentation said it "uses the `_ALT` operand layout (emitterId, mode,
+type, frames, startDelay, params)". It does not. Those six belong to
+**`MoveEmitterViewportTop` (73)**, the function immediately after it. `RevolveEmitter`
+has ten of its own — emitterId, startX, endX, startY, endY, radiusX, radiusY, frames,
+mode, particleSystem — and the angles are **degrees**, not index units, and the radii
+**pixels**. Both are read from pret's own `#define`s beside each handler, which is
+where the claim should have come from the first time.
+
+### `RevolveBattler`'s orbit is not centred on the battler
+
+The script function does `pos.y -= REVOLUTION_CONTEXT_OVAL_RADIUS_Y_INT`, and that
+constant is **−8** — so the centre is eight pixels *below* home — and then the
+finishing frame puts the sprite back at `pos.y + (−8)`, which is home again. The
+vertical radius is −4. So the battler **drops four pixels on its first frame**, orbits
+an ellipse that never rises above its mark, and snaps home at the end. Reproduced,
+including the little drop: a port that centred the orbit on the battler would look
+tidier and be wrong on every frame.
+
+The radii are halved after the init (`data[RADIUS_X] /= 2`), which is why a wobble is
+**16 by 4 pixels** and not 32 by 8. And `revs` multiplies the step **count**, not the
+step **size** — the step was computed from `stepsPerRev` alone — so three revolutions
+are three times as long at the same speed.
+
+### 90 of `RevolveEmitter`'s 105 calls do not rotate
+
+They pass the **same value for the start and the end angle** (0, ±45, 90, 135, 180,
+225 or 270 on both axes), so the step size is zero and the emitter sits at one point
+on the oval for its seven frames. The command is being used to **place a ring** of
+twelve emitters round the attacker, not to spin one. A port that treated "no rotation"
+as a mistake to guard against would break the commoner of its two uses. The other 15
+calls are the real thing: 0 → 360 degrees over 40 frames, radii 64 by 48.
+
+**The Y radius is negated on the way in**, and this is the same frame question the
+parabolic arc answered the other way round. pret's world frame is +Y up and it passes
+`ry * FX32_ONE` unnegated, so a positive radius puts the emitter *above* the battler;
+this port's offsets are +Y down. The arc in `startEmitterPath` is the mirror case —
+pret negates there, so this port does not.
+
+**And one `RevolutionContext_Update` runs in the script function itself**, before the
+first placement, exactly like the travelling emitters' `skipFrames` loop. Without it
+the emitter spends its first frame at the battler's own centre. For the 90 still calls
+that pre-step is what computes the position *at all*, since their step size is zero.
+
+### The top of the viewport is row zero, and that is a derivation
+
+`BATTLE_PARTICLE_VIEWPORT_TOP` is 16512 world units and `WORLD_TO_SCREEN` divides by
+172, giving **96** — exactly half of the DS's 192 rows. In a frame centred on the
+screen, half the height above centre *is* the top row. Asserted as that arithmetic
+rather than as the literal 0.
+
+The one call is in program 19 at instruction 68, past a `jumpifeffectchanceodd`, so
+the player's attack never reaches it — the check drives it synthetically and says so.
+
+### `SetBgGrayscale` greys the palette, so the port greys the palette
+
+`RGB_TO_GRAYSCALE(r, g, b)` is `(r*76 + g*151 + b*29) >> 8` on **five-bit** channels.
+The weights sum to 256, so white stays white and nothing clips. The graphics stage
+writes a grey twin of each of the 69 backdrops by greying the palette *before*
+composing — for an indexed picture that is the same operation as greying the pixels,
+done once at import instead of sixty times a second.
+
+**The five bits matter.** Weighting the already-expanded eight-bit channels and
+re-rounding gives 75, 148, 28 for red, green and blue where the cartridge gives
+**74, 148, 25** — one or two levels on most colours, which is exactly the kind of
+difference that makes a port "nearly" right in a way nothing can see.
+
+**The scope is 128 entries**, not 256: `PALETTE_SIZE * BATTLE_BG_PALETTE_MON_SPRITE`
+is 16 × 8, sub-palettes 0 to 7. So
+
+* the backdrop greys — and that had to be **measured**, not assumed: the highest
+  palette index any of the 23 backdrop tile sheets uses is **111**, taken over the
+  tiles the shared tilemap actually references;
+* the switched effect background does **not**. Its palette is slot 9;
+* the Pokémon and the terrain platforms do **not**. They are OBJs, in a different
+  palette buffer entirely.
+
+### Faults planted: sixteen, fifteen fail, and four assertions had to be rewritten
+
+The four rewrites are the value of the exercise, and every one is a shape this file
+has recorded before:
+
+* **the orbit never coming home** — read *after* the run, where the tail has already
+  cleared every channel, so "not displaced at the end" was true either way. Asserted
+  on the frame after the task's last instead.
+* **the ring round the wrong battler** — the vertical bounds were seeded at zero, so
+  `hi == 0` meant "nothing positive" rather than "reaches the origin", and a ring
+  shifted 64 pixels up passed. A bound one side of the data can never move is not a
+  bound.
+* **no pre-step before the first placement** — every assertion collected the union of
+  all frames and skipped the undisplaced ones, so one extra frame at the origin was
+  invisible to all of them.
+* **`SetBgGrayscale` never turning off** — "does program 50 grey the field" is true
+  either way, and "is it grey after the run" is false either way because the accessor
+  is guarded on `alive()`. Program 377's **two-frame window out of eighty-five** is
+  the falsifiable statement.
+
+Two more were weak source searches of the kind a comment can satisfy: `if false` left
+both `Gen4Battle.grayscale` and the `"_gray"` key in the file, and `grayscale = true`
+also appears in the saved entry's metadata. Both are matched inside the function that
+has to contain them now — and the tighter needle then had a bare `\n` in it and
+matched nothing at all, because the engine's files are CRLF. Third time that trap has
+cost something this session.
+
+**And one plant is not a fault.** Removing the grey's per-run reset, or the clear in
+`clearTransforms`, or *both*, fails nothing — because all five programs run their own
+paired off-call on their final frame. Two redundant guards, kept for consistency with
+the tints beside them, recorded rather than defended with an assertion that cannot
+fail.
+
+### Standing checks
+
+move animations 285 → **321/0**. battlescene 177/0, particles 136/0, cache wiring
+27/0, coverage 6/0, distortion world 57/0, branch 6/0, party 28/0, summary 20/0, icon
+9/0, seam clean, use-before-local 223 files/0, the three Python checks byte-identical.
+`withMotion` 287 → **289**: `RevolveBattler` joined the functions that move a battler,
+and two of its six programs had no other motion.
+
+### The queue after this
+
+The remaining list is short and none of it is arithmetic:
+
+* **`stopsoundeffect`** (12 / 10) — needs a sound handle the player does not own; it
+  emits through `onSound` and has nothing to stop.
+* **`SetPokemonSpritePriority` (75)** (12 / 6) — pret's name undersells it. It is the
+  Dark Void machine: hardware windows (`GX_SetVisibleWnd`, `G2_SetWnd0Position`), an
+  RNG'd sink, and OAM priorities. A whole channel, not a function.
+* **`playpokemoncry` / `waitforpokemoncries`** (10 / 5 each) — cries, same gap as the
+  sounds.
+* **`loadpokemonspriteintobg` / `removepokemonspritefrombg`** (5 / 5) — a Pokémon
+  drawn on a BG layer rather than as an OBJ, which is the palette slot 8 the grey
+  deliberately leaves alone.
+* **nineteen sprite callbacks** whose motion is unapplied; `MeanLook` wants
+  `G2_SetBlendBrightness`, a master brightness rather than a palette blend.
+* the **scanline wave**, which no program reaches.
+
+## 2026-09-26 (eighth pass) — the sound channel, which was wired to nothing
+
+**1,220 sound commands over 499 of the 501 programs, and not one of them reached the
+engine.** The player has called `self.onSound(id)` since it was written and nothing
+anywhere assigned `onSound`, so every Sinnoh move was silent — and the gap report
+could not see it, because *a command that calls a nil callback is not a command that
+was skipped*.
+
+That is the third time this port has had the same bug in a different place: a cache
+table nobody opened (`gen4_move_anims`), an animator nobody constructed (`gen4Anim`),
+a summary picture nobody drew into. **A channel wired to nothing reports nothing.**
+
+### The corpus, which decided what was worth building
+
+| command | uses / programs | |
+|---|---|---|
+| `playpannedsoundeffect` | 649 / 347 | the workhorse |
+| `playdelayedsoundeffect` | 203 / 99 | a sound task |
+| `playloopedsoundeffect` | 199 / 156 | a sound task |
+| `playmovingsoundeffectatkdef` | 113 / 78 | a sound task — pans over time |
+| `playsoundeffect` | 26 / 26 | |
+| `stopsoundeffect` | 14 / 10 | |
+| `playpokemoncry` | 8 / 5 | **the one that can make a noise** |
+| `waitforpokemoncries` | 8 / 5 | the only sound command that *waits* — and it is the same five programs |
+| `pansoundeffects`, `waitforsoundeffects`, `playmovingsoundeffect{nocorrection,atkdef2}` | 0 | implemented, unexercised |
+
+### !! An earlier draft of these numbers was measured off the wrong opcode
+
+`playpokemoncry` is opcode **65**; the first pass at measuring it used 64, which is
+`jumpifbattlerside` — three operands, no cry. It reported "37 cries, 36 of them
+normal" off a command with nothing to do with sound, and the figures were plausible
+enough that they went into a comment before anything checked them. Every opcode in the
+measurement scripts and the check is now looked up **by name** out of
+`Gen4MoveAnim.OPCODES`, which is the only spelling that cannot drift.
+
+The same shape as the operand-index fault two passes ago: *when a freshly written
+opcode or operand number gives a plausible answer, check the index before the claim.*
+
+### What is audible today, and what is not
+
+Platinum's sound effects are **SDAT sequences** — notes over banks over wave archives
+— and playing one means writing a synthesiser. The **cries** are single PCM8 samples
+and the import stage already writes all 493 into the same `audio.cries` table Gen 1, 2
+and 3 fill.
+
+So: the cries play now, and the effects are **events** with the right id, the right
+pan and the right frame. `Sound.playId` is called for them anyway, deliberately, so
+that the day the sequences are imported the seam is already where they arrive.
+
+### The seam takes a table, because nine of the ten commands carry more than an id
+
+`onSound(event)` with `kind` one of `play`, `pan`, `stop`, `cry`, `stopcries`. The old
+`onSound(id)` had nowhere to put a pan, a repeat index, a fade length, or a cry's
+modulation and volume.
+
+**A cry names a SIDE, not a species**, because the player is handed a move and a side
+and never a party — which is what the cartridge does too
+(`context->battlerSpecies[context->attacker]`). `BattleState` resolves it.
+
+### The two pan corrections
+
+`BattleAnimSound_CorrectPanDirection`: a pan is written for the *player* attacking and
+mirrored when the enemy is. The corpus uses exactly three pans — −117 on 223 calls, 0
+on 65, +117 on 361 — so Scratch's sound comes from the right when you attack and the
+left when you are attacked, and a centred sound stays centred.
+
+`BattleAnimSound_CorrectStepDirection`: the step's **magnitude** is the script's and
+its **sign** is the endpoints'. **Ten of the 113 moving sounds sweep right to left and
+all ten pass a positive step** — used as written they would walk away from their own
+end point, and since the task's end test is against the endpoints they would never
+finish either.
+
+### The three sound tasks, and the one frame between two of them
+
+* **Repeat** (`playloopedsoundeffect`): `count` plays, `interval + 1` frames apart,
+  **the first immediately** — because the command pre-loads `tickCount` to
+  `applyInterval`, so the task's first active frame already finds the counter at its
+  limit. Program 0 is the clean case: ten plays at frames 3, 6, 9 … 30.
+* **Delay** (`playdelayedsoundeffect`): one play, `interval + 1` frames after the
+  command. `if ((applyInterval--) == 0)` is a **post**-decrement, which is the single
+  character deciding whether an interval of 0 fires at once or never.
+* **Pan** (`playmovingsoundeffect*`): plays at once at the start pan, then walks the
+  pan across `step` at a time every `interval + 1` frames. This command does **not**
+  pre-load the tick counter, so unlike the repeat its first step is a full interval
+  late. One line apart in pret; three frames apart on screen.
+
+**And none of the three holds the animation.** `activeSoundTasks` is a different
+counter from `activeAnimTasks`, and only `waitforsoundeffects` — which no program uses
+— reads it. Counting a sound task as an anim task makes every `waitforanimtasks` after
+a repeating noise wait for the noise: the plant fails **six** assertions, including
+Metal Claw's forty-frame lifetime.
+
+### All eight cries ask for a different modulation, and three programs play a pair
+
+The modulations are 0, 3, 4, 6, 7, 8, 9, 10 — one each, and in `enum PokemonCryMod`
+those are NORMAL, MID_MOVE, HYPERVOICE_1, FAINT, HYPERVOICE_2, HOWL_1, HOWL_2,
+UPROAR_1. **They name the moves.** Three of the five programs play a *pair* — HOWL_1
+then HOWL_2 at volume 100 then 127 — which is what those paired constants are for. A
+port that dropped the operand would play one cry eight times where the cartridge plays
+eight different ones.
+
+### `waitforpokemoncries` waits on a question only the engine can answer
+
+pret waits on `Sound_IsPokemonCryPlaying()`. The seam is asked; a battle that cannot
+answer is **not** held up, because a wait on an unanswerable question is a hang and
+that is strictly worse than a cry overlapping the next command. When the engine *can*
+answer and says yes forever, the frame budget stops it — faithful is not the same as
+safe, and that is asserted.
+
+### !! And the measuring pass had to go silent
+
+`duration()` runs the whole program to measure it and then starts it again — that is
+how the battle queue learns how long to wait. With the seam wired, every move would
+therefore play its entire soundtrack **twice**: once all at once, before anything was
+drawn. `self.quiet` covers the measuring pass, and the check counts through the seam
+itself, because that is the only place the duplicate would show.
+
+### Faults planted: sixteen, all sixteen fail
+
+Two assertions had to be rewritten first, and both are shapes already in this file:
+
+* **the cry never resolving a species** — `Sound.playCry` appears elsewhere in
+  `BattleState` (the faint cry), so a search for the name was satisfied by unrelated
+  code. The *assignment* is asserted now.
+* **the cry dropping its modulation** — the first version counted the operands in the
+  *program*, which says nothing about what the player emitted. Taken off the events.
+
+### Standing checks
+
+move animations 321 → **357/0**. battlescene 177/0, particles 136/0, cache wiring
+27/0, coverage 6/0, distortion world 57/0, branch 6/0, party 28/0, summary 20/0, icon
+9/0, seam clean, use-before-local 223 files/0, the three Python checks byte-identical.
+
+### The queue after this
+
+* **`SetPokemonSpritePriority` (75)** (12 / 6) — pret's name undersells it: the Dark
+  Void machine, with hardware windows, an RNG'd sink and OAM priorities. A channel,
+  not a function.
+* **`loadpokemonspriteintobg` / `removepokemonspritefrombg`** (5 / 5) — a Pokémon
+  drawn on a BG layer rather than as an OBJ, which is the palette slot 8 the greyscale
+  deliberately leaves alone.
+* **nineteen sprite callbacks** whose motion is unapplied; `MeanLook` wants
+  `G2_SetBlendBrightness`.
+* **an SDAT sequence player**, which is what would make the other 1,212 sound commands
+  audible. Out of proportion to a move-animation pass and named here so it is on the
+  list rather than in the gap report.
+
+## Pass 9 — the mon-sprite slots, the hide channel and Dark Void
+
+Three separate things, and the first is the one that had been drawing nothing at all.
+
+### `Player:monHidden` had no caller anywhere in the port
+
+`Func_HideBattler` (40) is **50 calls over 16 programs** — 24 hides and 26 shows. The
+animator tracked `hidden` per side and exposed `monHidden(isPlayer)`, and a
+repo-wide search for that name found **the definition and nothing else**. So every
+move that takes a Pokémon off the field left it standing there: Whirlwind and Roar
+blow the foe away, Dig, Fly and Dark Void put one underground and fetch it back.
+
+Measured over the whole corpus once the draw asked the question: **462 frames over 14
+programs with the player casting, 409 over 13 with the foe casting**. Both numbers
+were zero before this pass, which is what makes them a floor that cannot be hit by
+accident.
+
+This is the **fourth** time this port has had the same bug in a different costume — a
+cache index nobody loaded, an animator nobody constructed, a summary picture nobody
+drew into, and now a method nobody called. None of the four can be seen by a gap
+report, because in all four cases the code that *would* have used the thing is absent
+rather than wrong. The check now asserts the **call site** out of `Gen4Battle.lua`'s
+source before it asserts any arithmetic.
+
+Answered in `Gen4Battle.drawBattlers` rather than in `BattleState:drawBattlerPic`,
+which Kanto, Johto and Hoenn also draw through. `BattleState.lua` is byte-identical to
+its committed version after this pass.
+
+### `LoadParticleResource` is a seventeen-instruction macro
+
+The whole mon-sprite family was eight lines of `NOT_NEEDED` under one reason: *"the
+battler is already on screen"*. That reason is **right 439 times out of 440**, and the
+macro says why:
+
+```
+    .macro LoadParticleResource particleSystem, narcMemberID
+    InitPokemonSpriteManager
+    LoadPokemonSpriteDummyResources 0 .. 3
+    AddPokemonSprite BATTLER_ROLE_PLAYER_1, FALSE, MON_SPRITE_0, 0
+    AddPokemonSprite BATTLER_ROLE_ENEMY_1,  FALSE, MON_SPRITE_1, 1
+    AddPokemonSprite BATTLER_ROLE_PLAYER_2, FALSE, MON_SPRITE_2, 2
+    AddPokemonSprite BATTLER_ROLE_ENEMY_2,  FALSE, MON_SPRITE_3, 3
+    Func_RenderPokemonSprites 0
+    LoadParticleSystem \particleSystem, \narcMemberID
+    WaitForAnimTasks
+    FreePokemonSpriteManager
+    RemovePokemonSprite MON_SPRITE_0 .. 3
+    .endm
+```
+
+So the four copies exist **to keep the Pokémon on screen across a synchronous NARC
+read**, and this port has no such stall. That accounts for every large number in the
+family: 521 `initpokemonspritemanager`, 2,007 dummy resources, 2,019
+`addpokemonsprite` of which **477 each** are the four absolute roles, 477
+`renderpokemonsprites`. It is a loading placeholder, not an animation.
+
+**Dark Void (464) is the one program that animates a copy**, and for it the reason was
+wrong: it adds a copy of the defender, sinks the **copy**, and hides the **real**
+battler one frame later. With no copy the port hid the defender and sank nothing — the
+foe blinked out and the eighty frames the move is about were eighty frames of empty
+platform.
+
+### What a slot is, and the one line of pret that makes the model sound
+
+A slot records **which side it copies, how far the animation has pushed it, and whether
+it is visible**. No second picture and no second draw path: in a single battle the copy
+and the battler are the same pixels in the same place, and the only case where they
+differ is the case where the battler is hidden. So `monHidden` answers *false* while a
+visible copy of that side is being rendered, and `monOffset` adds the copy's
+displacement **only under a hidden battler**.
+
+The line that settles it: **`SpriteSystem_DrawSprites(man)` is
+`SpriteList_Update(man->sprites)`** — the call that writes a sprite list into OAM — and
+nothing calls it on the Pokémon sprite manager unless a function that does so is alive.
+A copy is therefore not on screen because it exists; it is on screen **while a renderer
+lives**. Without that condition the 477 programs with the load preamble would each
+carry a permanently visible copy of the player defeating every `HideBattler` for the
+rest of the move. The two renderers this port implements are func 78 and func 75;
+other functions render the manager too and every one of them is in the unimplemented
+set, so the answer is *exactly as complete as the function coverage* — stated as the
+bound rather than claimed away.
+
+Six of the eight commands left `NOT_NEEDED`. The two that stayed are argued rather than
+assumed: the dummy resources really are placeholders, and
+`StopPokemonSpriteDrawTask` sets `pokemonSpriteDrawContexts[n].active = 0` and nothing
+else — outside a double battle the task that field gates **was never started**, because
+the whole body of `StartPokemonSpriteDrawTask` past one hide sits inside
+`if (IsDoubleBattle == TRUE)`. What is left of that command in a single battle is one
+hide, and that is now what it does.
+
+### Roles: neither partner role nor slot-2 role is an absence
+
+`BattleAnimSystem_GetBattlerWithRole` is longer than it looks and two arms decide the
+whole layer:
+
+* a **partner role** goes through `BattleAnimUtil_GetAlliedBattler`, whose first branch
+  is *"if the type is SOLO_PLAYER or SOLO_ENEMY, return the type"* — 0 or 1, which are
+  the battler indices of the player and the foe. So `DEFENDER_PARTNER` in a single
+  battle **is the defender**, and `AddPokemonSprite ..._PARTNER` makes a second copy of
+  the same Pokémon. Reading it as "there is no partner" was the obvious guess and would
+  have dropped six of the twelve func-75 calls on the floor.
+* **`PLAYER_2` and `ENEMY_2` fall back to the player.** Each scans for its own slot
+  type, finds none, and ends `if (result == BATTLER_NONE) result = BATTLER_PLAYER_1;`.
+  Not the foe, not nothing. So the load preamble puts **three copies of the player's
+  Pokémon and one of the foe's** on a Sinnoh single battle. `ENEMY_1`'s own fallback is
+  `BATTLER_PLAYER_1` as well.
+
+### `SetPokemonSpritePriority` (75): the priority half is a measured no-op here
+
+12 calls over 6 programs — 10 five-operand `Func_SetPokemonSpritePriority` and 2
+seven-operand `Func_DarkVoid`, through the same function id. pret's macro comment calls
+the function buggy (*"the priority being set to default values if you pass anything
+other than `BATTLE_ANIM_DEFAULT_PRIORITY`"*), and that is right **in a double battle**.
+In a single battle the bug cannot fire, and three measured facts settle it:
+
+1. every one of the twelve calls passes **bg = 3** (`BATTLE_ANIM_BG_POKEMON`) and
+   **spritePrio = 0** — measured off `we.arc`, not off pret's `res/`;
+2. bg 3 resolves through `BattleAnimSystem_GetPokemonSpritePriority` to **1** outside a
+   contest, and the mon sprite template's own `bgPriority` **is 1**;
+3. `sPriorityByBattlerType[] = { 0, 0, 20, 10, 10, 20 }` gives both solo types a sprite
+   priority of **0**, which is exactly the 0 every call passes — and the switch that
+   would overwrite it with 10 or 20 **has no case for either solo type**. It is written
+   for the four doubles types only.
+
+The player records what it was asked for and what it changed on `self.monPriority`, so
+the check asserts the no-op **off the record** rather than off those three sentences.
+
+What is *not* a no-op: the task's lifetime, which `waitforanimtasks` waits for; the copy
+being hidden when the task ends; the partner early return (**6 of the 12 calls**, which
+start no task at all); and, on the two Dark Void calls, the window and the sink.
+
+### The window is the void
+
+`GX_SetVisibleWnd(GX_WNDMASK_W0)`, an **inside** plane of BG0|BG1|BG2|BG3 and an
+**outside** plane of those four *plus* `GX_WND_PLANEMASK_OBJ`. Read together: inside
+window 0 every **sprite** disappears and the four backgrounds stay. There is no hole
+drawn anywhere — the Pokémon is simply not rendered below the window's edge.
+
+`G2_SetWnd0Position(left, top, right, bottom)`, and the argument order is stated twice
+(`hall_of_fame.c`'s `(left, 32, right, 32 + POKEMON_FRAME_HEIGHT)` and the end
+credits' `(0, 192 - 24, 255, 192)`):
+
+| type | left | top | right | bottom | under |
+|---|---|---|---|---|---|
+| 0 | 0 | 160 | 128 | 192 | the player |
+| 1 | 128 | 86 | 256 | 192 | the foe |
+
+Both run to the bottom of the screen and each covers one half horizontally, which is
+what makes a **single scissor exact**: for a battler whose picture lies inside the
+window's x span, "inside the window" reduces to "below the top edge". Measured rather
+than hoped — an 80-wide Sinnoh picture centred on 64 spans 24..104 and one centred on
+192 spans 152..232, so **neither solo battler straddles either window's x edge** and
+the two-draw case does not arise. A picture that *did* straddle gets no clip at all:
+drawing a whole Pokémon is a better failure than clipping the wrong half. Only window
+type 1 is reached by the cartridge; type 0 is implemented and recorded as unused.
+
+### The sink, state by state
+
+`SetPokemonSpritePriorityContext_DoDarkVoidEffects` is a switch on the task's own frame
+counter: four jittered steps, then a free fall.
+
+| state | what happens |
+|---|---|
+| 0 | the window goes up, and the frame the fall begins on is rolled: `35 + rand % 5` |
+| 5, 6 | a coin each frame — on heads step down 4, but only once |
+| 7 | if the coin never came up, step anyway |
+| 10, 11 / 12 | the same pair again |
+| 15, 16 / 17 | and again |
+| 22, 23 / 24 | and again, this time by **eight** |
+| past the rolled frame | step down 4 **every** frame, twenty steps at most, and stop being drawn once the centre passes 130 |
+
+**The coin changes *when*, never *whether*.** Every `if (ctx->stepCount != n)` line is a
+forcing move that makes the step happen at the end of its window if the coin refused,
+so the four steps always total `4 + 4 + 4 + 8 = 20` pixels by state 24 and only their
+timing is random. A port that read the coin as "maybe" would have a foe that sometimes
+sank twenty pixels and sometimes did not.
+
+**The two limits meet.** The foe's centre is 48, the jitter puts it at 68, and sixteen
+more steps of four is 132 — so the twentieth step (`stepCount < 20`) and the `y > 130`
+test land on the **same frame**, at a total fall of 84 pixels. That agreement is a
+consistency check on both constants at once, and the check asserts it.
+
+Driven, program 464 from the player's side: window up for **79** frames of the task's
+80, the four jitter steps totalling 20 by state 24, the fall reaching 84, the copy
+visible for **46** frames while the battler is hidden, and gone for the rest.
+
+### The LCRNG is the cartridge's, the sequence position cannot be
+
+`sLCRNGState = sLCRNGState * 1103515245 + 24691`, the value being the **top half** of
+the new 32-bit state. Multiplied in two 16-bit halves because a Lua 5.1 number is a
+double: a single `state * 1103515245` for a full 32-bit state is 4.7e18 and loses its
+low bits, and the low bits are the whole output.
+
+The **recurrence** is exact; the **sequence position** cannot be, because on the
+hardware `sLCRNGState` is one global the whole game draws from and where in it a move
+lands depends on everything that happened before. Seeded from the move id instead,
+which is what `duration()` needs — it runs every program twice and the two passes must
+agree — and what lets a check assert anything about a system otherwise driven by a real
+die. Same reasoning and the same words as `Gen4ParticleSystem`'s own seeded generator.
+
+### Dark Void is implemented twice on the cartridge
+
+`jumpifbattlerside` sends a **foe-cast** Dark Void down a branch with no func 75 in it
+at all: the sink there is plain `Func_MoveBattler` on the battler sprite, which this
+port has had all along. So the same visible effect exists twice in the same program —
+once as the mon-sprite machine and once as four battler moves — and only the first half
+was missing. The check asserts the foe-cast branch raises **no window at all**.
+
+### `RenderPokemonSprites` read its operand literally — 476 calls
+
+`if (GetScriptVar(FRAMES) == 0) ctx->frames = RENDER_POKEMON_SPRITES_DEFAULT_FRAMES;`
+and that constant is **3**. **476 of the 477 calls pass 0** (the odd one out passes 45),
+so 476 tasks were built with 0 frames and ended on their first step: three frames of
+hold lost every time, and — now that the slots exist — three frames in which a copy
+would not have been drawn.
+
+It also starts its task differently from every other function:
+`BattleAnimSystem_StartAnimTask(...)` **followed immediately by a direct call** to the
+task body, so it has no one-frame delay and renders on its creation frame.
+
+**This moved eight older assertions**, and every one of them by exactly the load cost
+rather than by a number chosen to fit:
+
+| assertion | was | now | why |
+|---|---|---|---|
+| program 25 stops on frame | 104 | **107** | one load, +3; the 103 drawn frames are unchanged, which is what says this is a shift and not a lengthening |
+| program 19's switch starts | 3 | **9** | two loads, +6 |
+| …its picture loads | 14 | **20** | +6, and the intervals between all three are unchanged |
+| …PARTIAL is reached | 14 | **20** | +6 |
+| program 0's first looped sound | 3 | **6** | one load, +3; the three-frame gaps are unchanged |
+| program 2's delayed sound | 8 | **11** | one load; *six frames after its command* is still the claim — the command moved from frame 2 to 5 |
+| corpus tint frames | 8,748 | **8,754** | the two programs whose tinted stretch is clipped by the end of their run; the program count is unchanged |
+| programs that move a battler | 289 | **290** | not the load cost: the mon-sprite slots joined `monOffset`, and the program that came with them is 464, whose displacement lives entirely on a copy. Counting battler transforms alone still gives 289 |
+
+### The bug the frame trace caught, which reading did not
+
+```lua
+    return self.attackerIsPlayer and false or true
+```
+
+**is always `true`** — `x and false` is false, and `false or true` is true. So every
+`DEFENDER` resolved to the **player's** side and the sink measured its cut-off against
+the wrong battler's centre: 112 instead of 48, hiding the copy 24 pixels into an
+84-pixel fall. It is the shape of the idiom used three lines above it, where the
+constant is `true` and it is correct. Found by tracing 135 frames of program 464 and
+noticing the copy vanished too early — **not** by reading, and not by any check that
+existed before the trace.
+
+### Faults planted: fifteen, all fifteen fail
+
+Five assertions had to be rewritten first, and one thing written down as "not a fault"
+turned out to be one:
+
+* **the window never lowered** — "is a window up after the run" is false either way,
+  because `monWindow` sits behind `alive()`. The same shape as the greyscale plant in
+  pass 7. Taken onto the last windowed frame and whether the run still had frames left.
+* **the coin read as "whether"** — the first version asserted the total sink, which the
+  forcing rows make 20 whichever way every coin falls: *a measurement that cannot
+  fail*. Taken onto **forced all-tails and all-heads runs**, where the four steps must
+  land on states 7/12/17/24 and 5/10/15/22 respectively.
+* **the sink applied to the battler** — asserted on the offset *under a visible
+  battler*, not "does the foe move", which is true on both readings.
+* **the partner copy hidden** — asked at the first frame the task exists, not the first
+  frame a slot 1 exists: the load preamble fills slot 1 with a *visible* copy of the foe
+  thirty frames earlier, and a test that found that frame was answering a different
+  question.
+* **the slots not cleared per run** — running a program to its end and starting another
+  tests nothing, because `clearTransforms` has already emptied the slots. Taken onto a
+  run **abandoned mid-animation**.
+* **`monSpriteFor` ignoring `visible`** — written down as *not* a fault first, on the
+  reasoning that a copy is invisible only on frames where the battler is hidden anyway.
+  **Wrong**, and the plant said so: those are exactly the frames where the two readings
+  disagree — Dark Void's last twenty-eight frames have a hidden battler *and* an
+  invisible copy, and without the test the copy keeps answering for it (434 hidden
+  frames instead of 462). **Predicting which plants will fail is not a substitute for
+  planting them.**
+
+Two more worth naming because of what they broke: dropping the **renderer condition**
+cost four assertions including both corpus totals, and reinstating the
+always-true `and false or true` reproduced the original bug exactly — 534 hidden frames
+over 15 programs, which is the number measured before it was found.
+
+### Standing checks
+
+move animations 357 → **435/0**. battlescene 177/0, particles 136/0, cache wiring 27/0,
+coverage 6/0, distortion world 57/0, branch 6/0, party 28/0, summary 20/0, icon 9/0,
+seam clean, use-before-local 223 files/0, the three Python checks byte-identical, all
+223 Lua files parse. `BattleState.lua`, `Gen3Battle.lua` and `core/Sound.lua` are
+byte-identical to their committed versions — this pass touched no shared file.
+
+### The queue after this
+
+* **`loadpokemonspriteintobg` / `removepokemonspritefrombg`** (5 / 5) — a Pokémon drawn
+  on a BG layer rather than as an OBJ, which is the palette slot 8 the greyscale
+  deliberately leaves alone. Now the nearest thing to reachable, because the slot layer
+  this pass built is what it would draw through.
+* **nineteen sprite callbacks** whose motion is unapplied; `MeanLook` wants
+  `G2_SetBlendBrightness`, a master brightness.
+* **`AnimStartWave`**, the scanline wave — still 0 uses, still recorded rather than
+  written.
+* **an SDAT sequence player**, which is what would make the other 1,212 sound commands
+  audible. Out of proportion to a move-animation pass and named here so it is on the
+  list rather than in the gap report.
+
+## Pass 10 — why every Sinnoh move that was not a plain hit said "But, it failed!"
+
+Play report: *"some moves like leer, growl etc arent working and say but it failed
+when used"*.
+
+### One line, 412 moves
+
+`pl_waza_tbl` gives each move an effect **number**. The battle engine dispatches on a
+**name**, through `data.move_effects`. The Gen 4 import wrote the number — so
+`BattleState:effectRecord` looked a Gen 4 *number* up among Kanto's *names*, found
+nothing, every move ran as a bare hit, and a status move with no damage to deal printed
+the failure message. Leer never lowered Defence, Growl never lowered Attack, Thunder
+Wave never paralysed. **Nothing raised or lowered a stat in Sinnoh at all.**
+
+**This is the same bug Hoenn had**, in the same field, and its own comment says so:
+*"every Gen 3 move arrived carrying a number the registry had never heard of: 331 of the
+354 moves in Hoenn had no effect at all"*. It is also the sibling of the Gen 4 bug
+already written up in this file — `move.type` was an id where `Damage.lua` wanted a
+name, and every Platinum move was typeless. **Same file, same field shape, same
+consequence, and the second one was not found by the first.**
+
+### The table is derived, and from a better source than Hoenn's
+
+Hoenn's `GEN3_MOVE_EFFECTS` is a **vote**: shared move names carrying their Gen 3 number
+onto the effect Johto gives them. Gen 4 has something stronger.
+
+**(1) pokeplatinum names every effect.** `res/moves/<name>/data.json` carries
+`"effect": { "type": "BATTLE_EFFECT_DEF_DOWN" }` for Leer and `BATTLE_EFFECT_ATK_DOWN`
+for Growl. Joining the cartridge's own move table to those 468 files **by move name**
+matches **471 of 471 rows, nothing unmatched** — and the cartridge's effect-**chance**
+byte agrees with pret's JSON on **every single move**, which is a second column
+confirming the first column's join. Every one of the **257** effect ids the cartridge
+uses carries **exactly one** pret name: the id determines the effect, with no ambiguity
+anywhere.
+
+**(2) Hoenn's table, read as a claim about numbering.** 195 of Gen 4's 257 ids are in
+it, and on all 195 the two sources describe the same effect — Hoenn names an effect
+after its *move* (`DREAM_EATER`, `SUPER_FANG`, `SPLASH`) and pret after its *behaviour*
+(`RECOVER_DAMAGE_SLEEP`, `HALVE_HP`, `DO_NOTHING`). So **Gen 4 inherited Gen 3's effect
+numbering wholesale** and appended its own 62 on the end.
+
+The check asserts that agreement against `RomExtractorGen3.lua`'s own source rather than
+against a copy, because a duplicated table is only safe if something checks it stayed
+duplicated.
+
+### The two places the sources disagree — neither is a numbering difference
+
+* **id 126.** pret calls it `BATTLE_EFFECT_PSYWAVE` and **it is Magnitude's**. The only
+  cartridge move carrying 126 is Magnitude; Psywave is id 88,
+  `RANDOM_DAMAGE_1_TO_150_LEVEL`. A misnomer in pokeplatinum, and Hoenn's *single-vote*
+  `MAGNITUDE_EFFECT` is right. One vote beating a decompilation's own label is worth
+  writing down.
+* **id 103.** Hoenn's vote called it `NO_ADDITIONAL_EFFECT` because Johto had no priority
+  effect to vote for; pret calls it `PRIORITY_1`, and its eight moves are Quick Attack,
+  Mach Punch, ExtremeSpeed, Vacuum Wave, Bullet Punch, Ice Shard, Shadow Sneak and Aqua
+  Jet. pret is the better *label*; Hoenn's is the right *behaviour*, because a move's
+  priority comes from its own priority byte, which this port has read since the record
+  was first parsed.
+
+### Five Gen 4-only ids still name an engine effect — by the engine's own convention
+
+`MoveEffects`' comment beside `FLY_EFFECT` says outright *"Fly AND Dig go
+semi-invulnerable (ChargeEffect sets INVULNERABLE for both)"*, so `FLY_EFFECT` is this
+engine's name for the whole two-turn semi-invulnerable family. Gen 4 moved **Dig, Dive,
+Bounce and Shadow Force** onto ids of their own and all four are that family.
+**Whirlpool**'s id is new because Gen 4 added double damage against a diving target; the
+bind is `TRAPPING_EFFECT` exactly, and the Dive bonus is not modelled and says so.
+
+Not a judgement of mine in any of the five — the engine's own words, quoted.
+
+### The crit rate, derived and then found to agree with a hardcode
+
+Gen 3's extractor sets `move.highCrit` from three hand-written ids, `effect == 43 or 200
+or 209`. Taking **every effect whose pret name contains `HIGH_CRITICAL`** gives
+**43, 200 and 209 — those three exactly**. A hardcoded list and a derivation agreeing is
+the strongest thing either could do. **17 Sinnoh moves** now crit at the raised rate: the
+fourteen on 43 (Karate Chop through Spacial Rend), Blaze Kick on 200, and Poison Tail and
+Cross Poison on 209.
+
+### What the battle receives now
+
+| | moves |
+|---|---|
+| carry an effect **name** | **412** of 471 |
+| …of which reach an effect the engine **implements** | **286** |
+| carry a Gen 3 name the engine has no record for | 122 |
+| id has no name at all, left as a **number** | 59 |
+
+The 122 are Kanto/Johto/Hoenn gaps too — `HIGH_CRITICAL_EFFECT` leads them at 14 moves
+and is carried by `move.highCrit` instead, so most of that column is a name the engine
+never needed. The 59 are Sinnoh's own — Roost, Gravity, U-turn, Trick Room, Stealth Rock,
+Toxic Spikes and their kin — and they are **left as numbers on purpose**, which is
+Hoenn's own policy: a number logs itself once through `missing()` rather than pretending
+to be a plain hit. Each carries pret's name in `gen4EffectName`, so the queue reads as
+work rather than as integers.
+
+A two-name row is an odds split: Gen 1 and Gen 2 put the chance *in* the effect
+(`BURN_SIDE_EFFECT1` is one in ten, `_2` three in ten) while Gen 4 has one effect and a
+chance byte beside it, so the cartridge's own byte picks the side. Thunderbolt's 10 takes
+the first name and Body Slam's 30 the second — both asserted.
+
+### tools/gen4_moveeffect_check.lua — 31 checks, 0 failures
+
+Nine faults planted, **all nine fail**: the effect left as a number (6 failures), the
+odds split ignored, the split resolved the wrong way, high crit dropped, high crit put on
+a plain hit, one row's name swapped, Dig no longer a two-turn move, an id invented, and
+the gap label dropped.
+
+Two assertions worth naming. The agreement with Hoenn is asserted as a count of
+**disagreements**, because a matcher that accepted everything would pass the other way
+round. And the crit test carries a **control** — Pound must *not* carry `highCrit` —
+because a count of seventeen passes any table that happens to total seventeen.
+
+One of the check's own bugs, found by it failing: *"nothing but Gen 4 code requires
+Gen4Moves"* reported the **Gen 4 ruleset** as a violation, because the filter matched
+`Gen4` case-sensitively and the file is `rulesets/gen4_platinum.lua`.
+
+### >>> THIS NEEDS A RE-IMPORT
+
+The moves table is written by the import stage, so the effect names land in the cache and
+not in the running build. Until Platinum is re-imported, Leer still fails. Nothing else in
+this pass needs one.
+
+## Pass 11 — Dawn was invisible because of a module nobody loads
+
+Play report, twice: *"dawns sprite seems to be missing shes invisible particularly if i
+start as a boy"*. The log said it outright and precisely:
+
+```
+[warn] gen4 object: graphics id 101 is var_0 (var 0x4020) and it holds 97 --
+       this object keeps the placeholder and will not draw
+```
+
+**97 is `player_f`.** Which means every part of the mechanism worked: the map's entry
+script ran, the gender branch was right, `VAR_OBJ_GFX_ID_0` was written with Dawn's
+graphics id, and `resolveGraphicsVar` read it back. The only thing missing was the table
+that turns 97 into a sheet.
+
+### The fourth instance of the same bug, in the one direction the check could not see
+
+`gen4SpriteFor` needs two hops: graphics id → name (`Gen4ObjectGfx.name(97)` =
+`"player_f"`), then name → **archive member**
+(`gen4_overworld.sprites["player_f"].member` = 91 → `SPRITE_G4_091`). The second hop is
+the only place in the port that knows it, and `Data.lua` **did not load
+`gen4_overworld`** — it was listed among the modules that are *"extractor INPUT ... no
+running screen reads them"*.
+
+That sentence was **true when it was written**. Then `resolveGraphicsVar` started reading
+the index, and nothing noticed. On a real boot `data.gen4_overworld` was nil, the member
+lookup returned nil, and **all sixteen `var_0`..`var_f` graphics ids drew nothing** —
+Dawn among them.
+
+Verified on Cedric's live cache rather than on mine: `gen4_overworld.lua` is there, fresh,
+and carries `player_f` with `member = 91`, `path = ".../overworld/player_f.png"`. The data
+was never the problem.
+
+This is the **fourth** table in this port to be written and not read — after
+`gen4_species_sprites`, `gen4_move_anims` and `gen4_particles` — and `Data.lua`'s own
+comment says a fourth "cannot happen quietly" because `gen4_cache_wiring_check` compares
+every name the extractor writes against that file. **It cannot see the mirror image**: a
+module deliberately *not* loaded that a consumer later begins to *read*.
+
+### The check now walks both ways — section 5
+
+Every `data.gen4_*` field read anywhere in `src/` must name a module `Data.lua` loads,
+read out of the source with comments stripped. 11 modules are read by name; all 11 are
+loaded. Plus the one this exists for, asserted literally so a revert names itself rather
+than moving a count.
+
+Reverting the load list fails **three** assertions: the stranded-table walk, the new
+reader walk, and the literal one.
+
+`gen4_overworld` also left the `DUMPS` list — the eight tables that are legitimately
+written and unread — because "no reader in src/" stopped being true of it. That list
+claims *unread*, and section 5 is what checks the claim instead of assuming it.
+
+tools/gen4_cache_wiring_check.lua 27 → **30/0**.
+
+### >>> NO RE-IMPORT NEEDED
+
+This is a load-list change, not an extraction change. Dawn appears on the cache already
+on disk.
+
+### Two readings handed over rather than fixed
+
+Both are in `src/render/Gen4Ground.lua`, which is another agent's file.
+
+**The bake counter cannot tell "no buildings" from "all buildings skipped".** Its own
+comment is right that `placed == 0` on a chunk with objects means the model lookup is at
+fault — but the loop body sits behind `if not self:animationsFor(object.model)`, so an
+animated object increments **neither** `placed` nor `missing`. Measured against Cedric's
+own terrain cache: **387 of 740 chunk records carry objects**, exactly the number the
+comment predicts, and chunk 5 (Route 201) is **not** one of them — so
+`chunk 5 baked 0 building(s), 0 unresolved` is *correct* there. But chunks **534 and 541**
+(the two Distortion World rooms in the same log) **do** carry objects, and both reported
+zero of both. Either every object in them is animated, or the list is empty at run time —
+and the counter as written cannot distinguish those. It wants a third bucket, and if
+nothing draws that bucket then every animated building is invisible.
+
+**`T_01R_0201 names no texture set; keeping the stand-in`**, with
+`gen3 tiles: baked TILESET_GEN4_STANDIN` right after it. The ground is being drawn from a
+synthesised metatile sheet rather than from the cartridge's land mesh, which is what "no
+3d" looks like from the player's side even with the camera correct — and the camera *is*
+correct in that log: `gen4 camera: default at 59.05 deg (the map header's own)`. The
+terrain cache carries the mesh (`heightBytes`, per-shape `texture` and `palette` names,
+11,720 texture references), so this is a texture-set resolution gap in the renderer, not
+missing data.
+
+## Pass 12 — the area lights, and the u16 that was selecting them wrong
+
+Item 1 on the play-test list, continued. The two Twinleaf screenshots said three
+things, and this pass is the first of them: **the cartridge lights its world and
+this port was drawing it unlit.** Side by side, the port's grass is a bright
+saturated green with a yellow path; the cartridge's is a muted olive with a warm
+orange-brown one. Same textures. Unlit textures always come out brighter and
+flatter than lit ones, and that is most of the difference between the pictures.
+
+### What was actually wrong, which was worse than "not implemented"
+
+`gen4_terrain`'s `maps` table has carried a byte called `lighting` on all 593
+maps since the terrain stage was first written, sitting beside `texture` and
+`area`. Nothing in `src/render/` or `src/world/` has ever read it. That made it
+the fifth write-and-never-read field in this port, after `gen4_species_sprites`,
+`gen4_move_anims`, `gen4_particles` and `gen4_overworld` (which was Dawn).
+
+It was also **the wrong u16.** `AreaDataFile` is four u16s and pret names every
+one:
+
+| offset | pret's name           | what it is                          |
+|-------:|-----------------------|-------------------------------------|
+| 0      | `mapPropArchivesID`   | the building model list             |
+| 2      | `mapTextureArchiveID` | the terrain texture set             |
+| 4      | `dummy04`             | "changes in the NARC, but is unused" |
+| 6      | `areaLightArchiveID`  | the `/data/arealight.narc` member   |
+
+`Gen4Maps.areaData` called offset 4 `lighting` and offset 6 `flags` — exactly
+backwards. The terrain stage carried the dead field onto every map, and because
+there was no consumer, there was nothing to disagree with it. **An unread field
+is also an unchecked one.**
+
+**The ROM settles it, using the cartridge's own assert.**
+`AreaLightManager_New` opens with `GF_ASSERT(archiveID < AREA_LIGHT_FILE_COUNT)`
+and that count is 4. Across the 75 area records:
+
+- offset 6 holds only **0, 1 and 2** — inside the bound with room to spare
+- offset 4 reaches **9** — it would trip the assert on nine records
+
+A field that fails the cartridge's own bound is not that field. Corrected, the
+593 maps distribute as **110 on member 0, 461 on member 1, 22 on member 2**.
+
+Member 3 is selected by no area record at all, and that is not a gap:
+`ov6_0223E140.c` is the only thing that asks for it, passing the literal `3`
+twice. It is reachable from that overlay and nowhere else.
+
+### The archive
+
+`/data/arealight.narc`, four members, **fifteen templates each, sixty in all**.
+It is a **text** file — `AreaLightTemplate_New` walks it with
+`Ascii_CopyToTerminator(iter, buf, '\r')` and `Ascii_ConvertToInt`. Ten lines per
+template and the tenth is blank:
+
+```
+<endTime>,
+<valid>,<r>,<g>,<b>,<vx>,<vy>,<vz>,      light 0
+<valid>,<r>,<g>,<b>,<vx>,<vy>,<vz>,      light 1
+<valid>,<r>,<g>,<b>,<vx>,<vy>,<vz>,      light 2
+<valid>,<r>,<g>,<b>,<vx>,<vy>,<vz>,      light 3
+<r>,<g>,<b>,                             diffuse reflection
+<r>,<g>,<b>,                             ambient reflection
+<r>,<g>,<b>,                             specular reflection
+<r>,<g>,<b>,                             emission
+(blank)
+```
+
+and the file ends on a line beginning `EOF`.
+
+- **`endTime` is seconds-since-midnight over two**, not a frame count or an
+  index: it is compared against `GetSecondsSinceMidnight() / 2`. So member 0's
+  0, 7200, 8100, 9000, 14400, 20700, 21600 are midnight, 4:00, 4:30, 5:00, 8:00,
+  11:30 and 12:00 — the cartridge's own dawn ramp. Every member's last band ends
+  at 43200, closing the day.
+- The active template is the **first** whose `endTime` is strictly past the
+  clock, falling back to index 0 — which is what wraps midnight rather than
+  leaving a gap.
+- **Colours are five-bit, 0..31**, and the validity test is on the *packed*
+  `GX_RGB` value against `INVALID_LIGHT_COLOR` = `0xFFFF`. Full white packs to
+  `0x7FFF`, so a 31,31,31 light is **valid**; only bit 15 makes the sentinel.
+- **Vectors are fx16 clamped to ±4096** on each axis by the cartridge.
+
+Member 0's first template lights the world at **11,11,16 of 31 with an ambient of
+10,10,10** — about a third brightness, slightly blue. Its light 0 swings from
+(1897,−3600,−466) at midnight through (−2043,−3548,110) at 15:00 and back, and
+its light 2 turns **14,6,0** at 18:30 — a warm orange fill, which is the sunset
+the cartridge screenshot has and the port does not. Member 0 is the only member
+whose sun moves at all; 1, 2 and 3 are constant across their fifteen bands.
+
+### The CRLF trap, which cost half the archive
+
+`Ascii_CopyToTerminator` looks *past* the terminator it stopped on:
+
+```c
+if (terminator == '\r' && src[i + 1] == '\n') return &src[i + 2];
+```
+
+So the file is **CRLF** and the cartridge's line buffers never carry the LF.
+Splitting on CR alone leaves that LF on the front of every line but the first,
+which `tonumber` quietly tolerates and the `EOF` test does not — `("\nEOF")`
+does not start with `EOF`, so the terminator is read as a sixteenth template and
+the member is rejected. Members 1 and 3 end with a CR after their `EOF` and
+members 0 and 2 do not, so **this failed on exactly half the archive** until the
+LF was stripped. The check now guards it from both ends.
+
+### What this pass deliberately does NOT do
+
+The obvious next step is to combine the rows into a tint —
+`diffuse * lightColour * max(0, -N·L) + ambient * lightColour + emission`. **I
+wrote it, measured it, and took it back out.** Summed over member 0 it pinned
+**thirteen of fifteen templates to exactly 1.000 on every channel**, so it
+reported full brightness for almost the whole day and could not have told a dawn
+from a noon. A measurement that cannot fail says nothing, and a renderer tint
+that cannot vary is worse than none.
+
+The saturation is a real open question, not a coding slip: light 3 is full white
+in every one of member 0's templates, the emission row is another 0.45 of full on
+its own, and `AreaLight_UseGlobalModelAttributes` switches the model onto
+**global** diffuse/ambient/specular/emission (`NNS_G3dMdlUseGlbDiff` and its
+three siblings), so how much of each row reaches an area's ground is a property
+of the model resource rather than of the extractor. Settling it needs a frame
+compared against the cartridge.
+
+So `Gen4AreaLight` ships the part that follows from the data alone —
+`lambert(template, nx, ny, nz)`, the per-light `max(0, -N·L)` — and leaves the
+combination to whoever owns the ground renderer. **N is Y-up**, settled rather
+than assumed: light 0's vector is dominated by y = −3600 of 4096, a sun pointing
+down, and against (0,1,0) that gives +0.879. Any other convention leaves the
+cartridge's own sun lighting nothing. Lights 2 and 3 are flat along +Z, so on
+ground they contribute nothing through this term at all.
+
+### Files
+
+| file | what changed |
+|---|---|
+| `src/import/Gen4AreaLight.lua` | **new**, 253 lines — the archive reader, the active-band rule, `lambert` |
+| `src/import/Gen4Maps.lua` | `areaData` now names `dummy04` and `areaLight` correctly, and derives `outdoors` from `IsOutdoorsLighting` |
+| `src/import/RomExtractorGen4.lua` | new `areaLights` stage writing `gen4_arealight`, keyed by the member and not by map |
+| `src/core/Data.lua` | `gen4_arealight` added to `GEN4_PREFIXED` **on the day the stage was added**, so it cannot become the sixth write-and-never-read table |
+| `tools/gen4_arealight_check.lua` | **new**, 5277 checks / 0 failures |
+
+### The check
+
+**5277 checks, 0 failures.** Every constant is looked up **by name** in pret —
+`AREA_LIGHT_FILE_COUNT`, `INVALID_LIGHT_COLOR`, `SCRATCH_BUFFER_SIZE`, and the
+declared field *order* of the `AreaDataFile` struct — because a check that
+hard-codes 4 cannot notice pret saying 5. Section 8 parses each member a **second
+time, deliberately differently** (splitting on the CRLF pair, with the row
+offsets written out separately) and cross-checks every field, because bounds
+cannot catch a shift that stays inside them.
+
+**Twenty faults planted, nineteen caught.** The nineteen include the original
+swap (offset 6 → offset 4, 20 failures), the LF-on-the-line bug (58), reflection
+rows read one line late (716), a `>=` on the band boundary (14), and a unit
+divisor of 4095 instead of 4096 (105).
+
+Three of those four were only caught **after** the first plant batch found them
+getting through, which is the whole reason for planting rather than predicting:
+
+- **reflection rows one line late** — passed every range check, because the rows
+  it landed on held legal five-bit values and the tenth line of a template is
+  *blank*, which parses to 0,0,0 and is legal too. Fixed by the independent
+  second parse in section 8.
+- **`>=` instead of `>` on the band test** — invisible everywhere except on the
+  one tick that sits exactly on a band's `endTime`. Fixed by testing that tick.
+- **unit divisor 4095** — 1.000244 passes every threshold a lambert check would
+  set. Fixed by pinning an axis at exactly FX16_ONE to exactly 1.0.
+
+**The one not caught is undecidable on this cartridge, and is recorded as such.**
+`ParseLightAttrs` tests `lightValid == TRUE`, so a `2` would mean *invalid*, but
+no member holds anything but 0 or 1 — a planted `~= 0` is therefore
+indistinguishable here. Section 9 asserts that domain instead, so the day a
+member holds something else, the stricter test becomes load-bearing and the check
+says so rather than the behaviour silently changing.
+
+Separately, dropping `gen4_arealight` from `GEN4_PREFIXED` was planted and
+`tools/gen4_cache_wiring_check.lua` **fails** (30 checks, 1 failure), so bug six
+is guarded by construction and not by memory.
+
+### Standing sweep
+
+`cache_wiring` 30/0, `coverage` 6/0, `distworld` 57/0, `branch` 6/0, `moveanim`
+435/0, `particle` 136/0, `moveeffect` 31/0, `seam` 162/162 verbs resolve. Nothing
+here touches the Gen 1/2/3 paths: `GEN4_PREFIXED` is only iterated for a Gen 4
+cache, and the other three files are Gen 4-only.
+
+### Still open on item 1
+
+This pass is finding **(a)** of three. **(b)** the pitch reading too steep
+(roof:wall 2.1 against the cartridge's 1.6) and **(c)** the ~1.5× zoom are both
+in `src/render/Gen4Ground.lua` and `Gen4Camera.lua`, which are another agent's
+live work; they are measured and stated but not edited. And the renderer still
+applies no light at all — the data is now in the cache under `gen4_arealight`,
+keyed by `areaLight`, but the ground draw does not yet read it.
+
+**Item 1 stays open.** Nothing here has been seen running.
+
+## Pass 13 — the map props, and why items 2 and 4 are one fault
+
+Items 2 and 4 on the play-test list — **"signs are not rendered at all"** and
+**"some areas draw placeholder tile art"** — are the same fault seen from two
+angles, and the placeholder is the cartridge's own dummy box.
+
+### A sign is geometry, and it arrives through an indirection the port skipped
+
+A signpost in Platinum is a **map prop**: an entry in a land chunk's object
+records carrying a model id, position, rotation and scale. `Gen4Maps.objects` has
+decoded those records for as long as the terrain stage has existed, and
+`build_model.narc` (590 members) is already extracted. Both ends were present.
+What was missing is the middle.
+
+`AreaDataManager_Load` does this:
+
+```c
+mapPropModelIDs = NARC read of area_build.narc[areaData.mapPropArchivesID]
+mapPropModelIDsCount = mapPropModelIDs[0];              // first u16 is a COUNT
+GF_ASSERT(count < MAX_MAP_PROP_MODEL_FILES);            // 768
+for (i = 0; i < count; i++) {
+    u16 id = mapPropModelIDs[i + 1];
+    mapPropModelFiles[id] = NARC read of build_model.narc[id];
+}
+```
+
+So each area loads a **subset** of `build_model.narc`; the ids are **global**
+members of that archive; and `mapPropModelFiles` is **sparse** — indexed by the
+global id, never by position in the list. A port treating the list as a dense
+remapping would draw the wrong prop everywhere.
+
+### The placeholder art is `dmybox00`
+
+An id outside the subset does not vanish:
+
+```c
+if (areaDataManager->mapPropModelFiles[mapPropModelID] == NULL) {
+    // Return the dummy box model if the requested one is not loaded
+    GF_ASSERT(areaDataManager->mapPropModelFiles[0] != NULL);
+    return &areaDataManager->mapPropModelFiles[0];
+}
+```
+
+with `map_prop.c` forcing `loadedProp->modelID = 0` alongside it, and
+`AreaDataManager_Load` guaranteeing member 0 is resident whatever else is.
+
+**The ROM agrees:** `build_model.narc` member 0 is 1900 bytes of NSBMD (`BMD0`)
+and the string **`dmybox`** is inside it. So an unresolved prop is not a missing
+sign — it is a visible grey box. That is the "placeholder tile art" in the
+report, and it is why the two items are one.
+
+### `Gen4Maps.areaBuildings` was correct and had no caller
+
+The decoder for these lists has existed, correct, and **nothing ever called it**.
+All 71 members decode on the count-then-ids shape with **none refused**; the
+largest list is **138** against the cartridge's 768 assert; the **527** distinct
+ids top out at **589** against a 590-member archive. A decoder with no caller is
+the same failure as a table with no reader, one step earlier.
+
+### The association is measured, not assumed
+
+Walking every matrix and testing its chunks' prop ids against its own map's area
+list:
+
+| | |
+|---|---|
+| matrices carrying props, **fully covered** by their own area's list | **201** |
+| matrices naming props their area does not load | **3** |
+| matrices carrying no props | **66** |
+| total | **270** |
+
+The three exceptions are the rule working. The worst is **matrix 0** — 501
+placements, **101** distinct ids outside *every* area list — which is what a
+matrix shared between maps from different areas looks like when only one area's
+subset is resident. On the cartridge those draw the dummy box.
+
+**A counting trap worth recording:** counting per *map* instead of per *matrix*
+reports **47,029** placements against the true **2,967**. 593 headers share 270
+matrices, so every chunk of a shared matrix gets counted once per map pointing at
+it. The first pass at this measurement reported 57% of placements "outside the
+allow-list" purely because of that inflation, and the reading looked broken when
+it was not.
+
+### Also corrected this pass
+
+`Gen4Maps`' area-record comment still said offsets +4 and +6 were **"not
+established"** and named them `lighting` and `flags`. Both names were wrong, and
+the wrong one of the pair was the one the terrain stage carried onto all 593 maps
+(see pass 12). The block now names all four fields as pret does and points at the
+measurement that settles them.
+
+### Files
+
+| file | what changed |
+|---|---|
+| `src/import/RomExtractorGen4.lua` | new `mapProps` stage writing `gen4_mapprops`; the terrain stage now carries `props` (= `mapPropArchivesID`) onto every map record |
+| `src/import/Gen4Maps.lua` | the stale "not established" comment replaced with pret's four field names |
+| `src/core/Data.lua` | `gen4_mapprops` added to `GEN4_PREFIXED` |
+| `tools/gen4_mapprops_check.lua` | **new**, 3220 checks / 0 failures |
+
+### The check
+
+**3220 checks, 0 failures.** Every cartridge rule is read out of pret by name or
+by source text: `MAX_MAP_PROP_MODEL_FILES`, the `mapPropModelIDs[0]` count rule,
+the `mapPropModelIDs[i + 1]` loop, the `build_model[id]` load, the dummy-box
+fallback in `GetMapPropModelFile`, the `modelID = 0` force in `map_prop.c`, and
+the guarantee that member 0 is always resident.
+
+**Eleven faults planted, ten caught.** Two of the catches only exist because the
+first batch found them getting through:
+
+- **the prop texture set paired by a constant** (`texture = 0`) passed everything
+  — the archives are the same length and every member is a real NSBTX, so nothing
+  in the *data* distinguishes "paired by index" from "always member 0". The
+  pairing lives in the code, so it is now asserted there.
+- **the eleventh is a guard weakening, not a fault.** Relaxing `areaBuildings`'
+  exact-length test from `~=` to `>` changes nothing on this cartridge, because no
+  member carries trailing bytes — and the check asserts the length invariant
+  directly on the data regardless, so the property is verified even though the
+  weakened guard is not detected.
+
+Two of my own patterns had to be fixed after they failed on correct code: a
+multi-line match on `GetMapPropModelFile`, and a `texture =` match that found the
+terrain code's assignment at the top of the extractor instead of the one inside
+`mapProps` — **which failed on correct code and passed on a planted fault at the
+same time.**
+
+### Standing sweep
+
+`cache_wiring` 30/0, `arealight` 5277/0, `mapprops` 3220/0, `coverage` 6/0,
+`distworld` 57/0, `branch` 6/0, `moveanim` 435/0, `particle` 136/0, `moveeffect`
+31/0, `seam` 162/162 verbs resolve.
+
+### Still open
+
+The data is now in the cache; **nothing draws it yet.** A prop needs its model
+from `build_model.narc`, its texture from `areabm_texset.narc` member `props`, and
+its placement from the chunk's object record — and the draw belongs in
+`src/render/`. Also unextracted: `build_model_matshp.dat`
+(`MapPropMaterialShape_Load`), and the cartridge's **edge marking** —
+`G3X_EdgeMarking(TRUE)` is on for the field, with
+`sIndoorsEdgeMarkings` / `sOutdoorsEdgeMarkings` chosen by
+`AreaDataManager_IsOutdoorsLighting`, which is the `outdoors` flag pass 12 added.
+That outline is visible on the cartridge's buildings in the comparison shot and
+absent from the port's.
+
+**Items 2 and 4 stay open.** Nothing here has been seen running.
+
+## Pass 14 — the prop draw list, which is an order and not an enumeration
+
+Continuing items 2 and 4. Pass 13 established which props an area loads; this pass
+extracts **how a prop is drawn**, which turned out to be the other half of making
+one appear correctly.
+
+### A map prop is not drawn as a model
+
+`MapProp_Draw` never hands the prop's NSBMD to the renderer and let it walk its own
+shapes. It walks a list out of a separate file:
+
+```c
+MapProp_GetMaterialShapeIDsLocator(modelID, propMatShp, &count, &index);
+propMatShpIDs = MapPropMaterialShape_GetMaterialShapeIDsAt(index, propMatShp);
+u8 materialID = 0xFF;
+for (i = 0; i < count; i++) {
+    if (materialID != propMatShpIDs[i].materialID) {
+        materialID = propMatShpIDs[i].materialID;
+        sendMaterial = TRUE;
+    } else {
+        sendMaterial = FALSE;
+    }
+    NNS_G3dDraw1Mat1Shp(model, materialID, propMatShpIDs[i].shapeID, sendMaterial);
+}
+```
+
+One `NNS_G3dDraw1Mat1Shp` per pair, in the file's order. **So the file is the draw
+order**, and it cannot be reconstructed by iterating the model.
+
+### The format, and it closes with no slack
+
+`fielddata/build_model/build_model_matshp.dat` — a plain ROM file, not a NARC,
+read by `MapPropMaterialShape_Load` with four bare `FS_ReadFile` calls:
+
+```
+u16 idsLocatorsCount
+u16 idsCount
+{ u16 idsCount; u16 idsIndex; }   x idsLocatorsCount   -- per PROP MODEL
+{ u16 materialID; u16 shapeID; }  x idsCount           -- the pairs
+```
+
+Measured: **590 locators, 1009 pairs**, and
+`4 + 590*4 + 1009*4 = 6400` = **the file's exact size**. 590 is also exactly
+`build_model.narc`'s member count, so the locator array is indexed by prop model id
+across the whole archive. The per-locator counts **sum to 1009 exactly** — the pair
+array is partitioned by the locators with no overlap and no gap.
+
+| | |
+|---|---|
+| models with a draw list | **478** |
+| models with none | **112** |
+| longest list | **9** |
+| distinct materialIDs / shapeIDs | 9 each (0..8) |
+
+### Why the order matters, proved rather than asserted
+
+If every list ran its materials and shapes in ascending order, the file would carry
+nothing a renderer could not get from the model itself and extracting it would be
+pointless. It does not:
+
+- **160 of the 478** non-empty lists put their shape ids **out of ascending order**.
+- **Three** lists draw their materials out of order — models **22, 23 and 236** —
+  and each draws **material 0 LAST**, after materials 1..4. That is translucency
+  ordering, and it is exactly what comes out wrong if a prop is drawn the obvious
+  way.
+
+### The `sendMaterial` rule fires exactly once in the cartridge
+
+**1008 of the 1009 pairs change material.** Exactly **one** reuses the previous
+one: model **175**, whose list is `(m0,s0) (m0,s1)`. So a renderer that
+"simplifies" the rule to always-send would be right 1008 times and wrong once —
+precisely the kind of fault that never gets found. The count is pinned in the check
+for that reason, along with the note that if it were 0 the rule would be untestable
+on this cartridge.
+
+`u8 materialID = 0xFF` before the loop is what guarantees the **first** pair always
+sends, since no prop uses material 255. `parse` seeds with 0xFF for the same reason,
+and a planted seed of 0 fails **478 assertions**.
+
+### An empty locator carries 0xFFFF
+
+All **112** empty locators have `idsIndex == 0xFFFF`, with no exceptions in either
+direction — the count and the sentinel never disagree. On the cartridge that is
+harmless because the loop runs zero times, but **a reader that resolves the index
+before checking the count indexes 65535 into a 1009-entry array.** `parse` stores
+nothing at all for an empty list, and the check reads the sentinel straight off the
+bytes because of that.
+
+### Files
+
+| file | what changed |
+|---|---|
+| `src/import/Gen4PropShapes.lua` | **new**, 130 lines — the draw-list decoder, with `sendMaterial` precomputed per pret's rule |
+| `src/import/RomExtractorGen4.lua` | `mapProps` now also parses the draw lists into `gen4_mapprops.draw` |
+| `tools/gen4_mapprops_check.lua` | section 6 added — **5224 checks / 0 failures** |
+
+Folded into `gen4_mapprops` rather than given its own cache table, so everything a
+prop needs arrives together.
+
+### The check
+
+**Twelve faults planted against section 6, ten caught.** The two that were not are
+**guard removals** rather than behaviour changes, and the check asserts both
+invariants directly off the bytes regardless: relaxing the exact-length test, and
+dropping the rejection of a sentinel on a non-empty list — neither changes anything
+on this cartridge, because the data already satisfies both.
+
+**The real miss, found by planting and now closed:** `out.draw = nil` sailed
+straight through. Section 6 parses the file *itself*, so it passed whether or not
+the extractor kept what it read — **the write-and-never-read family in reverse,
+data decoded correctly and then dropped on the floor.** The check now asserts that
+`out.draw` is assigned inside `mapProps`, and that plant fails.
+
+Worth recording that two swaps produced *nearly plausible* output rather than
+obvious garbage: swapping material and shape inside a pair still yields 9 distinct
+values on both axes and only shows up in the shape-order count (3 non-ascending
+instead of 160), and starting the pair array at the header instead of after the
+locators gives 86 non-ascending lists instead of 160. **Neither would have been
+caught by a range check.**
+
+### Standing sweep
+
+`cache_wiring` 30/0, `arealight` 5277/0, `mapprops` 5224/0, `coverage` 6/0,
+`distworld` 57/0, `branch` 6/0, `moveanim` 435/0, `particle` 136/0, `moveeffect`
+31/0, `seam` 162/162 verbs resolve.
+
+### Still open
+
+Everything a prop needs is now in the cache — model id, placement, scale, rotation,
+the per-area allow-list, the texture set index, and the draw order. **Nothing draws
+it.** That is in `src/render/`.
+
+Also still unextracted for the field: the cartridge's **edge marking**.
+`G3X_EdgeMarking(TRUE)` is on, with `sIndoorsEdgeMarkings` / `sOutdoorsEdgeMarkings`
+selected by `AreaDataManager_IsOutdoorsLighting` — the `outdoors` flag pass 12
+added. Those outlines are on the cartridge's buildings in the comparison shot and
+absent from the port's.
+
+**Items 2 and 4 stay open.** Nothing here has been seen running.
+
+## Pass 15 — item 3, the running shoes: three faults, one of them silent
+
+Reported as **"running shoes don't work, need sprint animation"**. Three separate
+things were wrong and none of them was visible from inside the game.
+
+### 1. There was no Gen 4 branch at all
+
+`OverworldState:runFrames` had a Gen 3 branch and a Prism fall-through:
+
+```lua
+elseif version ~= "prism" then
+  return nil
+```
+
+Every Platinum dataset landed in that refusal, so the shoes Mum hands over in the
+opening did nothing for the rest of the game.
+
+### 2. Opcode 0x159 was in the table with no lowering
+
+`checkrunningshoesacquired` was decoded and named and never lowered. The port's own
+comment on the neighbouring commands says why that is worse than a missing command:
+
+> the branch after them reads whatever the LAST comparison left in the register, so
+> an unlowered `countbadgesacquired` does not just fail to count badges, it makes
+> the next `gotoif` decide at random.
+
+So a script asking whether the player has the shoes got an answer with nothing to
+do with the shoes.
+
+### 3. The flag was written and read by nothing — the sixth time
+
+`g4_running_shoes` sets `save.player.runningShoes` **and** `save.hasRunningShoes`,
+with a comment saying it writes both "so whatever already gates running agrees."
+Nothing agreed, because nothing read either one. That is the sixth
+write-and-never-read in this port, after `gen4_species_sprites`,
+`gen4_move_anims`, `gen4_particles`, `gen4_overworld` and the terrain's own
+area-light byte.
+
+### Sinnoh's rule is two gates, and that is a measurement
+
+`player_move.c`, three times over — the plain, distortion and gravity movement
+variants all carry the same test:
+
+```c
+if (PlayerData_HasRunningShoes(player) == TRUE
+    && PlayerAvatar_IsRunButtonHeld(playerAvatar, keyPress) == TRUE) {
+    movementAction = MOVEMENT_ACTION_RUN_NORTH;
+    speed = PLAYER_ACTION_SPEED_FAST;
+}
+```
+
+and `PlayerAvatar_IsRunButtonHeld` is `pad & PAD_BUTTON_B`.
+
+- **No map gate.** `isRunningAllowed` is a real bitfield in pret's `MapHeader` —
+  bit 13, which `Gen4MapHeaders` already parses as `allowRunning` — and it is read
+  **nowhere** in the cartridge's code. The only other mentions are the header data
+  declarations. Hoenn's "228 of 519 maps allow it" has no Sinnoh counterpart.
+- **No ground gate.** Emerald has `MetatileBehavior_IsRunningDisallowed` and seven
+  behaviours; Platinum's run branch tests nothing about the tile. Where Sinnoh does
+  override movement (ice and the rest of `PlayerTileMovement`) it takes a different
+  movement function entirely, so running is bypassed structurally rather than
+  refused. Adding a ground check would be inventing a rule.
+
+### The step ladder, and the port was walking at half pace
+
+`MovementAction_InitWalk(mapObj, dir, distance, duration, ...)` is called once per
+speed, and **every row multiplies out to the sixteen pixels of one cell**:
+
+| distance | frames | action |
+|---:|---:|---|
+| 0.5 | 32 | slower |
+| 1 | 16 | slow |
+| **2** | **8** | **walk normal** |
+| 4 | 4 | walk fast |
+| 8 | 2 | faster |
+| 16 | 1 | instant |
+| **4** | **4** | **RUN** |
+
+So a Sinnoh walk is **two pixels a frame over eight frames**, not one over sixteen.
+The engine's fallbacks are 16 and 8 — Gen 1/2's numbers — and a Gen 4 cache that
+states neither inherits them silently. **Every step in Sinnoh was running at half
+the cartridge's pace.** `constants.world` now states `stepFrames = 8` and
+`runStepFrames = 4`.
+
+### Why the sprint animation is a separate problem
+
+**RUN and WALK_FAST are identical** in distance and duration. The only argument
+that differs is the last one — `MAP_OBJ_UNK_A0_09` against `_04` — which
+`InitWalk` stores into a field **pret itself names `unused`**, and which nothing
+reads. So the run is not a different *speed* from walk-fast; it is a different
+*animation* at the same speed, dispatched through the distinct movement action
+`MOVEMENT_ACTION_RUN_*` → `gMovementActionFuncs_RunNorth`.
+
+**I have not found how that animation is selected, and I am not guessing at it.**
+`unk_A0` is written and never read, so the selection is not through that argument.
+That is where item 3's second half stands: the speed and the gates are now the
+cartridge's, and the sprint frames are still unidentified.
+
+### Files
+
+| file | what changed |
+|---|---|
+| `src/world/OverworldController.lua` | Gen 4 branch in `runFrames`; `local gen4` declared beside `gen3`; the gate log renamed off one generation |
+| `src/import/RomExtractorGen4.lua` | `constants.world` states Platinum's `stepFrames = 8` and `runStepFrames = 4` |
+| `src/script/Gen4ScriptVM.lua` | `checkrunningshoesacquired` lowered |
+| `src/script/Gen4Commands.lua` | `g4_has_running_shoes`, normalising to 1/0 and reading both spellings |
+| `tools/gen4_running_check.lua` | **new**, 59 checks / 0 failures |
+
+### The check, and two things it caught in my own work
+
+**59 checks, 0 failures. Twelve faults planted, twelve caught.**
+
+While writing it, the check failed on correct code twice, and both are worth
+recording:
+
+- **`local gen4` was reported as declared after its use.** It was not. The
+  positional test matched inside **the comment I had just written to explain that
+  exact trap**, because the comment contains the literal string `elseif gen4
+  then`. The same slip would have let a genuinely misplaced local through. The
+  check now strips Lua comments before reading any port source — **a check that
+  reads source text has to read the code and not the prose about it.**
+- **The gate count matched one of three sites.** The three parenthesise the test
+  differently and one nests it instead of `&&`-ing it, so a pattern tight enough
+  for one missed the others. Counted by the two function names instead.
+
+I also very nearly repeated the nil-global bug in the check itself: the
+`stripComments` helper was first placed below three of its callers.
+
+### Standing sweep
+
+`cache_wiring` 30/0, `arealight` 5277/0, `mapprops` 5224/0, `running` 59/0,
+`coverage` 6/0, `distworld` 57/0, `branch` 6/0, `moveanim` 435/0, `particle` 136/0,
+`moveeffect` 31/0, `seam` 162/162.
+
+**Item 3 stays open** — the gates and the speed are right, the sprint animation is
+not found, and nothing has been seen running.
+
+## Pass 16 — the camera, measured by actually rendering it
+
+Taking the camera and the ground over, and — for the first time on this port — a
+frame that can be **looked at**. LÖVE runs headless in the work container under
+`xvfb-run`, `love.graphics.captureScreenshot` writes a PNG, and I can read the
+PNG. Everything below is measured off a render, not off a screenshot estimate.
+
+### First, a correction to my own earlier report
+
+From the two Twinleaf screenshots I reported three findings. **(b) was wrong.**
+
+I said the pitch looked too steep, measuring roof:wall at 2.1 in the port against
+1.6 on the cartridge. The bench draws a box of known world size through both
+projections and measures:
+
+```
+cartridge roof=20.583 wall=12.342 ratio=1.6677
+oblique   roof=24.000 wall=14.391 ratio=1.6677
+```
+
+**Identical, and both match the cartridge's ~1.6.** They must be: the oblique
+leans height by `cot(pitch)` and the cartridge scales ground by `sin` and height
+by `cos`, and `cot = cos/sin`, so the two differ by a uniform vertical stretch and
+**shape ratios are untouched**. My 2.1 was eyeballed off a small screenshot and it
+was not a real measurement. Withdrawn.
+
+### (c) is real, and it is 1.166x rather than ~1.5x
+
+The oblique is the cartridge's picture stretched vertically by `1/sin(pitch)` —
+**16.6%** at DEFAULT. On screen that means:
+
+| | ground depth in 192 rows |
+|---|---|
+| cartridge projection | **223.9 world units** |
+| flat grid | **192.0** |
+
+### THE FAULT: the ground is projected and nothing else is
+
+`Gen4Ground` has **already been switched** to the cartridge's projection — its
+matrix row 2 is `-2*cos/height, 2*sin/height`, which is `z*sin - y*cos`. That part
+is right.
+
+**Nothing else moved with it.** `Gen4Camera` is required by exactly three files:
+the ground, the overworld controller (for the OPTIONS tilt row) and the options
+menu. **`Gen4Camera.project` is called by nothing at all.** So the ground is
+compressed to 85.8% of its depth while the player, the NPCs and the props are
+still placed on the flat 16-pixel tile grid.
+
+Measured on the bench:
+
+| tile row | ground | sprite | drift |
+|---:|---:|---:|---:|
+| 4 | 54.9 px | 64.0 px | **9.1 px** |
+| 8 | 109.8 px | 128.0 px | **18.2 px** |
+| 12 | 164.7 px | 192.0 px | **27.3 px** |
+| 16 | 219.6 px | 256.0 px | **36.4 px (2.28 tiles)** |
+
+A character at the far edge of the view is drawn **more than two tiles off the
+ground they are standing on**, and the render shows the posts walking clean off
+the compressed ground onto the background. A world whose ground tilts while its
+people do not is a world that does not read as tilted at all — which is exactly
+the report.
+
+### And a claim in the camera file that was not true
+
+`Gen4Camera` said the `tan(halfFov) * distance` rule "comes out within 1.3% of 1.0
+for every one of the seventeen". It was written from the four rows quoted beneath
+it. Checking **all seventeen** found two that miss:
+
+| | | |
+|---|---:|---:|
+| `[8] stark_room2` | 115.09 | **+19.89%** |
+| `[16] unused_16` | 91.61 | **−4.57%** |
+
+**Both were re-read from pret's `sCameraTypes` and both match exactly** — same
+distance, pitch and FOV. So this is not an extraction error: Stark Mountain's
+second room really does render about 1.2× off one-unit-per-pixel, and a renderer
+assuming 1:1 everywhere draws that map at the wrong scale. `unused_16` is named
+for being unreachable, so its miss costs nothing; **camera 8 is used by a real
+map.** The comment is corrected and the check now names both exceptions, so a
+third one fails rather than being absorbed by a loosened tolerance.
+
+### Files
+
+| file | what changed |
+|---|---|
+| `tools/gen4_camera_check.lua` | **new**, 79 checks / 0 failures + 1 OPEN |
+| `tools/gen4-camera-bench/main.lua` | **new** — the LÖVE bench that produced the numbers and the picture |
+| `src/render/Gen4Camera.lua` | the "every one of the seventeen" claim corrected to fifteen, with both exceptions named and cross-checked against pret |
+
+### The check
+
+**79 checks, 0 failures. Ten faults planted, ten caught** — including swapping
+`scales` to cos/sin, reverting the ground matrix to the oblique, and "correcting"
+stark_room2 to obey the 1:1 rule.
+
+The sprite-projection fault is **reported as an `OPEN:` line and not counted as a
+failure.** It is a known-open defect rather than a regression, and a check that can
+never pass turns the standing sweep red for everyone forever, which is how a
+permanently-red check stops being read. The drift is asserted as a number instead,
+so its size cannot change unnoticed while the fault is open.
+
+### What comes next, and it is a real decision
+
+Projecting the sprites means ground depth no longer equals tile pixels, so every
+consumer that assumes "one tile is 16 screen pixels" — collision, the tile window,
+warps, the encounter grid, every sprite's screen position — has to go through the
+camera too. The oblique was chosen precisely to avoid that, and the comment in
+`Gen4Ground` says so. That is the work, and it is the only way the drift closes.
+
+**Item 1 stays open.**
+
+## Pass 17 — I was wrong about the sprites, and the tilt path really was broken
+
+Pass 16 reported that nothing projects sprites through the camera, so the ground
+compressed while every character stayed on the flat grid. **That conclusion was
+false, and the way it was false is worth more than the finding was.**
+
+### What I actually did
+
+I asserted that `Gen4Camera.project` was called by something, found that nothing
+calls it, and concluded the projection was missing. The projection is there. It
+simply does not go through that function:
+
+```lua
+local groundSin = ground and ground.scale and select(1, ground:scale()) or 1
+local function riseOf(e)
+  if not ground then return 0 end
+  local rise = ground:rise(e.px + (e.shiftPx or 0) + 8, e.py + 8)
+  if groundSin >= 1 then return rise end
+  return (e.py - cam.y) * (1 - groundSin) + rise
+end
+```
+
+`OverworldState:draw` asks the ground for its own sin, and folds the whole
+projection into a **per-entity camera offset**:
+
+```
+py - camY' = (py - camY) * sin - rise
+camY'      = camY + (py - camY) * (1 - sin) + rise
+```
+
+which is algebraically the same projection and touches **one seam** instead of
+every sprite path in the engine. It is a better design than the one I was about
+to propose, and it was already written.
+
+**The lesson, and it is the second time this port has taught it:** a check written
+against the implementation you expected will call correct code broken. Test the
+behaviour — that something asks the ground for its scale, that the `(1 - sin)`
+term is applied, that the terrain rise is read — not the name of a function that
+might have carried it. [[gen2_postgame_wiring]] says the same thing about
+"implementing" what already exists; this is that lesson one layer further in.
+
+### The real fault, which the correction surfaced
+
+`riseOf` was a local **inside the flat draw path**. The engine has two:
+
+| path | entity draw |
+|---|---|
+| flat | `e:draw(cam.x, cam.y + riseOf(e))` |
+| tilt | `e:draw(cam.x, cam.y)` |
+
+So with tilt on, a Sinnoh character lost **both** the terrain rise and the
+ground's sin-compression, and detached from the ground by the full drift — 36 px,
+**over two tiles**, at the far edge of the view.
+
+And it is reachable: `Tilt.active()` is `Tilt.level > 0 or Tilt.angle > 0`, a
+plain player option with **no generation gate**. Any Platinum map, any player who
+turns tilt on.
+
+`riseOf` is now hoisted above the branch and both paths apply it.
+
+### Still uncorrected, and stated rather than quietly left
+
+**Ghost NPCs** — the neighbouring-map characters drawn across a map seam — take no
+`riseOf` in either path (`g.npc:draw(cam.x - g.ox, cam.y - g.oy)`). That is at
+least consistent between the two paths, and it is a narrower case than the one
+fixed here, but it is the same fault and it is open.
+
+### The check
+
+**86 checks, 0 failures.** Section 4 was rewritten from "does anything call
+`project`" to "is the projection applied", and now asserts:
+
+- something asks the ground for its scale
+- the `(1 - sin)` compression term is present
+- the terrain rise is read
+- **at least two** entity draw calls add `riseOf`, and **no** draw call passes a
+  bare `cam.y`
+- `Gen4Ground:scale()` returns the **stored** scales
+
+That last one closes a gap the plants found: a planted `return 1, 0` passed
+everything else in the file. The call site still called it, the `(1 - sin)` term
+was still written, and `1 - 1` is zero — so every sprite silently stopped being
+compressed while the ground still was. **An accessor that lies makes each of its
+consumers look correct on its own.**
+
+Seventeen faults planted across both batches, seventeen caught.
+
+### Standing sweep
+
+`camera` 86/0, `running` 59/0, `arealight` 5277/0, `mapprops` 5224/0,
+`cache_wiring` 30/0, `moveanim` 435/0, `particle` 136/0, `moveeffect` 31/0,
+`distworld` 57/0.
+
+**Item 1 stays open**, and the OPEN line from pass 16 is withdrawn along with the
+finding behind it.
+
+## Pass 18 — Twinleaf is drawing another map's terrain
+
+Reported: still flat, "looks like a GBA game instead of showing the depth and 3d
+of the models", and the trees don't look 3D either.
+
+### What the Twinleaf log says
+
+```
+[info] gen4 camera: default at 59.05 deg -- ground x0.858, height x0.514
+[info] map: T01 at (20,21)
+[info] gen4 ground: chunk 4 baked 0 building(s), 0 unresolved (canvas 512x637, lean 197)
+```
+
+The camera is right and the pitch is applied (`lean 197`). The chunk is not.
+
+### The finding, from the cartridge's own ownership record
+
+Matrix 0 is the 30x30 Sinnoh overworld and it carries a **header id per cell**.
+Asked directly:
+
+```
+header 411 (T01 Twinleaf) owns 1 non-empty cell: (3,27) -> land 0
+land 4 at cell (2,26) is owned by header 334   <- what the port bakes
+land 3 at cell (2,25) is owned by header 334   <- what it baked for R201
+```
+
+**Twinleaf Town is land chunk 0. The port bakes land chunk 4, which belongs to a
+different map.** Chunk 0 carries **eight props**; chunk 4 carries none.
+
+That is the whole of "no 3D". Measured over Twinleaf's *actual* mesh (chunk 4, the
+wrong one): trees 1.5-2.6 tiles tall, and **every other shape flat at ground
+level** -- including `fenter`, a door, as four flat triangles. No walls, no roofs,
+because the houses are props and the chunk the port picked has none.
+
+It also explains why the trees looked wrong without looking obviously wrong: every
+neighbouring outdoor chunk has trees, so the mistake hid behind plausible grass.
+
+### The data is all correct, which is what makes this interesting
+
+Every input was checked and every one is right:
+
+| | |
+|---|---|
+| `Gen4Maps.extents` for header 411 | chunkX 3, chunkY 27, x **96**, y **864**, solid |
+| cached `T01` def | header 411, layout 0, originX **96**, originY **864**, 32x32 |
+| cache `matrices[0]` cell (3,27) | land **0** |
+| chunk 4's `objSize` in the ROM | **0** -- the extractor lost nothing |
+
+And the port's own arithmetic, simulated against the cache:
+
+```
+camX=  0 camY=  0 -> left= 1536 top= 13824 -> cell (3,27) -> land 0
+camX=192 camY=240 -> left= 1728 top= 14064 -> cell (3,27) -> land 0
+camX=256 camY=320 -> left= 1792 top= 14144 -> cell (3,27) -> land 0
+```
+
+Land 0, for every plausible camera position. **So correct data is producing a wrong
+answer at runtime**, and the value `Gen4Ground` actually holds for `def.originX` is
+the one thing that cannot be read from outside the process.
+
+### What this pass adds
+
+Two log lines, and nothing else:
+
+- `Gen4Ground.forMap` prints `id`, `layout`, `origin` in tiles, the pixel offset,
+  `chunkPx` and the grid extent, once per map load.
+- `Gen4Ground:draw` prints the camera, the offset, the divided cell and the land
+  id it resolved to -- once per distinct cell rather than per frame.
+
+No behaviour change. The next run says which number is wrong.
+
+### Three parsing mistakes of my own, recorded because they cost real time
+
+This turn I reached three wrong conclusions in a row, each from sloppy extraction
+rather than from the data:
+
+1. **"The chunk lookup is correct."** I argued chunk 4 must be Twinleaf because it
+   sits bottom-left and Twinleaf is bottom-left. Circular. The header layer is the
+   ownership record and it says chunk 0.
+2. **"Twinleaf owns only one non-empty cell, so the extents must be wrong."** I had
+   filtered out cells whose land is the 0xFFFF sentinel, so my count was not the
+   count `extents` computes.
+3. **"The cached def says header 417, layout 123."** It says header 411, layout 0.
+   I read fields out of a 60,000-character window that spanned several map records,
+   and a dict comprehension kept the last match.
+
+The pattern is the same each time: **a measurement whose bounds I did not check.**
+Bound the record, then read it -- the same lesson the check-writing notes already
+carry about anchoring a source match inside the function it is about, arrived at
+from the data side.
+
+### Standing sweep
+
+`camera` 86/0, `running` 59/0, `arealight` 5277/0, `mapprops` 5224/0,
+`cache_wiring` 30/0.
+
+**Items 1, 2 and 4 stay open**, and item 2 has a name now: `kanban01` is
+`build_model.narc` member 2, the signboard. It is a prop, so it arrives with the
+buildings -- one more thing the wrong chunk costs.
+
+## Pass 19 — chunk 0 bakes; the game just never asks for it
+
+Pass 18's diagnostic answered the question it was written for, and raised a
+sharper one.
+
+### What the log said
+
+```
+[info] gen4 ground: T01 layout=0 origin=(96,864) tiles -> offset=(1536,13824)px chunkPx=512 grid=30x30
+[info] gen4 ground: cam=(-176,-103) + offset=(1536,13824) -> left/top=(1360,13721) -> cell (2,26) -> land 4
+[info] gen4 ground: chunk 4 baked 0 building(s), 0 unresolved
+[info] gen4 ground: cam=(80,137)   + offset=(1536,13824) -> left/top=(1616,13961) -> cell (3,27) -> land 0
+```
+
+**The origin is right** (96, 864 -- exactly what the ROM and the cache both say),
+and the loop **does** reach Twinleaf's own cell (3,27) -> land 0.
+
+Two things follow that were not visible before:
+
+- **The camera goes NEGATIVE** (`cam=(-176,-103)`). The viewport is 1024 px, twice
+  a chunk, so the top-left corner sits outside the map in a neighbour's chunk.
+  That is correct for a seamless world -- the loop spans `x0..x1` -- and the
+  earlier reading of "the port picks the wrong chunk" was only ever looking at
+  the top-left corner of a nine-cell span.
+- **No `chunk 0 baked` line appears. Ever.** Land 0 resolves and is never baked.
+
+### Chunk 0 is fine, proved by driving the real code
+
+A LOVE harness was built around the *live cache* -- `gen4_terrain.lua` and the
+18.5 MB `chunks.bin` staged off the device -- and it drives the actual
+`Gen4Ground`, not a model of it:
+
+```
+forMap -> true
+offset=(1536,13824) chunkPx=512 grid=30x30
+  modelFor(0) -> true shapes=19
+  modelFor(4) -> true shapes=14
+[info] gen4 ground: chunk 0 baked 0 building(s), 8 unresolved (canvas 512x637, lean 197)
+  canvasFor(0) -> true   noDepth=nil
+```
+
+**Twinleaf's chunk carries its eight buildings and bakes correctly when asked.**
+(The "8 unresolved" is the harness's own doing -- it did not load `gen4_models`,
+so the building set was nil. The point is that the eight objects are there.)
+
+So the geometry, the origin, the cell arithmetic and the bake all work. The fault
+is that `canvasFor(0)` is not reached in a real session.
+
+### And it is not the draw target
+
+The obvious suspect was allocation: a Sinnoh session builds one ground per map
+**and per visible neighbour** -- seven at once on Route 201 -- each caching
+512x637 colour canvases with a depth buffer apiece. `newTarget` failing would
+latch `noDepth` and switch that ground to the stand-in **without a word in the
+log**.
+
+Stress-tested in the harness: **400 targets allocated, roughly 1 GB, no failure.**
+So that is not it here, though it remains the only path that could kill the ground
+silently -- which is why it now speaks.
+
+### What this pass changes: three silent exits, now stated
+
+No behaviour change. `Gen4Ground` had three ways to return nil without a word,
+and between them they made "the 3D does not work" indistinguishable from "the 3D
+was never asked to draw":
+
+| exit | now says |
+|---|---|
+| `newTarget` failed | which map, what size, which chunk, and that this ground is on the stand-in for the rest of the session |
+| `modelFor` returned nil | whether the chunk record is present and how many shapes it has |
+| bake budget exhausted | which chunk was skipped, how many are cached, and the per-frame limit |
+
+The budget one is the live suspect. `BAKES_PER_FRAME` is 4 and a 1024-pixel
+viewport spans nine chunks, so cells past the fourth wait a frame -- harmless,
+because cached chunks are answered *before* the budget is checked and cost
+nothing. It stops being harmless if the cache is dropped underneath it: then the
+same four are rebuilt every frame and the fifth is never reached at all. The new
+line distinguishes those two cases in one run.
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `cache_wiring` 30/0.
+
+**Item 1 stays open.** The next log says which of the three exits is firing, and
+each one names its own fix.
+
+## Pass 20 — the log was lying, and I believed it for three passes
+
+### The mistake
+
+`Gen4Ground:bake` reported like this:
+
+```lua
+if not self.reportedBake then
+  self.reportedBake = true
+  Logger.info("gen4 ground: chunk %s baked %d building(s), ...")
+```
+
+**Once per ground instance, ever.** A Sinnoh session builds one ground per map
+*and per visible neighbour*, so each reported its FIRST bake and then went silent
+for the rest of the session.
+
+That is the whole of passes 18 and 19. The log showed `chunk 5 baked` from a
+neighbour draw and nothing afterwards, and I concluded — three times, with
+increasing confidence — that Twinleaf's chunk 0 "never bakes". It bakes every
+time, **with its eight buildings**.
+
+**A once-ever line read as a per-event line is worse than no line at all,
+because it looks like evidence of absence.** Fixed: keyed by chunk, capped at 40
+so a thrashing cache still cannot flood the log.
+
+### What running the real code proves
+
+A LOVE harness now drives the actual `Gen4Ground` against the live cache — the
+real `gen4_terrain.lua`, `gen4_models.lua` and the 18.5 MB `chunks.bin` — replaying
+the exact camera values out of the play log:
+
+```
+cam=(208,233) + offset=(1536,13824) -> cell (3,27) -> land 0
+[info] gen4 ground: chunk 0 baked 8 building(s), 0 unresolved (canvas 512x637, lean 197)
+baked: 0=ok  173=ok  3=ok  4=ok  5=ok
+```
+
+Every earlier claim in this file about the ground can now be checked instead of
+inferred:
+
+| claim | verdict |
+|---|---|
+| Twinleaf draws another map's chunk | **wrong** — it draws land 0, its own |
+| the origin is wrong | **wrong** — (96,864), matching ROM and cache |
+| chunk 0 never bakes | **wrong** — bakes every visit |
+| the buildings never resolve | **wrong** — 8 placed, 0 unresolved |
+| the projection is not applied | **wrong** — sin 0.8576, leanPx 197 |
+
+The negative camera (`cam=(-176,-103)`) is also correct: a 256-pixel viewport on
+a 512-pixel chunk means the top-left corner regularly sits in a neighbour's cell,
+and the loop spans `x0..x1`.
+
+### And the part that is still wrong
+
+The harness renders the frame, so the output can be looked at rather than argued
+about. **It comes out flat** — matching the play report exactly. Rendered at the
+map header's own pitch and again at 90 degrees, the two differ only by the
+expected vertical compression; neither shows the eight baked buildings standing
+up.
+
+So: the chunk is right, the buildings are placed, the matrix carries sin and cos,
+and the picture is still flat. **The fault is between placing a building and
+seeing it** — `placement()`, the model's own matrix, or the depth pass — and that
+is where the next pass starts, with a render to check it against rather than a
+log.
+
+### Instrumentation added
+
+Four silent exits in `Gen4Ground` now speak: a failed draw target (which latches
+`noDepth` and drops that ground to the stand-in for the session), a chunk with no
+drawable geometry, an exhausted bake budget, and — the one that hid this — a
+chunk answered from a **cached failure**, which `self.baked[land] = canvas or
+false` makes permanent.
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `cache_wiring` 30/0, `running` 59/0.
+
+
+## Pass 21 — the buildings were never the fault; my harness had no textures
+
+### The retraction first
+
+Pass 20 ended with a measurement I reported as the isolated remaining fault:
+
+> **Zero lit pixels.** The buildings draw *nothing* ... Not the camera, not the
+> matrix composition, not the chunk lookup, not the origin, not the depth target.
+
+**That measurement was an artifact of my own harness and the conclusion was
+wrong.** The building shapes name texture PNGs under
+`assets/generated/gen4/models/buildings/<model>/`. Those files exist in the
+runtime data directory; they were never staged into the headless harness. And
+`Assets.image` is written — correctly — never to return nil:
+
+```lua
+local function blank()
+  if not blankImage then
+    local data = love.image.newImageData(16, 16)
+    blankImage = love.graphics.newImage(data)
+  end
+  return blankImage
+end
+```
+
+`love.image.newImageData(16, 16)` is zero-filled, which is **transparent** black.
+A mesh textured with it samples alpha 0 at every fragment and draws exactly
+nothing. So a missing texture in the harness produces a perfect zero-pixel
+result that looks identical to a broken model pipeline — and I read it as one.
+
+This is the same error shape as pass 20's `reportedBake`: a measurement that
+cannot distinguish "absent" from "broken" was treated as evidence of "broken".
+The house rule stands and I broke it again — *a measurement that cannot fail
+says nothing*. Here the measurement could fail, but it could fail for two
+reasons and I only listed one.
+
+With the real PNGs copied into the harness, on the same canvas and the same view
+matrix:
+
+| drawn | changed pixels |
+|---|---|
+| `t1_h01` house model, textures absent | **0** |
+| `t1_h01` house model, textures present | **10,521** |
+| `t1_s01` shop model, textures present | **10,637** |
+
+and the house renders as a correctly textured, correctly lit 3D building.
+
+### What the ground pipeline actually does, rendered end to end
+
+With the textures staged, `Gen4Ground:bake(0)` was driven directly against
+Twinleaf's own data — map `T01`, texture set 6, chunk 0 — with a ground built
+field for field the way `forMap` builds one.
+
+```
+camera=default pitch=59.052 sin=0.8576 cos=0.5143 canvasPx=637 leanPx=197.9
+bake ok=true -> Canvas: 512x637
+```
+
+The canvas is **correct**: a fully textured Twinleaf Town with four houses
+standing up, each showing roof, front wall, door and windows, and the tree line
+around it. The bake is not flat, not untextured, and not missing its buildings.
+
+Texture resolution was checked rather than assumed. All nineteen of chunk 0's
+shapes resolve through the map's own set:
+
+```
+polygon0   texture=tree01     palette=tree01   -> .../terrain/tex/06/tree01.png
+polygon2   texture=ngrass     palette=grass    -> .../terrain/tex/06/ngrass.png
+polygon9   texture=conttree_b palette=conttree -> .../terrain/tex/06/conttree_b__conttree.png
+...
+chunk 0 under T01's set: 19 resolved, 0 unresolved
+```
+
+including the nine that are filed under `<texture>#<palette>` because they are
+worn with two palettes.
+
+### The source the harness ran is the source the game runs
+
+Because four passes of committed changes failed to alter the reported picture,
+the possibility that the game loads engine Lua from somewhere other than the
+repo was checked rather than assumed. The runtime data directory holds only
+`assets/`, `imports/`, `mods/` and the per-game data folders — **no `src/`** —
+so the engine comes from the repo. The four files that matter were staged back
+and compared line for line with both sides newline-normalised:
+
+| file | device lines | harness lines | differing hunks |
+|---|---|---|---|
+| `Gen4Ground.lua` | 1140 | 1140 | 0 |
+| `TileRenderer.lua` | 2226 | 2226 | 0 |
+| `Gen4Model.lua` | 653 | 653 | 0 |
+| `Gen4Camera.lua` | 302 | 302 | 0 |
+
+Identical. The harness is running the shipped code.
+
+### Which leaves the picture itself
+
+`TileRenderer:drawWindow` hands over to the ground and returns before the flat
+batch, and both `:draw` and `:drawMapOnly` go through it, so there is no path
+that draws tiles over the mesh. `Gen4Ground:draw` blits each baked canvas 1:1 at
+`(cx*px - left, (cy*px - top)*sinP - leanPx)` — no second scale, nothing that
+could squash it.
+
+So every stage that can be run in isolation is correct, and the question is no
+longer *"why is nothing drawn"* but *"is what is drawn the right shape"*. Two
+DS-sized 256x192 windows of the bake were rendered for that comparison. The
+houses show roof and front wall; the tree line reads noticeably flatter than the
+cartridge's.
+
+That is a **camera-constant** question, not a plumbing question, and it is a
+different search from the one passes 18-20 were running:
+
+* ground depth scales by `sin(pitch)`, height by `cos(pitch)`, and the whole
+  thing is then stretched by `1/sin(pitch)` to keep the ground 1:1 with the tile
+  grid — so height reaches the screen at `cot(59.05deg) = 0.60` of a ground unit;
+* `areabm_texset.narc` prop texture sets are still not extracted;
+* edge marking (`G3X_EdgeMarking(TRUE)` with `sIndoorsEdgeMarkings` /
+  `sOutdoorsEdgeMarkings` selected by the `outdoors` flag) is still not applied,
+  and that outline is a large part of why the cartridge's trees read as solid.
+
+Before any of that is changed, the rendered windows need to be compared against
+what the running game puts on screen. If they match, the fault is in the
+constants above. If they do not, the fault is between the bake and the screen in
+the live session, and nothing in this pass has found it.
+
+**Nothing is marked complete.** Item 1 stays open, as do items 2 and 4, which are
+the same fault.
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 22 — the height is in the geometry and it reaches the screen
+
+Reported again from play: *"Still looks flat from my end, I don't think the
+renderer in our game is using an orthographic camera for the viewing of the
+world"*, with a full session log.
+
+### Answering the camera question first, with the matrix
+
+The port is **already orthographic**. `Gen4Ground:projection()` builds this, and
+it is printed here rather than described:
+
+```
+view matrix (row-major)
+   0.00391   0.00000   0.00000   0.00000
+   0.00000  -0.00161   0.00269   0.31066
+   0.00000  -0.00098  -0.00059   0.00000
+   0.00000   0.00000   0.00000   1.00000
+```
+
+Row 1 is the cartridge's own `z*sin - y*cos`: `-2*cos/637 = -0.001615` on the
+height axis, `2*sin/637 = 0.002692` on the ground axis, `lean/637 = 0.31067` on
+the translation. There is no perspective divide anywhere in it.
+
+**The cartridge, by contrast, is perspective** — DEFAULT is `distance
+666.922`, `halfFov 8.0914`. That is a very long lens: `tan(8.0914deg) * 666.92 =
+94.85` world units for a 96-pixel half-screen, so **1.012 px/unit**. A point 42
+units above the ground sits `42*cos(59.05deg) = 21.6` units nearer the eye, which
+magnifies it by `666.92 / (666.92 - 21.6) = 1.0335`.
+
+So switching to a true perspective camera would splay the tops of trees and
+houses outward by **3.3%** — about 3 pixels on a DS half-screen. It is a real
+difference and worth doing eventually, but it is nowhere near large enough to be
+the reported flatness.
+
+### The height is in the geometry — measured per shape
+
+Read off the raw vertices of Route 201's own chunk (`land 5`, the one the log
+resolves to), `posScale = 64`, and converted with `cot(59.05deg) = 0.5996`:
+
+| shape | texture | verts | yMin | yMax | rise on screen |
+|---|---|---|---|---|---|
+| polygon2 | ngrass | 148 | 16.00 | 16.00 | 0.00 px |
+| polygon3 | tree04_2 | 224 | 16.91 | 58.31 | **24.83 px** |
+| polygon4 | tree01 | 288 | 16.91 | 58.31 | **24.83 px** |
+| polygon7 | conttree_b | 176 | 16.91 | 42.75 | 15.50 px |
+| polygon8 | conttree_t | 176 | 34.39 | 58.31 | 14.34 px |
+
+The ground shapes are flat by design — every one is at exactly `y = 16.00`. The
+**trees carry the height**, 42.31 units of it, which the projection turns into
+25 screen pixels of lean. Twinleaf's buildings measure the same way: `t1_h01`
+spans 71 units (42.6 px), `t1_s01` and `t1_s02` 90.78 units (54.4 px).
+
+### And it reaches the screen
+
+Chunk 5 was baked twice from the same data and the same textures, changing only
+the pitch — once at the cartridge's 59.05 degrees, once with the OPTIONS row
+pinned to 90.
+
+* **59.05 deg** — the trees are pine-shaped; their lit sides are visible and they
+  stand off the ground.
+* **90 deg** — the same trees are round overhead blobs.
+
+The two pictures are plainly different, in the direction and by the amount the
+pitch predicts. **The projection reaches the geometry.** Whatever is flattening
+the reported picture is not the matrix, not the pitch, and not the mesh.
+
+### The mods were audited, and are not it
+
+`%APPDATA%/LOVE/Gen2Recomp/mods/DRAMATIC_SHAPE/main.lua` registers a `voxel`
+**drawWorld** pipeline whose own header says it replaces the flat tile blit. A
+mod owning the world pass would explain four passes of committed changes having
+no effect on the reported picture, so it was checked rather than assumed:
+
+```lua
+pipelines = { lavveil = 0, stadium2_battle_clock = 0,
+              stadium2_gold_voxel = 0, tiltshift = 1, voxel = 0 }
+modOptions.DRAMATIC_SHAPE.voxel3d = false
+```
+
+`voxel = 0` and `voxel3d = false`: **no mod owns the world pass**, and the log
+carries no `world pass:` line, which agrees. `Gen4Ground` is drawing.
+
+**One thing did come out of that audit.** `tiltshift = 1` is ON. It is
+DRAMATIC_SHAPE's `worldPresent` pipeline — a tilt-shift blur whose own comment
+says *"the blur belongs on the diorama"* — and its `worldPresent` is
+unconditional:
+
+```lua
+worldPresent = function(canvas)
+  return TiltShift.apply(canvas)
+end,
+```
+
+Nothing gates it on the voxel pipeline that is switched off. A tilt-shift blur
+holds one horizontal band sharp and progressively blurs everything above and
+below it, which is exactly the operation that would destroy the lit-side/
+shaded-side shading that makes a tree read as solid. This is a **candidate, not
+a finding** — it is ON in the session that reports flat and absent from the
+headless harness that renders 3D, which is a difference worth one keypress
+(hotkey `6`) to settle, and nothing more is claimed for it until it is.
+
+### What was ruled out this pass
+
+* the projection matrix (printed above, correct)
+* the pitch (`59.05 deg`, "the map header's own", in the log and in the harness)
+* the geometry (25 px of tree rise, measured per shape off raw vertices)
+* the bake (both pitches rendered and compared)
+* the engine source (`Gen4Ground`, `TileRenderer`, `Gen4Model`, `Gen4Camera` all
+  byte-identical between the repo and the harness)
+* a mod owning the world pass (`voxel = 0`, no `world pass:` line)
+
+### Still open, and now the likeliest remaining causes
+
+1. `tiltshift = 1` running its blur with its diorama off.
+2. Edge marking — `G3X_EdgeMarking(TRUE)` with `sIndoorsEdgeMarkings` /
+   `sOutdoorsEdgeMarkings` chosen by the `outdoors` flag — is **not applied**.
+   That outline is a large part of why the cartridge's trees read as solid
+   objects rather than as texture.
+3. The orthographic-for-perspective substitution, worth 3.3% of splay.
+4. `areabm_texset.narc` prop texture sets, still not extracted.
+
+**Nothing is marked complete.** Items 1, 2 and 4 stay open.
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 23 — Sinnoh was never lit, and the mesh format could not have shown it if it were
+
+Play-test reply to pass 22's two renders: *"Looks like the 59 degree one but its
+like a flat rendering"* — the tilt is arriving and the world still has no form.
+That is the report that finally localised this.
+
+### Every vertex in Sinnoh is white
+
+Measured off the packed geometry, counting DISTINCT colours rather than
+sampling:
+
+| | vertices | distinct colours |
+|---|---:|---|
+| Route 201 chunk 5, 13 shapes | 1,264 | **1** — `255,255,255` |
+| Twinleaf chunk 0, 19 shapes | 3,226 | **1** — `255,255,255` |
+| `t1_h01`, 4 shapes | 304 | **1** — `255,255,255` |
+
+Not mostly white. One colour in the whole world.
+
+That is not an extraction fault. Platinum's map display lists issue **NORMAL
+(0x21) and never COLOR (0x20)**, because the DS's geometry engine computes each
+vertex's colour in hardware from the normal and the area light. A port that
+replays the vertices and drops the lighting draws a tree's side at exactly the
+brightness of its top. No projection can put that back.
+
+### The normal was decoded and then thrown away one step later
+
+* `Gen4Nsbmd` reads command `0x21` into `nx, ny, nz` and puts them on every
+  vertex table. Correct, and it always has been.
+* `Gen4ModelPack` packed **14 bytes — x, y, z, u, v as s16; r, g, b as u8; one
+  pad byte**. No field for a normal. Dropped at the one step between decoding it
+  and needing it.
+* `Gen4AreaLight.lambert(template, nx, ny, nz)` existed and had **no caller
+  anywhere in the tree**. The lighting stage ran at import, wrote 84 KB of
+  templates into the cache, and nothing ever read them.
+
+### Baking the light at pack time would have been wrong
+
+The cheap fix — write `lambert()` into `r, g, b` in the packer — was considered
+and rejected on evidence, not taste: **the geometry is shared and the light is
+per map.** One `buildings` set of 590 models serves every town, and a terrain
+chunk is drawn by every map that reaches it — Route 201's own log shows chunk 5
+baked by six ground instances (R201, T02, T01, L01, R202, R219) whose
+`areaLight` members need not agree. One map's light baked into shared geometry
+is the wrong light for every other reader.
+
+So **the normal travels**: the vertex is now 16 bytes, `x, y, z, u, v` as s16,
+`r, g, b` as u8, `nx, ny, nz` as s8, and `src/render/Gen4Shade.lua` lights it in
+`Gen4Ground:bake`, where the map, the member and the time band are all known.
+
+### The equation, and the one free choice in it
+
+`Gen4AreaLight` ships `lambert()` and deliberately no tint, because the obvious
+combination pinned 13 of 15 templates to exactly 1.000. This does not try that
+again. It states the part that cannot saturate:
+
+```
+lit(N)   = sum over enabled lights of  max(0, -N.L) * lightColour
+shade(N) = k + (1 - k) * lit(N) / lit(UP)
+```
+
+`k` is `ambient / (ambient + diffuse)` per channel, from the cartridge's own two
+rows — a RATIO, so a template whose rows are both full white still answers 0.5
+rather than 1.
+
+**The anchor is the ground plane, and that is the whole safety argument.**
+Dividing by `lit(0,1,0)` makes an up-facing face come out at exactly 1.0, so the
+flat ground — every ground shape in chunk 5 is at exactly `y = 16` — keeps the
+brightness it already had. Bounded in `[k, 1]` by construction: nothing can go
+dark, nothing can blow out. The ratios between faces are the cartridge's; the
+overall level is ours, and it is the only thing that moves when someone finally
+compares a frame against the hardware.
+
+### What the cartridge's normals actually are
+
+Chunk 5, 1,464 vertices, **two distinct normals**:
+
+| normal | vertices | shapes |
+|---|---:|---|
+| `(0.000, 1.000, 0.000)` | 816 | nectgr, nhana, ngrass, nsandp, nsand, tshadow, allpeak, s_snow02, s_snow |
+| `(0.000, 0.819, 0.575)` | 648 | tree04_2, tree01, conttree_b, conttree_t |
+
+Flat ground, and a card leaning 35 degrees back toward the camera. That is how
+Platinum builds a tree, and it is exactly the distinction that separates a tree
+from the grass it stands on. At member 0, band 8 of 15 (ambient `10,12,12`,
+diffuse `16,16,16`), `shade(0, 0.819, 0.575)` = **0.878, 0.886, 0.886** against
+the ground's 1.000.
+
+### THE SECOND FAULT, which would have eaten the first
+
+With the light computed and applied, the render was still **pixel-identical** —
+0 of 326,144 pixels differed, while the probe showed the tree vertices leaving
+the loop at `223.8, 226.0, 226.0` instead of `255`. The colour was right and
+never arrived.
+
+Isolated to three vertices and a 1x1 white texture:
+
+```
+byte  + custom shader     255->1.000   128->1.000
+byte  + DEFAULT shader    255->1.000   128->1.000
+float + custom shader     255->1.000   128->0.502
+float + DEFAULT shader    255->1.000   128->0.502
+```
+
+**LOVE hands a `"byte"` vertex attribute to the shader UNNORMALISED.** The
+fragment stage sees 0..255, so `texel * colour` came out at 255x the texel and
+clamped to white for every value. `Gen4Model.FORMAT` declared
+`{ "VertexColor", "byte", 4 }`, so **this port could never have displayed a
+vertex colour at all.** It did not matter while every vertex was white. Changed
+to `"float"`, with the colours written as 0..1.
+
+With both halves in: **150,147 of 326,144 pixels differ**, max channel delta 26,
+and the ground is untouched.
+
+### The old cache still renders exactly as it does today
+
+The stride is now measured off the record (`#vertices / vertexCount`) and
+accepted at 14 or 16, because reading a 14-byte buffer at a 16-byte stride does
+not fail — it misaligns every vertex after the first and returns confetti with
+no error. Proven rather than asserted: the same Route 201 chunk baked by the new
+code against the existing 14-byte cache differs from the old code's bake by
+**0 of 326,144 pixels**. A cache with no normals says so once, at warn, and
+draws unlit.
+
+`Gen4ModelPack.verify` now round-trips the normals too, and refused nothing on
+the real chunk. The `s8` rounding was caught by a probe before it shipped:
+`floor(v * 127 - 0.5)` on the negative branch is wrong by a whole step, because
+`floor(-72.001)` is -73 — worst round-trip error 0.0118 against a half-step of
+0.0039, on half the normals in the cartridge. Rounding through the magnitude
+brings it to exactly 0.003937.
+
+### This needs a re-import
+
+The cache on disk has 14-byte vertices and no normals. Until Platinum is
+imported again the world draws exactly as it does now, and says so in the log.
+
+### Still open
+
+* The ABSOLUTE calibration — the anchor is a choice and wants a cartridge frame.
+* Edge marking (`G3X_EdgeMarking`, `sIndoorsEdgeMarkings` / `sOutdoorsEdgeMarkings`
+  by the `outdoors` flag) is still not applied.
+* `areabm_texset.narc` prop texture sets, still not extracted.
+* Characters float over the canopy — `bakeCanopy`/`drawCanopy` exist; whether
+  the overworld calls `drawAbove` on a Gen 4 map is unchecked.
+* Perspective-for-orthographic, worth 3.3% of splay (pass 22).
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 24 — the tilt raises the height instead of squashing the map
+
+Reported from play: *"still seems flat ... make the tilt work with the 3d of the
+world so the 3d becomes more visible when used"*, and separately that pressing
+`3` does nothing.
+
+### The control was real, and unreachable
+
+`Gen4Camera.setTilt` has no caller anywhere in `src/render`, `src/core` or
+`src/import` — the row lives in the UI tree, and the saved options confirm it
+works: `gen4CameraTilt = 1`, which is `"cartridge"`. So the row exists and is on
+its default.
+
+**`3` is not that row.** It is DRAMATIC_SHAPE's own hotkey — the mod's changelog
+says *"left stick click | step the VOXEL angle ladder (same as the \"3\" key)"*
+— and with `voxel = 0` in the same options file, pressing it steps a pipeline
+that owns nothing. The engine's Gen 4 tilt is the OPTIONS row.
+
+### What the ladder used to cost
+
+Rendering chunk 5 at every rung, with the pass-23 lighting on:
+
+| rung | ground scale | height scale | tree rise |
+|---|---:|---:|---:|
+| cartridge | 0.8576 | 0.5143 | 25.4 px |
+| 50 | 0.7660 | 0.6428 | 35.5 px |
+| 40 | 0.6428 | 0.7660 | 50.4 px |
+
+The height climbs — and **the ground scale falls with it**. One pitch drove both,
+so buying twice the lean at 40 degrees cost a quarter of the map's depth: Sinnoh
+squashed vertically in exchange for taller trees. The control traded one kind of
+wrong for another, which is why using it did not obviously improve the picture.
+
+### The two are now separate
+
+```
+ground = sin(mapPitch)                     -- never moves
+height = sin(mapPitch) * cot(heightPitch)  -- the OPTIONS row
+```
+
+`forMap` no longer overwrites `pitch`. The map header's own pitch stays, and the
+chosen angle names `heightPitch` alone — so everything that asks the config how
+deep the GROUND is (the blit, sprite placement, `unprojectGround` turning a
+screen row back into a tile row) still gets the map's own answer and needed no
+second thought about which pitch it was holding.
+
+At `heightPitch == pitch` the identity `sin * cos/sin = cos` gives back exactly
+the cartridge's pair, so **"CARTRIDGE" is bit-for-bit what it always was** —
+verified by rendering, not asserted: 0 of 326,144 pixels differ from the
+pass-23 bake.
+
+`Gen4Ground.projection` already took the two as an independent pair and derives
+its lean and its depth row from them, so nothing downstream changed.
+
+### After
+
+| rung | ground scale | height scale | canvas | tree rise |
+|---|---:|---:|---:|---:|
+| cartridge | 0.8576 | 0.5143 | 637 | 25.4 px |
+| 90 | 0.8576 | 0.0000 | 440 | 0.0 px |
+| 70 | 0.8576 | 0.3122 | 559 | 15.4 px |
+| 60 | 0.8576 | 0.4952 | 630 | 24.4 px |
+| 50 | 0.8576 | 0.7196 | 716 | 35.5 px |
+| 40 | 0.8576 | 1.0221 | 832 | 50.4 px |
+| **30** | 0.8576 | 1.4855 | 1010 | 73.3 px |
+
+The ground scale is **constant on every rung**. Aligned on the ground, the path,
+the sand and the grass band sit at identical rows across the whole ladder and
+only the trees grow — at 30 they are full columns with their trunks showing.
+
+### Where 30 comes from
+
+Not taste: `Gen4Ground` sizes a bake as `chunkPx * ground + height * MAX_RISE`
+with `MAX_RISE = 384`, so the height scale decides how tall a canvas is. The
+clamp is `MAX_HEIGHT_SCALE = 1.5`, which puts a 512-wide chunk on a 1,010-row
+canvas; sixteen of those with their depth buffers is about the most the bake
+cache should hold. 30 degrees lands at 1.485, a hair under it. The clamp lives
+in `scales` rather than in the ladder, because a limit that cannot be reached is
+not a limit.
+
+### And the log stops lying about it
+
+`applyCamera` printed only `pitch`, which now never moves — so every rung of a
+working ladder would have logged `59.05` and looked dead. It names both angles.
+
+### Still open
+
+* Absolute light calibration (the anchor is a choice; wants a cartridge frame).
+* Edge marking — `G3X_EdgeMarking` with `sIndoorsEdgeMarkings` /
+  `sOutdoorsEdgeMarkings` by the `outdoors` flag — still not applied.
+* `areabm_texset.narc` prop texture sets, still not extracted.
+* Characters float over the canopy; whether the overworld calls `drawAbove` on a
+  Gen 4 map is unchecked.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 25 — the world is drawn live, and standing geometry finally moves
+
+Reported from play, after the lighting and the tilt: *"still looks completely
+flat from my view is the issue even if its 3d current camera when walking makes
+it look flat"*.
+
+That is the right diagnosis of something neither of the previous two passes
+could have touched.
+
+### Why no amount of height was ever going to fix it
+
+Two things were stacked.
+
+1. **The world matrix is orthographic, and an orthographic projection has no
+   motion parallax by construction.** Screen position is a linear function of
+   `(x, y, z)` with no divide by depth, so the offset between a tree's top and
+   its base CANNOT depend on where the camera is.
+2. **The geometry was not even re-evaluated per frame.** `bake` rendered each
+   chunk once into a canvas; `draw` blitted the canvas. What crossed the screen
+   when the player walked was a finished 2D picture sliding rigidly.
+
+Measured, by rendering two frames 32 map pixels apart, shifting the second back
+by exactly the ground's own travel, and counting what fails to cancel:
+
+| | pixels that do NOT cancel |
+|---|---:|
+| orthographic (the spread forced to 0) | **0 of 43,008 — 0.00%** |
+| perspective (as shipped) | **9,434 of 43,008 — 21.94%** |
+
+Zero. Not "small": **nothing at all** moved relative to anything else. That is
+the number behind the report, and the same check with the term switched off is
+what proves it can fail.
+
+### What the cartridge does instead
+
+The DEFAULT camera record says `projection = "perspective"`, distance 666.92,
+half-fov 8.09. That frustum gives 1.0125 px/unit at the target, and geometry
+standing on the ground is nearer the eye by `h * cos(pitch)`:
+
+| | nearer by | scale | extra spread at the screen edge |
+|---|---:|---:|---:|
+| tree, 42.3 units | 21.8 | x1.0337 | 4.3 px |
+| `t1_h01`, 71 units | 36.5 | x1.0579 | 7.4 px |
+| `t1_s01`, 90.8 units | 46.7 | x1.0753 | 9.6 px |
+
+Zero at the screen centre, largest at the edges — so walking past a tree sweeps
+its top about eight pixels across its own trunk. In pass 22 this same 3.3% was
+computed and dismissed as too small to matter. That was wrong about WHY it
+matters: 3.3% of static distortion is invisible, and 3.3% that CHANGES AS YOU
+MOVE is the whole cue.
+
+### The term, and why it is in the shader
+
+```glsl
+float s = 1.0 - vertex_position.y * heightSpread.x;   // heightSpread.x = cos(pitch)/D
+if (s < 0.25) { s = 0.25; }
+p.xy /= s;
+```
+
+It multiplies a vertex's SCREEN OFFSET by a function of its HEIGHT — a product
+of two coordinates, which no 4x4 matrix can express. The matrix is built per
+frame around the camera, so screen centre is NDC (0,0) and scaling `p.xy` about
+the origin is exactly "spread from the centre of the view".
+
+**At `h = 0` the factor is exactly 1.** That is the containment argument: the
+ground plane projects precisely where it always did, so every sprite the
+overworld places, every collision pick and every screen-row-to-tile-row answer
+is untouched. Only things that stand up move, and they move relative to their
+own base.
+
+`heightSpread` is zero for the 300 headers the cartridge itself draws
+orthographically, and zero for every model screen — a Poke Ball on a menu has no
+camera to be off the centre of. Sent on every draw, for the reason `yCut` is.
+
+### Live instead of baked
+
+`Gen4Ground:livePass` draws the visible chunks and their buildings every frame
+into ONE screen-sized target, replacing a cache of per-chunk canvases. That is
+cheaper than it sounds and was probably always the better shape: chunk 5 is 13
+shapes and 1,464 vertices, chunk 0 is 19 and 3,226, and a screen shows a
+handful — tens of thousands of triangles a frame against a cache of 512x1010
+canvases with a depth buffer apiece. Moving props now animate on the frame
+clock instead of needing a canvas re-baked whenever they ticked.
+
+The baked path is **kept, not deleted**: `liveOff` latches if the one depth
+target cannot be allocated, and the old path serves the frame. A refusal costs
+one attempt, not one per frame.
+
+### Two faults caught before this shipped
+
+* **The NDC y sign was inverted** — the map rendered upside down. The baked
+  `projection` has y negative and z positive; the first version of
+  `screenMatrix` had them the other way round. Caught by looking at the render,
+  not by reading it.
+* **The mesh cache was unbounded.** `liveModels` kept every chunk it had ever
+  drawn; a session walking the length of Sinnoh would have held all 666. Capped
+  at 32, oldest first — measured at 9 held after 61 frames walking diagonally.
+
+Aligned against the baked path by cross-correlation, the live pass sits at
+**dx=0, dy=0** with a 1.2% mean difference, which is edge rasterisation: the
+bake rasterises into a 512-wide canvas and blits, the live pass rasterises
+straight at the view's own resolution.
+
+### Still open
+
+* Absolute light calibration (the anchor is a choice; wants a cartridge frame).
+* Edge marking — `G3X_EdgeMarking` — still not applied.
+* `areabm_texset.narc` prop texture sets, still not extracted.
+* The ground plane itself is still orthographic: the cartridge foreshortens it
+  by about +-15% across a screen, and matching that means projecting the
+  sprites through the same matrix. Deliberately NOT done here — it would move
+  every sprite, pick and tile-row answer in the overworld, and this pass is
+  contained precisely because it does not.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 26 — there are TWO tilts, and "3" was driving the wrong one
+
+Reported from play: *"3 to adjust tilt still messes up the placement of sprites
+and isnt changing the in game camera tilt/angle"*.
+
+Both halves of that sentence have one cause, and it is not subtle once found.
+
+### The two systems
+
+| | what it is | where |
+|---|---|---|
+| `Tilt` | the **Gen 1/2 pseudo-3D warp** — takes the finished flat world and shears it through `groundPoint`, angles `{0, 15, 35, 50}` | `src/render/Tilt.lua` |
+| `Gen4Camera` | the **actual field camera** the cartridge's map header names, `{cartridge, 90, 80, 70, 60, 50, 40, 30}` | `src/render/Gen4Camera.lua` |
+
+`Game.lua` bound `"3"` to `Tilt.cycle()`. On a Sinnoh map that:
+
+* **warps a world that has already been projected** — `Gen4Ground` drew it
+  through the cartridge's own camera, and `Renderer:drawTiltedWorld` then shears
+  the result a second time;
+* **drags the ground out from under the sprites**, because the overworld places
+  entities through the GEN 4 camera's `scale()` and `riseOf`, not through this
+  one. That is the reported sprite misplacement, exactly.
+* and of course **does not move the Gen 4 camera at all**, because it is a
+  different module.
+
+`gen4CameraTilt = 1` in the save confirms the Gen 4 row had never been moved;
+`tilt = 0` confirms the Gen 1/2 one is off until the key is pressed.
+
+### Fixed in three places
+
+1. **`Tilt.suppressed`** — `Tilt.active()` answers false while it is set, so the
+   Gen 1/2 warp stands down. Two world cameras must not both run.
+2. **`TileRenderer`** sets it as each map's renderer is built:
+   `Tilt.suppressed = (self.gen4Ground ~= nil)`. It follows the map, so nothing
+   has to remember to clear it, and a save carrying a tilt level in from a Johto
+   session cannot warp Sinnoh.
+3. **`Game.lua`** — on a map with a Gen 4 ground, `"3"` steps
+   `Gen4Camera.setTilt` and writes `options.gen4CameraTilt`; everywhere else it
+   still cycles `Tilt` exactly as before.
+
+Verified with the Gen 1/2 path explicitly included, and with the fault planted:
+
+```
+ok   level 3, not suppressed -> ACTIVE (gen1/2/3 unchanged)   true
+ok   level 3, suppressed -> inactive (a gen4 map)             false
+ok   suppression cleared -> active again (back to a gen2 map) true
+ok   planted fault (suppression ignored) IS caught            true
+```
+
+The planted run restores the OLD `Tilt.active` body and asserts the suite
+notices — a suppression flag that is written and never read passes every other
+line above.
+
+### And the ground now says which path drew the frame
+
+Reported alongside: *"still looks like the 3d models are being baked to a flat
+2d canvas nothing is raised"*.
+
+The live pass and the baked one produce **the same picture on flat ground** and
+differ only in how standing geometry behaves as the camera moves. So a session
+that quietly fell back to the bake — a failed depth target latches `liveOff` —
+looks EXACTLY like a session where the live pass is running and is not enough.
+From the outside those two are indistinguishable, which is the shape of report
+this port has already lost whole passes to.
+
+`Gen4Ground:draw` now says, once per change:
+
+```
+gen4 ground: T01 drew LIVE -- 4 chunk(s), 256x192 target, height spread 0.000771 per unit
+gen4 ground: T01 drew from the BAKED path -- the live pass is not running, so
+             standing geometry will not move as the camera does
+```
+
+A spread of exactly 0 is reported with its reason attached — 300 of the 593
+headers are `INTERIOR_ORTHOGRAPHIC` and the cartridge really does draw those
+flat, so zero there is correct rather than broken.
+
+**Read that line before theorising about flatness again.**
+
+### Still open
+
+* Absolute light calibration.
+* Edge marking (`G3X_EdgeMarking`) — still not applied.
+* `areabm_texset.narc` prop texture sets.
+* The ground plane is still orthographic on purpose (pass 25).
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 27 — everything works; the world is being viewed from 16x too far away
+
+The instrumentation added in pass 26 settled this in one log.
+
+### What the log confirms is WORKING
+
+```
+gen4 ground: R201 drew LIVE -- 9 chunk(s), 1024x768 target, height spread 0.000771 per unit
+gen4 camera: default at 59.05 deg, height at 90.00 deg (chosen in OPTIONS) -- ground x0.858, height x0.000
+gen4 light:  R201 on member 0 band 15 -- a vertical face is x0.417 of the ground
+```
+
+* the **live pass is running**, with a non-zero height spread -- so the parallax
+  from pass 25 is on;
+* **"3" now steps the Gen 4 camera** -- 90, 80, 70, 60, 50 and back to cartridge,
+  with the ground scale pinned at 0.858 the whole way, which is pass 24 working;
+* the **area light is resolved and applied**. And `chunks.bin` on disk is
+  **20,668,126 bytes** against the old 18,534,152 -- exactly the 14 -> 16 byte
+  vertex growth, so the re-import happened and the normals are there. The
+  "this cache carries no normal" warning is correctly absent.
+
+No `BAKED path` line anywhere. Every stage of passes 23-26 is live.
+
+### And what it says is wrong
+
+The target size. `1024x768`.
+
+The live pass maps one world unit to one target pixel, so:
+
+| framing | tiles visible | area vs DS | `t1_h01` as a share of screen height |
+|---|---|---:|---:|
+| Nintendo DS | 16.0 x 14.0 | 1.0x | **19.0%** |
+| 342x256 (this session's most zoomed IN) | 21.4 x 18.7 | 1.8x | 14.3% |
+| 512x384 | 32.0 x 28.0 | 4.0x | 9.5% |
+| **1024x768 (what the log reports)** | **64.0 x 56.0** | **16.0x** | **4.8%** |
+
+A Twinleaf house takes up **nearly a fifth** of a DS screen's height and **one
+twentieth** of this one. Rendered side by side at the same physical size, the DS
+framing shows a building with a roof, a front wall, a door, windows and a
+visible side; the same house at 1024x768 is a thumbnail in which none of that
+can read. Same geometry, same lighting, same matrices -- only the field of view
+differs.
+
+**That is the whole of "nothing is raised".** The height is all there and it is
+four times smaller, linearly, than the cartridge draws it. The log shows the
+target moving 342x256 -> 512x384 -> 1024x768 across the session, which is the
+zoom ladder on "4" working exactly as designed; the world was simply being
+played at its widest rung.
+
+`fit scale 5 px/GB px` on a 1024x768 window puts the fitted view at about
+205x154 world pixels, which is within a rung of DS framing.
+
+### A cost this port now carries, and it is mine
+
+The log shows **six ground instances each drawing a full-screen live pass every
+frame** -- R201, T02, T01, L01, R202, R219 -- and every one resolves to the SAME
+cell and draws the SAME chunks:
+
+```
+gen4 ground: cam=(-272,-215) + offset=(1536,13824) -> ... cell (2,26) -> land 4
+T01 drew LIVE -- 9 chunk(s), 1024x768 target
+R201 drew LIVE -- 9 chunk(s), 1024x768 target
+... four more, identical
+```
+
+54 chunk draws for 9 distinct chunks, into six 1024x768 colour+depth targets --
+about 36 MB of render target a frame, five sixths of it overwritten by the next
+ground. The baked path had the same six-instance shape but paid it in cached
+blits; the live pass pays it in geometry.
+
+NOT fixed in this pass, deliberately. The obvious guard -- skip a pass whose
+(left, top, vw, vh) another ground already painted this frame -- assumes the six
+pictures are identical, and they need not be: each ground carries its OWN
+texture set and area-light member, and a neighbour with a different
+`mapTextureArchiveID` would texture a shared chunk differently. That is a
+pre-existing question about which map owns a shared chunk's appearance, and
+guessing at it is how three passes were lost earlier in this file.
+
+### Still open
+
+* The six-pass redundancy above.
+* Absolute light calibration.
+* Edge marking (`G3X_EdgeMarking`) -- still not applied.
+* `areabm_texset.narc` prop texture sets.
+* The ground plane is orthographic on purpose (pass 25).
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 28 — a real camera, for first and third person
+
+Requested: *"implement first person and third person to work with the 3d models
+if possible without stretching the textures or models of the house"*.
+
+### Why this is a new file rather than a flag
+
+`Gen4Ground:screenMatrix` is OBLIQUE. It maps ground depth by `sin(pitch)` and
+height by `cos(pitch)`, and it has no notion of yaw at all -- the camera is
+always due south of its target, exactly as the cartridge's seventeen rows are.
+Two things follow: it cannot look in an arbitrary direction, which is the whole
+of first person; and **its two axes are scaled by different amounts**, which is
+a deliberate squash for the field view and would be a defect anywhere else.
+
+So the stretching the request is worried about is IN the current projection, and
+a true perspective camera is what removes it. `src/render/Gen4View.lua` builds
+one: `Gen4Model.perspective` puts `f / aspect` on x and `f` on y, so widening
+the window widens the FIELD OF VIEW instead of stretching what is already in it.
+
+### Measured, with the fault planted
+
+The `t1_h01` house, same camera, three targets, bounding box in pixels:
+
+| target | box | note |
+|---|---|---|
+| 512x384 | 172 x 183 | the reference |
+| **1024x384** | **172 x 183** | window twice as wide, object **unchanged** |
+| 512x768 | 346 x 367 | same shape (0.943 vs 0.940), uniformly larger |
+| **planted: aspect forced to 1** | **460 x 183** | **width +288 px** |
+
+Doubling the window's width does not touch the object; it reveals more to the
+sides. Doubling its height scales the object uniformly, because the field of
+view is vertical. And the planted run -- `aspect = 1`, which is precisely the
+mistake this check exists to catch -- is caught, so the three passing rows above
+are worth something.
+
+### What the camera is
+
+Absolute matrix coordinates, so it does not care which of the six maps on screen
+it stands on. `+x` east, `+y` up, `+z` south; `yaw` 0 looks NORTH and grows
+clockwise; `pitch` 0 is the horizon and positive looks DOWN, matching
+`Gen4Camera`'s rows.
+
+* **FIRST** -- eye at 22 units (a tile is 16, the player model about 24), pitch 0.
+* **THIRD** -- 96 units behind along the player's own heading, 40 up, pitched 18
+  down. The camera inherits the player's facing rather than owning a second
+  heading that has to be kept in step; a free-look control overwrites `yaw`
+  afterwards.
+* **fov 50 degrees**, NOT the cartridge's 16.2 -- that is a long lens chosen to
+  make the field view 1:1 with the DS screen at the target plane, and a
+  first-person view through it feels like looking down a tube. This is a mode
+  setting, so it is named rather than derived from something that does not
+  govern it.
+
+`Gen4Ground:drawFree` picks chunks in a radius around the CAMERA rather than
+around a viewport rectangle, and **switches the height spread off** -- that term
+is a first-order stand-in for a perspective divide the field view does not have,
+and a real perspective camera performs the whole divide. Applying both would
+count the same effect twice.
+
+Rendered from the middle of Twinleaf looking north, both modes show the path
+receding correctly, house walls, doors and windows at their true proportions,
+and the tree line in the distance.
+
+### NOT done, and needed before this is playable
+
+1. **No player billboard.** Third person currently shows the world with nobody
+   in it. The overworld's characters are 2D sheets, so they have to be drawn as
+   camera-facing quads through the same matrix; `Gen4View:pixelsPerUnitAt` is
+   published for exactly that and has no caller yet.
+2. **No input.** Nothing switches mode and nothing turns the camera.
+3. **Movement is still grid-relative**, so in first person "up" walks north
+   rather than forward.
+4. **The 2D entity path is untouched**, which is deliberate: it is correct for
+   the field view and must stay that way.
+
+## TRACKED, from play-testing — object masking
+
+Reported: *"trees should mask the players character as well as other objects
+identified in the rom, many indoor objects when walked behind dont mask the
+player but houses do perfectly"*.
+
+Houses mask because they are 71 to 91 units tall and `CANOPY_Y` is 32, so their
+upper half is painted after the sprites by the canopy pass. The open questions,
+NOT yet measured:
+
+* **Trees** are terrain-mesh shapes, not buildings, and span 16.91 to 58.31 --
+  well above the cut -- so the canopy pass's terrain draw should already cover
+  them. Whether `drawAbove` is called at all on a Gen 4 map is unchecked, and
+  that is the first thing to establish.
+* **Indoor objects** are props like any other, but a fixed world-height cut of
+  32 means anything shorter than that can never mask, whatever the room. Whether
+  that is right depends on the object: a low table should NOT mask a standing
+  player, a bookcase should. The cartridge almost certainly states this per
+  prop rather than by height -- see [[gen4_map_props]] for the per-area
+  allow-list indirection -- so the answer is in the ROM, not in a threshold.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 29 — the tree canopy had never drawn a single pixel
+
+Play report: *"trees should mask the players character ... many indoor objects
+when walked behind dont mask the player but houses do perfectly"*.
+
+The asymmetry in that sentence is the clue, and it is exact.
+
+### The call chain was fine
+
+`OverworldController` calls `drawAbove` unconditionally after the entity pass,
+for the current map and every neighbour, with the SAME `bgY` the ground pass
+gets -- so the canopy is reached and is aligned. `TileRenderer:drawAbove` hands
+over to `Gen4Ground:drawCanopy`. None of that was wrong.
+
+### The fault is one word, in the depth test
+
+The canopy pass draws the terrain TWICE: once with the colour mask off to lay
+down depth, so a hill still hides what is behind it; then again with the height
+cut, to paint the part that goes over the sprites.
+
+`Gen4Model:draw` hard-set `g.setDepthMode("less", true)`.
+
+The second draw is the SAME GEOMETRY as the first, so every one of its fragments
+sits at **exactly** the depth the first one wrote -- and `less` rejects equal.
+
+Measured on Twinleaf's chunk 0, counting painted samples:
+
+| pass | depth compare | painted |
+|---|---|---:|
+| terrain canopy | `less` (what shipped) | **0** |
+| terrain canopy | `lequal` | **13,507** |
+| buildings canopy | `less` | 4,827 |
+
+**Zero.** The terrain half of the canopy has never painted anything, in any
+build, so nothing made of terrain mesh has ever gone over the player.
+
+And the buildings row is the control that explains the whole report: buildings
+are drawn **once** in the canopy pass, against depth nothing else has written,
+so `less` was always fine for them. **Houses masked perfectly; everything made
+of terrain -- which is every tree -- never masked at all.** One depth comparison
+accounts for both halves of what play-testing saw.
+
+Fixed in both canopy paths, the live one and the baked fallback, by passing
+`"lequal"` on the second terrain draw. `depthCompare` is a parameter on
+`Gen4Model:draw` rather than a change to its default, because every pass that
+draws a piece of geometry ONCE still wants `less`.
+
+Rendered afterwards, the terrain canopy is the upper halves of the trees and
+transparent everywhere else -- which is exactly what should be painted over a
+character standing behind one.
+
+### The indoor half is NOT explained by this
+
+Trees are terrain mesh and are now fixed. Indoor objects are props, drawn once,
+on the path that always worked -- so their failure has a different cause, and
+guessing at it is how passes 18-20 were lost. `CANOPY_Y` is a fixed world height
+of 32, so a prop shorter than that can never mask whatever the room; whether
+that is right depends on the object (a low table should not mask a standing
+player, a bookcase should), and the cartridge most likely states it per prop
+rather than by height. Still open, still tracked.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 30 — the canopy cut is the wrong MECHANISM, not the wrong number
+
+Pass 29 fixed the terrain half of the masking report. This is the indoor half,
+and it does not have the same answer.
+
+### Measured over all 590 building models
+
+| | |
+|---|---:|
+| models with geometry | 590 |
+| **entirely below `CANOPY_Y` (32) -- can never mask, in any room** | **338 (57.3%)** |
+
+The furniture itself:
+
+| model | yMin | yMax | masks at the cut? |
+|---|---:|---:|---|
+| `shelf01`, `shelf05` | 0.50 | **32.00** | **no** -- the shader tests `vModelY <= yCut`, so 32 fails on the equals |
+| `table_l01` | 0.50 | 30.00 | no |
+| `machine_pc01` | 2.00 | 24.16 | no |
+| `shelf_fs01` | 1.00 | 21.00 | no |
+| `sink01`, `table01` | 0.50 | 17.00 | no |
+| `t1_h01` (a house) | 1.50 | 72.50 | yes |
+
+More than half the props in the cartridge can never mask anything. A bookshelf
+misses by an equals sign.
+
+### And RAISING the cut cannot fix it
+
+The cut paints the part of an object ABOVE head height over the sprites. For
+anything SHORTER than a character there is nothing it can express: a shelf
+should hide a player's LEGS and leave their head showing, which is not "above
+32" of anything. No value of `CANOPY_Y` produces that picture, because the
+quantity it thresholds is not the one that decides occlusion.
+
+**The cartridge has no cut.** It draws the world and the characters into one
+depth-buffered 3D scene and occlusion falls out of the depth test. The live pass
+of pass 25 finally makes that possible here, because the world is already
+rendered into a target with a depth buffer -- so a character drawn into the SAME
+target, at a depth derived the SAME way, is occluded correctly by everything,
+with no height rule anywhere.
+
+### The seam
+
+Three calls instead of one, because the entity pass runs between them:
+
+```lua
+ground:beginWorld(camX, camY, vw, vh)   -- target bound, ground drawn
+ground:drawSprite(image, quad, sx, sy, w, h, worldZ, baseY)
+ground:endWorld()                       -- unbound and blitted
+```
+
+`drawSprite` takes the screen position the 2D path would have used, so a caller
+that already knows where a character goes does not compute it twice; the world
+position is needed only for the DEPTH. A transparent texel discards rather than
+writing depth, or the square around a character would occlude what is behind it.
+
+`spriteDepth` is DERIVED from the chunk matrix rather than invented: that matrix
+writes `-(sin*y + cos*(z + offY)) / LIVE_DEPTH` with `offY = cy*chunkPx - top`,
+and `worldZ = cy*chunkPx + half + z`, so the pair collapses to
+`worldZ - half - top`.
+
+`draw` is untouched and still works, so this lands before the overworld uses it.
+**+167 lines, -0.**
+
+### Verified, and the first run of the check FAILED
+
+`shelf01` -- the model that fails at the cut -- with a character 24 units behind
+it and 24 in front:
+
+| | sprite pixels visible | depth |
+|---|---:|---:|
+| behind the shelf | **304 of 512** | +0.000377 |
+| in front of it | **512 of 512** | -0.000377 |
+
+41% occluded behind, untouched in front. That is exactly the picture the cut
+cannot produce.
+
+**The first run reported 512/512 both ways** -- no occlusion at all. The fault
+was in the check, not the code: it placed the shelf at an arbitrary screen
+offset, and `spriteDepth`'s derivation assumes `offY = cy*chunkPx - top`. Two
+different spaces were being compared, and the result would have read as "the
+depth is not working" however correct the code was. Placed as a real chunk is
+(cell 0,0, top 0), it passes. A check that can fail, and did.
+
+### Still open
+
+* **The overworld does not call the new seam yet.** `OverworldController`'s
+  entity pass draws in 2D between `draw` and `drawAbove`; moving it onto
+  `beginWorld`/`drawSprite`/`endWorld` is the integration, and it is an edit to
+  a 730 KB file that should be made deliberately rather than at the end of a
+  long pass.
+* Once it is called, `CANOPY_Y` and both canopy passes become dead -- the depth
+  buffer subsumes them -- and the pass-29 fix with them.
+* The same `drawSprite` is what third person needs for the player billboard.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 31 — THIRD and FIRST are rungs of the tilt ladder
+
+Requested: *"make the tilt show 3d like the first and 3rd person do, and have
+first and third person as an option within the tilt"*.
+
+### The ladder
+
+```lua
+Gen4Camera.TILTS = { "cartridge", 90, 80, 70, 60, 50, 40, 30, "third", "first" }
+```
+
+They belong here rather than on a control of their own because they answer the
+same question every other rung does -- how much of the world's height do I want
+to see -- and a player who has walked from CARTRIDGE down to 30 is already
+asking for more of it.
+
+A string rung carries no pitch, so `forMap` leaves the map header's own in place
+and `Gen4Ground` reads `Gen4Camera.mode()` instead. Every consumer that asks the
+table for a number still gets one on the eight numeric rungs -- verified across
+all ten:
+
+| rung | mode | view3d | ground | height |
+|---|---|---|---:|---:|
+| cartridge | nil | no | 0.858 | 0.514 |
+| 90 .. 30 | nil | no | **0.858 throughout** | 0.000 .. 1.485 |
+| **third** | third | **yes** | 0.858 | 0.514 |
+| **first** | first | **yes** | 0.858 | 0.514 |
+
+The free rungs leave `groundScale`/`heightScale` at the cartridge's values on
+purpose: `OverworldState:draw` still reads `ground:scale()` for `riseOf`, and a
+mode that changed them underneath it would move every sprite.
+
+### It needs NO overworld change
+
+`camX/camY` is the viewport's corner and the overworld keeps the player at its
+centre, so the centre IS the player to within the follow distance. `draw` places
+the camera from that when nothing else has, which means switching to THIRD or
+FIRST works through the existing `Gen4Camera.setTilt` path with no new call
+anywhere. A caller that knows better calls `placeCamera` first and `draw` leaves
+it alone (`cameraPlaced`).
+
+Verified by drawing both free rungs with nothing calling `placeCamera`: both
+return true, eye at (1797, 40, 14096) and (1797, 22, 14000).
+
+### What is NOT done, and why it is the same blocker twice
+
+**The numeric rungs are still oblique.** Making them show perspective the way
+THIRD and FIRST do means letting the GROUND converge, and that is precisely what
+pass 25 declined to do: the overworld places every entity through
+`ground:scale()` and `riseOf`, which assume the ground maps linearly to map
+pixels. Converge it and every sprite, every collision pick and every
+screen-row-to-tile-row answer moves -- which is the sprite misplacement already
+reported once, reintroduced deliberately.
+
+**And characters are not drawn in the free rungs either**, for the same reason
+from the other side: the 2D entity pass draws them at their 2D screen positions,
+which in a free camera is nowhere in particular.
+
+Both wait on one thing -- the entity pass drawing into the world's depth buffer
+through pass 30's `beginWorld`/`drawSprite`/`endWorld`. `drawEntity` calls
+`e:draw(...)` and each entity draws itself through its own sprite renderer, so
+that is not a surgical edit to one function; it is a change to how entities
+draw. Worth doing deliberately, and it unlocks all three at once:
+
+1. characters in first and third person,
+2. perspective on the numeric rungs,
+3. the indoor-object masking of pass 30.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+
+## Pass 32 — five of the six ground passes were drawing nothing new
+
+Pass 27 flagged this and deliberately did not fix it, because the obvious guard
+assumed six identical pictures and that was not established. It is now.
+
+### The waste, from the play log
+
+Six grounds -- R201, T02, T01, L01, R202, R219 -- all reported the SAME
+`left/top=(1653,13524) -> cell (3,26) -> land 5` in one frame. That is not a
+coincidence: `Gen4Ground:draw` picks its chunks from the shared 30x30 matrix,
+bounded by the grid and **not by the map's own extent**, so the current map's
+ground already draws every visible chunk whoever owns the cell. A neighbour
+recomputes the identical `left/top` and paints the identical picture on top.
+
+With the live pass that is six full-screen colour+depth targets a frame, about
+36 MB, five sixths of it overwritten.
+
+### Proven, not assumed
+
+Rendering the log's exact six grounds and cameras, then the current map alone:
+
+| | grounds | chunk draws | |
+|---|---:|---:|---|
+| all six (what shipped) | 6 | 24 | |
+| current map alone | 1 | **4** | |
+| **pixels differing** | | | **0 of 196,608** |
+
+**83% of the chunk draws removed, and the picture is bit-identical.**
+
+### Which one should win IS a real choice
+
+A chunk is textured from the ground's own `mapTextureArchiveID`, and **71
+distinct texture sets** exist across the 593 maps -- so at an area boundary the
+six would NOT agree. (In the logged frame all seven maps share set 6 and light
+member 0, which is why the diff is zero there.)
+
+The old behaviour was "last neighbour drawn wins the whole screen", which is
+arbitrary. **The current map is the principled answer**: it is the area the
+player is standing in, and the cartridge loads that area's texture set and no
+other.
+
+`drawMapOnly` -- the neighbour path -- returns immediately on a Gen 4 map and
+sets a flag; `drawAbove` reads it and stands the neighbour's canopy down too,
+or it would paint a second copy of the same treetops over the sprites.
+
+### And it unblocks the entity integration
+
+This was the reason pass 31 could not proceed to drawing characters in the
+world's depth buffer: with six grounds each owning a target, there was no
+answer to *which* target the sprites belong in. There is now exactly one, owned
+by the map the player is on, and `beginWorld`/`drawSprite`/`endWorld` have
+somewhere unambiguous to go.
+
+**Nothing is marked complete.**
+
+### Standing sweep
+
+`camera` 86/0, `mapprops` 5224/0, `arealight` 5277/0, `running` 59/0.
+
+## Pass 33 — a short prop is sorted, not cut
+
+Reported from play: *"many indoor objects when walked behind dont mask the
+player but houses do perfectly"*.
+
+### The cut cannot describe furniture
+
+A prop is drawn into the canopy pass with a HEIGHT CUT: the shader keeps the
+part above head height and discards the rest, so what remains paints over the
+sprites. That works for a house — Twinleaf's are 71 to 91 units tall against a
+`CANOPY_Y` of 32 — and it cannot work for a bookshelf, because a bookshelf has
+nothing above 32 to keep. Measured over all 590 building models, **338 of them
+(57.3%) top out below the cut**, and for every one the cut discards the whole
+object. `shelf01` ends at exactly 32.00 and fails on the shader's `<=`;
+`table_l01` is 30, `machine_pc01` 24.16.
+
+So the cut is the wrong MECHANISM here, not the wrong NUMBER. Raising it would
+be worse: a shelf shorter than the player should occlude their legs, not their
+head.
+
+### What replaces it
+
+An object whose world top (`object.y + topY * scaleY`) is at or below
+`SORTED_BELOW` is now **y-sorted** against the player instead of cut: behind
+the player, the whole prop is painted over them; in front, it is not painted at
+all. That is the sort Gen 1–3 has always used, and it is right for exactly the
+objects the cut is wrong for. Taller objects keep the cut, untouched.
+
+`playerZ` is the view's own centre, which the overworld keeps the player at, so
+this needed no new argument threaded through four files. `Gen4Model:topY()`
+measures the highest vertex rather than trusting the header's bounding box,
+which disagrees with the geometry on two thirds of this cartridge's models.
+
+### Measured on the Lost Tower's graves (chunk 286)
+
+One camera position for every frame, so visibility is held constant, and each
+prop measured twice: once with no cut at all (is it on screen?) and once
+through the canopy pass. The control disables only the new branch.
+
+| prop | world z | top | side | visible | canopy, sorted | canopy, before |
+|---|---|---|---|---|---|---|
+| tomb02 | 176 | 16.4 | south | 913 | **913** | 0 |
+| tomb02 | 160 | 16.4 | south | 915 | **915** | 0 |
+| tomb02 | 192 | 16.4 | south | 934 | **934** | 0 |
+| tomb02 | 128 | 16.4 | north | 937 | 0 | 0 |
+| tomb02 | 96 | 16.4 | north | 934 | 0 | 0 |
+| tomb01 | 200 | 13.0 | south | 240 | **240** | 0 |
+| tomb01 | 232 | 13.0 | south | 242 | **242** | 0 |
+| tomb01 | 216 | 13.0 | south | 242 | **242** | 0 |
+| tomb01 | 152 | 13.0 | south | 258 | **258** | 0 |
+| tomb01 | 168 | 13.0 | south | 256 | **256** | 0 |
+| tomb01 | 120 | 13.0 | north | 257 | 0 | 0 |
+| tomb01 | 88 | 13.0 | north | 257 | 0 | 0 |
+| *(tall prop)* | 40 | 36.0 | north | 191 | 64 | 64 |
+
+Twelve short props, every one correct: painted when the player is behind it,
+nothing when in front. **The before column is zero for all twelve** — that is
+the reported bug, measured. The one tall prop is identical in both columns,
+which is the guard that houses are untouched.
+
+Twinleaf, where every prop is lifted onto a house floor and so is tall by this
+rule, is **pixel-identical** across three camera positions: 95,975 / 75,020 /
+47,846 painted with matching colour checksums. The change is inert where the
+cut already worked.
+
+### Four wrong measurements before a right one
+
+Worth recording, because each looked like a result:
+
+1. **First run counted visibility, not sorting.** A 128-tall viewport put the
+   graves at screen rows 82–199, so most were off the bottom edge; moving the
+   camera to "put the player in front" also moved the graves into view. The
+   number changed for the wrong reason.
+2. **Then it counted coverage, not colour.** A grave stands in the middle of a
+   floor the terrain has already painted, so counting only pixels the baseline
+   left transparent reported 0 for a prop that was plainly there.
+3. **Then the textures were missing.** This harness has 4 of the 590 building
+   texture sets, and the shader discards any texel with `alpha < 0.5`, so a
+   perfectly placed grave painted exactly nothing — **16×16, 0 of 256 texels
+   opaque**, the transparent stand-in `Assets.image` returns for a missing
+   path. This is the same trap that once produced a false "buildings render
+   zero pixels" claim. Fixed by substituting a synthetic opaque texture, which
+   removes the texture as a variable and leaves geometry, placement and the
+   branch under test entirely real.
+4. **Then the expectation was wrong, not the code.** One object on the chunk is
+   36.0 tall and correctly takes the cut; the test called it a mismatch until
+   it classified props by the same rule the code uses.
+
+The probe that found #3 is the one worth keeping: transform the shape's own
+vertices by its own matrix and check they land inside the frustum. They did —
+NDC x −0.234..−0.141, y 0.027..0.271 — which ruled out placement and the depth
+test in one measurement and pointed straight at the fragment stage.
+
+### Still not the proper answer
+
+The proper answer is the depth buffer, which the cartridge uses and which pass
+30's `beginWorld`/`drawSprite`/`endWorld` makes possible. That still needs the
+overworld's entity pass drawing into the world target — a change to draw ORDER
+with a black-frame failure mode, in a 730 KB function with two `renderer:draw`
+sites and one `drawAbove`. This pass fixes the part that can be made correct
+without it.
+
+**Nothing is marked complete.**
+
+## Pass 34 — the tilt ladder adds depth, not just height
+
+Asked for: *"make the tilt show 3d like the first and 3rd person do, and have
+first and third person as an option within the tilt."*
+
+The second half was already done — `"third"` and `"first"` are the last two
+rungs of `Gen4Camera.TILTS`, `applyCamera` builds a `Gen4View` for them and
+`Gen4Ground:draw` hands them the frame. (A grep that excluded `Gen4Ground.lua`
+made `drawFree` look like dead code with no caller; it is called from the same
+file. Search the file you are editing too.)
+
+### What the ladder was actually doing
+
+Measured before changing anything, as parallax: two frames one whole pixel of
+ground travel apart, the second slid back by exactly that, counting what fails
+to cancel. Whatever moved differently from the ground is depth.
+
+| rung | height scale | spread/unit | parallax, DEFAULT | parallax, a ROOM |
+|---|---|---|---|---|
+| cartridge | 0.5143 | 0.0007711 | 19.49% | **0.00%** |
+| 90 | 0.0000 | 0.0007711 | 19.69% | 0.00% |
+| 70 | 0.3122 | 0.0007711 | 19.79% | 0.00% |
+| 50 | 0.7196 | 0.0007711 | 17.41% | 0.00% |
+| 30 | 1.4855 | 0.0007711 | 13.51% | 0.00% |
+
+The spread is `cos(pitch)/distance` off the map header, so it was **the same
+number on every rung** — stepping the ladder made things TALLER and no deeper,
+and the parallax even fell as the rung got shallower. And for the 300
+`INTERIOR_ORTHOGRAPHIC` headers — every ordinary room — it was **0 pixels of
+184,320 at every rung**, because an orthographic projection has no parallax by
+construction. Indoors the tilt could not show depth however far it was stepped.
+
+### The change
+
+The spread is a fact about where the camera sits, so the honest way to make it
+larger is to bring the eye closer, not to scale the term by a number chosen to
+look right. A chosen rung now interpolates the eye's distance between the map
+header's own and **169.462158203125** — `HALL_OF_ORIGIN`, the closest camera in
+`sCameraTypes[]`. Both ends come from the ROM.
+
+Interpolated **reciprocally**, because the spread is proportional to `1/D`. Two
+things fall out of writing it that way round: an orthographic header starts at
+`1/D = 0`, which is what orthographic *means*, so rung 90 leaves those rooms
+exactly as flat as the cartridge draws them; and parallax then grows linearly
+with the rung, which is the property a ladder should have. Interpolating the
+distance itself instead gave rung 90 a spread of 0.0004104 and 12.13% parallax
+on the **flattest** rung, where the height scale is 0 so nothing is raised and
+the splay has nothing to belong to. That was caught by measuring, not by
+reading.
+
+| rung | spread/unit | parallax, DEFAULT | spread, a ROOM | parallax, a ROOM |
+|---|---|---|---|---|
+| cartridge | 0.0007711 | 19.49% | 0.0000000 | 0.00% |
+| 90 | 0.0007711 | 19.69% | 0.0000000 | 0.00% |
+| 80 | 0.0011484 | 22.93% | 0.0006310 | 17.72% |
+| 70 | 0.0015256 | 22.09% | 0.0012621 | 23.11% |
+| 60 | 0.0019029 | 25.25% | 0.0018931 | 27.72% |
+| 50 | 0.0022802 | 27.38% | 0.0025242 | 34.06% |
+| 40 | 0.0026574 | 28.55% | 0.0031552 | 35.98% |
+| 30 | 0.0030347 | **30.30%** | 0.0037863 | **38.68%** |
+
+**The cartridge rung and rung 90 are bit-identical to the baseline** — same
+pixel counts, same spread — on both projections. That is the containment: the
+faithful path is untouched and there is no second branch to drift from it.
+
+The ground plane is untouched too, and that is why this is safe: the shader's
+factor is `1 - y * spread`, exactly 1 at `y = 0`. `groundScale` reads 0.8576
+(and 0.7670 indoors) on **every** rung, so every sprite, pick and tile-row
+answer the overworld computes from `scales()` and `unprojectGround` is
+unchanged. `pitch`, `distance` and `projection` are all left alone.
+
+### The measurement was wrong twice first
+
+Both wrong versions produced confident numbers:
+
+1. **A round camera step gives a fractional shift.** 32 map px of travel is
+   `32 × 0.767 = 24.54` screen px, so the comparison sampled half a pixel out
+   of register and counted ordinary texture detail as parallax — **42.68% for
+   an orthographic camera that cannot have any**. Fixed by making the SHIFT a
+   whole number of pixels and deriving the camera step from it.
+2. **Then the sign was guessed.** Sliding the wrong way gave 59.67%, also for
+   ortho. Fixed by SEARCHING the alignment: the ground cancels at exactly one
+   offset, that offset is the minimum, and for an orthographic projection the
+   minimum must be ~0. It is — 0 of 184,320 — and that is what proves this
+   check can fail.
+
+The search is windowed to the analytically expected offset. A free scan found
+`dy = -1` on the two shallowest orthographic rungs — a spurious minimum picked
+because the picture had changed so much that nothing cancelled anywhere — and
+reported numbers not comparable with the rest of the column.
+
+### Still open
+
+Third person draws no player: `Gen4View:pixelsPerUnitAt` is published for a
+billboard and still has no caller, and `drawSprite` works in the field camera's
+screen space, so the free camera needs its own projected billboard. No look
+control or view-relative movement either.
+
+**Nothing is marked complete.**
+
+### Correction to the "Still open" above, same session
+
+Written two paragraphs up: *"Third person draws no player."* **That is wrong,
+and it was my own note being repeated rather than checked.**
+
+`OverworldState:draw`'s `drawEntity` has no free-camera gate. The player and
+every NPC are still drawn by `e:draw(cam.x, cam.y + riseOf(e))` — flat, at their
+ordinary screen positions, on top of the perspective world `drawFree` has
+already blitted. The world is not empty; **the characters are in the wrong
+space**: unscaled by distance, unsorted against the world, and in FIRST person
+the player's own sprite is painted at screen centre, standing in front of the
+eye. (Read from the source; not yet run. The absence of a gate is plain, but it
+is stated as a reading, not as a measurement.)
+
+That changes what the fix is. Not "add a billboard because nothing is drawn" —
+the draw exists and needs PROJECTING through `Gen4View` when a free camera owns
+the frame. `Gen4View:pixelsPerUnitAt` is published for exactly that and still
+has no caller, and the scale needs no invention: the cartridge's field camera is
+1:1, one world unit to one screen pixel at the target plane, so a sprite's pixel
+dimensions are its world dimensions.
+
+### And both free modes were looked at, not assumed
+
+First person on Twinleaf renders a path, a fence line, a blue-roofed house and
+forest canopy overhead; third person renders ground receding to a real horizon.
+The perspective works. One harness note worth keeping: `follow` places the eye
+from the viewport centre, which on Twinleaf puts it at world x 2000 while the
+houses sit near x 1704 — outside a 50 degree frustum. A frame that looks empty
+of buildings may only be pointed the wrong way; aim at the chunk centre
+(`cell * 512 + 256`) before concluding anything.
+
+## Pass 35 — three faults reported from a third-person screenshot
+
+Reported: *"currently the first and third person are showing the flat world
+overlaying the first or third person and isnt keeping the player the right size
+and theres no free movement or orbital camera"*, with a screenshot of Twinleaf
+in correct third-person perspective carrying flat tree columns up both sides and
+two characters standing in it at flat 2D scale.
+
+Three separate faults, and the screenshot is what separated them.
+
+### 1. The flat world overlaying — `drawCanopy`
+
+`Gen4Ground:drawCanopy` runs `livePass`, which is the **oblique field matrix**,
+and blits the result over the finished frame. Under a free camera that paints a
+flat-projected copy of the chunks straight over the perspective world.
+
+**Reproduced before it was called fixed.** With the new standdown disabled, the
+canopy pass repaints **79,031 of 196,608 pixels — 40.20% of a third-person
+frame**. As shipped: **0 pixels**. Rendered, the control shows exactly the
+artifact in the report: flat tree columns down both sides and flat green roofs
+over the road.
+
+`drawFree` already draws every chunk and prop whole, with no height cut, into a
+depth buffer — so there is nothing for a canopy pass to add, and nothing it
+could add that would be in the right projection. The field view is untouched:
+`drawCanopy` still returns true there.
+
+### 2. The characters at flat scale — the projection
+
+There was no free-camera gate anywhere in `drawEntity`, so every sprite was
+placed by `e:draw(cam.x, cam.y + riseOf(e))` — the field camera's 1:1 mapping,
+which is simply not this camera's. A character fifty units away and one at the
+eye came out identical.
+
+New: `Gen4View:project(x, y, z, vw, vh)` → screen position, pixels-per-unit and
+depth, returning **nil behind the eye** rather than a mirrored point, because a
+character standing behind you painted in front of you is worse than one absent.
+
+The scale needs no invention: the cartridge's field camera is 1:1 — one world
+unit to one screen pixel — so the flat draw is *already* in world units and
+`pixelsPerUnitAt` is the whole conversion.
+
+**The sprite is not redrawn, it is re-placed.** `Gen4Ground:freeEntity` runs the
+entity's own unchanged draw call inside a transform that maps the point it would
+have put the feet on to the point the projection gives. Sprite selection,
+animation frames, palettes and followers stay entirely the entity's business.
+
+Measured: two stand-ins on the same road, 160 units apart in depth, both land on
+the road centreline — near at screen (256, 322) scaling 6.275 px/unit, far at
+(256, 138) scaling 1.891. **A 3.32× size ratio where a flat draw is exactly
+1.00×.** In the field view `freeEntity` returns false outright and the caller
+draws flat exactly as before.
+
+The y sign was **measured, not reasoned about** — markers drawn at four
+buildings' own coordinates land on those buildings, and the two at `t1_door1`
+land on the doors. Getting that sign wrong is what rendered the whole map upside
+down when the ground matrix was first written, and the failure mode here would
+have been unmistakable mirroring.
+
+In first person the player is skipped: they are the eye, and drawing them puts
+their own back across the middle of the view.
+
+### 3. No orbital camera — `Gen4View:orbit`
+
+The free camera took the player's facing, so it could only ever look the way
+they were walking — never at them, never round a building, never up at a roof.
+
+`orbit(dYaw, dRise)` gives the camera its own yaw and elevation, and `recentre`
+hands it back. Bound to `,` `.` (yaw, 15° a press, so four presses make a
+quarter turn and the cartridge's four facings are all reachable exactly) and
+`;` `'` (elevation, 6°, clamped to −20..+60). The keys do nothing unless the
+tilt ladder is on `third` or `first`, so they stay free everywhere else.
+
+**The orbit is derived from the placement that was already there**, so at rest it
+reproduces it exactly rather than approximately: read `FOLLOW_DISTANCE` 96 and
+`FOLLOW_HEIGHT` 40 about a pivot at chest height 16 as a radius and an elevation.
+Measured over five yaws, the largest disagreement with the old formula is
+**2.27e-13**, and the orbit radius stays 99.0 through every step — which is what
+makes it a pivot rather than a drift. Both clamps hold (+90 → +60, −200 → −20)
+and `recentre` restores the original eye exactly.
+
+### Containment
+
+`freeGround` is nil on every Gen 1/2/3 map (`gen4Ground` is nil) and nil on every
+Gen 4 map at the cartridge rung or any numeric one (`view3d` is nil unless the
+ladder is on `third`/`first`). So the flat path is reached by exactly what
+reached it before, and the new one only by a player who has stepped into a mode
+that was drawing characters wrongly anyway. The `freeMode` test is on the method
+as well as its answer, so a ground built before this existed cannot raise.
+
+### Still open
+
+Free MOVEMENT is not done — the orbit turns the camera, but walking is still
+grid- and facing-relative, so under a swung camera "up" is still north rather
+than away from the eye. Shadows and the grass overdraw are skipped in free mode
+(both are drawn in screen space against a ground plane this camera has not got).
+Characters are painted over the world rather than depth-sorted into it, which
+still wants the entity pass drawing into the world target.
+
+**Nothing is marked complete.**
+
+## Pass 36 — walking is camera-relative under an orbited camera
+
+The half of *"theres no free movement"* that pass 35 left open. Once the camera
+had been swung round a building, `up` still walked NORTH — so the controls were
+relative to a camera that was no longer there, which is the part that actually
+bites.
+
+### Quantised to quarter turns, and grid movement is exactly why
+
+"Free movement" is tempting to read as walking off the grid. It should not be.
+Collision, encounters, scripts, ledges, ledge hops, warps, the whirlpool and the
+Acro bike's side jump in this engine are all answered per CELL and per FACING —
+there are four facings and the cartridge has no notion of a fifth. Walking off
+the grid would not be free movement; it would be every one of those systems
+silently answering about the wrong tile.
+
+So the step stays on the grid, and only *which of the four it means* is rotated:
+`Gen4View:screenToWorld` turns the pressed key by the number of quarter turns the
+camera has taken. Yaw is 0 north and grows clockwise, so the camera's quarter
+turns are the input's quarter turns.
+
+| camera yaw | up | right | down | left |
+|---|---|---|---|---|
+| 0 | up | right | down | left |
+| 90 | right | down | left | up |
+| 180 | down | left | up | right |
+| 270 | left | up | right | down |
+
+Verified at the quarter turns and either side of a boundary — 44° rounds to 0,
+46° to 90, 359° back to 0 — 0 mismatches over 28 cases. Not orbiting, every
+direction comes back untouched whatever the yaw, and a non-direction key passes
+straight through.
+
+**Only while orbiting.** Unorbited, the camera takes the player's own facing, so
+"away from the eye" would always be "forward" — tank controls, and a change to
+how the game plays for someone who only wanted a camera angle.
+
+### One rotation point, and it had to be checked rather than assumed
+
+The rotation happens on the single line that turns a held key into a direction,
+so nothing downstream learns about cameras. That is only safe if nothing in that
+loop re-reads the INPUT using the rotated name — it would poll the wrong key.
+Checked across the loop's whole 80-line body: the only input read in it is the
+guard itself, which uses the pressed key. Everything else takes `dir` as a world
+direction, which is what it now is.
+
+`walkDirection` is wrapped in `pcall` for the same reason `groundSin` is: it runs
+on every frame a direction is held, and a renderer mid-swap must cost a dropped
+rotation, never a dropped step. It returns its argument unchanged on every map
+this engine runs and on every camera but an orbited free one.
+
+**Nothing is marked complete.**
+
+## Pass 37 — item 2 (signs): four mechanisms ruled out, and a wrong note corrected
+
+Item 1 is with play-testing, so this took item 2, "signs are not rendered". It
+did not end where it was expected to, and one earlier note in this document is
+now withdrawn.
+
+### `kanban01` is not the sign
+
+Recorded earlier: *"Item 2's sign has a name: `kanban01` is `build_model.narc`
+member 2."* **`kanban01` is placed ZERO times across all 666 chunks.** So are
+`fs_kanban`, `board_b`, `board_c`, `board_e`, `board_f` and `gym_sig01`. The
+family is not dead — `board_a` is placed 300 times across 10 chunks — that one
+id simply is not a sign anywhere in Sinnoh.
+
+Nor is the `_sNN` family: 61 models, 84 placements, and `t1_s01`/`t1_s02` are
+Twinleaf **buildings** with five shapes and their own doors, not signposts. The
+town's eight props are four buildings and their four doors.
+
+### The prop extraction is provably complete — 665 of 666, ROM-verified
+
+Read `land_data.narc` out of the ROM and compared prop counts with the cache
+chunk by chunk: **665 agree, 0 differ.** (Land 506's size field is not a multiple
+of the record size and carries no cache row.)
+
+Getting there corrected a second thing. **pret's `LandDataHeader` field names do
+not match the file's field order:**
+
+```c
+typedef struct LandDataHeader {        // src/overlay005/land_data.c:137
+    int terrainAttributesSize;         // field 0 — always 2048, confirmed
+    int mapModelSize;                  // <-- actually the MAP PROPS size
+    int bdhcSize;                      // <-- actually the MAP MODEL size
+    int mapPropsSize;                  // <-- actually the BDHC size
+} LandDataHeader;
+```
+
+Read in declaration order, Twinleaf's props come to 162 bytes = **3.375
+records** — and a fractional record count is the tell that the field is the wrong
+one. Field **1** over 48 (`sizeof(MapPropFile)`: `int` + three `VecFx32` +
+`int[2]`) gives 8, 29 and 0 for lands 0, 286 and 4 — matching the cache exactly,
+and matching the separately recorded fact that chunk 4's object size in the ROM
+is 0. The four sizes sum to the file length exactly on every chunk.
+
+### Where the signpost is not
+
+| mechanism | ruled out by |
+|---|---|
+| a map prop | no sign model is placed on any chunk, and the extraction is complete |
+| terrain geometry | chunk 0's ROM model is 38,876 bytes of `BMD0` with **exactly 19 shapes** — the same 19 the port imports, nothing dropped. Every material in it is terrain: `grass`, `conttree`, `nsand`, `lake`, `s_snow`, `puddle` |
+| a bg event | `BgEvent` is `{script, type, x, z, y, playerFacingDir}` — **no model id** — and nothing in pret's field code draws from one |
+| an object event | Twinleaf's are graphics 10/12/19/91/92/94/148 = ace_trainer_m, beauty, hiker, player_f, player_m_bike, prof_rowan, palmer — the opening-scene NPCs. And **no signpost sprite exists among the 421** overworld sprites |
+
+Rendered Twinleaf's single sign event — tile (107, 893), chunk-local (−80, +208)
+— through the free camera, with props and with props removed. Flat grass both
+times. There is nothing there to draw, in the port **or in the ROM**.
+
+### What "signpost" means in the cartridge
+
+`Signpost` in pret is the **text box**, not a post: `SIGNPOST_CMD_*`,
+`ScrCmd_DrawSignpostTextBox`, `ScrCmd_DrawSignpostInstantMessage`. Looked up by
+name, those are opcodes 54–59 of 839, and `Gen4ScriptVM` already lowers all six.
+
+So item 2 may be about the sign's **message** rather than a missing post — a
+readable spot that says nothing when you press A. That is a different fault in a
+different subsystem, and worth one question before any code is written.
+
+### A lookup trap worth keeping
+
+**Twinleaf is event map 390, not 411.** The terrain def's header id and the event
+table's map id are different id spaces — 411's event row is an interior with a
+single warp and no signs, which reads exactly like "this town has no signs"
+rather than like "you are reading the wrong map".
+
+**Nothing is marked complete.**
+
+### Addendum — the measurement that closes "signs are props"
+
+Confirmed from play: *"No signpost object visible"* — a physical post is
+expected and there is nothing there.
+
+So the prop question was settled properly rather than by Twinleaf alone. For
+every sign/bg event that lands inside the 30x30 overworld matrix, the nearest
+prop on that event's own chunk was measured:
+
+| within | events with a prop | of 344 |
+|---|---|---|
+| 1 tile | 42 | 12% |
+| 2 tiles | 56 | 16% |
+| 3 tiles | 64 | 19% |
+| 4 tiles | 82 | 24% |
+
+**A smooth climb with radius is the signature of random proximity**, not of a
+pairing — in a town full of props something is always eventually nearby. A real
+pairing would sit near 100% at one tile and stay flat. And the props that do
+land near a sign are buildings (`c10_s02`, `r209s02`, `t5_o01`), i.e. signs read
+off a wall.
+
+That closes the fourth door. Signs in Platinum are not props, not terrain
+geometry, not bg-event models and not object events — and the port's extraction
+of all four is verified complete against the ROM. Whatever draws a signpost is a
+fifth mechanism, and nothing found so far points at where.
+
+**Not guessing further without a look at the cartridge.** The cheapest next step
+is a ROM screenshot of a place with a visible signpost, which says at once
+whether the post is 3D geometry, a billboarded sprite, or painted into the
+ground texture — and each of those points at a different archive.
+
+## Pass 38 — the spread was pivoting about the wrong plane
+
+Reported from play, with a screenshot of the player standing on the tile beside
+the Pokémon Center: *"when standing up next to a building i seem to be smaller
+than i should be and my character doesnt seem close enough to it ... i seem a few
+blocks back visually"*, and *"the player and npc sprite seems to be drawing below
+the ground rather than standing at ground level"*.
+
+### The containment argument in pass 29 was false
+
+The height spread scales a vertex's screen offset by `1 - y * spread`, and the
+whole case for it being safe was that the factor is **exactly 1 at y = 0**, so
+the ground plane lands where it always did and no sprite, pick or tile-row answer
+moves.
+
+**Twinleaf's ground is at y = 16, not y = 0.** Measured off the chunk mesh: the
+largest flat shape by area, 313,344 square units, sits at y = 16.0, and the BDHC
+agrees — `heightAt` returns **16.0 for 984 of Twinleaf's 1024 tiles**. So the
+factor at ground level was `1 - 16 * spread`, never 1, and the entire ground
+plane was being scaled about the screen centre while the characters standing on
+it were not.
+
+Measured, terrain only, comparing each rung against the same frame with no
+spread — the ground **must not move at all**:
+
+| rung | spread/unit | ground pixels moved |
+|---|---|---|
+| cartridge | 0.0007711 | 50.6% |
+| 80 | 0.0011484 | 53.1% |
+| 60 | 0.0019029 | 61.0% |
+| 30 | 0.0030347 | 65.5% |
+
+It was wrong at the **cartridge** rung too — this predates pass 34, which only
+made it three to four times worse.
+
+### The fix
+
+`heightSpread` is a `vec2` whose `y` was unused. It now carries the datum:
+
+```glsl
+float s = 1.0 - (vertex_position.y - heightSpread.y) * heightSpread.x;
+```
+
+and `Gen4Ground:draw` sets it each frame to `groundY` at the view centre — which
+is where the overworld keeps the player. That is the plane it has to be: the one
+the sprites stand on, because they are placed by the flat projection and get no
+spread at all.
+
+Isolating the flat ground shapes (the tree walls span the whole chunk and stand
+41 units tall, so they cover the frame centre and are *supposed* to move):
+
+| rung | datum 0 | datum 16 |
+|---|---|---|
+| cartridge | 16.6% | **5.7%** |
+| 90 | 9.5% | **1.0%** |
+| 60 | 28.0% | **9.8%** |
+| 30 | 47.9% | **25.2%** |
+
+Three to nine times better, not zero — the residual is neighbouring chunks the
+filter did not reach, since `livePass` draws several and only chunk 0's shapes
+were filtered. The arithmetic at the datum is exact by construction: `y - datum`
+is zero there, whatever the spread.
+
+### And two sprite faults in the free camera
+
+**The anchor was half a tile out in both axes.** `freeEntity` took a flat screen
+point and a world point as separate arguments, and the caller derived them
+differently — so a character landed low and south of where they stood, which is
+the "below the ground" report. It now takes the MAP POSITION and derives both
+spaces itself, because two spaces computed from one position cannot disagree.
+
+The feet offset is **derived, not guessed**: `SpriteRenderer:draw` puts the
+sheet's top-left at `py - camY + cellYBias - (tileH - 16)`, so the bottom edge is
+`py - camY + cellYBias + 16` — **`tileH` cancels**, giving `py - camY + 12` for a
+16x16 sprite and a 64x64 one alike. The horizontal centre cancels the same way at
+`px + 8`.
+
+It also projected the character at **y = 0** while the ground is at 16, putting
+them under it. It now reads `groundY`.
+
+**And the artwork was still in the old frame.** Reported: *"when i orbit the
+camera 180 degrees if i walk left it looks like hes walking right"*.
+`screenToWorld` turns the PRESS into a world direction so the step is right;
+`worldToScreen` is its inverse and turns the world facing back into the camera's
+frame so the sprite shown is the one the player is looking at. They are inverses
+because the camera sits between them. Set and restored around the draw, so no
+pose, animation or follower path learns about cameras.
+
+### Open, and it needs a decision rather than a patch
+
+*"changing the tilt seems to be stretching the buildings rather than changing the
+tilt of the camera"* — **correct, and it is what the oblique projection does.**
+Tilting an oblique matrix can only compress the ground (by `sin`) or scale height
+(by `cot`); it cannot move a camera. The decoupling in pass 23 chose the second,
+which is precisely "stretching the buildings". The height spread is a first-order
+patch over the same hole.
+
+The cartridge does not have this problem because **289 of its 593 headers name a
+PERSPECTIVE camera**, and `Gen4View` already is one — it is what first and third
+person run on, and it renders Twinleaf correctly. Putting the perspective headers
+on `Gen4View` at their own distance, pitch and fov would be *more* faithful than
+the oblique matrix, would make the tilt genuinely tilt, and would retire the
+spread entirely.
+
+**Nothing is marked complete.**
+
+## Pass 39 — off-grid walking, in first and third person only
+
+Clarified: *"walking off the grid entirely in first or third person"*. The scope
+is what makes it safe. Collision, encounters, scripts, ledges, warps, the
+whirlpool and the Acro bike's side jump are all answered **per cell and per
+facing**, and the field view and every other cartridge keep the grid untouched —
+so this adds a second way to move rather than replacing the only one.
+
+### The cell still exists, it just follows the body
+
+On the grid, `cellX/cellY` lead and `px/py` are derived — `Player:update` writes
+`px = cellX * 16 + dx * progress` every frame of a step. Off the grid it is the
+other way round: `px/py` lead and the cell is recomputed from the player's centre
+each frame.
+
+`Player:freeWalk` returns true **exactly when the cell index changes**, which is
+what `Player:update` already returns when a grid step lands. So the overworld's
+
+```lua
+local stepped = self.player:update()
+```
+
+keeps being the one place that says the player arrived somewhere new, and every
+warp check, coord event, encounter roll and music cue hanging off `stepped` runs
+unchanged and never learns the step was not a step. That seam is the whole reason
+this is a contained change rather than a rewrite.
+
+### Details that had to be got right
+
+- **Per axis.** A diagonal into a wall slides along it instead of stopping dead —
+  which is the entire feel of off-grid movement — and it costs one extra
+  `Collision.mayEnter`, not a new collision rule.
+- **The vector is normalised**, so a stick pushed into a corner does not walk
+  root-two times faster than one pushed straight.
+- **Same pace as the grid.** A grid step covers one tile in `stepFrames` frames;
+  free walking covers the same ground in the same time, bike included, so nothing
+  about pace changes with the mode.
+- **Rotated continuously**, not quantised to quarter turns the way
+  `walkDirection` has to be: a grid step can only be one of four, an off-grid one
+  can take the angle it was given. Screen up becomes the camera's forward
+  `(sin, -cos)`, screen right its right `(cos, sin)`.
+- **Only while orbited**, for the same reason the grid rotation is: an unorbited
+  camera looks the way the player walks, so rotating by its yaw would hand tank
+  controls to someone who never touched the camera.
+- **Leaving free mode snaps the body back to the grid.** Stepping off the ladder
+  mid-tile would otherwise leave the player between two cells until the next step
+  snapped them — which reads as the character teleporting a few pixels the first
+  time you press a direction.
+- The sheet has four facings and a stick has all of them, so the sprite shows the
+  dominant axis, and `Gen4View:worldToScreen` turns that back into the camera's
+  frame at draw time.
+
+### Consequence worth noting
+
+`OverworldState:walkDirection` (pass 36) is now unreachable: it only ever did
+anything under a free camera, and the free camera no longer takes the grid path
+at all. It is left in place rather than removed — it is the correct answer if the
+grid path is ever wanted under a free camera again — but it is a no-op today.
+
+**Untested.** The seam and the arithmetic are reasoned and syntax-checked;
+nothing here has been run. Expect the first play-test to find something.
+
+**Nothing is marked complete.**
+
+## Pass 40 — mouse look and right-stick orbit
+
+Requested: *"the orbit seems to work actually but should be mouse and right
+analog stick controlled"*.
+
+`Gen4View:orbit` already took arbitrary degrees — the four keys just handed it
+fixed steps — so the only new numbers are sensitivities, and those are taste
+rather than measurement: 0.20 deg of yaw per mouse pixel, 0.12 of elevation, and
+150 / 80 deg per second at full stick. The keys stay as they were.
+
+Three things this had to get right:
+
+- **The stick is polled, not evented.** `love.gamepadaxis` fires on CHANGE, so a
+  stick held at full deflection sends nothing and the camera would stop turning
+  while the player is still asking it to. An analog control that means "keep
+  going" has to be read every frame, so it runs from `Game:update`.
+- **A deadzone that starts the response from zero**, not one that just ignores
+  small values — otherwise a worn stick drifts the camera round on its own, and
+  the first push past the threshold snaps.
+- **Relative mouse mode**, or the pointer reaches the edge of the window and the
+  look stops dead. Enabled only while a free camera is up *and* the overworld
+  itself is the top state — a menu over a free camera still wants a real cursor —
+  and released the moment either stops being true.
+
+`Game:freeView()` answers nil on every Gen 1/2/3 map and on every Gen 4 map whose
+ladder is not on `third` or `first`, so all of this is inert everywhere else
+without needing to know what else is bound to the mouse. `love.mousemoved` asks
+it first and falls through to the existing touch path untouched.
+
+Mouse down and stick down swing the camera up and over, looking further down.
+That is a guess at taste, and one line to invert.
+
+**Untested.**
+
+**Nothing is marked complete.**
+
+## Pass 41 — third-person zoom, and what the blank building backs really are
+
+### Zoom
+
+Requested: *"add the zoom in and out feature to the third person"*. The wheel
+now scales the orbit radius when a free camera owns the frame, and the window
+zoom otherwise — which is what a wheel means in every 3D game.
+
+**Multiplicative per notch**, not additive: a fixed number of units per notch
+crawls when you are far out and lurches when you are close in, because what the
+eye reads is the ratio between one step and the last. At 1.15 per notch, five
+notches give 2.01x out and 0.50x in, with the stops just past at 2.60 and 0.45 —
+so the camera ranges from **2.8 to 16 tiles** from the player against a default
+of 6.2.
+
+The radius carries the height above the pivot with it, so zooming dollies along
+the view line and the framing angle does not change — which is what stops a zoom
+from sliding into the ground or climbing over the roof. Inert in first person by
+construction rather than by a test: the eye is at the player there and `follow`
+never consults the radius. `recentre` clears the zoom with the rest.
+
+### The building backs have no geometry at all
+
+*"the backs of buildings are blank which is normal for the rom but we should find
+a way to fill the back with a texture that fits in if possible."*
+
+Counted the triangle normals of `t1_h01`, a Twinleaf house, off its own vertices:
+
+| direction | triangles |
+|---|---:|
+| south (front) | 50 |
+| east | 43 |
+| west | 41 |
+| up (roof) | 24 |
+| **north (back)** | **0** |
+| down | 0 |
+
+**Nothing faces the back.** So this is not an untextured face or a culling
+setting — there is no surface there to texture, and no shading trick can fill it.
+The cartridge builds its houses for a camera that is always south of them, which
+is exactly what the seventeen-row table guarantees, and the port's free camera is
+the first thing ever to walk round behind one.
+
+Filling it means GENERATING geometry. The honest way is to cap the open edge
+loop: collect the edges used by exactly one triangle — for a house that is the
+back outline including the gable — and triangulate it, then planar-project UVs
+from the back plane at the same scale the side walls use, so the fill wears the
+building's own texture rather than a flat colour. A bounding-box quad would be
+cheaper and would stick out above the roofline on every pitched roof.
+
+Not started; it is a new feature rather than a fix, and the camera rework is the
+bigger prize.
+
+**Nothing is marked complete.**
+
+## Passes 42–43 — the free camera's first real play-test
+
+Five reports, one of them a regression this work caused.
+
+### Routes and cities stopped connecting — a regression, and mine
+
+*"cant move between routes and cities now."* Walking off a map edge is not
+movement, it is `checkEdgeExit`, and it lives in the per-direction loop that
+pass 39's off-grid path returns before ever reaching. So do the whirlpool, the
+carpet and arrow exits, ledge hops, Strength boulders and the Hoenn gates:
+**every one of them is a thing you reach by walking into it**, and going off-grid
+quietly removed all of them at once.
+
+They are asked again now, in the same order and with the same guards, for the
+dominant direction only — these are per-facing questions and the player has one
+facing. A check that starts a grid step is welcome to: `freeWalk` stands down
+while `moving` is set and resumes when the step lands. The facing is set before
+asking, exactly as `tryMove` does, or on the frame a direction is first pressed
+every check would answer about the way the player used to be looking.
+
+**The lesson: an early `return` past a loop does not skip a loop, it skips
+everything the loop was asked to decide.** That block was seven checks and one
+step, and only the step was replaced.
+
+### The player was not centred
+
+*"players not centered on the screen in third person."* The eye was placed on a
+sphere at elevation `e` and then aimed along a **separate** angle,
+`FOLLOW_PITCH + rise` — 18 degrees against an elevation of 14.04 at rest. A
+camera that sits at one angle and looks along another is not pointing at the
+thing it orbits, and the 3.96 degree gap is **6.9 world units of vertical miss at
+the player**, about 30 screen pixels. On a sphere the two are the same angle by
+definition, so the pitch is now the elevation.
+
+### The camera dug under the map
+
+*"the camera doesnt collide with the ground so im able to see under the map."*
+Two clamps, because there are two causes. `Gen4View` now stops at a rise of −12
+rather than −20: the eye sits at `PIVOT_Y + sin(elevation) * radius` and the base
+elevation is 14.04, so −14.04 puts it exactly on the ground plane and anything
+past that digs. −12 leaves clearance at every zoom — measured 17.6 / 19.5 / 25.1
+against a ground of 16.0 at the near, default and far stops.
+
+That only covers flat ground. A hill between the eye and the player rises past a
+perfectly legal elevation, so `Gen4Ground` holds the eye above `groundY` too —
+that is where the heights live. It lifts rather than pulls in, because pulling in
+pushes the camera through the player instead: the same hole from the other side.
+
+### The guitarist in 2D
+
+*"im seeing a guitarist in the bottom left as if it were in 2d view."* A **ghost**
+— a character standing on the next map, drawn across the seam by its own loop
+with an offset camera. Ghosts never went through `drawEntity`, so the projection
+added in pass 35 missed them entirely and they kept flat 2D size and position
+while everyone on this map was placed properly. Routed through `freeEntity` now,
+with rise 0, because a ghost takes none on either path today — a known gap, and
+not one that line should start guessing at.
+
+### And a sky
+
+Artwork supplied. The field view never needed one — it looks down and the DS
+fills the rest with a backdrop colour — but a camera you can raise to the horizon
+shows whatever lies past the last chunk, which until now was the clear colour.
+
+**Mirrored into a seamless tile at import**: the image is laid beside its own
+mirror, so the first and last column are the same pixels and a full turn crosses
+no seam. Verified on the file — the worst difference between those columns is
+**0**. Yaw scrolls it sideways two copies per turn; pitch slides it by the same
+fraction of the view that the pitch is of the field of view, so the sky and the
+ground agree where the horizon is. Drawn first with `always` depth and no depth
+write, so the world lands on top and the sky can never occlude anything.
+Rendered and looked at.
+
+### Still open
+
+Trees are flat sheets and should turn to face the camera — asked for, not done.
+A tree billboards about its own vertical axis, which means rotating its geometry
+per frame rather than scaling it, so it belongs with the model draw rather than
+here.
+
+**Nothing is marked complete.**
+
+## Pass 44 — the camera survives a map change, and the sky stops drifting
+
+### The camera reset at every doorway
+
+*"when changing from a town or route or map chunk its resetting my camera."*
+A `Gen4Ground` is built per map and `applyCamera` builds it a fresh `Gen4View`,
+so the orbit and the zoom lived on an object that died at every route boundary.
+Walking north and back put the camera behind the player again.
+
+The look is now held in the MODULE — `Gen4View.look` — and every control writes
+through to it, for the same reason `Gen4Camera` holds the tilt choice there: the
+thing that needs it is rebuilt by the map loader, which is never handed a game
+and has no business carrying a camera across for it. A look the player set is a
+preference, and it should outlive the map exactly as the tilt rung already does.
+
+### The sky moved with the camera
+
+*"the skybox seems to move when i look around as well rather than seeming like a
+static sky."* It did, and the first version earned it: the panorama scrolled
+`SKY_TURNS = 2` copies per revolution at a scale picked to look right. **A sky
+moving at twice the world's rate reads as the sky turning, not the camera.**
+
+There is nothing to tune here, which is the point. A cloud infinitely far away
+sits at a fixed WORLD DIRECTION, so the panorama spans 360 degrees across its
+width exactly once, and the scale comes from the camera's own field of view:
+
+```
+hfov     = 2 * atan(tan(fovY/2) * aspect)
+pxPerDeg = vw / hfov                 -- the same number the world is drawn with
+scale    = pxPerDeg * 360 / imageWidth
+```
+
+**Measured**: at fovY 50 and 512x384 the horizontal field is 63.74 degrees and
+8.032 screen pixels to the degree, so a 30 degree turn must move the sky
+**241.0 px**. Cross-correlating a row of the rendered sky before and after that
+turn gives **241 px — an error of 0.00 degrees.** The horizon is placed from the
+pitch through the same `pxPerDeg`, so the sky and ground agree where it is.
+
+### Trees cannot be billboarded yet, and the reason is upstream
+
+*"trees should rotate to face the players camera always."* They are flat sheets,
+so a camera that walks around them sees them edge-on. But billboarding needs to
+know WHICH geometry is a tree, and:
+
+| | shapes carrying a material name |
+|---|---|
+| Twinleaf's chunk mesh | **0 of 19** |
+| `t1_h01`, a building | 4 of 4 |
+
+The ROM's own chunk model names its materials — `conttree`, `conttree_b`,
+`conttree_t`, `grass`, `nsand`, `lake` were read straight out of it in pass 37 —
+and **the terrain import drops them.** Nothing downstream can tell a tree from a
+patch of grass.
+
+This is the same fault the building path already had and had fixed, one layer
+over. `Gen4Ground:building` carries this comment:
+
+> THE MATERIAL TRAVELS WITH THE SHAPE, and it has to. This list is rebuilt
+> rather than passed through, and it dropped `material`, `texture` and `alpha`
+
+The terrain shape list is rebuilt the same way and drops the same field. So the
+first step is the importer, not the renderer — and after that, billboarding a
+sheet inside a merged chunk mesh needs each vertex to know its own sheet's
+centre, since a shape here is every tree on the chunk at once, not one tree.
+
+**Nothing is marked complete.**
+
+
+## Pass 45 — the world masks characters again, because the 3D pass stays open
+
+Reported from play, twice: *"3d objects dont seem to mask the player or 3d
+sprites still as well especially in 3rd person or first person."*
+
+### Why it could not have worked
+
+`drawFree` drew the whole world into its own canvas **with a real depth buffer**
+and then, at the end of the function, blitted that canvas to the screen. That
+blit is the bug. It ends the frame's 3D: the depth buffer still holds the world,
+but every character afterwards is painted onto a flat picture that has no depth
+attached, so there is nothing left for a sprite to test itself against. A house
+and a character were never in the same comparison.
+
+So the pass is now left **open**. `drawFree` records `freeOpen`, the canvas it
+displaced, and the colour target; the entity pass draws into that still-bound
+target through `freeEntity`; and `drawCanopy` — which the overworld already
+calls *after* the sprites — closes it and blits.
+
+### The sprite's depth
+
+`Gen4View:project` already computed `cz / w` and threw it away; it is returned
+now as a fourth value and is exactly normalised device z, the same space the
+world's geometry wrote. `DEPTH_SPRITE_SHADER` leaves LÖVE's 2D transform alone
+and overrides only depth:
+
+```glsl
+vec4 p = transform_projection * vertex_position;
+p.z = spriteZ * p.w;
+```
+
+`lequal`, not `less`, for the reason the canopy needs it: a character standing
+exactly on a surface shares its depth and `less` rejects equal. Transparent
+texels `discard` so the square around a character does not occlude what is
+behind it.
+
+### Closing it can't be conditional
+
+`drawCanopy` closed the pass in its free-mode branch, which sat *below* the
+`noDepth or not self.grid` guard. A map change between `draw` and `drawCanopy`
+flips `grid`, the guard takes the early return, and the canvas stays bound — the
+blit then waits for the net at the top of the next `draw`, one frame late, into
+a canvas reference the map change may already have replaced. The close now runs
+as the **first** statement of `drawCanopy`, in every mode; `endFree` is
+idempotent, so this costs nothing on frames that go on to draw a canopy. The net
+at the top of `draw` stays, above the `noDepth` return.
+
+### Measured
+
+Twinleaf, 512x384, camera at (1792, 14080) facing north. House model 22 stands
+at world (1872, 13992) with its door prop at z = 14005. A red marker quad is put
+on that house's line at a range of depths and rendered **twice** — once through
+the depth path, once with it bypassed. The bypass is the control: it proves the
+marker would have painted.
+
+| marker z | through the depth path | control | |
+|---|---|---|---|
+| 14040 | 3936 | 3936 | visible |
+| 14020 | 3486 | 3486 | visible |
+| 14010 | 856 | 3081 | partial — straddling the front face |
+| 14000 | 0 | 2738 | **masked** |
+| 13960 | 0 | 1830 | **masked** |
+| 13930 | 0 | 1458 | **masked** |
+
+The transition lands between 14010 and 14000, which is where the house's front
+face is — its door prop sits at 14005. Nothing was tuned to make that happen.
+
+Three earlier versions of this measurement were thrown away for saying nothing:
+
+- The first placed both markers off-screen and read 0 in **both** cases. A test
+  whose pass and fail look identical has not been run.
+- `freeEntity` returns `true` on the behind-the-eye path as well as after
+  drawing, so its return value was never evidence of a draw.
+- The third scanned the open road, where there is no building — depth-on equalled
+  the control at all eleven positions, which is the correct answer to a question
+  worth nothing. The placements had to come from `terrain.chunks[land].objects`,
+  not from `self.buildings`, which is a model cache and not a placement list.
+
+First person needed the same pair. On the house line it is masked from z = 13960
+inward but its nearer positions are off-screen, so *"first person hides
+everything"* was still live; on the open road line it is fully visible at all
+fourteen distances, identical to the control. It masks where geometry occludes
+and nowhere else.
+
+### The tilt path is untouched
+
+Rungs `cartridge`, 50 and 30, in a process that has not entered free mode:
+`freeMode = nil`, `freeOpen` never set, `draw` and `drawCanopy` both return
+true, frame 100% lit. The new guard reads `self.freeOpen`, which those rungs
+never set, so the flow through `drawCanopy` is the one it always was. Gen 2 and
+Gen 3 do not reach `Gen4Ground` at all.
+
+**Nothing is marked complete.** Item 16 — *trees and indoor objects should mask
+the player* — stays open until Cedric has played it. Trees remain blocked behind
+the terrain importer dropping material names (pass 44); this pass fixes the
+masking *mechanism*, which is what every one of those objects was missing.
+
+
+## Pass 46 — the camera stops spinning at boundaries, and the sky stops sliding
+
+### The 180-degree flip, measured
+
+Reported: *"camera flipping on route/chunk/city change, when i walk into a new
+area its rotating my camera 180 degrees."*
+
+`Gen4View.look` carried `yaw`, which is the ORBIT's angle and exists only while
+the player is orbiting. A player who had never touched the look controls kept
+`nil`, so the camera rebuilt at a map boundary started at 0 — north — and
+anyone walking SOUTH was turned exactly about. Measured across a simulated
+boundary before the fix:
+
+| player | yaw before | yaw after | rotation |
+|---|---|---|---|
+| never orbited | 180.00 | 0.00 | **180.00** |
+| has orbited | 180.00 | 180.00 | 0.00 |
+
+The kept state now also carries `heading` — the direction the camera actually
+ended up looking, written in `follow` rather than in `remember`, because
+`remember` is only called by the orbit controls and the players being spun were
+exactly the ones who never touched them. Ten headings from 0 to 359 now carry
+across a boundary with a worst rotation of **0.0000 degrees**, and the tilt
+rungs never set `heading` at all.
+
+### The sky no longer slides with pitch
+
+Reported: *"the skybox shouldnt move when moving camera up or down."*
+
+`horizon = vh * 0.5 + pitch * pxPerDeg` is what a sky at infinity really does,
+and on this camera it is far too much to read as sky: third-person pitch runs
+2.04 to 74.04 degrees and at 8.03 px/degree that slides the panorama 579 px up
+a 384-px screen. Pinned to `vh * 0.5`. Measured over the whole pitch range,
+old file against new:
+
+| pitch | old | new |
+|---|---|---|
+| 2.04 | -97 px | 0 |
+| 30.00 | +128 px | 0 |
+| 74.04 | -182 px | 0 |
+
+The YAW response is untouched and identical between the two files (-241 px at
+30 degrees, the same number pass 44 measured), so the horizontal world-lock
+still holds.
+
+### No sky indoors
+
+Reported: *"indoors no skybox should show."* Not a new judgement —
+`AreaDataManager_IsOutdoorsLighting` (area_data.c) is
+`areaLightArchiveID == 0 || == 3`, and the extractor already stores it per map.
+110 of the 593 maps are outdoors, 483 are not. Derived from the light member
+when the field is absent, so an old cache needs no re-import: the derivation
+agrees with the stored flag on **593 of 593 maps**.
+
+## Pass 47 — the camera is aimed at the player, and sits at head height
+
+### `placeCamera` had no callers
+
+Reported: *"when zooming and rotating around the player in 3rd person the
+player isnt centered still."* This is a DIFFERENT fault from the one pass 42
+fixed. Pass 42 fixed where the camera POINTS; this is what it points AT.
+
+`Gen4Ground:placeCamera` has existed since the free modes were added and was
+never called, so every frame fell through to the estimate in `draw` — the
+viewport's centre, with the vertical divided by the ground's `sin(pitch)`
+because that is what the FLAT pass needs. A free camera is not the flat pass.
+On a 512x384 view with the player dead centre, sinP is 0.8576 and the camera
+was aimed **31.9 units — two whole tiles — past the player**, in both third and
+first person. Two tiles is invisible while the camera sits still behind the
+player and swings wide the moment you orbit or zoom.
+
+The overworld now calls it once a frame from `drawWorld`, before every draw
+path, using `cameraTarget()` so a cutscene's invisible camera object still
+leads the view. No facing is passed, so the look controls and the kept heading
+are untouched: this moves the camera, it does not aim it.
+
+Measured over four orbit angles x three zooms x three elevations, projecting
+the pivot the zoom selects and asking how far it lands from the centre of the
+frame:
+
+**worst miss: 411.5 px with the estimate, 10.3 px with `placeCamera`.**
+
+The residual 10.3 px occurs only at the lowest elevation, where `EYE_CLEARANCE`
+deliberately lifts the eye off the orbit sphere to stop the camera digging into
+the ground. It is the ground clamp, not the aim.
+
+### Eye height, off the cartridge's own doors
+
+Reported: *"first person also has the camera too low should be head height."*
+It was 22, on a comment claiming the player model "stands about 24 tall" — a
+number nothing had measured, and one that contradicts `ORBIT_PIVOT_Y`'s comment
+calling 16 the CHEST. A chest at 16 puts the crown near 32, not 24.
+
+Measured instead off the one prop whose height states what a person is, decoded
+from `build_model.narc`:
+
+| model | height |
+|---|---|
+| `door_pc01` | 30.50 |
+| `door_wi01` | 30.50 |
+| `door01` | 27.21 |
+| `t1_h01` (a Twinleaf house) | 71.00 |
+
+A doorway is 30.5 and is built to clear a head, so the eye goes just under it:
+**26**, which is 0.85 of the door. This is OUR number — Platinum has a fixed
+camera and no first person, so nothing in the ROM states an eye height. What
+the ROM states is the scale.
+
+### Zoom now converges on the eye
+
+Reported: *"when zooming in in third person it should zoom into the eye level
+on my player."* The pivot was pinned at the chest, so winding the zoom in ended
+nose-to-chest and stepping into first person jumped the eye up ten units. The
+pivot now travels chest (16) to eye (26) as the zoom closes. Anchored at zoom
+1, where `t` is 0, so the default framing every earlier pass was measured
+against is arithmetically unchanged.
+
+## RETRACTION — the terrain importer does NOT drop material names
+
+Pass 44 recorded trees as blocked, on the claim that the terrain import drops
+material names so nothing downstream can tell a tree from grass. **That claim
+was false.** `Gen4Terrain.append` carries `material = shape.material`, and
+measured against the cache: **7,547 of 7,547 terrain shapes carry a material
+name**, 3,301 distinct. The tree work was never blocked.
+
+### What a tree actually is, measured
+
+Two wrong rules were tried and discarded first:
+
+- **y-span > 0** catches `dun_wall_c/n/e/s/w`, `searock`, `criffp2`, `newstep`
+  — walls, cliffs and steps. Not a card test.
+- **every connected component is a 4-vertex quad** is better (trees decompose
+  into 56-240 independent quads; walls into 6- and 8-vertex boxes) but the
+  FLAT all-quad set is mostly `sea`, `green`, `blue`, `lakep` — the ground
+  itself. Standing those up would destroy the world.
+
+The signature that does work is the FACE NORMAL, computed from the geometry:
+
+| material | faces point |
+|---|---|
+| `tree01`, `tree2_01`, `tree04_2`, `conttree_b`, `conttree_t` | **(0, 0.82, 0.58)** |
+| `searock`, `imped`, `dun_imped` | (0, 0.71, 0.71) |
+| `ngrass`, `nhana`, `nectgr`, `sea`, `tshadow` | (0, 1, 0) — flat |
+| `hasira`, `newstep`, `dun_wall_*` | (±1, 0, 0), (0, 0, 1) and many more |
+
+(0, 0.82, 0.58) is the cartridge's authored 35-degree lean, and it appears on
+the tree materials and nowhere else. That is the classifier — and it is the
+same normal the pass-42 lighting work measured independently, from a 16-byte
+cache, which is a second source for it.
+
+**One trap for whoever picks this up:** the harness cache is **14 bytes per
+vertex**, not 16 — it predates the normal being carried — so the normals must
+be computed from the geometry rather than read. A first attempt read bytes
+13-15 as the normal and got nonsense (every shape "mixed", y spanning
+-256..256); the tell was the stride, `vertexBytes / vertexCount`, which says
+14.000 on every shape in this cache.
+
+Grass is a separate job from trees and a bigger one: `ngrass` is FLAT in the
+cartridge, so standing it up is an addition rather than a fix, and nothing
+structural separates a grass quad from a ground quad — both are flat quads with
+normal (0, 1, 0). That one needs a material allow-list, and it should say so.
+
+**Nothing is marked complete.**
+
+
+## Pass 48 — a crash of my own, and the sky's sign wrong in both directions
+
+### The crash: state that outlived the object
+
+Reported from play, on leaving a building in third person:
+
+```
+src/render/Gen4Ground.lua:2043: bad argument #4 to 'setCanvas'
+(Canvas expected, got table)
+```
+
+Pass 45 left the free pass OPEN across the entity draw, which is the whole of
+the masking fix — but it kept `freeOpen`, `freePrevious` and `freeColour` on
+the GROUND INSTANCE. A map change builds a new `Gen4Ground`; the old one's pass
+was still open with its canvas still bound, and the new ground's net saw its
+own `freeOpen` as nil and closed nothing. The first code downstream to run
+`{ g.getCanvas() }` then captured a binding made as
+`{ colour, depthstencil = depth }`, which is not a plain canvas list, and
+handing it back to `setCanvas` is the raise.
+
+A canvas binding is GLOBAL state, so the record of it has to be global too.
+The three fields moved to the module, so whichever ground draws next closes a
+pass any ground opened — the same fix `Gen4View.look` needed, for the same
+class of bug. `endFree` also now clears its state before touching the canvas
+(so a raise cannot leave the pass permanently marked open) and restores at most
+ONE canvas, which is the only shape the free pass ever displaces and cannot
+reproduce the bad argument.
+
+Reproduced and checked: map A draws and leaves the pass open, the loader throws
+A away, map B draws and closes it — B draws without raising and the module flag
+comes back false.
+
+### The sky's sign has been wrong twice, and the second time was mine
+
+Positive pitch in this engine is looking DOWN (`forward()` returns `-sin(pitch)`
+for y), and a camera looking down puts the horizon ABOVE the centre of the
+view. The original `vh/2 + pitch * pxPerDeg` therefore moved the sky the wrong
+way — down as the world went up, which reads as a sky travelling at double rate.
+
+Pass 46 read *"the skybox shouldnt move when moving camera up or down"* as "pin
+it to the screen" and set the horizon to a flat `vh * 0.5`. That removed the
+double rate by removing the response entirely, which is worse in a way that is
+easy to miss: **a sky that holds still on the screen is a sky glued to the
+camera.** Reported straight back, and the sentence is the specification:
+
+> *"the sky keep its look moving it with the camera rather than the clouds
+> staying in the same place and me looking up beyond the cloud im looking at"*
+
+### ...and it is not linear in the pitch
+
+The obvious correction, `vh/2 - pitch * pxPerDeg`, was MEASURED against the
+world rather than trusted, by comparing the sky's horizon row with where a
+point at infinity on the eye plane actually projects. It is the small-angle
+form and it comes apart:
+
+| pitch | linear form | world horizon | miss |
+|---|---|---|---|
+| 2.04 | 175.61 | 177.33 | 1.7 px |
+| 14.04 | 79.23 | 89.03 | 9.8 px |
+| 50.00 | -209.62 | -298.70 | 89.1 px |
+| 74.04 | -402.72 | -1247.72 | **845.0 px** |
+
+A direction `a` off the view axis lands at `tan(a) / tan(fovY/2)` in normalised
+device units, not at `a` times a constant. With
+`horizon = vh/2 * (1 - tan(pitch) / tan(fovY/2))` the worst disagreement over
+the same six pitches is **0.0000 px**.
+
+### Camera heights are above the PLAYER'S FEET, not above zero
+
+Reported: *"outdoors the height of the camera is lower but the indoor height
+seems to be fine"*. `EYE_HEIGHT` and `ORBIT_PIVOT_Y` are heights above the
+player, and they were being used as absolute world y. That is only right where
+the floor is at zero — which is precisely the interiors that looked fine.
+Twinleaf's ground is at y = 16, so outdoors the eye sat a whole tile into the
+player's shins. `follow` now takes the floor height from the caller, which owns
+the height map. Measured on Twinleaf: third person 40.00 above the ground
+(`FOLLOW_HEIGHT`), first person 26.00 (`EYE_HEIGHT`).
+
+### Still open: the reported flip
+
+Nothing outside `Gen4View` writes `yaw` or `orbiting`, nothing resets
+`Gen4View.look`, and the heading carries ten test angles across a rebuild with
+a worst rotation of 0.0000 degrees. The remaining suspect is the stale canvas
+above, which crashed on exactly the transition the flip was reported at
+(leaving a building) and left the previous map's target bound while the new map
+drew into it. Not concluded — it needs a play-test on this build.
+
+**Nothing is marked complete.**
+
+
+## Pass 49 — the crash at its real source, and what the logs said about the flip
+
+### The setCanvas raise had a second face, and pass 48 only closed the first
+
+Reported again, on switching third person to first:
+
+```
+src/render/Gen4Ground.lua:2094: bad argument #4 to 'setCanvas'
+```
+
+`drawFree` binds the target and marks the pass open near the top, and then
+ended on `return drawn > 0`. **A false there is not "I did nothing" — the
+canvas is bound.** `draw` reads it as "the free pass declined, use the live
+one", falls through, and the live pass opens with `{ g.getCanvas() }`, which
+captures a binding made as `{ colour, depthstencil = depth }`. Passing that
+back to `setCanvas` is the raise.
+
+`drawn` is zero whenever no chunk is READY, not whenever none exists — `bake`
+is budgeted at `BAKES_PER_FRAME`, so the first frames after a map load or a
+mode switch legitimately have nothing built. That is exactly when it was
+reported, both times.
+
+The fallback to the live pass is worth keeping (it is what draws the world
+while the bakes catch up), so the pass is now CLOSED before handing the frame
+back rather than the fallback removed. Two further hardenings: the live pass
+closes any open pass before it starts (the net at the top of `draw` only
+catches one left by a PREVIOUS frame), and all **five** restore sites now take
+one canvas or none instead of passing the captured table straight back.
+
+Checked: with the camera forced outside the grid so `drawn` is 0, `draw` no
+longer raises, the pass closes, and the canvas is restored to the one that was
+bound. The ordinary path still leaves the pass open for the sprites, and the
+pass-45 masking measurement is unchanged (visible in front, masked behind).
+
+### The flip was never the map boundary
+
+Two passes assumed it was the camera being rebuilt at a boundary. The logs
+settle it, and settle it against that:
+
+```
+L01 ... eye (1527,80,13733) yaw -32.4 deg pitch 29.0 deg
+L01 ... eye (1542,78,13732) yaw -15.2 deg pitch 28.2 deg
+L01 ... eye (1534,86,13660) yaw -84.0 deg pitch 33.2 deg
+```
+
+Same map, no reload between them, and the yaw moves 17 degrees and then 69.
+The pitch is 28-33 when the resting pitch is 14.04, which means `rise` is
+non-zero — **the orbit is being driven.** A camera that is merely being rebuilt
+does not do that.
+
+`updateCameraStick` turns relative mouse mode on whenever the overworld is the
+top screen and off whenever it is not, and a map transition pushes and pops a
+screen — so every doorway and every route boundary toggles it, twice. Each
+toggle warps the pointer, and SDL reports the warp as one `mousemoved` with a
+delta the width of the window behind it. 51.6 degrees in a frame, which is the
+jump above, is 258 pixels at `LOOK_PER_PIXEL` — about half a window.
+
+A mouse event asking for more than **12 degrees** is now DROPPED rather than
+clamped: a hand cannot move that far between frames (a fast flick of a thousand
+pixels a second is 3.3 degrees an event, so no real movement is refused), and a
+clamped warp would still turn the camera twelve degrees for no reason. Two
+events are also swallowed after each relative-mode toggle.
+
+**This is a hypothesis about a report, not a measured fix**, and it is
+instrumented to say so: the first dropped spike logs
+
+```
+gen4 camera: dropped a mouse look of X/Y degrees (cap 12.0) -- a pointer warp, not a hand
+```
+
+If the flip stops and that line never appears, the cause was something else and
+the guard is dead weight. The next play-test is the measurement.
+
+**Nothing is marked complete.**
+
+
+## Pass 50 — the flip, found: every map owned its own camera
+
+Three passes aimed at this and the first two were wrong about it. The third --
+the mouse-warp guard of pass 49 -- was instrumented to prove itself, and the
+play test that found the real cause **never printed its line**. That is the
+guard falsifying itself, which is what it was for.
+
+### What the log actually said
+
+```
+map: R201 at (16,31)
+map: T01 at (16,0)
+map: R201 at (16,31)
+map: T01 at (16,0)     ... eleven times ...
+map: T01 at (16,0)
+```
+
+Every one of those lines is a FULL MAP SETUP -- the same function calls
+`rebuildNeighbors`, `applyForcedBike` and `updateMapNameSign`. So at a boundary
+the game is loading both maps, alternately, for a dozen frames.
+
+### The mechanism
+
+Every map owns a renderer, every renderer owns a `Gen4Ground`, and every ground
+built **its own `Gen4View`**. Pass 46 added `Gen4View.look` so a rebuilt camera
+could restore the player's angle -- but `new` only reads it at the moment the
+view is BUILT. A neighbouring map loaded before the player touched the mouse
+keeps the old angle for ever, and stepping across the border swaps which camera
+the frame is drawn through.
+
+Reproduced, and the first attempt at reproducing it FAILED and was worth more
+than if it had passed: building the neighbour AFTER the orbit gives 0.0 degrees,
+because `orbit` calls `remember` immediately and a view built later picks the
+change up. The divergence needs both grounds to exist BEFORE the input -- which
+is exactly the boundary case, where both maps are already loaded. In that
+order:
+
+| | yaw |
+|---|---|
+| map being left, after orbiting | -84.0 |
+| neighbour, already loaded | 0.0 |
+| **swing as the current map alternates** | **84.0 deg** |
+
+-84.0 is the same number that appears in the reported log.
+
+### The fix
+
+`Gen4View:follow` now re-reads the kept look EVERY FRAME -- `orbiting`,
+`userYaw`, `userRise`, `zoom` -- rather than only at construction. The look is
+the one shared thing; a `Gen4View` is a lens onto it, and two lenses can no
+longer disagree. The `draw` fallback also stopped passing `self.view3d.yaw` as
+a facing, because that value is read BEFORE the sync and would pin the camera
+to the stale angle the sync exists to remove.
+
+Measured over five orbit configurations, with both grounds built before the
+input: worst yaw disagreement across a border **0.0000 deg**, worst pitch
+**0.0000 deg**, camera height identical. A player who never orbits still
+carries their heading (137.0 set on the old map reads 137.0 on the new one),
+and the tilt rungs build no free view at all.
+
+Regressions re-checked in the same run: pass 45 masking (visible in front,
+masked behind), the zero-chunk crash case (no raise, canvas restored), and the
+sky on the world horizon (0.0000 px).
+
+### The pass-49 guard is retracted in place
+
+It is kept -- a pointer warp on a relative-mode toggle is a real event, and a
+twelve-degree cap cannot refuse a hand -- but its comment now says plainly that
+it was proposed as the cause of the flip and was wrong, and that it should be
+deleted rather than tuned if it ever refuses a real movement. A guard carrying
+a false story about why it exists is worse than no guard.
+
+**Nothing is marked complete.**
+
+
+## Pass 51 — the camera aimed at the corner of the player's tile
+
+Reported: *"in third person when zoomed in the player isnt centered, zoomed out
+it is though"*, with a screenshot showing them well right of centre.
+
+`freeEntity` anchors a character's feet at `(mapX + FEET_X, mapY + FEET_X)` --
+the CENTRE of their tile -- and `placeCamera` aimed at `(px, py)`, its CORNER.
+Eight units apart, in both axes.
+
+Eight units is a few pixels with the camera far back and grows with the zoom,
+because the sprite's scale is pixels-per-unit at the eye's distance. Measured
+on a 512-wide frame, projecting the point the sprite actually stands on:
+
+| zoom | scale px/unit | feet land at | miss from centre |
+|---|---|---|---|
+| 2.60 (far) | 1.62 | 269.0 | 13.0 px |
+| 1.00 | 4.33 | 290.6 | 34.6 px |
+| 0.70 | 6.17 | 305.4 | 49.4 px |
+| 0.45 (near) | 9.56 | 332.5 | **76.5 px** |
+
+That is "wrong zoomed in, fine zoomed out" exactly, and on a full-width window
+76.5 px of a 512 frame is most of the way to the edge of the player.
+
+### Why pass 47's centring check did not catch this
+
+Pass 47 measured centring by projecting the PIVOT -- the point the camera aims
+at. **A camera cannot disagree with the point it is defined to be looking at**,
+so that check reported 0.0 px and was, for this fault, a measurement that could
+not fail. The check that catches it projects the point the SPRITE is drawn at,
+which is a different number derived a different way. Same lesson as the
+accessor that lies: two things that must agree have to be measured against each
+other, never each against itself.
+
+After the fix, over five orbit angles x three zooms: worst horizontal miss
+**0.000 px**. Vertically the head sits above centre and the body below -- the
+chest on the centre line at rest and the eye on it at full zoom-in, which is
+the framing the zoom pivot was built for.
+
+## Added to the list: building backs, textured from their own building
+
+Requested: *"add a task for making the backs of buildings so they blend in,
+they should use textures from the building they are a part of so they look
+natural"*. The rear faces do not exist in the cartridge at all (0 north-facing
+triangles measured), so this needs generated geometry -- edge-loop capping --
+with planar-projected UVs taken from the same building's own material, not a
+stand-in texture.
+
+**Nothing is marked complete.**
+
+
+## Pass 52 — trees turn to face the camera
+
+Requested: *"trees should rotate to face the players camera always"*, and
+*"make sure they also dont change when looking up or down"*.
+
+### What a card is, and where the rule is allowed to apply
+
+The classifier is the face normal, computed from the geometry rather than read
+from the vertex (a 14-byte cache carries none): a triangle at **(0, 0.819,
+0.575)** -- the cartridge's authored 35-degree lean -- is a card. Over the
+terrain that is 60,273 triangles across 45 materials, all of them trees.
+
+**Buildings are deliberately excluded**, and that is measured rather than tidy.
+Run over `build_model.narc` the same classifier catches 184 triangles -- a
+school roof, a fountain, a shop front -- that happen to sit at the same lean
+and would then swing to face the camera. So `record.billboard` is set for
+terrain chunks only.
+
+Each card turns about ITS OWN centre, found by walking a shape's triangles as a
+graph: a card is one connected component and every one is exactly four
+vertices. A terrain shape is every tree on the chunk at once -- `tree2_01`
+reaches 240 quads in one shape -- so a per-shape pivot would swing the whole
+copse about its middle. The pivot rides in a new per-vertex attribute; the
+format is local to `Gen4Model`, so Gen 1/2/3 never see it.
+
+### Y ONLY
+
+The rotation is about the vertical axis alone, so the cartridge's lean is kept
+exactly as authored and the card only spins to face you. Proved rather than
+asserted: the billboarded card was compared against the same card PRE-ROTATED
+about Y in Lua, at five yaws x three camera elevations. Thirteen of fifteen are
+pixel-identical; the two that differ (4 px and 6 px, both at yaw 45) are the
+s16 quantisation in the Lua pre-rotation -- 0, 90, 180 and 270 map axis-aligned
+coordinates onto axis-aligned coordinates exactly and are exact, which is the
+signature of rounding rather than a different transform. A spherical billboard
+would have matched at none of the elevations.
+
+### THE SIGN WAS WRONG, and the first test said it was right
+
+Measured on a synthetic card, area painted as the camera orbits it:
+
+| cam yaw | plain | billboarded |
+|---|---|---|
+| 0 | 6264 | 6264 |
+| 60 | 4157 | 6265 |
+| 120 | **189** | 6265 |
+| 240 | **189** | 6265 |
+
+Plain, a tree collapses to 189 pixels -- it turns edge-on and all but vanishes,
+which is the reported "trees dont look 3d". Billboarded it holds 6264-6265 at
+every angle, **0.0% variation**, and at yaw 0 the two are identical, so the
+rest pose is untouched.
+
+The first version of this measurement reported 0.0% variation for the WRONG
+SIGN, because the test built its own camera at `+sin(yaw)` while
+`Gen4View:follow` places the eye at `-sin(yaw)` -- a mirror in x. The test was
+measuring its own convention, not the game's. The render gave it away (trees at
+60 degrees became flat brown ellipses) and the fix was to build the test's
+camera with `Gen4View` itself, after which the wrong sign collapsed the card
+from 6264 to 188. **A test that supplies its own version of the thing under
+test is measuring itself.**
+
+### The field view is untouched, byte for byte
+
+`billboardYaw` is zero everywhere but the free pass, and a rotation by zero is
+the identity -- but that is an argument, so it was measured. Twinleaf rendered
+at rungs `cartridge`, 50 and 30, before the change and after: **0 differing
+pixels of 196,608, on all three.** Twinleaf's fourteen loaded chunks carry
+1,884 cards.
+
+### Noticed while checking: the orbit has no collision against buildings
+
+At yaw 120 with a modest zoom the camera ends up INSIDE a house and the frame
+is untextured wall. `EYE_CLEARANCE` lifts the eye off the GROUND and there is
+nothing equivalent for walls. Separate from this pass and not addressed here.
+
+**Nothing is marked complete.**
+
+
+## Pass 53 — the tilt is a camera now, not a stretch
+
+Requested: *"fixing the tilt in gen4 currently its stretching the buildings
+rather than changing the 3d view of the camera like first person and third
+person do"*.
+
+### It really was a stretch, and here is the proof
+
+The ladder left the map's own `pitch` alone -- so the ground never moved -- and
+wrote the chosen angle into `heightPitch`, which only says how TALL to draw
+things. The measurement that shows it: where a fixed GROUND point and a point
+48 units above it land, by rung. **A stretch cannot move the ground; a camera
+must.**
+
+| rung | ground y | roof y | roof - ground |
+|---|---|---|---|
+| 90 | 109.67 | 109.67 | **0.00** |
+| 60 | 109.67 | 85.90 | -23.77 |
+| 30 | 109.67 | 38.37 | -71.30 |
+
+The ground sits at 109.67 at every rung -- it *cannot* move -- and at rung 90 a
+48-unit building has **zero** height on screen. After the change the ground
+moves with the rung (88.00 / 108.45 / 146.19) because the eye moves.
+
+An earlier metric -- "how many pixels differ between two rungs" -- was thrown
+away: it read 76-84% for the OLD code too, because exaggerating every height
+moves most of the frame. It could not tell a stretch from a camera and
+therefore said nothing.
+
+### How it is built
+
+A numeric rung now selects a real camera (`field3d`) through the same path
+first and third person use, at the cartridge row's own DISTANCE and at the
+rung's pitch. `cartridge` still answers nil and keeps the oblique pass, and its
+frame is **pixel-identical: 0 differing pixels of 196,608**.
+
+**Both projections, because the cartridge has both.** 300 of the 593 headers
+are `CAMERA_TYPE_INTERIOR_ORTHOGRAPHIC` and `Camera_ComputeProjectionMatrix`
+really builds an orthographic box for them; a perspective matrix there is not a
+near-miss but a different picture, since an orthographic camera has no parallax
+at all. `Gen4Model.orthographic` is new. Two traps came with it:
+
+- An orthographic matrix ends in (0,0,0,1), so `w` is **1** for every point --
+  and the near-plane guard in `project` tests `w > NEAR`, where NEAR is 4. Left
+  alone it would have rejected every point on those 300 maps and nothing would
+  have placed at all. There the test belongs on the clip z.
+- Its pixels-per-unit is constant, not a function of distance, so the sprite
+  scale is exactly 1.
+
+**The fov is derived, not copied.** The cartridge's `halfFov` is written for a
+192-row screen, where it makes one world unit one screen pixel. Taking that
+ANGLE on a 384-row target magnifies everything 2x. So what is kept from the row
+is the fact about the camera -- where it sits -- and the fov is the one that
+preserves the engine's scale. Measured: at rung 90 a 104-unit step north lands
+104.00 px from centre, exactly 1:1.
+
+Lower rungs foreshorten, as a camera must, and the amount is exactly right: at
+rung 30 the point is 104 cos(30) = 90 units further from the eye, predicting
+666/756 = **0.881** of full scale, and the measured ratio is **0.881**. At rung
+60, predicted 0.928, measured 0.928.
+
+### A bug this pass introduced, caught by a control that painted nothing
+
+`useConfig` wrote the row's `halfFov * 2` into `fovY`, and `applyCamera` hands
+the row to whichever view is up -- so third person silently dropped from its own
+50-degree field to the cartridge's 16.2. The masking regression caught it, and
+what caught it was the CONTROL reading zero: the marker was outside a frustum a
+third as wide. **A control that paints nothing is not a pass, it is the signal
+that something upstream moved.** The stored fov is gone; nothing needed it.
+
+The same hand-off needed a second gate: the cartridge's projection KIND is
+honoured only by `field3d`, or a player walking into a house in third person
+would have got an orthographic camera. Verified: third person keeps a
+perspective scale on both map types (12.211 and 28.213, not 1.000) and its fov
+stays 50.0.
+
+Masking re-checked afterwards with real controls -- visible in front, masked
+behind -- and the zero-chunk crash case still restores its canvas on a tilt
+rung.
+
+**Nothing is marked complete.**
+
+
+## Pass 54 — trees turn about their trunks, and a tilt rung stops being drivable
+
+### The pivot was the card's middle, and a leaning card's middle is not above it
+
+Reported with a screenshot: *"the border trees to the town seem to be rotating
+billboards weird as a large group of trees instead of individually above their
+trunks"*.
+
+Pass 52 pivoted each card on its component's CENTROID. The cartridge tilts a
+tree card 35 degrees back, so the middle of the quad hangs BEHIND the trunk.
+Measured on Twinleaf's own border:
+
+| material | centroid vs base |
+|---|---|
+| `conttree_b` (trunk) | 13.9 units behind, on every card |
+| `conttree_t` (canopy) | 9.0 to 12.3 units behind |
+
+Turning a card about that point swings it through an arc it never should have
+left, which reads as the whole tree line sweeping sideways -- and because the
+trunk's offset and the canopy's DIFFER, the two halves of one tree come apart
+as they turn. That is the screenshot exactly.
+
+The pivot is now the middle of the card's LOWEST edge -- where it meets the
+ground, which is the trunk. A trunk and the canopy above it share that axis
+even though they are separate components, so they stay together.
+
+Measured on a synthetic card at the cartridge's lean:
+
+| pivot | stored value | base movement on rotation |
+|---|---|---|
+| centroid | (0.00, **-13.09**) | up to **42.79 px** |
+| base | (0.00, **0.00**) | **0.00 px** |
+
+**Two false alarms on the way, both the same mistake.** A component-count check
+(union every triangle vs only card triangles) returned identical numbers and
+proved nothing. Then the facing test reported 40.6% variation and "NOT FACING"
+-- because it orbited the camera around the OLD centroid, so with a base pivot
+the card's distance to the camera now varied. Orbiting the pivot the card
+actually turns about: **0.0% variation** at eight angles, against a plain card
+collapsing to 502 px. A test that keeps a stale assumption about the thing it
+is measuring reports the assumption.
+
+### 3D is a rendering question; drivable is a control question
+
+Reported: *"fix the camera being orbital and movement being free when not in
+3rd or 1st person"*. Making the tilt rungs a real camera (pass 53) made them
+free in BOTH senses, because ONE predicate -- `isFree` -- was answering two
+different questions. Stepping onto a tilt rung handed the player off-grid
+walking and a mouse orbit as well as the 3D view they asked for.
+
+`isFree` now means "is a 3D camera drawing this", and a new `isOrbital` means
+"does the player drive it", true only for first and third person. The orbit
+input and the off-grid walk path take the second; the camera placement and
+sprite projection take the first. A field camera's heading is also pinned at
+zero -- the cartridge's field camera does not turn, and that keeps
+`screenToWorld` an identity so a direction key means what it always did.
+
+Measured, with the kept look deliberately left at 137 degrees by third person:
+
+| rung | 3D view | orbital | yaw |
+|---|---|---|---|
+| cartridge | no | no | - |
+| 90 / 60 / 30 | yes | **no** | **0.0** |
+| third / first | yes | yes | 137.0 |
+
+**Nothing is marked complete.** Indoor object shadows are now tracked but NOT
+started: character shadows already exist (`Gen4Shadows`, suppressed per tile
+behaviour from the ROM's own list), and whether Platinum's interior props carry
+shadow geometry at all is the first thing to establish.
+
+
+## Pass 55 — a forest border is ONE card, and no pivot can fix that
+
+Reported after the base-pivot fix: *"many groups of trees canopys are still
+pivoting as if theyre rows rather than from the trunk of every tree
+individually"*.
+
+### It is not a pivot fault
+
+First hypothesis: adjacent trees share vertices, so union-find merges a row
+into one component. **Measured and wrong** -- across the whole cartridge,
+30,136 of 30,147 card components are exactly four vertices, one quad each.
+Nothing is being merged.
+
+What is actually happening: `conttree` is *continuous* tree. Platinum draws a
+forest border as ONE CARD, **256 world units wide and 20 tall**, repeating a
+64-pixel texture four times. Every one of the 2,956 `conttree_t` and 3,738
+`conttree2_t` cards is wider than 48 units. A quad cannot bend, so there is no
+pivot that turns those four trees individually -- **the geometry for them does
+not exist.**
+
+### Subdividing was tried and abandoned, for a measured reason
+
+Splitting a strip at its texture tiles needs the repeat count to be a whole
+number. Across the cartridge, **23,171 of 30,147 cards have a non-integer
+u-span over texture width** -- the UVs address sub-rectangles of an atlas, not
+whole tiles. There is no derivable place to cut, and cutting at a guessed one
+would break a strip into panels that swing apart at the seams. Inventing tree
+boundaries the cartridge does not record would be a worse answer than leaving
+the strip alone.
+
+### So a strip is left exactly as drawn
+
+A card whose u span exceeds 1.5 texture widths is a strip and does not turn.
+The rule is measured per COMPONENT, not per shape, because a `conttree_t`
+shape holds both single cards and 256-wide strips. What it keeps and drops:
+
+| material | kept as trees | dropped as strips |
+|---|---|---|
+| `tree2_01` | 11,280 | **0** |
+| `tree01` | 6,945 | **0** |
+| `tree04_2` | 558 | **0** |
+| `tree3_02` | 276 | **0** |
+| `conttree_t` | 1,060 | 1,896 |
+| `conttree2_t` | 1,826 | 1,912 |
+| `ug_map_wall` | 25 | 35 |
+
+Every individual-tree material is untouched; only the wide strips stop turning.
+In Twinleaf's loaded chunks 591 of 1,884 cards (31%) are now excluded.
+
+One guard came with it: `tw` falls back to 1 when a texture fails to load, and
+a width of 1 would make the test reject every card with a u span over 1.5
+texels -- all of them. The test is skipped when there is no image, so a cache
+without textures billboards on the geometry alone rather than silently doing
+nothing.
+
+**Still open and honest about it:** the forest borders do not face the camera,
+because in this cartridge they are not trees, they are wallpaper. Making them
+per-tree needs geometry the ROM does not contain -- generated, not extracted --
+and that is a decision to take deliberately rather than smuggle into a
+billboard fix.
+
+**Nothing is marked complete.**
+
+
+## Investigation — indoor object shadows: the cartridge has none
+
+Requested: *"implement shadows for indoor objects"*. **Nothing was committed
+for this**; what follows is the measurement, and one attempt that does not yet
+work.
+
+### The cartridge does ship shadow geometry -- for OUTDOOR props
+
+`Gen4Model` already recognises `kage` (Japanese for shadow) as a material and
+gives it a reduced alpha. Across `build_model.narc`, **153 of the 590 prop
+models (25.9%) carry a shadow shape**, almost all named `h_kage` (123 shapes).
+The terrain carries its own: `tshadow` (199 shapes), `dun_shadow` (8).
+
+### ...but not for the furniture
+
+Of the models actually PLACED on maps, 25.8% of placements carry a shadow --
+and the common indoor props carry none at all:
+
+| model | placements | shadow shapes |
+|---|---|---|
+| `ref01` (fridge) | 203 | **0** |
+| `sofa01` | 109 | **0** |
+| `table02` | 82 | **0** |
+| `chair03` | 78 | **0** |
+| `bed_h01` | 57 | **0** |
+| `plant01` | 34 | **0** |
+
+The ones that DO have a shadow are outdoor props -- `gate_b`, 300 placements,
+one shadow shape. **So an indoor shadow has to be generated, not extracted.**
+That is the same class of decision as the building backs and the forest
+borders, and it is worth stating rather than quietly inventing.
+
+### The attempt, and why it is not shipped
+
+A generated shadow was written as a synthetic SHAPE on the model rather than as
+a draw in the ground pass -- props are drawn from four places (the bake, the
+live pass, the canopy pass and the free pass) and a shadow that must be added
+to each is a shadow that will be missing from one. It builds correctly: every
+indoor prop gains exactly one shape, sized from the model's own bounding box,
+lifted 0.25 units off the floor, using the same texture the character shadows
+stand on.
+
+**It does not render, and the cause is not yet found.** The evidence:
+
+- A plain 29%-alpha rectangle in the same harness reads 0.608 over a 0.85
+  floor, so blending works there and `Gen4Model` sets no blend mode.
+- With the shadow enabled, `sofa01` -- whose single own shape is discarded for
+  want of a texture -- paints **zero** pixels. The 4,422 pixels seen for
+  `table02` are the table's own geometry, not the shadow: they are identical
+  over a pale floor and a dark one, and identical with the shadow's vertex
+  alpha set to 0.29.
+
+Carrying the translucency on the vertex colour instead of relying on
+`shapeAlpha` changed nothing, which rules the alpha path out and points at the
+shape never being drawn at all.
+
+**Not committed.** A shadow that is either invisible or an opaque slab under
+every table is worse than no shadow, and shipping it to find out which would be
+the wrong way round.
+
+**Nothing is marked complete.**
+
+
+## Pass 57 — indoor shadows, and the false negative that nearly buried them
+
+The investigation above concluded the generated shadow "does not render". **That
+conclusion was wrong**, and the way it was wrong is worth more than the feature.
+
+### `Assets.image` degrades instead of failing
+
+It was pointed at `assets/generated/gen4/shadow.png`, which does not exist in
+this cache. `Assets.image` does not raise on a missing path -- it substitutes a
+placeholder and carries on. The placeholder's alpha does not survive the model
+shader's `texel.a < 0.5` discard, so the shadow was thrown away with nothing
+logged and nothing to see. Every measurement after that was measuring a missing
+file.
+
+**A loader that degrades turns a missing asset into a silent wrong answer.** The
+test that caught it asked the texture a question it could fail: read its alpha
+directly. `love.image.newImageData` on the same path answered *"Does not
+exist"* -- the thing `Assets.image` had been quietly hiding.
+
+### The cartridge's own shadow art
+
+Pointed at a real file -- `h_kage.png`, 16x16, **all 256 texels at alpha 1.000**
+-- it renders and blends. `sofa01`, whose own shape is discarded for want of a
+texture so only the shadow shows, reads **0.780 over a pale floor and 0.184 over
+a dark one**: the same patch changing with what is under it, which is what
+translucent means.
+
+The texture is FOUND rather than named. 153 of the 590 prop models ship a
+`kage` shape, and the file sits beside whichever model owns it
+(`models/buildings/funsui/h_kage.png`), so there is no single path to hard-code
+and a cache from another ROM would put it elsewhere. `Gen4Ground:shadowTexture`
+searches the building set once and holds the answer; no shadow shape in the
+cache means no shadow drawn, rather than a placeholder invented.
+
+### Shipped
+
+A generated shadow is added only where the cartridge left a gap -- a model that
+already owns a `kage` shape keeps its own -- and only indoors, because the
+outdoor props have theirs. Verified: `sofa01`, `table02`, `chair03` and
+`bed_h01` each gain exactly one shape on an indoor map and none on an outdoor
+one, and **outdoor rendering is pixel-identical: 0 differing pixels of 196,608
+at the cartridge rung and at tilt rung 60.**
+
+The translucency rides on the shadow's own vertex colour rather than on
+`shapeAlpha`, so it does not depend on being named well enough to be
+recognised.
+
+**Nothing is marked complete.**
+
+## Pass 58 — the backs of buildings, built from the building's own silhouette
+
+A Platinum house is a facade. Walk behind one and you look straight through into
+the inside of its front wall, because the cartridge never gives the camera a
+reason to be back there.
+
+### The plan that died on the first measurement
+
+The obvious fix is to find the hole and cap it: collect the mesh's open edges,
+walk them into a loop, triangulate the loop. `t1_h01` says why that cannot work
+here. Its 158 triangles face **50 south, 43 east, 41 west, 24 up, 0 down and 0
+north** -- so the missing wall is real and exactly where expected -- but the mesh
+carries **273 open edges out of 360**. A closed wall of quads would have almost
+none. 273 means the model is not a surface with a hole in it; it is a heap of
+separate quads that happen to line up. There are no loops to walk.
+
+This is recorded because the earlier note in this document proposing edge-loop
+capping was wrong, and the measurement that killed it is worth more than the
+plan was.
+
+### What replaced it
+
+`Gen4Model.addBackWall` builds the wall from the model's own **silhouette**
+instead of its topology: the maximum y at each distinct x across every non-roof
+shape, then quads between consecutive x values, placed at the side walls' north
+extent + 0.05. A silhouette needs no connectivity -- it is a projection, so a
+soup of quads answers it as well as a closed mesh would.
+
+The texture is taken from the building's own material, not invented: the shape
+with the most east/west-facing triangles is the side wall, and the new quads use
+its image at its own measured `uvPerUnit`, so the back tiles at the same scale
+as the sides it joins.
+
+### The gate, and what it excludes
+
+A wall is only added when `depth >= across * 0.25` -- a model that is
+essentially a flat panel has no back to build. Verified: `c1_b02b`, `t1_h01`,
+`l2_s02b` and `gate_b` each gain one; `ref01`, `sofa01` and `door01` correctly
+gain none. Viewed from behind, `t1_h01` changes **13.0%** of its pixels; the
+hole is closed.
+
+### The honest residual
+
+The first attempt used the bounding box, which poked **3,887 px** above the
+gable. The silhouette form brought that to **259**, and three further
+adjustments took it to 253, then 235, then **162 px of 196,608 -- 0.08%**, thin
+slivers at the gable corners where the silhouette's step edges outrun the roof.
+
+I stopped there. Three adjustments each moving the number about 10 px is
+guessing, not measuring, and a number that moves by the same small amount
+whatever I change is not telling me where the fault is. 162 px is left standing
+rather than buried, and named here so the next pass can attack the gable
+corners with a measurement instead of a nudge.
+
+`Gen4Model.lua` md5 `9cc5df47582e58490bb8aeaaf26d4119`, `Gen4Ground.lua` md5
+`eac5b6e73cb73292eab13ff04b7a6101`; both re-staged from the device and byte-identical
+to the working copies, both clean under the syntax checker.
+
+## Pass 59 — the back walls were noise, and the residual I stopped at was the clue
+
+Reported with a screenshot: *"the backs of the buildings need to be improved ...
+doesnt seem to be using the right scale of texture for the back of the building
+to blend in"*. Every back wall in Twinleaf was a field of fine coloured static.
+
+Pass 58's own measurements had said this was fine. They could not have caught
+it. "The view from behind changes 13.0% of its pixels" proves a wall was drawn;
+it says nothing about what is on it. And the number I chased instead -- 162
+stray pixels in the CARTRIDGE view -- was measured from a camera that cannot see
+a back wall at all. **I was measuring the one view where the thing under test is
+invisible, and calling the result a pass.**
+
+### The scale fault, which was a factor of 64
+
+The mesh format takes UVs in 0..1 of the texture. `uvPerUnit` was measured in
+TEXELS. Written straight into the coordinate, a 64-pixel texture repeats
+sixty-four times faster than it should: on `t1_h01`, u swept 94 texture widths
+across a 64-unit wall. That is the static, exactly.
+
+The aggregate was wrong as well as the unit. `uvPerUnit` was the shape's whole u
+range over its whole span -- 93.9 texels over 64 units on `t1_h01`, because
+`polygon0` carries the porch and the chimney along with the walls. A real wall
+quad on the same building is **28 texels over 11.75 units**. An aggregate of
+unrelated faces is not a density.
+
+### Which face to copy, and two wrong answers first
+
+**Biggest in world units** is wrong on every building measured. `t1_h01`'s
+largest side face is 12.00 x 32.50 units showing **5 x 6 texels**; `c1_b02b`'s
+is 48 x 72 units showing **0.9 x 1.6**. These are flat colours stretched over
+panels, and tiled from them the backs came out a uniform dark grey -- which is
+what one texel spread over sixty units looks like.
+
+**Biggest in texels** is wrong too. On `t1_s01` it picks a shape whose material
+is named `light`, wearing the whole 64 x 64 atlas on one quad -- a decal -- and
+the back came back covered in smeared windows.
+
+What separates them is **scale**. Platinum's building art is drawn at screen
+scale, so a course of siding is about one texel per world unit vertically.
+Across nine buildings every real course lands between **0.91 and 1.58** (t1_h01
+1.05, c1_b02b 1.13, t1_s01 1.13, c1_s02 1.09, l2_s02b 0.91, gym00 1.58, r212s02
+1.21, shelf08 0.96), the stretched panels sit at **0.02 to 0.21**, and the
+squeezed decals at **2.06 to 7.53**. One octave either side of the drawing scale
+keeps the courses and drops both kinds of junk.
+
+Only the vertical density is gated: a course runs horizontally, so its height is
+what is drawn to scale, while its width may be squeezed because it tiles --
+`t1_h01` squeezes it to 2.38. A second test rejects rects under four texels
+across, which is a colour and not a picture; there the measurements leave a
+clean gap, 0.9-2.0 texels for the flat fills against 10-64 for the courses.
+
+**This is a scale window, not a proof.** The nearest thing it excludes is that
+`light` face at 2.06, which is close to the bound, and a building whose siding
+was drawn at half scale would be rejected by it.
+
+### Tiling, the way the cartridge tiles
+
+`t1_h01`'s side wall is two quads sharing an edge, 11.75 units each, and the
+second runs its u **backwards** -- 28 texels out and 28 back. The cartridge
+mirrors the course rather than repeating it, which is why its walls have no seam
+down the middle. The back is tiled the same way, so it matches the sides it
+meets at the corner. u is therefore a triangle wave and continuous at every band
+edge; v repeats instead of mirroring, because a course of siding read upside
+down is not a course of siding, and the rows are cut exactly on the sawtooth's
+edges so nothing is interpolated across a jump.
+
+### Three places the back was still too big
+
+With the texture right, the back was still visible from the FRONT -- 9,742
+pixels on a view that must not change at all -- as a clapboard sliver down each
+house's corner. Three separate causes, each found by measurement rather than by
+nudging:
+
+- **In z**: the plane came from the shape's north edge, and `t1_h01` is ONE
+  shape carrying its walls and its roof, so that edge is the roof overhang at
+  -22.00 while the walls stop at **-13.75**. Taking it from the faces wearing
+  the wall course fixed it. 9,742 -> 3,805.
+- **In x, against the facade**: the silhouette is the building's cross-section
+  and includes the front, which reaches 32 units either side while the side
+  walls stand at 29. Clamping to the outermost east/west planes -- which over
+  twelve placed buildings never widened one -- took 3,805 -> 846.
+- **In x, against the trim**: those outermost planes are at 29.00 and the
+  cladding at 28.00, a one-unit strip of trim on the same wall. Where the
+  course's plane and the outermost plane are the same wall they differ by 0.04
+  to 5 per cent of the building's width; where they are genuinely different
+  walls -- a course worn by one narrow pair of faces, a wing the course never
+  reaches -- by 14, 37 and 45. Nothing measured falls between, so a tenth of
+  the width chooses. 846 -> **2**.
+
+### The silhouette was a sample, not an outline
+
+Taking the highest VERTEX at each sampled x is not the roofline; it is a sample
+of it, and the two disagree wherever a triangle spans an x carrying no vertex of
+its own. Enlarged, that showed as two pale spikes standing above `t1_h01`'s
+gable and a dark wedge beside them where the wall stopped short and the roof's
+underside showed through. Asking each wall triangle how high it reaches AT that
+x answers the question exactly, and costs nothing that matters: the whole town
+rebuilds in 1.9 seconds.
+
+### The controls
+
+| view | differing pixels of 307,200 |
+| --- | --- |
+| cartridge rung | **0** |
+| third person, from the front | **21** (0.007%) |
+| third person, from behind | 48,171 (15.7%) |
+| third person, close behind | 45,332 (14.8%) |
+
+Nothing where nothing should change, everything where it should. The 21 is left
+standing and named rather than chased; pass 58 is the record of what chasing a
+number that small looks like.
+
+**Verified by looking**: Twinleaf rendered from behind at two distances and the
+gable end enlarged four times. The backs are clapboard with the courses at the
+sides' own scale, the framing timbers lining up, the blue skirting carrying
+round the corner, and the gable filled to the roofline.
+
+`Gen4Model.lua` md5 `d51753570a30d720b929f8b0b0eb6a3b`, re-staged from the
+device and byte-identical to the working copy, clean under the syntax checker.
+Nothing outside `Gen4Model` and `Gen4Ground` refers to any of the new fields,
+and all of the measurement is gated on `capBack`, which only `Gen4Ground:building`
+sets -- so Gen 1, 2 and 3 do not run a line of it.
+
+## Pass 60 — the back plane, and one window instead of twenty
+
+Reported with a screenshot: *"theyre a bit too far inside of the house rather
+than fitting on the back also the houses have repeating window textures maybe
+just do one window and fill the rest with the wood texture"*. Both correct, and
+the first one had a number: six units.
+
+### The plane was the texture's, not the building's
+
+Pass 59 put the back at `band.zLo` -- the northmost face wearing the wall
+course. On `t1_h01` that is **-13.75**, because the course is worn by two quads
+that stop there, while the walls carry on to **-19.75**. A course is a texture,
+and where a texture stops is not where a building stops. The back stood six
+units inside its own house.
+
+Three further guesses followed, and each was measured rather than nudged:
+
+- **The northmost wall face** (-19.75). Better, but `c1_b01a`'s northmost wall
+  is a PLINTH standing two units proud: the cross-section there is eight
+  triangles reaching 11.30 where the building is 102 tall, so its back came out
+  with no height at all and was dropped entirely.
+- **The bounding box** (-22.00, the roof's rear edge). Worse on every count --
+  cart 397, front 2,525 -- because at the roof's own edge there is no roof left
+  above the wall to hide it.
+- **The wall planes tried from the north inward**, taking the first where the
+  building still stands at least half its own height. No slope to sit on: the
+  rejected plane is 11 per cent of the height and the accepted one 96, and every
+  other building measured passes at its very first plane at 100.
+
+### The silhouette was the wrong cross-section
+
+With the plane moved, 312 stray pixels appeared in the cartridge view, all of
+them on Twinleaf's two-storey houses and none on the single-storey ones. The
+outline was taken over the WHOLE model, so it is the building's tallest
+cross-section anywhere -- and those houses are tall at the front and low at the
+back. Their backs were drawn to the front block's height and stood up behind
+their own roofs.
+
+Raising the roofline inset eightfold moved 312 to 217, which is what said the
+height was not the fault.
+
+The outline is now the cross-section **at the back plane**: only triangles whose
+z range spans it. The roof is included where the walls are not -- over the hole
+the back is closing there IS no wall, so the roof's underside is the only thing
+that states the shape of the opening, and it states it exactly (`t1_h01` reads
+72.50 at the ridge and 50.63 at the cladding line, which is the gable). Where
+the section is silent for a column the model's own outline answers instead.
+
+The same treatment fixed the width: side walls are clamped by the planes that
+cross the back, since a building wide at the front and narrow at the back has no
+single width. Insisting on those planes alone was far too strong -- three houses
+collapsed to a 7.5-unit sliver on a 90-unit frontage and a fourth lost half
+itself -- so the crossing planes are preferred, the outermost planes are the
+fallback, and the tenth-of-the-width test chooses between them rather than
+deciding whether to clamp at all.
+
+### One window
+
+`t1_s01`'s wall rect is 36 x 30 texels of siding-window-siding, and the
+cartridge puts it on ONE quad per side wall: a panel with a window in it, never
+repeated. `t1_h01`'s rect really is a course and really does tile, twice per
+side wall and mirrored. Tiling both gives one right wall and one wall of
+windows.
+
+**What separates them is pure white.** Read off the two textures: `t1_h01`'s
+band runs 0.542 to 0.821 luminance and never touches white; `t1_s01`'s glass is
+exactly **1.000** against siding at 0.756 to 0.871. Glass is the only thing in a
+Platinum house wall drawn at the palette's white, and a band with none in it is
+siding all the way across -- so `t1_h01` tiles exactly as it did.
+
+The frame around the glass needs no second number. Among the columns carrying no
+white, the profile that occurs most often is the siding (ten of thirty-six on
+`t1_s01`); the window block grows outward from the glass for as long as the next
+column is not that profile, which takes in the grey surround and the two courses
+beside it and stops at the first real siding column. The widest run of siding
+left over is what the wall is filled with -- courses are horizontal, so any
+slice of them tiles invisibly -- and the window is stamped once, centred, at the
+height the side wall carries it, with the band's own v range so its courses run
+straight into the siding either side.
+
+### The controls
+
+| view | differing pixels of 307,200 |
+| --- | --- |
+| cartridge rung | **0** |
+| third person, from the front | 1,757 (0.57%) |
+| third person, from behind | 57,902 (18.8%) |
+| third person, close behind | 48,996 (15.9%) |
+
+The cartridge view is untouched. The 1,757 is **one building**, at the extreme
+right edge of the frame and very close to the camera: an L-shaped model whose
+west wall stops before the back plane, so at that plane its west side is open
+and the back's own edge shows. That is the limit already written down here -- a
+single flat plane cannot fit an L-shaped building -- and it is named rather than
+nudged.
+
+**Verified by looking**: Twinleaf from behind at two distances. The backs are
+clapboard at the sides' own scale, the blue skirting carries round the corner,
+the gables fill to the roofline, and `t1_s01` has one window where it used to
+have a row of them.
+
+`Gen4Model.lua` md5 `d23668312917727ffb50262874d0fb3a`, re-staged from the
+device and byte-identical, clean under the syntax checker, whole town still
+rebuilding in 1.8 seconds. Nothing outside `Gen4Model` and `Gen4Ground` names
+any of the new fields and every measurement is gated on `capBack`, which only
+`Gen4Ground:building` sets, so Gen 1, 2 and 3 run none of it.
+
+## Pass 61 — the census: every building, not the ones in shot
+
+Reported: *"the pokemarts, and pokemon centers are missing backs still, make
+sure all buildings have backs that fit in"*.
+
+The first half was a bug with three causes stacked on it. The second half is the
+more useful instruction, because until now every claim in this document about
+back walls was made from **one town**. A back that works on Twinleaf's four
+houses is not a back that works on Sinnoh.
+
+### Why the Centre and the Mart were skipped
+
+The gate was *"north-facing triangles must be under a tenth of the south-facing
+ones"* -- a model that already has a back is left alone. `pc` read 20 north
+against 52 south and `fs` 20 against 30, so both were thrown out. Two separate
+faults:
+
+- **A roof slope is not a wall.** A rear roof pitch leaning more north than up
+  is filed as "north" by a face classifier, and most of those 20 were roof. The
+  two kinds do not overlap at all in this cartridge: every vertical wall reads
+  |ny| = 0.00 or 0.01, every sloping face between 0.34 and 0.69.
+- **A count is not coverage.** Counting only the vertical walls still leaves
+  `fs` at 12 north against 16 south, because it has a real but partial rear
+  wall. The test now compares like with like -- the north-facing wall area AT
+  the back plane against the area the back would add -- so a model that covers
+  its own opening is left alone and one that covers a third of it gets the rest.
+
+### What no test on the geometry can decide
+
+Dropping the ratio gate immediately handed back walls to `ref01`, `box02`,
+`shelf03` and `sofa01_l`. The obvious fix is a ratio on wall AREA instead of
+counts, and the measurements say it cannot work: a fridge, a crate and a shelf
+have **exactly as much north-facing wall as a Twinleaf house -- none at all**.
+There is nothing in the geometry that tells a house from a sideboard.
+
+What does is that one of them stands in a room. `capBack` is now set only when
+the map is outdoors, which is the same fact the indoor object shadows already
+turn on, used the other way round. Measured: 315 models get a back outdoors and
+**zero** indoors.
+
+### The four shops that are painted, not clad
+
+`l2_s01` (the restaurant), `c8_s02` (the market), `c7_s04` and `c10_s02` still
+found no band, and for a real reason: their side walls carry a u span of **0.0
+texels**. The cartridge paints them from a single texel; there is no course and
+no scale to match.
+
+Where there is no course to copy, the back is painted from that same texel. It
+fits in exactly, because it is the colour the walls already are.
+
+### The census
+
+Run over all 590 building models, cross-referenced against the 360 that the
+terrain actually places:
+
+| | before this pass | after |
+| --- | --- | --- |
+| exterior buildings placed outdoors, with a back | 78 of 85 | **81 of 85** |
+| Pokemon Centre (`pc`), Poke Mart (`fs`) | neither | both |
+| flat-painted shops (`l2_s01`, `c8_s02`, `c7_s04`, `c10_s02`) | none | all four |
+| interior furniture with a back | 20-odd, wrongly | **none** |
+
+The four exteriors still without one -- `r04_b1`, `r04_b2`, `r04_b3` and
+`game_h01` -- have **no south-facing wall at all**, so they are not buildings
+with a missing back; they are named like buildings and are not shaped like them.
+
+Twinleaf is unchanged by all of this: cartridge rung **0 differing pixels of
+307,200**, and the three third-person views identical to pass 60's to the pixel,
+which is what says the new admissions did not disturb the old ones.
+
+`Gen4Model.lua` md5 `b159249d5dea051ddcfe52c28a2fcc8e`, `Gen4Ground.lua` md5
+`291fbd33c58da9afe100de85b2d693f0`; both re-staged from the device,
+byte-identical, clean under the syntax checker.
+
+**Not verified by looking**: this install's cache has no textures for `pc`, `fs`
+or the four painted shops -- `Assets.image` reports them missing and the shapes
+are discarded at the alpha cut -- so they cannot be rendered here. What is
+measured is that they are admitted, and with what plane, width and colour. The
+picture is Cedric's to check in play.
+
+## Pass 62 — standing the grass up, and standing up the wrong grass first
+
+Requested twice: *"make the grass billboards that stand up and always face the
+camera as well"*, and then, when the first attempt was rendered, *"looks like
+your making the wrong grass a billboard its supposed to be the grass wild
+pokemon are in"*.
+
+That correction is the whole pass. I had stood up `ngrass`.
+
+### Which layer, and why the renderer has to ask by name
+
+Sinnoh's ground is drawn in layers, each its own polygon with its own material,
+and the cartridge separates the lawn from the encounter grass exactly that way:
+**`ngrass` against `nectgr`**. `ngrass` is the bigger by far -- 19,236 triangles
+over 223 chunks against 3,440 over 97 -- which is why it was the one that caught
+my eye, and it is the lawn.
+
+The better question -- *is this tile TALL_GRASS* -- cannot be asked here. The
+port does decode that byte (`Gen4Behaviors` has `TALL_GRASS` and
+`VERY_TALL_GRASS`, and `Gen4Tileset` builds `grassTiles` and `encounterTiles`
+from it) but it is a movement-layer fact, and the terrain cache the renderer
+reads carries geometry and height and nothing else. So the material is the
+question that can be asked in the renderer, and it is the cartridge's own answer
+rather than a guess about one. The list is one table so that importing another
+region's texture set is a one-line change; only the materials this install could
+actually be **looked at** are in it.
+
+### Why the lawn could never have worked, measured on the art
+
+Every ground tile in set 06 is **100% opaque** -- there is no alpha anywhere in
+it -- so a card made from one is a rectangle. What decides whether that
+rectangle reads as grass is how much of the tile is decoration rather than flat
+field colour:
+
+| tile | colours | flat field green |
+| --- | --- | --- |
+| `ngrass` (lawn) | 4 | **57.4%** |
+| `nectgr` (encounter grass) | 9 | 21.1% |
+
+Stood up, the first is a green slab that blanks out the path behind it; the
+second is a clump of leaves. Both renders are in this pass's screenshots and
+they are not a close call.
+
+### The tile's background is its ground, and it can be cut out
+
+A clump inside a visible pale box is still not grass. A ground tile has to meet
+the ground seamlessly on all four sides, so the colour running round its border
+IS the field it sits in: on `nectgr`, **63.3% of the border** is (82,255,148),
+and that is also the tile's commonest colour overall -- the border and the whole
+agree, which is what says it is a background rather than a pattern. On a
+vertical card that colour is behind the plant rather than under it, so it is
+made transparent and the model shader's existing alpha cut removes it. The flat
+quad keeps the untouched texture; only the standing card wears the cut-out, and
+the cut-out is derived from the cartridge's own pixels rather than drawn.
+
+### One card per tile, and the keying mistake in between
+
+A chunk's grass is merged into quads that span two tiles as often as one, so the
+triangles are grouped back onto the tile grid the cartridge measured
+(`tileUnits` = 16, read off the cache).
+
+Keyed by VERTEX that grouping is wrong, and quietly: a tile-sized quad has its
+corners ON the tile boundaries, so the four of them file under four different
+tiles and each is left with a single UV and no rectangle to draw. Four fifths of
+the cards vanished -- 2,272 changed pixels against 11,332 -- with no error
+anywhere. Keyed by the triangle's CENTRE it is unambiguous.
+
+The card is as tall as it is wide, because the texture is square and any other
+aspect stretches art painted at 16x16. It stands on the lowest corner of its
+tile, so it plants in sloping ground instead of floating over it, and its pivot
+is its foot -- the same rule the trees needed, for the same reason.
+
+### The control that can fail
+
+Counting grass pixels as the camera orbits proves nothing on its own: the camera
+sees a different part of the chunk at each yaw. The control that isolates the
+question is the same scene twice, with the cards billboarded and with them
+nailed down:
+
+| yaw | fixed cards | billboarded |
+| --- | --- | --- |
+| 0 | 11,332 | 11,332 |
+| 45 | 9,429 | 12,011 |
+| 90 | **4,234** | **11,928** |
+| 135 | 12,525 | 12,928 |
+
+At yaw 0 the two are identical, because a card already facing the camera has
+nothing to turn. At 90 degrees the fixed cards fall to a third, seen nearly
+edge-on, and the billboarded ones do not move. That is the billboarding, and a
+version that did not work would show the first column twice.
+
+### What it costs elsewhere
+
+At the cartridge rung the cards are edge-on from directly above and the patches
+still read as the flat DS map: 6,402 pixels of 307,200 changed, none of it
+structural. Twinleaf's back walls are **identical to pass 61 in all four views**
+(0 / 1,757 / 57,902 / 48,996), which is what says this did not disturb them.
+
+`Gen4Model.lua` md5 `a8f024b3902fbe57f1ce5880e8397792`, `Gen4Ground.lua` md5
+`d23fba6a5d8a328d0137d891b5f16d9a`; both re-staged from the device,
+byte-identical, clean under the syntax checker.
+
+**Still open**: the other grass-ish materials in the cartridge -- `l_grass_u`,
+`l_grass_m`, `l_grass_d`, `s_grass`, `bf_ngrass` -- live in texture sets this
+install has not extracted. They are not in the list, because adding them unseen
+would be guessing at what they depict.
+
+## Pass 63 — item 2: the signpost search had been run in the wrong language
+
+Item 2 of the play-test list, "Signs are not rendered at all", had been
+investigated once and closed as *nothing found*: four mechanisms ruled out and a
+note that a fifth must exist. One of those four rulings was wrong, and the way it
+was wrong is worth more than the ruling.
+
+### A search that was never shown it could succeed
+
+The earlier pass concluded **"no signpost sprite exists among the 421 overworld
+sprites (nothing named kanban/sign/board)"**. It searched for *kanban* -- Japanese
+-- on a table whose names are **English**. The band was there the whole time:
+
+| id | name | placements |
+|---|---|---|
+| 91 | `map_signpost` | 29 |
+| 92 | `mailbox` | 2 |
+| 93 | `signboard` | 81 |
+| 94 | `arrow_signpost` | 72 |
+| 95 | `gym_signpost` | 8 |
+| 96 | `trainer_tips_signpost` | 20 |
+
+**212 signpost object events across Sinnoh** -- 6.0% of the 3,555 object events
+in `gen4_events` -- ordinary rows carrying a graphics id exactly like any NPC,
+sitting contiguously between `unused_woman_3` (90) and `player_f` (97).
+
+The terrain materials in this cartridge ARE Japanese (`ngrass`, `conttree`,
+`criff`, `kage`), which is presumably why the search was written that way. The
+object-graphics table is not. **A search that returns nothing has to be shown it
+can return something** -- the `kanban` query was never once run against a name it
+should have matched.
+
+### What the symptom rules out
+
+Asked what actually happens in play: *"Invisible but solid"* -- you bump into it
+and reading it works, but there is no picture. So the object spawns, keeps its
+collision and runs its script. That removes the two big candidates at a stroke:
+it is not a spawn failure, and it is not the signpost TEXT BOX (which
+`Gen4ScriptVM` already lowers, opcodes 0x36-0x3B).
+
+### ...and what it means the port is getting RIGHT
+
+```lua
+function RomExtractorGen4:spriteFor(graphicsId)
+  local member = self:objectGfxTable()[graphicsId]
+  if member then return spriteKey(member), member, nil end   -- the table WINS
+  return nil, nil, Gen4ObjectGfx.reason(graphicsId) or "unmapped"
+end
+```
+
+`Gen4ObjectGfx.NO_SPRITE` is consulted **only when the cartridge's own overlay-5
+table has no member for the id**, and `extractOverworld` pulls every member of
+the archive regardless of it. So the fact that signposts come back with
+`noSprite` set is itself the measurement: **the cartridge has no overworld sprite
+for graphics 91-96.** The port's classification is an accurate reading of the
+cartridge, not the bug. (The idealised `IDS` fallback lists 469 ids where the
+cartridge read finds 441 rows -- and the 28 missing are these no-sprite bands.)
+
+A signpost therefore has no billboard **on a real DS either**. The picture comes
+from somewhere else.
+
+### Searching by SHAPE instead of by name
+
+Having just been burned by a name search, the next one was run on geometry: every
+one of the 590 prop models measured for a post -- taller than wide, inside one
+tile, few triangles. 58 of 590 qualify, and the top of that list is a family:
+
+| model | w x h x d | triangles | textures |
+|---|---|---|---|
+| `board_a` | 18.00 x 31.75 x 8.12 | 22 | `board_ab`, **`h_kage`** |
+| `board_b` | 16.00 x 35.38 x 13.00 | 44 | `board_ab`, **`h_kage`** |
+| `board_e` | 18.00 x 31.75 x 9.00 | 52 | `board_ef`, **`h_kage`** |
+| `board_f` | 17.00 x 27.00 x 7.50 | 34 | `board_ef`, **`h_kage`** |
+
+A panel on a base, one tile wide, half again as tall as it is wide, carrying its
+own **ground shadow** -- which is the signature of a free-standing outdoor prop
+rather than something stuck on a wall.
+
+**And it still is not the Sinnoh-wide signpost.** `board_a`'s 300 placements are
+**ten chunks carrying exactly 30 each, in the same arrangement** (lands 445-453
+and 476) -- a repeated fixture, not signage scattered over a region. `board_b`,
+`board_e` and `board_f` are placed zero times. The earlier pass dismissed
+`board_a` by assertion; this is the same conclusion with a measurement under it.
+
+### Closing the remaining mechanisms, each with a control
+
+- **Not a map prop.** For all 212 signposts, the distance to the nearest prop on
+  their own chunk, against ordinary object events as a control:
+
+  | | within 1 tile | 2 | 3 | 4 |
+  |---|---|---|---|---|
+  | 212 signposts (189 in-matrix) | **0.5%** | 6.9% | 22.2% | 31.7% |
+  | other object events (control) | **0.7%** | 4.3% | 9.9% | 17.1% |
+
+  A signpost is no likelier than an ordinary NPC to stand on a prop, and the
+  smooth climb with radius is the random-proximity signature this document
+  already warned about. (They ARE likelier to be near one at 3-4 tiles -- signs
+  cluster by buildings -- which is a real effect and not a pairing.)
+
+  The earlier pass ran this over bg EVENTS with no control. Signpost objects and
+  bg events are different sets.
+
+- **Not terrain geometry.** Height standing above the eight neighbouring tiles,
+  at the sign's own tile:
+
+  | | mean rise | over 8 units |
+  |---|---|---|
+  | signposts | 2.85 units | 21.1% |
+  | control | **3.59 units** | 23.9% |
+
+  The control is *higher*. Nothing stands where a sign is.
+
+- **No artwork anywhere in the cartridge.** `mmodel.narc` names its 470 members
+  and not one is sign-like. Widened to **every archive name list -- 8,118 member
+  names** -- across `sign|board|kanban|post|arrow|mail|fuda|tate`: the only
+  signpost entries in the whole cartridge are `signpost_frame.NCGR` and
+  `signpost.NCLR` in `/graphic/field_board.narc`, which sit beside 31 route maps
+  and 19 city maps. **That is the text box you read, not the post.** The sweep
+  carried a control -- it finds `ninja_boy` six times -- so this negative is one
+  that could have come back positive.
+
+- **And I looked.** Twinleaf's own `map_signpost` is at land 0, local tile
+  (16,14) -- the chunk rendered throughout this document. Rendered from four
+  sides at eye level and from directly above: path, grass, and the corner of a
+  roof. Nothing stands there and nothing is painted there.
+
+### Where item 2 now stands
+
+Every mechanism is closed, and the answer is that **there is no fifth one**:
+Platinum ships no field artwork for a signpost. The 212 objects are invisible
+interaction markers carrying a script, which is exactly what play reports --
+*"invisible but solid"* -- and the port is reproducing the cartridge faithfully.
+
+**This is not, on this evidence, a port bug.** What remains is a question only
+the cartridge can answer, and it is now a decisive one rather than an
+exploratory one: stand in front of a sign in Platinum itself and see whether a
+post is there. If it is, something in this sweep is wrong and the screenshot
+says which archive to re-open. If it is not, item 2 is really about the sign's
+MESSAGE, and `Gen4ScriptVM` already lowers opcodes 0x36-0x3B for it.
+
+**Nothing changed in the engine this pass.** What changed is that four doors
+recorded as closed have now actually been tried, and one of them -- the sprite
+table -- had been closed with a search in the wrong language.
+
+## Pass 64 — item 4: the placeholder is not the cartridge's placeholder
+
+Item 4, "some areas draw placeholder tile art", was recorded as the same fault
+as item 2 and diagnosed as **the cartridge's own dummy box**: a chunk object
+whose model id is outside its area's allow-list draws `dmybox00` rather than
+nothing. The decode for those lists was built, checked (5,224 checks, 0
+failures) and written to `gen4_mapprops`.
+
+### `gen4_mapprops` is written, loaded, and read by nothing
+
+```
+src/import/RomExtractorGen4.lua:5341   self:write("gen4_mapprops", out)      -- written
+src/core/Data.lua:187                  "gen4_mapprops" }                     -- loaded
+(everything else)                      -- no reader
+```
+
+`Gen4Ground:building(index)` resolves `set.models[index + 1]` straight off the
+object's model id and never consults an area list. **The port cannot draw
+`dmybox00`, because nothing tells it to.**
+
+That is the write-and-never-read family for the fifth time in this port, and the
+note beside this very module in `Data.lua` describes the fourth. A module can be
+correct, checked, cached AND listed for loading and still be dead, because none
+of those four facts is a reader.
+
+### So item 4's diagnosis does not fit its own symptom
+
+The recorded reading predicts placeholders **once the allow-list is applied**.
+The list is not applied, and the placeholders are being reported anyway. Those
+two cannot both be about the dummy box.
+
+What the port draws instead, everywhere the cartridge would show a neutral box,
+is the real model. On matrix 0 that is **101 distinct ids across 501
+placements**. A divergence, but in the direction of looking better rather than
+worse -- and worth a decision rather than a reflex, because "apply the list" is a
+change that makes the port draw MORE boxes, not fewer.
+
+### What the placeholders are not, measured
+
+- **Not an unresolved texture set.** All **593** maps resolve theirs; 74 sets in
+  the cache, 71 referenced.
+- **Not an unnamed texture.** Of **1,149** distinct shape texture names across
+  the 7,547 terrain shapes, **9** appear in no set at all, covering **10
+  shapes** -- 0.13%.
+
+### The candidate left, and the check for it
+
+`Assets.image` returns a PLACEHOLDER for a path that is not on disk, silently.
+That is the trap that hid the indoor object shadows for a whole pass: every
+measurement was taken against a missing file and nothing said so. A texture that
+is correctly named, correctly in its set, and simply never written to disk
+produces exactly "some areas draw placeholder tile art", area by area, depending
+on which sets the import wrote.
+
+The check is to resolve every path in `gen4_terrain.sets[*].textures[*].path`
+against the filesystem and report the misses per set. It needs the real install
+-- this harness only has set 06 extracted, so every other set reads as missing
+here and the measurement is meaningless in the container.
+
+**Nothing changed in the engine this pass.**
+
+---
+
+## Pass 65 -- the sky gets a night, and the fade comes off the cartridge's own light table
+
+Requested, with both pieces of artwork supplied: *"apply this updated skybox and
+a nighttime variant as well based on the time it should fade between the two and
+ensure were using the games day and night lighting system as well"*.
+
+### The tint could not answer this, and says so itself
+
+`Gen4Shade.forTemplate` is **ratio-normalised on purpose** -- its own comment
+records that the absolute equation pinned **13 of 15** templates to exactly 1.000
+on every channel and "could not tell a dawn from a noon". What it reports is the
+SHAPE of the light, never its level. Asking it for a day/night signal would have
+been asking a measurement that cannot fail.
+
+There is also **no time-of-day table to read**. Gen 2 and Gen 3 both have one and
+both are extracted (`GetTimeOfDay`, `TimeOfDayTable`); Platinum has none in
+anything extracted here. Searched by name across `src/` -- and that search *does*
+return the Gen 2 and Gen 3 tables, so it is known to be able to return something.
+
+### What is actually in the cartridge
+
+Member 0's fifteen area-light keyframes, and the day cycle lives in exactly one
+row of them: **light 0's colour**. Light 0 is the only light in any of the fifteen
+with a real direction (`0.46, -0.88, -0.11` at midnight -- the sun); lights 2 and
+3 carry the degenerate `(0, 0, 1)` in all fifteen.
+
+| clock | sun | clock | sun | clock | sun |
+|---|---|---|---|---|---|
+| 00:00 | 11,11,16 | 12:00 | 22,22,20 | 18:30 | 17,13,10 |
+| 04:00 | 11,11,16 | 15:00 | 24,24,20 | 19:00 | 16,13,10 |
+| 04:30 | 12,12,18 | 15:30 | 22,22,18 | 20:00 | 11,12,15 |
+| 05:00 | 12,12,22 | 17:00 | 20,18,16 | 24:00 | 11,11,16 |
+| 08:00 | 15,15,22 | 18:00 | 19,16,12 | | |
+
+Keyframes 1 and 15 are **byte-identical** at 00:00 and 24:00, which is what makes
+this a cyclic keyframe list rather than fifteen flat spans.
+
+### The threshold is not typed in
+
+Distances of each keyframe's sun colour from the 00:00 anchor run `0.00, 0.00,
+1.41`, then `2.45`, with the far end at `18.81`. The gap between 1.41 and 2.45 is
+a real break: **any cut between 8% and 12% of the spread selects the same four
+keyframes** -- 00:00, 04:00, 20:00, 24:00.
+
+That puts the night at **20:00 -> 04:00, which is Platinum's own NIGHT period**,
+arrived at from the sun colours alone with neither boundary typed in. The two
+agreeing is the check on the whole derivation -- it is the part that could have
+come out wrong and did not.
+
+**And the fade is the keyframe spacing itself**: night lifts across 04:00 -> 04:30
+(half an hour) and falls across 19:00 -> 20:00 (an hour), because that is where
+the cartridge put its keyframes. A fade length I chose would have been the one
+number here with no source.
+
+### The artwork had to be mirrored, and the check caught it
+
+The supplied sheets are 1248x832 **raw**. The existing sky is 2048x687 and is a
+**mirror pair** -- laid beside its own reflection so the first and last column are
+the same pixels and a full turn of the camera crosses no seam. Measured: the old
+sheet's wrap seam is **0**, and the control (left half against the *unflipped*
+right half) is **204**, so the test can fail.
+
+The raw sheets' wrap seams were **193** and **106** -- they would have cracked
+visibly on every full turn. Both are now laid beside their own mirror,
+**2496x832**, wrap seam **0**, controls **205** and **249**.
+
+### Measured, at a horizon-level camera over Twinleaf
+
+| clock | nightness | px differing vs 12:00 | mean abs diff |
+|---|---|---|---|
+| 00:00 | 1.000 | 67,269 | 15.84 |
+| 04:00 | 1.000 | 67,269 | 15.84 |
+| 04:10 | 0.667 | 67,269 | 10.56 |
+| 04:20 | 0.333 | 67,269 | 5.28 |
+| 04:30 | 0.000 | 0 | 0.00 |
+| 12:00 | 0.000 | 0 | 0.00 |
+| 19:00 | 0.000 | 0 | 0.00 |
+| 19:20 | 0.333 | 67,269 | 5.28 |
+| 19:40 | 0.667 | 67,269 | 10.56 |
+| 20:00 | 1.000 | 67,269 | 15.84 |
+
+The differences are exactly linear in the nightness, and the two ramps mirror
+each other. Over the changed pixels the swing is real: night `(17.9, 48.0, 70.5)`
+against day `(75.9, 138.7, 98.2)`.
+
+**It is a true cross-fade, not a hole.** At nightness 0.5 the frame is the exact
+average of the two endpoints -- max abs difference **0.50**, **0 px** off by more
+than 2 -- while the control against the night endpoint alone differs on all
+**67,269**. The clear colour appears in **none** of the three frames.
+
+### The first measurement of this pass proved nothing, and said so
+
+The initial run reported **0 differing pixels at every clock**. The cause was the
+harness, not the engine: `build()` never set `arealight` or `lightMember`, so
+`applyLight` got nil and the log said `T01 has no area light (member nil)`. Fixed
+in the harness, and only then did the numbers above appear. Recorded because a
+zero difference that means "the wiring is absent" looks exactly like a zero
+difference that means "nothing changed".
+
+### Controls that can fail
+
+- **Members 1, 2 and 3 answer `nil`**, not 0 -- their sun never moves, so they
+  carry no day at all. A member with its sun forced constant also answers `nil`
+  while the real member 0 answers `0.000` at noon, so the `nil` is the flatness
+  and not a broken call. This matters because **member 0 is exactly the 110
+  outdoor maps** and members 1 and 2 are exactly the 483 indoor ones.
+- **Indoors draws no sky and therefore no fade**: indoor midnight against indoor
+  noon is **0 px**, while indoor midnight against *outdoor* midnight is **67,974
+  px**, so the shot is not blind.
+- **The size guard fires**: a night sheet resized to 1248x416 is logged and
+  dropped, and the frame then matches the day sky exactly (**0 px**).
+- **The fallback works**: with the pair removed, `gen4_sky.png` still draws.
+- **`activeAtClock` is unchanged** by the `clockTime` refactor -- 5,760
+  clock/member pairs, **0 disagree**; a deliberately wrong seconds-instead-of-
+  half-seconds conversion disagrees on **1,320 of 1,440**.
+
+### Crystal, Gold, Silver and Prism
+
+Untouched. `TileRenderer` reaches gen4 only through `Gen4Ground.forMap`, which
+did not change, and **none** of `skyImage`, `SKY_IMAGE`, `activeAtClock`,
+`clockTime`, `nightness` or `skySheets` has a single caller outside the three
+gen4 files edited here.
+
+### Changed
+
+- `src/import/Gen4AreaLight.lua` -- `clockTime(hour, minute)` pulled out of
+  `activeAtClock` so `nightness` walks the table by the same number.
+- `src/render/Gen4Shade.lua` -- `Gen4Shade.nightness(arealight, member, hour,
+  minute) -> 0..1`, cached per templates table.
+- `src/render/Gen4Ground.lua` -- `SKY_DAY` / `SKY_NIGHT` with the old single
+  sheet as fallback, `skyImage` -> `skySheets` with the registration guard,
+  `applyLight` records `self.nightness`, `drawSky` draws day then night at the
+  fade's alpha through one set of numbers.
+- `assets/sky/gen4_sky_day.png`, `assets/sky/gen4_sky_night.png` -- 2496x832,
+  each mirrored into a seamless tile.
+
+**Still unverified in play.** The fade is measured in the container against a
+forced clock; the thing it has not had is Cedric walking Sinnoh at dusk.
+
+---
+
+## Pass 66 -- item 3: the running shoes did nothing in the mode Sinnoh is played in
+
+Item 3 of the play-test list: *"Running shoes do nothing and have no sprint
+animation"*. The speed half is fixed here; the sprint SHEET is the piece Cedric
+deferred until the 3D was working, and it is still deferred.
+
+### Everything upstream of the fault was already right
+
+Checked one link at a time, because "the shoes do nothing" has about six
+plausible causes and five of them were not it:
+
+- **The opcode decodes.** `giverunningshoes` is op 346 (0x15A) and appears
+  **exactly once** in the 11.8 MB of extracted map scripts -- in Mum's scene,
+  between a `bufferplayername`/`message` pair and a `playfanfare`.
+- **The lowering exists.** `L.giverunningshoes` emits `g4_running_shoes`.
+- **The handler exists.** It sets both `save.player.runningShoes` and
+  `save.hasRunningShoes`.
+- **`GameVersion` declares `hasRunning` for platinum**, and `isGen4()` exists.
+- **`runStepFrames` resolves to 8** -- it is in the shared `FieldDefaults`
+  constants, so Sinnoh inherits it.
+- **`OverworldState:runFrames` is correct for Sinnoh.** Driven directly against
+  the real `GameVersion` and `FieldDefaults`:
+
+| case | answer | gate said |
+|---|---|---|
+| shoes given, B held | **8** | running |
+| shoes given, B not held | nil | -- |
+| no shoes, B held | nil | the running shoes have not been given yet |
+| shoes, B held, map denies | **8** | running (Sinnoh has no map gate -- correct) |
+
+  with controls that answer differently: crystal nil, prism 8, emerald "this
+  map's header does not allow it".
+
+### The fault
+
+`Player:freeWalk` -- **the Gen 4 free camera's mover, which is what runs in first
+and third person, which is how Sinnoh is played** -- worked its pace out from the
+walk and bike frames alone:
+
+```lua
+local frames = (save and save.onBike) and self.bikeStepFrames
+               or self.stepFrames or STEP_FRAMES
+local speed = 16 / math.max(frames, 1)
+```
+
+It never asked `OverworldState:runFrames`, never wrote `stepFramesCur`, and never
+set `running`. The grid step had all three; the free step had none. So the shoes
+worked in the field view and did nothing in the two modes actually being played,
+and the sprint sheet was unreachable from there even once it exists.
+
+Measured, driving the real `freeWalk` with the real `runFrames` behind it:
+
+| case | before | after |
+|---|---|---|
+| shoes given, B held | 1.00 px/frame, `running=nil` | **2.00 px/frame, `running=true`** |
+| shoes given, B not held | 1.00, `running=nil` | 1.00, `running=false` |
+| no shoes, B held | 1.00, `running=nil` | 1.00, `running=false` |
+
+The before column is the control: **1.00 in all three cases** is the reported
+bug, reproduced.
+
+### Lifted, not copied
+
+The run/hook/flags block moved out of `tryMove` into `Player:applyPace(save,
+frames)`, which both movers call. Copying it into `freeWalk` would have been two
+spellings of one rule, and this rule had **already drifted once** -- the comment
+in `tryMove` records the earlier report, *"its also letting me sprint before
+getting the running shoes from mom"*, which was the same class of fault in the
+other direction.
+
+The moved block is **byte-identical**, 2,924 bytes on both sides, with a control
+showing the comparison can fail. `tryMove` passes the base pace it worked out
+(walk, bike, and the direction-specific Cycling Road rule, which stays in
+`tryMove` because only the grid step has a direction).
+
+### Crystal, Gold, Silver and Prism
+
+The grid step was driven old-against-new across **8 versions x shoes x B = 32
+cases**: **0 differ**. The matrix is not blind -- Crystal, Gold, Silver and
+Polished Crystal stay at 16 frames while Prism, Emerald, FireRed and Platinum
+drop to 8 with B held, so the rows genuinely differ from each other.
+
+`freeWalk` is Gen 4 only and no other cartridge reaches it.
+
+### Also fixed: standing still was still running
+
+`freeWalk`'s idle branch runs every frame the stick is centred, so a `running`
+left set from the last moving frame would have held the run sheet up under a
+motionless character. The grid step only revisits `running` when a step starts,
+which is harmless there because a new step always precedes a new pose.
+
+### A finding that was not one, recorded because the near-miss matters
+
+A sweep of emitted-versus-implemented Gen 4 script commands reported
+`g4_has_running_shoes` as emitted with no handler and not on the `pending` list
+-- which for a var-writing command is the bad case the VM's own comment warns
+about. **It was wrong.** The sweep had run against a `Gen4Commands.lua` staged in
+an earlier session; the device's current copy implements it at line 1840, and
+essentially identically. Re-staging before committing caught it, and a second
+sweep against the fresh file reports **166 of 166 emitted commands resolved**.
+
+Had it been committed it would have defined the function twice. The re-stage step
+is not ceremony.
+
+(Separately, and NOT touched here: `runFrames` refuses Polished Crystal, because
+its last branch is `elseif version ~= "prism" then return nil` while
+`GameVersion` declares `hasRunning = true` for it. Present before this pass and
+unchanged by it -- flagged rather than fixed, since Polished Crystal has its own
+open items.)
+
+### Changed
+
+- `src/world/Player.lua` -- `Player:applyPace(save, frames)` lifted out of
+  `tryMove`; `freeWalk` now asks it instead of deciding alone; the idle branch
+  clears `running`.
+
+**The sprint animation is still absent**, by Cedric's own deferral: `runSprite`
+comes from the character's run sheet, and Dawn's and the boy's were left until
+the 3D worked. Until they exist, `pose()` falls back to the walk sheet, which is
+its documented behaviour for a character with no run cycle.
+
+**Unverified in play.** The speed is measured in the container; what it has not
+had is Cedric holding B in Sinnoh.
+
+---
+
+## Pass 67 -- item 5: no wild Pokemon, because the table was looked up in the wrong id space
+
+Item 5 of the play-test list: *"No wild Pokemon in grass, water or caves"*. Two
+faults, and the second is why fixing only the first would have replaced silence
+with a crash.
+
+### What was already right
+
+Checked before changing anything, because "no wild Pokemon" has several plausible
+causes and most of them were not it:
+
+- **The step path reaches Gen 4.** `onStepComplete` has no generation gate
+  between its start and the encounter roll.
+- **The cells are known.** `Gen4Tileset` wires `grassTiles`, `encounterTiles` and
+  `waterTiles` from `Gen4Behaviors.group(...)`, which returns **4**, **19** and
+  **16** behaviour values -- with a control (`group("not_a_real_group")` -> nil)
+  showing the lookup can fail.
+- **The data is extracted and complete.** 183 encounter tables, every field
+  present on all 183.
+- **The map header carries its encounter id.** `Gen4MapHeaders` parses
+  `wildEncountersArchiveID` at offset 14 and `RomExtractorGen4` writes it onto
+  the map def as `encounters`.
+
+### Fault one: the id space
+
+A Gen 4 map header names an **encounter table**, and that id is not the map id --
+the same trap as Twinleaf being event map 390 and terrain header 411. The
+overworld asked `data.encounters[map.id]`, which is correct for Gen 1, 2 and 3
+because their tables *are* keyed by map.
+
+Measured against the cartridge's own cache -- 154 of Sinnoh's 593 maps carry an
+encounter id, and all 154 resolve against the 183-entry table:
+
+| lookup | resolves |
+|---|---|
+| `encounters[map.id]` | **5** of 154 |
+| `encounters[map.encounters]` | **154** of 154 |
+
+Those 5 are coincidental id collisions. They were not five maps working -- they
+were five maps rolling against somebody else's table.
+
+### Fault two: the shape
+
+Sinnoh writes grass as a **bare array** of twelve slots with the rate beside it
+as `grassRate`, where every other generation writes `{ rate = n, slots = {...} }`.
+Handed to `rollTable` that does not answer wrongly, it **raises**: `grass.rate` is
+nil and `rate <= 0` compares nil with a number. So fixing the key alone would
+have turned "no wild Pokemon" into a crash on the first patch of grass.
+
+### Both denominators are measured, not assumed
+
+- **The slot span is 100.** All 183 tables carry the same twelve chances --
+  `20,20,10,10,10,10,5,5,4,4,1,1` -- and every one sums to exactly 100. Surf and
+  the three fishing tables sum to 100 as well.
+- **The rate denominator is 100, and the rods settle it.** Old Rod 25, Good Rod
+  50, Super Rod 75. Out of 100 those are clean quarters; out of 256 they would be
+  9.8%, 19.5% and 29.3%, which is not a quarter of anything. Grass then runs
+  5..35 of 100, with 12 tables at 0.
+
+### Measured after the fix
+
+| | |
+|---|---|
+| maps with an encounter id | 154 |
+| table resolved | **154** |
+| grass table well-formed | **154** |
+| of those, rate 0 (genuinely no wild Pokemon) | 12 |
+| produced a real encounter over 4,000 rolls | **142** = 154 - 12 |
+
+Read out in full, **Route 201** (map 342, table 140, rate 30/100) comes out as
+species **396, 399, 401** at levels 2-3 -- Starly, Bidoof and Kricketot, which is
+Route 201's actual line-up, so the table is landing on the right map and not
+merely on *a* map. Cumulative thresholds reach exactly 100, so the two 1% slots
+at the bottom are reachable.
+
+### Controls that can fail
+
+- **The old lookup, on the same maps: 5.** The bug, reproduced.
+- **A Gen 1/2/3-shaped table passes through untouched** -- `forMap` returns the
+  *same table object* and it still rolls. Gen 1, 2 and 3 have no
+  `map.encounters` (so the id stays `mapId`) and no `grassRate` (so the table is
+  returned as-is). `grassRate` is the discriminator rather than a version check,
+  so a hack built on Platinum works without being listed.
+- **A malformed table is refused** -- chances summing to 80 give `grass = nil`.
+
+### A flaw the control caught, recorded because it looked right
+
+The first version carried the untouched fields (`swarm`, `radar`, `dualSlot`,
+`formRates`) through an `__index` metatable onto the original. That reads well and
+is wrong: `gen4Table` answers nil for a malformed table, and **a nil field on the
+view falls straight through the metatable to `def.grass`** -- the raw
+unnormalised array, the exact thing the refusal exists to keep out of the roll. A
+refusal that hands back the thing it refused is worse than no refusal, because it
+looks like one. Replaced with an explicit copy, with the normalised fields
+assigned *after* it.
+
+### Deliberately not done
+
+Sinnoh's table also carries `day`, `night`, `swarm`, `radar`, `dualSlot`,
+`formRates` and `unownTable` -- slot **substitutions**, each replacing particular
+indices under particular conditions. Which index each replaces is a rule this has
+not read off the cartridge, and guessing it would put the **wrong species** in the
+grass rather than none. The base twelve stand until that is measured, so expect
+correct encounters that do not yet vary by time of day or swarm.
+
+### Changed
+
+- `src/world/Encounter.lua` -- `Encounter.gen4Table(slots, rate)` and
+  `Encounter.forMap(data, mapDef, mapId)`, the one place that knows both which id
+  space a generation keys its tables by and what shape they arrive in.
+- `src/world/OverworldController.lua` -- both `data.encounters[map.id]` sites now
+  ask `Encounter.forMap`. No direct index into `data.encounters` remains in the
+  overworld.
+
+**Unverified in play.** Measured in the container against the real cache; what it
+has not had is Cedric walking into the grass on Route 201.
+
+---
+
+## Pass 68 -- item 6: the ball animation, and the archive that is not it
+
+Item 6 of the play-test list: *"Ball catching animations do not play"*. **Nothing
+is built this pass beyond a corrected comment.** What it produced is the
+derivation, because the port's own note about where the ball animation lives was
+wrong and would have sent the build into the wrong archive.
+
+### The trail, and where it went wrong
+
+`BattleState:ballChain` has a Gen 3 branch, a Gen 2 branch and a Gen 1 fallback
+chain, and **no Gen 4 branch** -- so Sinnoh falls through to Gen 1 animation
+names (`TOSS_ANIM`, `POOF_ANIM`, `HIDEPIC_ANIM`, `SHAKE_ANIM`) that do not exist
+in Platinum's data, and nothing draws. That part is real and unchanged.
+
+The extraction does pull `/wazaeffect/effectdata/ball_particle.narc`, and it
+lands as **117 `ball_N` effects** in `gen4_particles`. Measured: all 117 carry
+emitters and textures, structurally identical to the `move_N` effects the
+existing `Gen4MoveAnimPlayer` already plays (485 move effects, 451 with
+emitters). Nothing in the port reads a single one of them -- the sixth
+write-and-never-read in this cache.
+
+`Gen4MoveAnimPlayer` even said what they were for:
+
+> the ball archive is the other half of that stage and is reached by the catching
+> animation, not from here
+
+**That sentence is wrong**, and it is the reason this pass went looking for a
+mapping from ball item to particle index that does not exist. Checked against
+pokeplatinum:
+
+- `NARC_INDEX_WAZAEFFECT__EFFECTDATA__BALL_PARTICLE` is opened in **exactly one
+  place** in the whole cartridge -- `src/battle_anim/ov12_02235E94.c`, by
+  `BallCapsuleSealEffect`. It is the **Ball Capsule seals**, the decoration
+  system, and nothing else reads it. 117 effects for a seal set is the right
+  order of magnitude; 117 for sixteen throwable balls never was.
+- The structure said so too, once looked at: indices **0-36** are complex (3 to 7
+  emitters) and **37-116** are uniformly one emitter and one texture. A periodicity
+  test across those looked ~69% at every period tried, which is just the base rate
+  of 80 identical entries -- it measured nothing, and is recorded here as a
+  measurement that could not fail rather than as evidence.
+
+### Where the throw actually lives
+
+**It is not a particle effect at all.** It is a 2D cell animation, and
+`sBallThrowGraphics[20][4]` states it completely -- each row is
+`{ NCGR tiles, NCLR palette, NCER cells, NANR animation }`:
+
+| row | ball | row | ball | row | ball | row | ball |
+|---|---|---|---|---|---|---|---|
+| 0 | master | 5 | net | 10 | luxury | 15 | cherish |
+| 1 | ultra | 6 | dive | 11 | premier | 16 | park |
+| 2 | great | 7 | nest | 12 | dusk | 17 | mud |
+| 3 | poke | 8 | repeat | 13 | heal | 18 | bait |
+| 4 | safari | 9 | timer | 14 | quick | 19 | bait |
+
+**The row is `ballId - 1`** (`ov12_02235E94`), and an id outside 1..274 falls
+back to `v0 = 4`, which returns row **3 -- the plain Poke Ball**. That order is
+the same one the extracted item table already lists them in: Master, Ultra,
+Great, Poke, Safari, Net, Dive, Nest, Repeat, Timer, Luxury, Premier, Dusk, Heal,
+Quick, Cherish.
+
+Dusk, heal and quick share `quick_dusk_heal_anim`; every other ball shares
+`shared_anim` with its own `shared_cell` variant. Mud and bait are the Safari
+Zone throws and have their own.
+
+### What this makes the job
+
+The art is in **`res/graphics/battle/ball_throws/`**, 80 entries in the battle
+sprite order, which builds into **`battle/graphic/pl_batt_obj.narc`** -- an
+archive **this port already opens**, as `Gen4Battle.ARCHIVE_OBJ`, with a family
+map for it. And the port already has NANR cell-actor machinery
+(`gen4_cellactors`).
+
+So item 6 is no longer an unknown. It is: pull the `ball_throws` family out of
+`pl_batt_obj`, play its NANR through the cell-actor system, and give
+`ballChain` a Gen 4 branch that picks the row as `ballId - 1`. Left for the next
+pass rather than half-built here, because verifying a ball arcing across a battle
+needs a battle harness the container does not have, and shipping an animation
+nobody has looked at is the thing this project does not do.
+
+### Changed
+
+- `src/battle/Gen4MoveAnimPlayer.lua` -- the comment claiming the ball archive is
+  reached by the catching animation, corrected to what the cartridge does, so the
+  next pass does not repeat this one's detour.
+
+**The 117 `ball_N` effects stay unread**, and that is now the right answer rather
+than a gap: they are seals, and the port has no ball capsules.
+
+---
+
+## Pass 69 -- item 6 continued: the throw art was already extracted, and nothing named it
+
+Following pass 68's correction. **The animation itself is still not built**; what
+this pass lands is the mapping it needs, derived and checked, plus a tool that
+keeps it honest on a real install.
+
+### The art has been there all along
+
+`ball_throws/` is a declared family in `Gen4Battle.OBJ_FAMILIES` and has been
+extracted for a long time. The cache holds **twenty sets** of **16x16** frames --
+ten per ball, seven for `mud` -- named `ball_throws_<ball>_<NN>`, each with a
+`path` on disk and a `cellBank` of `ball_throws/shared_cell`.
+
+Nothing said which set belonged to which ball, so nothing could use them, and
+nothing would have noticed a set going missing.
+
+**Looked at rather than assumed.** The ten `poke_ball` frames read, in order, as:
+00-01 the closed ball spinning in flight, 02-04 opening, 05-08 closing, 09 the
+split-open pose. That is a throw sheet, and it is what the port will be playing.
+
+### The mapping, derived and cross-checked
+
+`sBallThrowGraphics[20][4]` gives the row order, and the row is **`ballId - 1`**
+(`ov12_02235E94`), with an id outside the table falling back to **row 3, the
+plain Poke Ball** -- not row 0. The ball id **is an item id**:
+`item_use_pokemon.c` compares `MON_DATA_POKEBALL` straight against
+`ITEM_LUXURY_BALL`.
+
+Cross-checked against a second, independent source rather than taken from one:
+pret's table runs master, ultra, great, poke, safari...; **this port's own
+extracted item cache** numbers them 1 Master, 2 Ultra, 3 Great, 4 Poke, 5
+Safari, ... 16 Cherish. The two agree, which is what makes `ballId - 1` a
+measurement rather than a guess.
+
+Rows 17-19 are the Safari throws -- park, mud, bait -- reached by the `0xFF+`
+band rather than by an item.
+
+### Measured
+
+All **16 of 16** ball items resolve to a complete ten-frame set in the cache,
+and the three Safari rows resolve too.
+
+Controls, each answering differently: id 1 -> `master_ball`, id 4 ->
+`poke_ball`, id 16 -> `cherish_ball`, id 999 -> `poke_ball` (the documented
+fallback), id nil -> `poke_ball`, id 228 (Smoke Ball, which is not a throwable
+ball) -> `poke_ball`. A frame lookup for a ball that does not exist returns nil
+while a real one returns a record, so the lookup is known able to miss.
+
+### The check, and a defect in its first version
+
+`tools/gen4_ball_throw_check.lua` resolves every ball's frames in the cache
+**and on disk**, and exits non-zero on any gap. It takes the frame count from
+the cache rather than from a constant, so `mud`'s seven do not read as three
+missing.
+
+Its first version checked the disk for the sixteen ball items and **not** for the
+three Safari throws, so those three reported "ok" on a cache whose frames were
+never written -- a check that passes where it does not look. Both lists now go
+through one routine.
+
+In this container it reports 18 of 19 short, which is an **artefact and not a
+finding**: only `poke_ball`'s ten frames, `master_ball_00` and `mud_00` were ever
+staged here. `poke_ball` passes and `mud` correctly reports 6 of 7 absent, which
+is how the on-disk half is known to work. It needs a real install to say
+anything.
+
+It also fails itself if its own control finds frames for a ball that does not
+exist.
+
+### Changed
+
+- `src/import/Gen4Battle.lua` -- `BALL_THROWS`, `BALL_THROW_DEFAULT`,
+  `ballThrowFrame(name, frame)` and `ballThrowFor(itemId)`.
+- `tools/gen4_ball_throw_check.lua` -- new.
+
+### Still to build
+
+`BattleState:ballChain` still has no Gen 4 branch. With the mapping settled and
+the art confirmed present, that branch is the remaining work: play the frames
+through the cell-actor machinery along an arc, then the shake, then the click or
+the break-out. Not attempted here because verifying a ball crossing a battle
+needs a battle harness the container does not have -- the terrain harness has no
+equivalent for the battle screen -- and standing that up is its own job.
+
+---
+
+## Pass 70 -- a correction to pass 69: the mapping was put in a module the battle never loads
+
+Pass 69 added `BALL_THROWS`, `ballThrowFrame` and `ballThrowFor` to
+`src/import/Gen4Battle.lua`. **There are two `Gen4Battle` modules**, and that is
+the wrong one:
+
+| module | required by |
+|---|---|
+| `src/import/Gen4Battle.lua` | `RomExtractorGen4` **and nothing else** |
+| `src/battle/Gen4Battle.lua` | `BattleState`, and what `require("src.battle.Gen4Battle")` resolves to |
+
+The import module is extraction-side and is never loaded at runtime, so
+`ballThrowFor` sat where the thing that needs it -- `BattleState:ballChain` --
+could not reach it without the runtime pulling extraction code in behind it,
+which is backwards.
+
+Caught while starting the battle harness, by reading `BattleState`'s own require
+list rather than by anything failing: nothing would have failed until the branch
+that uses it was written, and then it would have looked like a missing function
+rather than a misplaced one.
+
+Both modules load headlessly, so the block moved as-is -- no third module, no
+duplicated table. The move was verified rather than assumed: the file committed
+in pass 69 is **exactly** the pre-pass-69 original with the block inserted, and
+the reverted `src/import/Gen4Battle.lua` md5-matches that original.
+
+`tools/gen4_ball_throw_check.lua` now requires `src.battle.Gen4Battle`, and still
+reports the same thing it did before the move.
+
+### Changed
+
+- `src/battle/Gen4Battle.lua` -- gains the ball-throw mapping.
+- `src/import/Gen4Battle.lua` -- reverted to its pre-pass-69 content.
+- `tools/gen4_ball_throw_check.lua` -- requires the runtime module.
+
+---
+
+## Pass 71 -- a headless Gen 4 battle, rendered
+
+Task #166, and the thing that was actually blocking item 6 rather than any
+missing knowledge about it.
+
+### Why the harness was the blocker
+
+The terrain harness stands in Twinleaf, renders, and diffs frames -- which is
+what made the camera, the back walls, the encounter grass and the day/night sky
+checkable, and what caught three separate measurements that could not fail. The
+battle screen had no equivalent. So the ball throw, the party icons, the HP bar,
+the move menu and the stray textbox could be reasoned about and never looked at,
+and this port does not ship visuals nobody has seen.
+
+### What it took
+
+- **The require graph, walked statically.** Rather than staging the tree and
+  guessing, a small probe parses `require("src.*")` out of each file from
+  `BattleState` outwards. It reported **121 modules present, 68 absent**; after
+  two rounds of staging, **193 present, 3 absent** -- and two of those three
+  never load, while `src.ui.` is an artefact of a dynamic require built by
+  concatenation.
+- **The cache, whole.** `Data:load()` reads `POKEPORT_DATA_DIR`, so the real
+  loader builds the dataset rather than a hand-assembled stand-in: **1,180 maps,
+  508 species, 471 moves**, `isGen4Cache = true`.
+- **Assets, only the ones one battle touches.** Asked rather than guessed: the
+  first run named **7 missing images**, and after those, **3** more (the two
+  species' sprites). Ten files, against a full install's thousands, because
+  every absent asset draws a placeholder and says which path it wanted.
+
+### The save is the game's own
+
+The first version hand-built `{ party, player, options, flags, vars, bag }` and
+raised on `save.inventory`. Rather than adding fields until it stopped raising --
+which is how a harness ends up exercising a save shape the game never produces --
+it now calls `SaveData.newGame(Game:bootConfig())` and replaces only the party.
+
+### It works
+
+`TURTWIG (Lv12) vs STARLY (Lv3), gen4 layout: true`, and the frame shows the
+plain-day background, both platforms, Starly on the enemy side, Turtwig's back
+sprite, and both healthboxes reading their levels and `38/38`.
+
+A log line of mine was wrong on the way there and is worth recording: it printed
+`Lv nil` for both, because a battler wraps its Pokemon as `.mon` and the level
+lives there. A nil in a log reads as a broken battle rather than a broken log
+line, so it was fixed rather than left.
+
+### Known gap
+
+**Text renders as an empty white box.** The glyph lookup reports `no glyph for
+"A"` and so on -- the font data the Gen 4 screens read is not wired into the
+harness. Sprites, platforms, backgrounds and healthbox numbers all draw, so it is
+usable for animation and layout work and **not** usable for anything about text.
+Named here rather than left for someone to discover.
+
+### Changed
+
+- `tools/gen4_battle_harness/main.lua`, `conf.lua`, `README.md` -- new.
+
+### What it unblocks
+
+#146 (the ball throw, whose mapping is already settled and committed), and
+#127/#128, #135/#136, #147, #148 -- every battle-side item on the play-test list
+that has so far had no way to be looked at.
+
+---
+
+## Pass 72 -- item 6: the ball is thrown
+
+With the harness from pass 71 there is finally a way to look at a battle, so the
+throw could be built and checked rather than argued about.
+
+### The timing is the cartridge's, read off its own NANR
+
+Not chosen by eye. Each ball names an NANR in `sBallThrowGraphics`, and pret
+stores those as JSON, so the frame table is transcribed rather than invented.
+Every animation carries two sequences -- a looping SPIN and a one-shot OPEN:
+
+| animation | spin (cell:delay) | per turn | open | total |
+|---|---|---|---|---|
+| `shared_anim` | 0:2 1:2 2:6 3:2 4:2 5:2 6:6 7:2 | 24 | 0:10 8:10 9:50 | 70 |
+| `quick_dusk_heal_anim` | 0:2 1:2 2:2 3:2 4:2 5:2 6:2 7:2 | **16** | 0:10 8:10 9:50 | 70 |
+| `bait_anim` | 0:2 1:2 2:2 3:2 | 8 | 0:60 | 60 |
+| `mud_anim` | 0:2 1:2 2:2 3:2 | 8 | 0:6 4:6 5:6 6:50 | 68 |
+
+**The Quick, Dusk and Heal balls spin faster than every other ball** -- 16 frames
+a revolution against 24 -- which is not a thing anyone arrives at by taste, and
+is why this reads four tables instead of one.
+
+### What is NOT from the cartridge, said plainly
+
+The NANR says which cell is on screen and for how long. It says nothing about
+where the ball IS: the path is driven by code (`ov12_02235E94.c`'s
+`BallRotation`), not by the animation. So the arc, the drop and the shake are
+**this port's**, not Platinum's, and they are gathered in `ARC`, `DROP` and
+`SHAKE` at the top of the file so that replacing them with measured numbers
+later is one edit rather than an excavation. They are the first thing to doubt
+against a real cartridge.
+
+### Two faults caught by looking, not by reasoning
+
+The first render ran the whole animation with **the Pokemon still standing
+there** -- the ball arced correctly, opened, closed and shook, all in front of a
+fully visible Starly. It read as the ball failing to catch anything. Fixed by
+hiding the foe from the moment the ball opens, through
+`Gen4Battle.battlerHidden`, which is the seam the move animations already use --
+rather than inventing a second way to hide a battler.
+
+The second: the ball **stopped at the foe's slot**, which is where the Pokemon's
+middle is, so it hung in mid-air in front of where the face had been. A `drop`
+phase now carries it down onto the platform, where it rests and shakes.
+
+Neither was visible from the code. Both were obvious in the first contact sheet.
+
+### Measured
+
+Poke Ball, three shakes, caught -- 232 frames end to end:
+
+| t | cell | position | foe hidden |
+|---|---|---|---|
+| 0 | 0 | 88, 96 | no |
+| 8 | 2 | 124, 38 | no |
+| 16 | 6 | 160, 24 | no |
+| 24 | 0 | 192, 48 | **yes** |
+| 40 | 8 | 192, 48 | yes |
+| 60 | 9 | 192, 48 | yes |
+| 95 | 0 | 192, 50 | yes |
+| 115 | 0 | 192, 74 | yes |
+| 200 | 0 | 192, 74 (rocking) | yes |
+
+Looked at, frame by frame: the ball leaves the player's side spinning, arcs up
+and across, the foe vanishes as it arrives, it opens to the split-open cell,
+closes, falls to the platform and rocks there.
+
+### Still not right
+
+**The Pokemon pops out of existence rather than shrinking into the ball.** The
+cartridge draws it being drawn in and scaled down -- the Gen 3 path in this same
+engine already models that, with `monScale`, `monBlend` and `monRise`. Gen 4 has
+no equivalent yet, so the absorb is a hard cut. It is the obvious next piece and
+is not claimed as done.
+
+Also untested: the break-out path (`caught = false`, which ends on the `burst`
+phase), and the Safari throws. The harness can drive both; this pass drove the
+catch.
+
+### Changed
+
+- `src/battle/Gen4BallAnim.lua` -- new; the four NANR tables, the phase
+  timeline, and the port's own arc/drop/shake.
+- `src/battle/Gen4Battle.lua` -- `drawThrownBall`, over the battlers and under
+  the HUD; `battlerHidden` now honours the ball.
+- `src/battle/BattleState.lua` -- `gen4BallChain`, asked before the Gen 3 branch;
+  `ballItemId`; `updateGen4Ball` ticked from `updateFx`.
+
+**Unverified in play.** Measured and looked at in the container; what it has not
+had is Cedric throwing a ball in Sinnoh.
+
+---
+
+## Pass 73 -- item 6: the Pokemon is drawn in, not switched off
+
+Pass 72 left the absorb as a hard cut and said so. This closes it.
+
+### What was wrong with the second version
+
+Hiding the foe the instant the ball arrived is right about where it ends up and
+wrong about how it gets there: the Pokemon **popped**. One frame at full size,
+the next gone, while the ball had not even opened yet.
+
+### What it does now
+
+`Gen4BallAnim` carries `monScale` and `monBlend` -- **the same pair the Gen 3
+path in this engine already uses**, so the two generations describe an absorb the
+same way instead of each inventing fields for it. `Gen4Battle.drawBattlers`
+shrinks the picture and carries its centre to the ball's; `battlerHidden` only
+answers true once the scale has reached zero.
+
+Measured across the open sequence:
+
+| t | cell | mon scale |
+|---|---|---|
+| 24-32 | 0 | 1.00 |
+| 36 | 8 | 0.93 |
+| 40 | 8 | 0.80 |
+| 46 | 9 | 0.60 |
+| 55 | 9 | 0.30 |
+| 75 | 9 | hidden |
+
+Looked at: Starly shrinks visibly from frame 36 through 55 as the ball opens,
+is gone by 75, and the ball then closes, drops to the platform and rocks.
+
+### Where the absorb starts is the port's, and pinned to the one thing that isn't
+
+The NANR fixes the ball's own cells: closed for 10 frames, then cell 8, then
+cell 9 to frame 70. It says nothing about when the Pokemon goes in, because on
+the cartridge that is the mon sprite's own callback and not this animation's
+business. So `ABSORB.from = 10` -- the absorb begins exactly when the ball first
+opens, which is the one part of the timing the NANR does pin -- and `span = 30`
+is a choice. Both sit beside `ARC`, `DROP` and `SHAKE` with the rest of the
+port's own numbers.
+
+### Still imperfect
+
+The ball is **parked on the Pokemon's face for ten frames** before it opens,
+because the open sequence's first cell is the closed ball held for 10. The cell
+timing is the cartridge's; what is almost certainly wrong is the POSITION -- the
+ball arrives at the foe's slot, which is the middle of the sprite, rather than at
+a point of contact. It reads as a pause rather than as a hit.
+
+Unchanged from pass 72: the break-out path and the Safari throws are written and
+unexercised.
+
+### Changed
+
+- `src/battle/Gen4BallAnim.lua` -- `ABSORB`, `monScale`/`monBlend` across the
+  open and burst phases, `absorbFor`.
+- `src/battle/Gen4Battle.lua` -- `ballAbsorb`, and `drawBattlers` shrinking the
+  picture toward the ball.
+
+---
+
+## Pass 74 -- item 6: the two paths passes 72 and 73 left unexercised
+
+Both were written and neither had been run. Recorded because "written but never
+executed" is not a state this port should leave a feature in, and because the
+harness makes running them cheap now.
+
+### Every ball resolves, and the spin lengths really do differ
+
+| ball | spin | open |
+|---|---|---|
+| master, ultra, great, poke, cherish | 24 | 70 |
+| **dusk, heal, quick** | **16** | 70 |
+| mud | 8 | 68 |
+| bait | 8 | 60 |
+
+Cherish takes the shared 24 rather than the fast group, which is the one that
+could plausibly have been mis-grouped -- it sits next to Quick, Dusk and Heal in
+the item order but names `shared_anim`, not `quick_dusk_heal_anim`.
+
+### The break-out
+
+`caught = false`, two shakes, 256 frames:
+
+| t | cell | mon scale | hidden |
+|---|---|---|---|
+| 24 | 0 | 1.00 | no |
+| 55 | 9 | 0.30 | no |
+| 90 | 9 | 0 | yes |
+| 140-190 | 0 | 0 | yes |
+| 200 | 8 | 0.13 | no |
+| 210 | 9 | 0.47 | no |
+| end | -- | **1.00** | **no** |
+
+**It ends visible**, which is the assertion that matters: a Pokemon that stayed
+invisible after breaking out of a ball would be a serious defect and is exactly
+the kind that hides until someone fails a catch in play. Looked at as well as
+measured -- the ball arrives, the foe is drawn in, the ball drops and rocks on
+the platform, then opens and the foe comes back out.
+
+**Nothing changed this pass.** Both paths behaved correctly first time.
+
+---
+
+## Pass 75 -- item 7 diagnosed, and a defect in the harness itself
+
+### The harness was skipping `enter()`
+
+Found while diagnosing item 7, and worth putting first because it invalidated a
+measurement before it was noticed. `BattleState:enter()` is where a battle loads
+its pictures -- `playerBackPic`, `showPlayerBack` and the rest -- and the harness
+shipped in pass 71 constructed a battle and drew it without ever calling it.
+
+So the first probe reported `playerBackPic = nil` and I read that as the engine
+failing to resolve a picture. It was the harness failing to ask for one. With
+`enter()` called, `playerBackPic` is an Image and `showPlayerBack` is **true**.
+
+A harness that skips a lifecycle step reports the step, not the engine. Fixed,
+and written into the harness README so the next person extending it does not
+repeat it.
+
+### Item 7: *"No trainer sprite in battle before the Pokemon is sent out"*
+
+Two separate gaps, and the second is the one the report names.
+
+**The data.** `field.playerPics` is **nil** on a Platinum cache -- the Gen 4
+import never writes it -- so `FieldDefaults.fieldValue` falls through to the
+generation-agnostic default, and `Sprites.playerPath(data, "back")` answers
+`assets/generated/battle/redb.png`. That is **Red's Gen 1 back sprite**, on a
+Sinnoh dataset. `field.playerForms` does exist and carries `boy` and `girl`, but
+with overworld sprites only -- no `back`, which is the key `Sprites.playerForm`
+reads.
+
+Meanwhile **40 `trainer_backs_*` frames are in the cache** (eight trainers, five
+frames each) and `trainer_backs/` has been a declared family in
+`Gen4Battle.OBJ_FAMILIES` all along -- the same shape as the ball throw: art
+extracted, nothing naming it.
+
+**The renderer.** This is the one that produces the reported symptom.
+`showPlayerBack` arms correctly for Sinnoh, and the player's Pokemon is correctly
+withheld while it is set -- but **`Gen4Battle` contains no reference to a trainer
+back at all**, so the player's side is simply empty. Rendered with the back
+picture injected as boy, injected as girl, and not injected: **all three frames
+are pixel-identical**, and none has a trainer in it.
+
+That control is the point. If the renderer drew the picture, the three would
+differ; they do not, so the missing piece is the drawing and not only the data.
+
+### Which trainer
+
+`sBallThrowGraphics`' neighbours in the sprite order are `lucas_dp`, `dawn_dp`,
+`barry_dp`, then the five stat trainers. Lucas is Diamond/Pearl's male player
+character and Dawn the female; Barry is the rival. The names are the evidence --
+two greps for a gender-to-index constant in pokeplatinum found nothing and the
+search was stopped rather than extended into guesswork.
+
+### Not fixed this pass
+
+Both halves are understood and neither is written. The renderer half is the same
+job as `drawThrownBall` and belongs beside it; the data half belongs in the
+importer, which means a re-import before it takes effect -- and that is worth
+saying now rather than after the work.
+
+### Changed
+
+- `tools/gen4_battle_harness/main.lua` -- calls `BattleState:enter()`.
+- `tools/gen4_battle_harness/README.md` -- the lifecycle note.
+
+---
+
+## Pass 76 -- item 7: the trainer is drawn
+
+Both halves diagnosed in pass 75, both written here.
+
+### The renderer
+
+`Gen4Battle.drawTrainerBack`, placed by the same `corner` the battlers use on the
+player's own slot, so the trainer stands where the Pokemon it is about to send
+out will stand rather than at a second set of coordinates that can drift from it.
+Drawn before the thrown ball, so a send-out throw goes over the trainer.
+
+### ...and the Pokemon it was standing in front of
+
+`showPlayerBack` is the engine's flag for "the first Pokemon is not out yet", and
+the Gen 3 path already honours it. **This one did not**, so Sinnoh drew the
+player's Pokemon through the whole intro -- and once the trainer was drawn too,
+drew both at once in the same place. `battlerHidden` now withholds the player's
+battler while the flag is set.
+
+**I had this wrong in pass 75** and said the Pokemon was "correctly withheld".
+It was not; the green shape on the left of those frames was Turtwig, drawn the
+whole time. Corrected here rather than left standing.
+
+### The data
+
+`field.playerPics` is never written by the Gen 4 extractor, so the lookup fell
+through to the generation-agnostic default -- `assets/generated/battle/redb.png`,
+Red's Gen 1 back sprite, on a Sinnoh cache. `playerForms` was written but carried
+field sprites only, and `back` is the key `Sprites.playerForm` reads.
+
+`formFor` now writes it: **lucas_dp** for the boy, **dawn_dp** for the girl. Those
+are Diamond and Pearl's two player characters, named that way in the cartridge's
+own sprite order (`lucas_dp`, `dawn_dp`, `barry_dp` the rival, then five stat
+trainers). The names are the evidence -- pokeplatinum has no gender-to-index
+constant to find, and the search was stopped rather than extended into guesswork.
+
+### Measured
+
+Rendered as the boy, as the girl, and with no back pic available:
+
+| case | trainer drawn | player's Pokemon |
+|---|---|---|
+| boy | **Lucas** -- red cap, blue band | withheld |
+| girl | **Dawn** -- white beanie, long dark hair | withheld |
+| no pic | none | withheld |
+
+Boy against girl now differ on **1,327 px**. In pass 75 the same three frames
+were **pixel-identical**, which is what said the renderer was the gap; that they
+now differ is what says it is closed.
+
+### Two of my own test errors, recorded
+
+- The first gender comparison set `save.player.form`. `Sprites.playerForm` reads
+  `save.player.**gender**`, so both runs fell back to the boy and differed by 144
+  px -- which was the healthbox's own gender symbol, not the trainer. **The test
+  was wrong, not the engine.**
+- A "non-background pixels in the player slot" measurement returned 4,080 for all
+  three frames, because it compared a gradient background against its own corner
+  pixel. It could not have distinguished them and was discarded rather than
+  reported.
+
+### The import half is NOT verified end to end
+
+The renderer is verified by looking. The extractor change is not: running it
+needs the ROM. What **is** verified is that the exact path string it writes --
+`assets/generated/gen4/battle/trainer_backs_lucas_dp_00.png` -- is the string
+that made Lucas appear when injected into the cache by hand. So the key and the
+value are right; that the stage runs and writes them is not yet shown.
+
+**This needs a re-import before it takes effect on Cedric's install.**
+
+### Changed
+
+- `src/battle/Gen4Battle.lua` -- `drawTrainerBack`; `battlerHidden` honours
+  `showPlayerBack`.
+- `src/import/RomExtractorGen4.lua` -- `playerForms.boy.back` and `.girl.back`.
+
+---
+
+## Pass 77 -- the harness's blank text was the harness, not the engine
+
+Pass 71 shipped this harness with a "known gap": text rendered as an empty white
+box, and the note said the Gen 4 font "is not wired here yet". That framing was
+too generous to me -- it reads as though something in the port were unfinished.
+It was a missing call.
+
+### `Font.load(Data)`
+
+Measured: **ten** `no glyph for "..."` warnings without it, **zero** with it, and
+the healthboxes then draw `STARLY`, `TURTWIG` and `37/37`.
+
+The white block was the font FALLBACK painting a filled rectangle where the
+message area goes. With the font loaded it is gone. So anyone reading those
+earlier contact sheets should know the white slab in them was never a text box
+and never a bug in one.
+
+### What was checked on the way, and did not turn out to be the cause
+
+Both worth recording, because both looked promising and neither was it:
+
+- **The font sheet.** `font.pages.message.image` pointed at
+  `assets/generated/gen4/font/font_message_sheet.png` and the file was genuinely
+  absent from the container. Staging it changed nothing on its own -- the
+  warnings continued -- so the missing asset was real but not the fault. It is
+  staged now because the harness does need it.
+- **`gen4_fonts` is written and never loaded.** `RomExtractorGen4` writes it
+  twice and it is **not** in `Data.lua`'s `GEN4_PREFIXED` list, so `Data:load()`
+  never reads it and `Data.gen4_fonts` is nil. That is a real observation -- the
+  seventh write-and-never-read in this cache -- but it is **not** what caused the
+  blank text, because `data.font` already carries the message page and the full
+  484-entry charmap, including all 62 ASCII alphanumerics. Recorded as a loose
+  end, not claimed as a fix.
+
+### The pattern, twice now
+
+`enter()` in pass 75, `Font.load` here. Both produced a convincing-looking fault
+in the engine that was not there, and in both cases the first reading of the
+symptom was wrong. The README now names both as lifecycle steps rather than
+burying them.
+
+### Changed
+
+- `tools/gen4_battle_harness/main.lua` -- calls `Font.load(Data)`.
+- `tools/gen4_battle_harness/README.md` -- the two lifecycle steps, the font
+  sheet in the asset list, and the "known gap" removed because it is closed.
+
+---
+
+## Pass 78 -- item 8: the stray textbox, found and removed
+
+*"A stray extra textbox appears in battle."* Reproduced in the harness, traced to
+one condition, fixed, and confirmed by looking.
+
+### Getting the harness to the point where it was visible
+
+Three things had to be in place before the fault could be seen at all, and two of
+them were gaps in the harness rather than the port:
+
+- `Font.load(Data)` (pass 77), without which every box is a white slab.
+- `assets/generated/gen4/windows/dialogue.png`, absent from the container --
+  Platinum's message frame simply did not draw.
+- The battle **stalls without input**: measured, the queue sits at 9 items and
+  `showPlayerBack` never clears. Its remaining entries are
+  `[6] text="Go! TURTWIG!"` and `[7] anim=POOF_ANIM` -- worth noting separately,
+  because `POOF_ANIM` is a **Gen 1 animation name in a Gen 4 send-out**, which is
+  the same class of fault item 6 turned out to be.
+
+### The fault
+
+`Gen4Battle.drawTextArea` draws Platinum's frame unconditionally near the top.
+Its message branch was guarded as:
+
+    if phase == "messages" and (battle.current or battle.animPlaying) then
+
+so a message phase with **no line to show right now** -- the opening, while the
+queue works through its waits and callbacks -- matched none of the branches and
+fell through to the fallback at the bottom, which pushes the Game Boy's centring
+translate and calls `drawTextAreaInner`. That function opens with
+`Font.drawBox(0, 12, 20, 6)`.
+
+So the screen carried Platinum's message box **and** the Game Boy's, the second
+floating over the field where the centring translate put it.
+
+### Measured
+
+White regions of 200px or more, on the DS screen:
+
+| tick | before | after |
+|---|---|---|
+| 20 | **3** -- incl. x55..200 y127..160 | 2 |
+| 60 | **3** -- incl. x55..200 y127..160 | 2 |
+| 120 | 2 | 2 |
+| 300 | 2 | 2 |
+
+The stray box is the x55..200 y127..160 region. It was present at ticks 20 and 60
+and **already absent by 120** before any fix -- because by then a line had
+arrived and the branch was taken. That is what made it intermittent in play, and
+it is why the measurement had to be taken early.
+
+The two that remain are Platinum's box border and its interior, in every frame.
+
+### How it was found
+
+Not by reading. `Font.drawBox` was wrapped in the harness to print its caller:
+at tick 20 it reported `BattleState.lua:10944 drawBox(0,12,20,6)` and at tick 120
+it reported nothing at all. One line, and it named the function, the arguments
+and the fact that the call is conditional.
+
+### The fix
+
+`phase == "messages"` now returns whether or not there is a line to draw. An
+empty message box is the right answer for a message phase with nothing to say;
+the Game Boy's box is not. The fallback is left for what its comment says it is
+for -- Mimic's copy menu and the demo script.
+
+### Changed
+
+- `src/battle/Gen4Battle.lua` -- the message branch no longer falls through.
+
+---
+
+## Pass 79 -- the send-out throws a ball too
+
+Found while measuring item 8: the send-out queue on a Sinnoh battle still held
+`{ anim = "POOF_ANIM" }` -- **Gen 1's animation name in a Gen 4 battle**. The Gen
+3 note in the same file records fixing exactly this, one generation earlier:
+
+> There was no send-out animation on Hoenn at all -- the queue ran Gen 1's
+> POOF_ANIM, which a Gen 3 dataset has no script for, and then Gen 2's grow-in
+
+Platinum has no script for `POOF_ANIM` either, so the poof drew nothing and the
+Pokemon arrived by the Game Boy's grow-in.
+
+### Built on the throw that already exists
+
+`Gen4BallAnim` gains a `mode` -- `catch` or `release` -- and a `side`. Same
+cells, same cartridge timings; a release is the arc and the open with the absorb
+run backwards, no drop, no shakes and no answer to wait for. `side` matters
+because a capture is always about the foe but a send-out can be about either, and
+without it the player's own throw would shrink the Pokemon standing opposite --
+which is the mistake the Gen 3 path records having made.
+
+Hooked at `startGrowIn`, which the file's own comment calls "the one place every
+send-out in the file goes through", and asked before the Gen 3 branch for the
+same reason the ball chain is: relying on a Gen 3 gate to decline a Gen 4 cache
+is a coincidence, not a rule.
+
+### Measured, and looked at
+
+| tick | state |
+|---|---|
+| 285-305 | ball in the air, arcing to the player's slot |
+| 315 | ball open, Turtwig emerging, `monScale` climbing |
+| 325 | `monScale` 0.67, ball fading |
+| 335 | Turtwig at full size, ball gone |
+
+### Only the player's send-out is claimed
+
+A foe's ball on the cartridge is **placed**, not thrown -- the Gen 3 note states
+that for Hoenn and Platinum has not been measured for it. A ball arcing in from
+off-screen on the wrong side would be worse than the grow-in it replaced, so
+everything that is not the player returns false and keeps what it had.
+
+### What is still wrong with it
+
+**The arc start is the catch's.** `ARC.fromX/fromY` was measured for throwing at
+the foe, on the right; a release starts in the same place and travels a short way
+left to the player's own slot. It reads as a send-out but the ball appears to
+come from off to the left rather than from the trainer's hand. The number is in
+`ARC` with the other port-owned ones and wants replacing with a measured throw
+origin.
+
+### A fourth gap in the harness, and a wrong reading it caused
+
+`Game.input` is **nil** in the harness -- nothing builds one -- so a battle opens
+on a queue of messages that each wait for the player and stalls at 9 items
+forever. `showPlayerBack` never clears and the send-out never runs.
+
+Worse: an earlier attempt to drive it pressed A behind `if Game.input then`,
+which with a nil input pressed **nothing at all**, and the stall was reported as
+though presses had been tried and had not helped. That is the third test of mine
+in this stretch that silently did nothing and was read as evidence. The harness
+now builds an input and presses A on a schedule (`PRESS`, frames between
+presses), with the failure written next to it.
+
+### Changed
+
+- `src/battle/Gen4BallAnim.lua` -- `mode`, `side`, the release phase list and
+  the reversed absorb.
+- `src/battle/BattleState.lua` -- `gen4SendOut`, asked first in `startGrowIn`.
+- `tools/gen4_battle_harness/main.lua` -- a working `Game.input`.
+
+---
+
+## Pass 80 -- the throw's own numbers, and a Pokemon that arrived before its ball
+
+Pass 79 shipped the send-out with a defect named in its own entry: the arc start
+was the capture's, so the ball appeared to come from off to the left rather than
+from the trainer's hand. Going to look for the real number found the rest of
+them, and then found something worse.
+
+### Every number in the throw is now the cartridge's
+
+`Gen4BallAnim`'s header already said the trajectory was the port's own and was
+"the part to distrust first if the throw looks wrong against a real cartridge".
+It was right to. Platinum keeps all of it in `ov12_02235E94.c`:
+`sBallThrowTypes[battlerType]` picks a type, `ov12_022378A0` sets the
+destination, arc radius and duration from it, `ov12_02237B14` sets the origin.
+
+| | port's guess | cartridge | where |
+|---|---|---|---|
+| send-out origin | (88, 96) | **(10, 100)** | type 6 |
+| send-out target | battler pos | **battler pos + 32y** | type 6 |
+| send-out radius | 46 | **48** | type 6 |
+| send-out frames | 24 | **20** | type 6 |
+| capture origin | (88, 96) | **(-30, 160)** | type 15 |
+| capture radius | 46 | **64** | type 15 |
+| capture frames | 24 | **16** | type 15 |
+
+(-30, 160) is **off-screen**, below and left: the player's hand under the
+camera. No amount of staring at the visible frame could have produced that
+number, which is the argument for looking it up rather than tuning it by eye.
+
+The destinations resolve through `BATTLER_POS_SOLO_PLAYER` (64, 112) and
+`BATTLER_POS_SOLO_ENEMY` (192, 48) -- the two the port already uses -- so the
+coordinate space is the DS's and the numbers transfer without scaling. That
+agreement is also the check that the table was read correctly.
+
+**The curve was the wrong curve.** `XYTransformContext_InitParabolic` is not a
+parabola: it is a linear interpolation plus a revolution swept 90 to 270 degrees,
+applied by `RevolutionContext_Update` as `cos(angle) * radius` on y alone. So the
+true arc is `y = lerp - radius * sin(PI * u)`, against the `4u(1 - u)` this file
+had. Same family, fuller through the middle, and it is the cartridge's function
+rather than one that resembles it.
+
+**And the foe's ball is measured now, not assumed.** Pass 79 said the foe's ball
+is placed rather than thrown and admitted that was carried over from the Gen 3
+note. It is correct for Platinum: the enemy battler types take
+`ov12_022378A0`'s cases 0-5, which set the destination to the sprite's own
+position with **radius 0 over 12 frames**. Also worth having: the cartridge
+throws no ball at all in Safari and Pal Park, and none for the foe outside a
+trainer battle.
+
+### The Pokemon was already standing there
+
+The throw was correct. Watching it in sequence rather than in stills showed it
+arriving to send out a Pokemon that had been on the platform for a second.
+
+    t=223   trainer walks off, showPlayerBack cleared, Turtwig visible
+    t=286   startGrowIn -- the ball is thrown
+
+`startGrowIn` ran **once**, for the player, at 286. So something else revealed
+the Pokemon at 223, and it was the queue:
+
+```lua
+local throws = self:gen3ThrowsSendOut()
+```
+
+`gen3ThrowsSendOut` asks whether `constants.gen3BallAnim.timing.sendOut` exists.
+A Gen 4 cache has no such record, so `throws` came back false and the queue took
+the Game Boy branch -- walk the trainer off, wait eighteen frames, clear
+`showPlayerBack` -- long before any send-out animation ran.
+
+**This is the same fault as POOF_ANIM, and pass 79's own comment named it**: "relying
+on a Gen 3 gate to decline a Gen 4 cache is a coincidence, not a rule." Pass 79
+applied that to `startGrowIn` and did not check whether it was true of the gate
+one level above, which it was. Split into a general `throwsSendOut()` that asks
+Gen 4 on a Gen 4 layout; the two genuinely Gen 3 callers keep the Gen 3 one.
+
+Measured after: the trainer now stays through "Go! TURTWIG!" and leaves on the
+same tick the ball appears -- which is what the Gen 3 note already says Hoenn
+does -- and the platform is empty until the ball opens on it.
+
+### One frame that had it both ways
+
+`monHidden` was left for the first `update` to set, so on the tick the ball was
+created the field was nil, `battlerHidden` answered false, and the Pokemon drew
+at full size while its ball was still at the left edge. One frame -- long enough
+to see, not long enough to believe -- and only a per-tick trace found it. The
+constructor seeds the mode's mon state now, so the first frame is right before
+anything ticks.
+
+### The catch's landing point was deliberately NOT changed
+
+The cartridge lands the capture ball at enemy pos + 8y; this file's `drop` phase
+moves it 26. `drop` is still the port's, and the cartridge reaches its resting
+place with a second parabola this pass did not read. Correcting one end of a
+chain whose other end is a guess makes the throw worse, not better, so the 8 is
+recorded in `THROW.catch` as a comment and left unapplied.
+
+### Two files were LF in a CRLF repository
+
+`Gen4BallAnim.lua` and `tools/gen4_battle_harness/main.lua` -- both created by
+these passes -- were LF while every pre-existing engine file is CRLF, and each
+pass had been faithfully preserving the mistake. Both converted; the diff for
+that is whitespace only.
+
+### Changed
+
+- `src/battle/Gen4BallAnim.lua` -- measured `THROW` table per mode, the
+  cartridge's sine arc, seeded first frame, CRLF.
+- `src/battle/BattleState.lua` -- `throwsSendOut()`, and the queue asks it.
+- `tools/gen4_battle_harness/main.lua` -- `TRACE`, which found both faults above;
+  CRLF.
+
+---
+
+## Pass 81 -- item 9: Barry was deleted one line after he started following
+
+*"Barry is invisible while following, then pops in at borders."* Both halves are
+one branch, and the cause is in the cartridge's own script.
+
+### First there had to be a way to look at the overworld
+
+The terrain harness draws the ground and the battle harness draws a battle;
+neither stands up an `OverworldState`, so nothing about the live cast could be
+examined. `tools/gen4_overworld_harness` does: it pushes the real
+`OverworldController` onto a real stack, walks the player, and traces who is on
+the map and who is following.
+
+Two things it does deliberately, both learned the hard way:
+
+- **It boots the services `Game:boot` boots, in that order.** The battle harness
+  was assembled the other way -- a service added each time a nil was hit -- and
+  reported three engine faults that were all missing lifecycle.
+- **It draws through `Game:draw`.** Calling `OverworldState:draw` into a canvas
+  gives a black frame, not even the player: `Game:_draw` is what sizes the
+  surface, picks the visible base and runs the world pass.
+
+And one thing it got wrong first: `FOLLOW` took a **localId**, so the first run
+adopted T01's `map_signpost` and proved that a signpost has no character art.
+Two objects can share a localId on a Gen 4 map, so a number is not an identifier
+here; it names a sprite now.
+
+### The script hides him on purpose, and the port took it literally
+
+`scripts_route_201.s`, four consecutive rows:
+
+```
+    SetHasPartner
+    SetMovementType LOCALID_RIVAL, MOVEMENT_TYPE_FOLLOW_PLAYER
+    SetObjectFlagIsPersistent LOCALID_RIVAL, TRUE
+    SetFlag FLAG_HIDE_ROUTE_201_RIVAL
+```
+
+**That flag is about the map's template, not about him.** Barry is now a
+persistent actor traveling with the player, so Route 201 must stop spawning its
+own copy -- otherwise you would walk back and meet a second Barry standing where
+you left him. `SetObjectFlagIsPersistent` is the cartridge saying exactly that:
+`sub_0206184C` deletes every object whose header id is not the new map's
+**unless** that status is set.
+
+In the port the flag reached `syncObjectVisibility`, which does not hide but
+**removes** -- it takes the npc out of `npcs` and `entities`. So the follower
+was deleted one line after he became the follower.
+
+And the pop-in is the same fact seen from the other side: on the next map
+`Gen4Follower.onMapEntered` found no live object with his local id, fell through
+to `spawnFollower`, and rebuilt him from the saved record -- visible, because a
+freshly built npc carries no hide state.
+
+### Measured, replaying those four rows on a Sinnoh save
+
+| | before | after |
+|---|---|---|
+| after `SetFlag` | `follower=GONE, 8 live entities` | `follower=still here, 9` |
+| walking | `follower=none` every tick | trails one cell behind |
+| crossing a seam | `spawned=true sprite=barry` -- pops in | still rebuilds, but he was already there |
+
+The fix is one branch in the removal pass: a live `gen4Follower` is not the
+map's to delete.
+
+### The regression check can fail, which is the point
+
+With **no** follower adopted, the same flag on the same object must still remove
+him -- otherwise the exemption is too wide and every hide flag in Sinnoh stops
+working. Measured: `follower=GONE, 8 live entities`, unchanged.
+
+**Gen 1/2/3 cannot reach the branch.** `gen4Follower` is written only by
+`Gen4Follower.adopt` and cleared only by `release`; nothing in the Game Boy or
+Hoenn paths sets it.
+
+### Not claimed
+
+Whether the rest of the escort is right. This makes the partner survive his own
+hide flag and stay on screen; the approach walk, the doorway shuffle and the
+scenes that address `LOCALID_FOLLOWER` are not tested by this pass.
+
+### Changed
+
+- `src/world/OverworldController.lua` -- the follower is exempt from
+  `syncObjectVisibility`'s removal.
+- `tools/gen4_overworld_harness/` -- `main.lua`, `conf.lua`, `README.md`, new.
+
+---
+
+## Pass 82 -- item 10: the fix for it was written and never called
+
+*"Professor Rowan is translucent in his lab."* Not fixed this pass. What this
+pass did was find the mechanism, and the mechanism is an eighth
+write-and-never-read.
+
+### What was measured
+
+With the new overworld harness standing in `T02R0101`:
+
+- **Rowan's sprite is not translucent.** His rendered pixels are his source
+  palette exactly -- `(239,239,255)`, `(206,206,222)`, `(173,165,206)` -- with
+  no blend toward the background, and the player beside him is the same. So
+  nothing in `drawEntity` is dimming him; it sets `(1,1,1,1)` throughout.
+- **Something is drawn over him.** `Gen4Ground:drawCanopy`'s live path paints
+  and blits INDOORS:
+
+  | map | |
+  |---|---|
+  | `T02R0101` Rowan's lab | `outdoors=false painted=1` |
+  | `T01` Twinleaf (control) | `outdoors=true painted=2` |
+
+  and its own comment says when: *"this runs after the entity pass"*. Nothing
+  gates it on being indoors -- `self.outdoors` is read by `drawSky` and by the
+  shadow and back-wall decisions, and not by the canopy.
+
+Indoors the room's walls and floor ARE the chunk mesh, so the canopy is not
+"the part of a building above head height" any more. It is the room, painted
+over the people standing in it.
+
+### The file already knows, in its own words
+
+Above `beginWorld`, from an earlier play report -- *"many indoor objects when
+walked behind dont mask the player but houses do perfectly"*:
+
+> `CANOPY_Y` is a fixed world height of 32 and it is the WRONG MECHANISM, not
+> the wrong number. Measured over all 590 building models, **338 of them --
+> 57.3% -- are entirely below it** and can therefore never mask anything, in
+> any room.
+
+and the replacement, three calls with the entity pass between them:
+
+```
+    ground:beginWorld(camX, camY, vw, vh)   -- target bound, ground drawn
+    ground:drawSprite(...)                  -- once per character
+    ground:endWorld()                       -- unbound and blitted
+```
+
+**All three have zero callers.** Searched across `src/` and `tools/`:
+`Gen4Ground:beginWorld` is defined at line 1615, `:drawSprite` at 1653,
+`:endWorld` at 1683, and nothing anywhere calls any of them. (`beginWorldPass`
+and `endWorldPass` are `Renderer`'s, a different pair, and those ARE called --
+which is why a name search alone says the opposite.)
+
+So the correct path exists, is argued for in the file, was written to fix this
+exact class of report, and has never run once.
+
+### Write-and-never-read, number eight
+
+After `gen4_fonts` (#167). The shape is the same every time: the work is done,
+the seam is not. Worth saying plainly that this one is the most expensive of
+the eight so far -- it is the whole indoor occlusion model.
+
+### Not claimed, and why this pass stops here
+
+That wiring is not a line: it routes every Gen 4 character draw through the
+ground's depth target, and it changes the draw path of every Sinnoh frame,
+indoors and out. It should be done with the terrain TEXTURES present so the
+result can be looked at -- this harness has `chunks.bin` but not the texture
+sets, so the lab renders as untextured slabs and a picture of it would not
+settle whether a character is masked correctly.
+
+Also not claimed: that overdraw is the whole of item 10. It is measured that
+the canopy paints over the entity pass indoors; it is NOT measured that what it
+paints lands on Rowan specifically, because that needs the textures too.
+
+### Changed
+
+Nothing. This is a finding.
+
+---
+
+## Pass 83 -- item 11: an object id can be a variable, and this port read the number
+
+*"The Pokemon Center does not heal, animate or play its jingle."* Three
+symptoms, three different answers, and only one of them was a bug.
+
+### It heals
+
+It does not reproduce. Talking the nurse through her whole exchange in the
+overworld harness takes a hurt party from **9/37 to 37/37**.
+
+Two earlier runs of mine said otherwise and both were the harness:
+
+- **The command set was never registered.** Every Gen 4 row reported
+  `unknown command 'g4_set_var' (skipped)`. `src/mods/Builtins.lua` is what
+  calls `Commands.registerInto`, reached through `Game.mods:load(Data)` -- a
+  boot step the harness skipped.
+- **The loop ticked the overworld, not the stack.** `StateStack:update` runs
+  the TOP state, and a text box sits above the overworld, so nothing could
+  consume a press: the script parked at `g4_message_var` for 360 frames and
+  the party never healed. That is *exactly* the shape of the play report, and
+  it was my test.
+
+Fifth and sixth harness gaps of this family. The rule the battle harness
+already carries held again: do what `Game:boot` does, in the order it does it.
+
+### AN OBJECT ID OPERAND IS A VAR OR A LITERAL, AND THIS PORT READ THE LITERAL
+
+The real find, and it is not about the nurse.
+
+    [move] raw=32775 resolved=32775 -> NOBODY
+    gen4 move: no object with localId 32775 on T02PC0101 -- the movement is
+    dropped (live localIds: 0,1,2,3,4)
+
+**32775 is 0x8007.** The cartridge reads that operand with
+`ScriptContext_GetVar`, which is `FieldSystem_TryGetVar`: *if the number names
+a variable take its value, and if it does not the number IS the value.* The
+port already has that rule -- `valueOf` in `Gen4Commands`, written for
+`g4_set_var` -- and the object lookup never used it.
+
+So `ApplyMovement VAR_0x8007` walked local id 32775. The nurse never turned to
+the machine and never turned back: the report's **"does not animate"**.
+
+Fixed in `objectById`, which the file's own comment calls "one lookup for every
+command that takes an object id" -- so every object-id operand in Sinnoh gets
+the cartridge's rule, not just movement. Resolved BEFORE the
+`0xFF`/`0xF2`/`0xF1` branches, because the cartridge resolves first too and a
+var can legitimately hold `LOCALID_PLAYER`. It cannot collide with a real local
+id: those are 0..255 plus three specials, and `VARS_START` is 0x4000.
+
+After: `raw=32775 resolved=3 -> pokecenter_nurse`, and
+`[face] pokecenter_nurse: down -> left` then `left -> down`.
+
+**39 of Sinnoh's 2,215 ApplyMovement sites name a var**, so this is not one
+nurse.
+
+### ...AND 29 OF THOSE 39 NAME A VARIABLE NOTHING EVER WROTE
+
+`VAR_LAST_TALKED = VAR_0x800D` (`generated/vars_flags.txt`) -- the ordinary
+"the person you are talking to turns, or shows a mark over their head" idiom.
+**Nothing in the Gen 4 path had ever written it.**
+
+That matters for the order these two go in. Resolving the operand *alone* would
+have turned a loud failure -- `no object with localId 32781 -- the movement is
+dropped` -- into a silent one, walking whichever object happens to be local id
+0. **A fix that makes a bug quieter without making it rarer is worse than the
+bug**, so the seed ships in the same pass, on the talk path, Gen 4 only.
+
+Measured after: `lastTalked=3` on every row of the nurse exchange.
+
+Gen 3 keeps its own `VAR_LAST_TALKED` at **0x800F** -- a different id; they are
+not interchangeable -- and Gen 1/2 have no such variable.
+
+### The other two symptoms are absences, not faults
+
+- **No animation beyond the turns:** `playpokecenterhealinganimation` is a
+  deliberate `g4_noop`. With nothing between her two turns, she faces the
+  machine and faces back *within one tick* -- which is why sampling her facing
+  every five frames across 900 frames caught only `down`, and why it reads as
+  no animation at all even now the turns land.
+- **No jingle:** there is no Gen 4 SE bank. `audio.lua` is cries only. That is
+  task #102 and not this.
+
+### Not claimed
+
+That every one of the 39 var-targeted sites now does the right thing. Two were
+exercised here (`0x8007` twice, and the literal `255` control, unchanged at
+`resolved=255`). The remaining `VAR_MAP_LOCAL_*` pair reads a different var
+class that this pass did not test.
+
+### Changed
+
+- `src/script/Gen4Commands.lua` -- `objectById` resolves var-or-literal.
+- `src/world/OverworldController.lua` -- the talk path seeds `VAR_LAST_TALKED`.
+- `tools/gen4_overworld_harness/main.lua` -- loads mods (so commands register),
+  ticks the stack, and gains `PARTY`, `HURT`, `PRESS` and `WATCH`.
+
+---
+
+## Pass 84 -- the diagnostic that threw away its own answer
+
+Item 12 is not fixed. This pass fixed the thing that was stopping it being
+diagnosed, and I got the diagnosis wrong once on the way.
+
+### What the mart actually does
+
+Talking to Jubilife's clerk produces **nothing** -- no text box, no shop, no
+menu of any kind. Tested at four positions against both cashiers, with the
+player measured at the cell and facing I meant (`player=(3,6)up`, `cashier_f`
+at (3,5)) and A pressed every 20 frames for 300. Zero UI pushes.
+
+The Centre nurse, in the *same* geometry one tile apart, runs her whole
+exchange. So presses reach the interact and the talk path works; something
+about this clerk does not. Not isolated yet -- the next thing to check is
+whether her script id binds, since half of Sinnoh's field events were unbound
+until the band fix and a mart clerk is a `common_scripts` caller.
+
+### The log line that could not name anything
+
+Talking to the clerk logged exactly one line:
+
+    [warn] script: unknown command 'g4_unimplemented' (skipped)
+
+`Gen4ScriptVM` emits `{ "g4_unimplemented", ins.name }` -- the opcode's own
+name -- and its comment says why: *"a silently dropped command is a script that
+runs and quietly does the wrong thing, which is far harder to find than one
+that reports what it could not do."*
+
+**`pending`'s closure takes no arguments.** So the one thing the row was built
+to carry was discarded, and every unlowered command in the cartridge logged the
+same line -- the wrapper's name, never the opcode's. A play report could never
+be turned into a command to go and look up.
+
+Given its own handler, the same press now says:
+
+    gen4 script: `mysterygiftgive` is decoded but not lowered (variable length)
+    -- the row is stepped over and the script carries on
+
+Which also says that row was the Mystery Gift deliveryman standing in the same
+shop, not the clerk at all -- a thing the old line could not have told anyone.
+
+Keyed per OPCODE rather than per wrapper, which is the whole point: `said`
+would have hushed the second distinct opcode for ever.
+
+### I GOT THIS WRONG FIRST, AND NEARLY SHIPPED THE WRONG FIX
+
+I grepped for `function Commands.g4_unimplemented`, found none, concluded
+nothing defined it, and wrote a new definition with a confident comment saying
+so. It is defined -- by `pending("g4_unimplemented", "the opcode itself")`,
+which a search for `function Commands.` cannot see because `pending` assigns
+`Commands[verb]` through a variable.
+
+**A name that is assigned rather than declared is invisible to a search for its
+declaration**, and this file has 142 `function Commands.g4_*` lines to make
+that look like the only shape. The claim "nothing handles X" needs the search
+that would find X if it were handled in ANY of the ways this codebase handles
+things -- here, `grep g4_unimplemented`, which I ran second and which answered
+immediately.
+
+The real defect was narrower and the fix is narrower with it: not "define it"
+but "stop it discarding the name".
+
+### Changed
+
+- `src/script/Gen4Commands.lua` -- `g4_unimplemented` gets its own handler and
+  reports the opcode instead of the wrapper.
+
+---
+
+## Pass 85 -- item 12 does not reproduce, and the reason I thought it did
+
+**The Pokemart works.** Talking to Jubilife's clerk pushes
+`ShopMenu` -> `ListMenu` -> `QuantityBox` -> `ChoiceBox`, and the shelf is the
+badge-tier one this port derived earlier:
+
+    gen4 shop: 0 badge(s) -> tier 1, 4 item(s) on the shelf
+
+which is the first column of the table that pass's own verification recorded
+(4/10/10/13/13/17/17/18/19 across nine badge counts). Her block compiles to 15
+rows and the call shape matches the cartridge: push the return label, jump to
+the greeting in another member, `g4_return` back into
+`close_message / pokemart / release_all`.
+
+So items 11 and 12 are both **already fixed by earlier passes**, and the play
+report predates them. Item 12 needs a play-test to close, not a fix.
+
+### I SPENT THIS PASS MEASURING A HARNESS I HAD BROKEN MYSELF
+
+Before that run I had measured, and was ready to report, that **nobody on the
+mart map responds at all** -- four positions, both cashiers, plus the
+guitarist, the pokefan and the beauty. Every one zero. It was a clean-looking
+table and it was worthless.
+
+Earlier in the same pass I had copied the *staged* harness over my working one
+to pick up the committed version. The staged copy was the **pre-commit**
+snapshot -- I had committed `main.lua` and then never re-staged it -- so the
+copy silently removed `PARTY`, `HURT` and `PRESS`. **With `PRESS` gone the
+harness pressed nothing**, and a test that presses nothing reports that nobody
+answers, on every map, for ever.
+
+**What caught it was the control**, and only the control: re-running the
+Pokemon Centre nurse -- known to work forty minutes earlier -- and getting zero
+from her too. A result that is the same for the case under test and for the
+case known to pass is not evidence about either.
+
+The standing rule here is "a measurement that cannot fail says nothing". This
+is its mirror and it is easier to miss: **a measurement that can only fail says
+nothing either**, and it is more dangerous, because a page of zeroes reads as a
+finding rather than as a broken rig. The guard is the same in both directions
+-- run the case you already know the answer to, in the same build, in the same
+batch.
+
+Second-order lesson, and the actual cause: **a staged copy is only as fresh as
+the last stage.** Committing a file does not update the staged snapshot of it,
+so `cp <staged> <working>` after a commit silently reverts the working copy to
+the version before the commit. Re-stage after committing, or copy from the
+output that was committed.
+
+### Changed
+
+Nothing. This is a measurement and a correction.
+
+---
+
+## Pass 86 -- item 13: the Pokedex had Platinum's art and nothing to put on it
+
+*"The Pokedex does not use Platinum's art."* It does. It had no species to
+show, so nobody ever reached the page that has the art on it.
+
+### `x or 493` cannot catch a zero
+
+`Data.lua` derives `dexSize` as the highest `def.dex` across the species table.
+**A Gen 4 cache carries no `dex` field at all** -- measured, 0 of 508 species
+have one -- which is the same fact `Gen4Pokedex`'s own comment states from the
+other side: Platinum numbers its species in national order, so there is nothing
+separate to read. So `highest` stays 0 and `dexSize` is written as **0**.
+
+Then:
+
+```lua
+for id = 1, (data.constants or {}).dexSize or 493 do
+```
+
+In Lua only `nil` and `false` are falsy, so `0 or 493` is **0**, the loop runs
+no times, and `entries` is empty. Measured with the whole dex marked seen:
+`index=1 species=nil` on every tick. A is refused because
+`status(species())` is asked about a nil species, so the entry page -- the one
+that draws the cartridge's picture -- is unreachable, and the list page draws
+a correct listing of nothing.
+
+The list page being plain is not a fault and never was: `drawList` fills
+`setColor(0.08, 0.14, 0.24)` on purpose, and the file's header says so --
+*"The entry page is the cartridge's own picture; the list is not, and that is
+said plainly rather than hidden."*
+
+### 493 is the cartridge's number, and the highest id is not
+
+`include/constants/species.h`: `NATIONAL_DEX_COUNT (MAX_SPECIES - 2)` with
+`MAX_SPECIES SPECIES_BAD_EGG` = 495, so 493 -- and Arceus, the last species
+with a dex number, is 493. The cache's ids run to **507** because the fourteen
+rows above 493 are alternate FORMS, which is exactly why "fall back to the
+highest species id" would have been wrong: it would list fourteen duplicate
+forms at the end of the dex.
+
+### After
+
+`species=1`, A opens the page, and it is Platinum's: the gold banner bar, the
+green checkered ground, the framed sprite box, `001 BULBASAUR / Seed Pokemon`,
+`HT 2'04" / WT 15.2 lbs.` and the entry text in the cartridge's blue box. The
+height, weight and category are the pre-formatted strings the `dex` stage
+carries, not numbers this port rounded.
+
+### Left alone, and the one to fix next
+
+`Data.lua`'s derivation is the root cause and is **not** touched here. It is
+shared by every cartridge, and its comment is right about why it derives rather
+than writes 151 down. But it silently produces 0 for any dataset whose species
+carry no `dex` field, and a 0 that flows through `or` guards is worse than a
+nil. The honest fix is the Gen 4 extractor writing `dexSize`, with
+`Data:seedDefaults` bridging existing caches -- the same both-ends shape the
+connection-key fix used. Tracked rather than done.
+
+`PokedexMenu.lua:53` has the identical `constants.dexSize or 151` shape. It is
+not reached on Gen 4 and its `dexSize` is non-zero elsewhere, so it is live but
+not currently wrong.
+
+### Changed
+
+- `src/ui/Gen4Pokedex.lua` -- a non-positive `dexSize` is treated as absent.
+
+---
+
+## Pass 87 -- item 14: the tilemap was already found, and the face is composed wrong
+
+*"The trainer card is the Game Boy one, not Platinum's."* Reproduced exactly:
+`Gen4TrainerCard` opens and draws a white `Font.drawBox` with TRAINER CARD /
+NAME / IDNo. / MONEY / POKeDEX / TIME -- Kanto's card, in the engine's own
+frame.
+
+The screen's own header said why, and **the header is out of date**. It claimed
+the card face and the portraits were "one tilemap away, and the tilemap is the
+thing to find", and that nothing in the archive paired a tilemap with the
+64x240 strip. Both claims are false now:
+
+- `Gen4Archives` names `trainer_card_front.NSCR`, `trainer_card_back.NSCR`,
+  `lucas.NSCR`, `dawn.NSCR`, `lucas_dp.NSCR` and `dawn_dp.NSCR` in
+  `/graphic/trainer_case.narc` -- **the same archive as `badge_case.NSCR`**,
+  which is exactly why that one composes.
+- The cache already carries all six as `kind = "screen"`, 256x256,
+  `borrowedTiles = true`. The extractor found the pairing and ran it.
+
+A stale "this is impossible until X" comment is worse than no comment: it is a
+standing instruction to go and do something that is already done.
+
+### What is actually left, measured on the composed PNGs
+
+| | opaque px of 65,536 | |
+|---|---:|---|
+| `lucas` | 1,120 | a recognisable figure |
+| `dawn` | 1,043 | a recognisable figure |
+| `trainer_card_front` | **6,760** | a scattering of blocks in one corner |
+
+**The portraits compose correctly. The face composes WRONG** -- which is a
+different bug from a missing one, and it is the one to fix. The likely cause is
+the one [[gen4_tilemap_blocks]] already records: the DS lays background screen
+data out in 32x32-entry BLOCKS per 256x256 pixels rather than as one wide grid,
+and a fifth of Platinum's tilemaps composed as scrambled before that was
+applied. A 64x240 tile strip read against a 256-wide map is exactly the shape
+that goes wrong.
+
+### The portrait is not a draw call away either -- tried it
+
+Since the portraits compose, the obvious move was to blit one and be done.
+Written, run, looked at: **invisible**. `drawFace` opens with `Font.drawBox`
+across nearly the whole screen, so a portrait drawn under it is covered, and
+one drawn over it lands across the value column at x~184.
+
+The cartridge positions that figure for the CARTRIDGE'S card face. This face is
+the port's own layout, and the two do not correspond -- so the portrait needs
+the face rebuilt around it, which is the same job as composing the face rather
+than a separate small one. Backed out rather than shipped; an invisible draw
+call is a claim that something was done.
+
+### Changed
+
+- `src/ui/Gen4TrainerCard.lua` -- the header replaced with what is true, and
+  what is left. Comments only; no behaviour.
+
+---
+
+## Pass 88 -- correcting pass 87's "likely cause", and what is actually eliminated
+
+Pass 87 named the tilemap-block rule as the likely cause of the trainer card
+face composing wrong. **That is wrong, and it is the same fault pass 87 had just
+finished criticising in that file's header** -- a confident cause left standing
+for the next reader to chase.
+
+### The block rule cannot be it
+
+[[gen4_tilemap_blocks]] states its own scope: the 32x32-entry block split is
+applied only at the hardware's BG sizes above 256x256 -- 512x256, 256x512 and
+512x512 -- and *"at 256 wide the two mappings are THE SAME ARITHMETIC, which is
+what protects every screen that already worked."*
+
+`trainer_card_front` is **256x256**. Both readings produce identical output. The
+rule is not involved and never could have been. I had the note in hand and
+reached for the most recently-learned explanation instead of reading its scope.
+
+### The donor pairing is not it either
+
+`Gen4Screens`'s per-archive `tilesFrom` table already carries exactly the cases
+in question, and its comment names them:
+
+```lua
+tilesFrom = {
+  trainer_card_front = "trainer_card",
+  trainer_card_back  = "trainer_card",
+  lucas = "player", dawn = "player",
+  lucas_dp = "player_dp", dawn_dp = "player_dp",
+}
+```
+
+> "No rule over the names finds those, and the shared sheet is WRONG rather than
+> merely worse, so they are written down per archive"
+
+So the face is already paired with `trainer_card_tiles`. Two candidate causes
+eliminated, both by reading what the port already knew rather than by measuring
+anything new.
+
+### What the picture actually shows
+
+Rendered over a flat ground and looked at: disconnected rectangles of single
+flat colours -- greens, browns, a blue strip -- with fragments of a frame, and
+**every opaque pixel inside the bounding box x 8..255, y 0..95**. Nothing below
+row 95 of a 256-tall canvas. 6,760 opaque pixels of 65,536.
+
+Against the one screen in the same archive that composes correctly:
+
+| | height | tiles | palette |
+|---|---:|---|---|
+| `badge_case` (works) | **192** | its own `badge_case_tiles` | borrowed |
+| `trainer_card_front` | **256** | **borrowed** | borrowed |
+
+### The candidate that is left, stated as a question rather than an answer
+
+The declared height is 256 and the content stops at 96 -- twelve tile rows of a
+thirty-two-row canvas. That is the shape of a **cell count and a declared size
+that disagree**: a map carrying 12x32 cells laid into a grid sized for 32x32
+leaves everything past the twelfth row blank, and nothing in the cache can say
+which of the two is right because both come out of the same header read.
+
+So the next step is the NSCR itself -- how many cells `trainer_card_front.NSCR`
+carries against the width and height the composer took from it. That needs the
+ROM, not the cache, which is why this pass stops here rather than guessing a
+third time.
+
+### Changed
+
+Nothing. This is a correction.
+
+---
+
+## Pass 89 -- item 15: every item in Sinnoh raised, and the bag was the symptom
+
+*"The bag is scrambled and shows no item art or descriptions."* The bag's own
+art is fine. The items could not get into it.
+
+### The bag's background is the cartridge's and composes correctly
+
+Worth saying first, because it looked like the fault. `bag_ui_main.png` renders
+as Platinum's bag: the BAG tab, the blue bag area with its shadow, the orange
+POCKET panel, the green list frame and the purple lower-screen band. **The
+purple band is the art, not a gap.** No bag or item asset is missing -- the only
+absent images in the run are overworld sprites.
+
+### `g4_give_item` raised on every item
+
+```
+[g4give] item 17 -> src/inventory/Bag.lua:59: attempt to index local 'id' (a number value)
+[g4give] item 4  -> src/inventory/Bag.lua:59: ...
+```
+
+Measured through the engine's own command, not a hand call to the bag.
+
+`itemKey` decides what key an item enters the bag under:
+
+```lua
+if items[id] then return id end
+```
+
+**`items[id]` succeeding says the id NAMES AN ITEM. It does not say the id is
+the form the bag wants.** On a Gen 4 cache `items` is keyed **0..445 with zero
+string keys** -- measured -- so `items[17]` is a hit and 17 is returned; and the
+bag is string-keyed throughout, `Bag.isBadge` doing `id:find("BADGE")`. Every
+pickup, every gift, every Mart purchase in Sinnoh died on that line.
+
+That is also the whole of "no item art or descriptions": the bag screen resolves
+`data.items[id]`, and on the same mismatch it found nothing to read a
+description or an icon from. **One cause, three symptoms.**
+
+### Fixed at both ends, because either alone does nothing
+
+- `Data.lua`, Gen 4 branch: each numeric item is published under `ITEM_%03d` as
+  well -- the SAME table, not a copy, so a mod patching one sees the other.
+  446 aliases.
+- `Gen4Commands.itemKey`: `if type(id) ~= "number" and items[id] then ... end`.
+
+The alias alone changes nothing, because `itemKey`'s first branch still finds
+the numeric key and short-circuits -- measured, the raise was unchanged. The
+`itemKey` change alone changes nothing either, because `ITEM_017` would not
+resolve. **Verified in that order**, which is what says both halves are load
+bearing.
+
+An alias rather than a numeric bag: those keys are a SAVE format shared with
+four other cartridges, and `ITEM_%03d` is the spelling `itemKey` already
+reached for on its second branch -- so this lets that branch succeed rather
+than inventing a convention. Gen 1/2/3 pass strings and take the branch they
+always did.
+
+### What is left, and not claimed
+
+- **The pocket routing.** With the correct key the item is added and the list is
+  still empty: given `POTION` (no def at all) the screen listed three rows;
+  given `ITEM_017` (a real def) it lists none. So the screen routes by
+  `def.pocket` and that is not landing in the pocket on show. Not diagnosed.
+- **The bag sprite is never drawn.** `bag_sprite_male_*` / `bag_sprite_female_*`
+  are in the cache and `Gen4BagMenu.lua` does not reference either -- which is
+  why the shadow in the art sits with nothing above it.
+- Descriptions ARE in the cache: 446 of them, one placeholder, genuine Platinum
+  text. Nothing needs extracting.
+
+### Changed
+
+- `src/core/Data.lua` -- `ITEM_nnn` aliases on a Gen 4 cache.
+- `src/script/Gen4Commands.lua` -- `itemKey` never returns a number.
+
+---
+
+## Pass 90 -- item 15 finished, and pass 89's "remaining defect" was not one
+
+### THE POCKET ROUTING IS CORRECT. I REPORTED A BUG THAT DOES NOT EXIST.
+
+Pass 89 closed with *"the screen routes by `def.pocket` and that is not landing
+in the pocket on show"*, from this: given the bogus key `POTION` the list showed
+three rows, given the real `ITEM_017` it showed none.
+
+Both observations were right and the conclusion was wrong. `include/constants/
+items.h`:
+
+```
+POCKET_ITEMS 0   POCKET_MEDICINE 1   POCKET_BALLS 2   POCKET_TMHMS 3
+POCKET_BERRIES 4 POCKET_MAIL 5       POCKET_BATTLE_ITEMS 6  POCKET_KEY_ITEMS 7
+```
+
+and the cache agrees exactly -- Potion `fieldPocket = 1` (medicine), Poke Ball
+`2` (balls), Town Map `7` (key items). `rebuild` matches `self.pocket - 1`
+against it and is right. **I had put medicine and balls into the bag and then
+looked at the ITEMS pocket**, which correctly contained neither. The bogus key
+listed only because an item with no def at all falls to pocket 0, which is the
+`or 0` fallback doing exactly what its comment says.
+
+Given three real `fieldPocket = 0` items:
+
+    Black Flute x3 / Shoal Salt x3 / Red Shard x3 / CLOSE BAG
+
+with the cartridge's own casing, and the description drawn across the strip:
+*"A black flute made from blown glass. Its melody makes wild Pokemon less likely
+to appear."* **So "no descriptions" is fixed by pass 89 and nothing else was
+wrong with the list.**
+
+The lesson is narrow and worth having: when a test's control differs from the
+case under test in TWO ways -- a different key form AND a different pocket --
+the difference in outcome names neither of them. I changed the key and read the
+result as being about the key.
+
+### What actually remains, both of them "declared and never drawn"
+
+* **THE BAG SPRITE.** Sixteen frames in the cache -- `bag_sprite_male_00..07`
+  and `bag_sprite_female_00..07`, which is **one per pocket**, the cartridge
+  turning the bag to whichever pocket is open. `Gen4BagMenu.lua` references
+  neither name. That is why the shadow in `bag_ui_main` sits with nothing above
+  it.
+* **THE ITEM ICON, AND IT IS NOT JUST A DRAW CALL.** The layout declares
+  `itemIcon = { x = 3, y = 150 }` and nothing ever reads it -- but there is also
+  nothing to read: **the item icons are not extracted**. `Gen4Archives` names
+  `/itemtool/itemdata/item_icon.narc`, the cartridge carries 356 of them, and
+  there is no `assets/generated/gen4/items` directory and no icon key in
+  `gen4_graphics` at all. So the empty white frame at the bottom-left is the
+  background art with nothing to put in it, and closing it is an EXTRACTOR job
+  before it is a screen one.
+
+### Item 15's final state
+
+| | |
+|---|---|
+| the bag's own art | correct, the cartridge's |
+| items reaching the bag | **fixed** (pass 89) -- every one raised before |
+| descriptions | **fixed**, drawn from the cache's own 446 |
+| pocket routing | was never wrong |
+| the bag sprite | in the cache, never drawn |
+| item icons | **not extracted** |
+
+### Changed
+
+Nothing. This is a correction and a survey.
+
+---
+
+## Pass 91 -- the bag is in the bag screen now
+
+Pass 90 listed the bag sprite as "in the cache, never drawn". It is drawn.
+
+### Both numbers are the cartridge's
+
+The temptation was to place it against the shadow `bag_ui_main` paints, which
+would have been this port choosing a position. The cartridge states it:
+
+* `src/applications/bag/sprites.c`, `sBagUISpriteTemplates`:
+  `[BAG_SPRITE_BAG] = { .x = 48, .y = 50, ... }`.
+* `src/applications/bag/main.c` picks the animation with the bare pocket --
+  `ManagedSprite_SetAnim(sprites[BAG_SPRITE_BAG], pocketType)` at three sites --
+  so **the frame IS the pocket**, 0-based, which is the same 0-based enum
+  `rebuild` already matches `fieldPocket` against. Eight frames per gender, one
+  per pocket: the cartridge turns the bag to whichever pocket is open.
+
+A DS sprite template's position is its CENTRE, so a 64x64 frame lands at
+(48 - 32, 50 - 32). Taken from the sheet's own size rather than a written-down
+64, so a re-extraction at another size still centres.
+
+**A fourth site disagrees and is not what this follows.** `main.c:1106` uses
+`SetAnimationFrame(..., 8 + pocketType)` -- a FRAME inside the sheet, not an
+animation, on the touch-dial path. The three `SetAnim` sites are the ordinary
+pocket change, and the cache carries eight frames per gender rather than
+sixteen, which agrees with the animation reading and not the frame one. Said
+here because the two rules differ by exactly the offset that would look almost
+right.
+
+### Looked at
+
+The bag sits on its shadow -- blue, white and red, Platinum's own -- above the
+ITEMS plate, with Black Flute and Shoal Salt listed and the flute's description
+across the strip.
+
+### Still open on this screen
+
+The item icon. Not a draw call: `/itemtool/itemdata/item_icon.narc` is named in
+`Gen4Archives`, the cartridge carries 356 icons, and **nothing extracts them** --
+no `assets/generated/gen4/items` directory and no icon key in `gen4_graphics`.
+The white frame at the bottom-left stays empty until the extractor fills it.
+
+### Changed
+
+- `src/ui/Gen4BagMenu.lua` -- the bag sprite, and a `female()` helper beside
+  `img`.
+
+## Pass 92 -- the pocket strip was never a screen bug, and the bag's text was never the wrong font
+
+Reported from play, two things at once: "make sure its using the roms font, and
+font color, and fix the icons under the pouch label theyre currently scrambled
+and showing multiple symbols per pouch icon and white lines".
+
+The first turned out to be already true and the second turned out to be an
+EXTRACTOR fault two steps upstream of the screen that draws it.
+
+### The pocket icons: a wrong width is a different picture, not a smaller one
+
+`pocket_selector_icons` came out of the import as a 64x64 sheet. It should be
+**256x16**. Both hold the same sixty-four 8x8 tiles in the same order; they
+differ only in how many tiles go on a row, and that is enough to put every
+piece next to the wrong neighbour. Nothing is missing, so nothing fails, so
+nothing warns -- the strip simply drew as soup with white bars through it.
+
+The cartridge states the shape outright. `BagUI_DrawPocketSelectorIcons`
+(`src/applications/bag/windows.c`) blits out of a bitmap declared
+`32 * POCKET_MAX` by 16 -- 256 by 16, or 32 tiles by 2 -- and 32 x 2 is 64
+tiles, which is exactly what the member holds. The byte count and the declared
+shape agree, which is what settles it rather than any picture looking better.
+
+Re-laying the member's own tiles 32 wide and comparing against pokeplatinum's
+`res/graphics/bag/pocket_selector_icons.png`: same 256x16, every one of its six
+palette indices maps to exactly one colour in the relaid sheet, 0 of 4096
+pixels disagree on transparency. Sixteen cells, each with exactly 100 opaque
+pixels in a 10x10 box at its own top-left corner -- which is precisely the
+`10, 10` the cartridge blits from `iconX, 0`.
+
+**THE MEASUREMENT IN THE OLD HEADER COULD NOT HAVE FAILED.** It read: "on a
+sixteen-pixel grid the sheet is four by four, the top eight cells carry 160
+opaque pixels each and the bottom eight carry 40 -- the icons and the small
+markers". Every number of that is true of the file. None of it is true of the
+cartridge. A measurement taken on the output of a step you have not checked is
+a measurement of that step. The check that finds it is the one that compares
+against something the cartridge states -- here, a declared blit width.
+
+Two bank-less sheets in `pl_bag_gra` had the same fault, and the four that DO
+carry a cell bank came out right, which is the control that names the
+mechanism:
+
+| member | cache | cartridge | |
+|---|---|---|---|
+| `pocket_selector_icons` | 64x64 | 256x16 | wrong -- 32 tiles wide |
+| `buttons` | 64x816 | 240x216 | wrong -- 30 tiles wide |
+| `item_entry_icons` | 64x16 | 64x16 | right (8 wide by luck) |
+| `item_highlight` | 152x32 | 152x32 | right (cell bank) |
+| `moving_item_pos_bar` | 144x16 | 144x16 | right (cell bank) |
+| `pocket_highlight` | 16x16 | 16x16 | right (cell bank) |
+
+`Gen4Screens` now carries `tilesWideFor` beside `tilesWide`, stating a width
+per member for the sheets that have no bank to take one from.
+
+### The two plates were the wrong way round
+
+`Window_Add` puts POCKET_INDICATOR at tile (0, 11) and POCKET_NAMES at tile
+(0, 13) -- pixel y 88 and y 104 -- and all four BG layers are at `.x = 0,
+.y = 0`, so those are screen coordinates. The art agrees to the pixel: the
+grey-blue plate runs y 90..101 (inside the indicator's 88..103) and the
+framed box runs y 106..121 (inside the names' 104..127). The icons blit at
+window-y 3, landing at 91..100 with a pixel of margin top and bottom; the name
+prints at window-y 2, landing at 106.
+
+This file had the name in the grey plate and the icons in the framed box.
+
+Where the strip starts is arithmetic, not a constant, and now runs as such:
+`pocketSelectorIconsX = 6 + (90 - 10 * n) / (n + 1)` with
+`spacing = 10 + x - 6`, integer division, which for eight pockets gives x = 7
+and a pitch of 11 -- eight ten-pixel icons ending at 94, inside the ninety the
+art leaves. The bag opened in battle carries five pockets and the same formula
+re-spreads them, which is why a cached number could not have served.
+
+The name centres on screen x = 50: `PrintPocketNameCentered` writes centred on
+window x = 146 and `BagUI_ClearPocketNameBox` shows window column 12 (x = 96)
+at screen column 0. The art agrees without being asked -- the box it paints
+runs x 5..96, whose centre is 50.
+
+### Opening the bag AT a pocket landed in the wrong one
+
+Checking that the highlighted icon MOVES -- rather than that it looks
+plausible at the first pocket -- found a fault that had nothing to do with any
+of the above. `new` matched `opts.pocket` by substring and kept the LAST hit,
+and these names contain one another: "ITEMS" is inside "BATTLE ITEMS" and "KEY
+ITEMS". Every bag opened at ITEMS opened at KEY ITEMS instead. BERRIES, which
+nothing else contains, went on working -- so the fault was invisible to any
+test that used it. An exact name now wins, and a containing one is the
+fallback. Verified at six pockets: 1, 2, 5, 6, 7, 8 each highlight their own
+cell and no other.
+
+### The font was already the cartridge's; the COLOUR was not
+
+Checked glyph by glyph rather than by eye. The extracted `E` at cell 302 is
+identical to pokeplatinum's `res/fonts/font_system.png` cell 302, and the
+per-glyph advances match `font_system.json`'s `glyphWidths` entry for entry --
+6 for the uppercase Latin, which is why the letters touch. Composing "ITEMS"
+straight from the sheet at those advances gives the same picture the engine
+draws. `font_message_sheet.png` and `font_system_sheet.png` being byte-identical
+is NOT an extractor fault either: pokeplatinum's own two files have the same
+md5. Platinum ships one bitmap for both.
+
+What is not the cartridge's is the colour, and the reason is structural.
+Platinum's sheet carries ROLES, not colours -- 0 nothing, 1 letter, 2 shadow,
+preserved exactly in the extracted PNG's palette indices -- and every printer
+call names which palette entry each role takes. The bag's windows use BG
+palette 3 and ask for three pairs: `TEXT_COLOR(1, 2, 0)` for the pocket name,
+the item rows and their counts, `TEXT_COLOR(15, 14, 0)` for the description,
+`TEXT_COLOR(8, 9, 0)` for the count of an item being moved. Nothing was
+stating any of them, so `blitCode`'s pre-tinted path blitted the extractor's
+placeholder greys everywhere.
+
+### ...and the reason the text looked like a ghost was a missing layer
+
+`TEXT_COLOR(1, 2, 0)` out of that palette is a near-black letter (16, 24, 32)
+with a light shadow (172, 189, 189), which on a near-black box shows the
+shadow and nothing else. That is exactly how it looked -- and it is a clue
+about the BACKGROUND, not about the colours.
+
+`bag_ui_main` leaves the item list and the pocket name box as HOLES: 1456 of
+the name box's 1472 pixels are alpha 0. What fills them is
+`item_list_border`, an opaque WHITE panel with the blue-grey frame, and
+`main.c` puts it on BG_LAYER_MAIN_3 while the list text is on MAIN_2 and
+`bag_ui_main` on MAIN_1 -- a DS layer's priority counts down towards the
+front, so the art is drawn OVER the text and the white panel UNDER it. This
+file drew neither, only `bag_ui_main`, so both boxes came out the clear
+colour. `draw` now runs in the cartridge's four-layer order.
+
+Verified by looking: dark text with a light shadow on the white list panel,
+white text with a black shadow on the purple description strip, the pocket
+name centred in its own box, eight distinct icons with the open pocket's in
+warm colour.
+
+### Left open
+
+- **The selected row's highlight is invisible.** `item_highlight` extracts as
+  pure white and transparent and nothing else, so on the white list panel it
+  cannot be seen. It read as a white outline while the panel was black, which
+  is why it looked fine before. An OAM sprite's palette is not being applied.
+- **Nothing publishes a screen's palette.** The three colour pairs above are
+  written into `Gen4BagMenu` as constants because the cache carries only the
+  composed picture, which cannot contain a colour that appears nowhere but in
+  text. Publishing the sub-palettes beside each screen is the proper fix and
+  would let every gen4 screen resolve `TEXT_COLOR` indices from Cedric's own
+  cartridge instead of from a table here.
+- **The bank-less sheets in the other fifteen archives have not been checked**
+  for the same width fault. pokeplatinum ships a PNG per graphic, so comparing
+  declared widths across all of them is a single sweep.
+- The item icon still needs extracting (pass 90/91); unchanged.
+
+### Changed
+
+- `src/import/Gen4Screens.lua` -- `tilesWideFor`, and the bag's two widths.
+- `src/import/Gen4Menus.lua` -- the pocket icon geometry, and the pocket strip
+  and name dropped from `BAG_LAYOUT` because both are runtime arithmetic.
+- `src/import/RomExtractorGen4.lua` -- writes `iconCell`/`iconStride`.
+- `src/ui/Gen4BagMenu.lua` -- the strip, the two plates, the pocket matcher,
+  the cartridge's text colours and the four-layer draw order.
+- `tools/gen4_overworld_harness/main.lua` -- `POCKET`, plus the `SCREEN`,
+  `GIVE`, `GIVE_G4` and `DEX_SEEN` blocks that had only ever existed in a
+  scratch copy.
+- `platinum/assets/generated/gen4/bag/pocket_selector_icons.png` and
+  `buttons.png` -- re-laid from the cache's own tiles so the fix is visible
+  without waiting for a re-import.
+
+## Pass 93 -- the eight-tile fallback was almost never right
+
+Pass 92 fixed one mislaid sheet in the bag. This is the sweep that asks how
+many others there are, and the answer is nearly all of them.
+
+### The candidate list was already in the cache
+
+`Gen4Screens` gives every archive a `tilesWide` fallback for sheets that carry
+no size and have no cell bank to take one from, and the extractor already marks
+each sheet it used that fallback on -- `provisionalLayout = true` in
+`gen4_graphics`. There are **113** of them, and every one came out 64 pixels
+wide, because 8 tiles was the number every archive declared.
+
+pokeplatinum ships a PNG per graphic, so each one has a width to check against.
+Matching by name inside the archive's own directory, trying the role suffixes
+the cache normalises away (`_tiles`, `_bg_tiles`, `_tileset`) so that
+`trainer_card` finds `trainer_card_tiles.png`:
+
+**110 wrong, 3 right** -- and the three are right by coincidence, not by rule.
+Eight tiles was never a measurement; it is the number a sheet gets when nothing
+knows.
+
+| archive | sheets | widths |
+|---|---|---|
+| summary | 75 | mostly 4 (ribbons) and 2 (balls); `tiles_main` 32, `sub_buttons` 30 |
+| trainer_card | 19 | 10 for the seventeen trainer figures, 32 for `player`, 16 for the card |
+| pokedex | 3 | 32 -- `entry_main`, `entry_sub`, `scroll_sub_background` |
+| town_map | 3 | 64, 64, 34 |
+| bag | 2 | 32, 30 (pass 92) |
+| font | 2 | 23, 3 |
+| options / party / poketch / shop / touch | 1 each | 5, 5, 4, 32, 29 |
+
+### Each relay was checked against the cartridge, and one check failed
+
+The fix is a pure rearrangement: read the member's own tiles in order and lay
+them at the stated width. So each relaid sheet was compared against
+pokeplatinum's PNG over the reference's own extent, requiring that every
+reference palette index map to one and the same colour in the relay.
+
+**109 of 110 came back with zero inconsistent pixels.** The one failure is
+`pokedex/weight_scale`: 954 of 2048 pixels disagree. Looking at the two
+pictures settles why -- pokeplatinum's `weight_scale.png` is a scale bar with
+green weights on either end, and the cache's member is scattered white and
+yellow fragments. **It is a name collision, not a width fault**, so the width
+was removed from the table rather than applied. The check earned its keep: name
+matching found a reference that does not belong to that member, and only the
+pixels said so.
+
+One honesty note on the other direction: of the 109, twenty-nine would also
+have passed the same test un-relaid, because the un-relaid file is too short
+for the reference to disagree with. For those the width rests on pokeplatinum's
+stated dimensions rather than on the pixel check. The other eighty fail the
+test before the relay and pass it after, which is what makes the test worth
+running.
+
+### Verified by looking
+
+The seventeen trainer-class figures were unreadable smears at 64 wide and are
+now single clean sprites at 80x96 -- a lass, a black belt, a beauty, an ace
+trainer, each whole. `trainer_card` at 128x120 shows "TRAINER CARD", the badge
+stars and the Sinnoh scene. A summary ribbon reads as a ribbon and a ball icon
+as a ball.
+
+### What this does NOT explain
+
+**The trainer card's composed face (item 14) is untouched by this.**
+`Gen4Graphics.compose` fetches a tile by BYTE OFFSET into the sheet's pixel
+data -- `base = (cell.tile - firstTile) * perTile` -- not out of a laid-out
+image, so a screen composed through an NSCR does not care what width its sheet
+was drawn at. The width fault can only ever have affected sheets that UI code
+draws directly, which is exactly the set the extractor flagged. Item 14 stays
+open on its own terms.
+
+### Changed
+
+- `src/import/Gen4Screens.lua` -- `tilesWideFor` for eleven of the sixteen
+  archives, 109 widths, all of them pokeplatinum's stated dimensions.
+- 109 sheets under `platinum/assets/generated/gen4/` re-laid from their own
+  tiles, so the screens are right before the next import rather than after it.
+
+### Still open
+
+- `pokedex/weight_scale` has no reference that belongs to it; its width is
+  still the fallback.
+- The `poketch` archive's `watch` and `generic` and everything in `title`,
+  `menu`, `windows`, `mail` and `berry_tag` either matched at eight or were
+  never flagged provisional, so none of them is covered by this sweep.
+- `item_highlight` still extracts as pure white (pass 92).
+- Nothing publishes a screen's sub-palettes (pass 92).
+
+## Pass 94 -- the selected row's outline: a mask, not a picture
+
+Pass 92 made the item list white, which is what the cartridge does -- and that
+made the selected row's outline vanish, because `item_highlight` extracts as
+pure white and nothing else. It had looked fine only while the list was wrongly
+black.
+
+**It extracts as a white silhouette because that is all it is.** The PNG is
+1-bit: one ink, no colour. Platinum paints it at runtime.
+`BagUI_SetHighlightSpritesPalette` sets an OBJ palette slot on both this and
+the pocket highlight -- **1** in the ordinary state, **2** once an item is
+picked and its action menu opens.
+
+WHICH COLOURS THOSE SLOTS HOLD is settled by two things agreeing rather than by
+one reading:
+
+  * The bag loads its sprite palettes in order -- its own bag sprite palette
+    (one palette, taking slot 0), then `ui_elements` (two, taking slots 1 and
+    2). So slot 1 is `ui_elements` sub-palette 0 and slot 2 is sub-palette 1.
+  * Those are the only two sub-palettes in `ui_elements` with any colour in
+    them at all: sub-0's ink is (255, 0, 0) and sub-1's is (123, 123, 123),
+    while sub-2 through sub-15 are entirely black.
+
+Shift the mapping by one and the action-menu highlight comes out black on a
+white list, and the red would belong to nothing. So: **red while you are
+choosing, grey while the action menu is up.** Only the first is reachable here
+-- this screen has no action menu yet.
+
+### The cell is taller than the row it marks
+
+Drawn at the old offset the outline cut two red lines through the middle of the
+text. `item_highlight_cell` is 152x32 with the outline itself seventeen rows
+inside it, and a list row is `MAX_LETTER_HEIGHT`, which is sixteen. Centring
+the cell on the row is that difference -- `(ROW_H - image:getHeight()) / 2` --
+taken from the image rather than nudged until it looked right, so a
+re-extraction at another cell size still lands.
+
+Verified by looking: a red rounded box around "Black Flute", the rest of the
+list clean.
+
+### Changed
+
+- `src/ui/Gen4BagMenu.lua` -- the highlight is tinted and centred.
+
+## Pass 95 -- the item icon: which member belongs to which item
+
+Passes 90 and 91 both recorded that the bag's item-icon frame stays empty
+because nothing extracts `/itemtool/itemdata/item_icon.narc`, and left it
+there. This is the missing piece: the archive holds 711 members and **nothing
+about an item says which of them is its icon**.
+
+### The pairing is a table in the ARM9, and it is not derivable
+
+`Item_Load` reads `sItemArchiveIDs[item].iconID` and `.paletteID`. Neither is
+in the item's own data record -- the record carries pockets, price, fling and
+hold effects and no graphic at all -- so the pairing lives only in the
+binary.
+
+Found by signature rather than by address, which is how an importer should
+find it too: a run of 8-byte rows `{u16 dataID, u16 iconID, u16 paletteID,
+u16 gen3ID}` whose first field counts up from zero and whose icon and palette
+fields stay in archive range. In this cartridge it sits at arm9 offset
+**986308** and runs exactly **468 rows** -- which is exactly the number of
+entries in the item NAME bank, and the row after it is garbage.
+
+Everything about it is self-checking against things already known:
+
+  * **Member 0 is the NANR and member 1 the NCER** -- the animation and cell
+    bank that `Item_IconNANRFile` and `Item_IconNCERFile` return -- and the
+    first real item, id 1, points at members **2 and 3**. The table starts
+    exactly where the pairs start.
+  * **Item 0 points at 707 / 708**, and 711 members means the last index is
+    710, with `unused_709_NCGR` and `unused_710_NCLR` named after them. `none`
+    sits just below its own pair of unused slots.
+  * **`index - dataID` takes exactly two values**: 0 for 112 rows and 22 for
+    333 rows, with 23 rows pointing at `none` in between. That is the "a
+    member index is the item id only up to 112 and is off by twenty-two after
+    that" already written in `Gen4BagMenu`'s header from the item-table work,
+    arrived at independently and agreeing to the row.
+
+### A third of the items borrow another item's sprite
+
+**158 of the 468 rows have `paletteID != iconID + 1`** -- 295 distinct sprites
+against 351 distinct palettes. Black Flute is the clearest case and the one
+that can be checked against pokeplatinum by name: its row is `(68, 65, 69)`,
+and `res/items/data/black_flute.json` says `sprite: blue_flute_NCGR, palette:
+black_flute_NCLR`. One flute shape, recoloured per flute.
+
+So any rule of the form "item n's icon is member 2n" is wrong for a third of
+the bag, and would be wrong in the way that looks almost right -- every item
+would have AN icon, just the wrong one for a third of them.
+
+### Verified by looking
+
+Twelve items picked by name out of the cache, their rows read out of the table
+and the named members decoded through their named palettes: Master Ball (purple
+with the M), Poke Ball, Potion, Fresh Water, Black Flute, Shoal Salt, Shoal
+Shell, Escape Rope, Repel, Honey, and two unnamed ids that come out a gold
+shard and a fishing rod. Twelve names, twelve correct pictures, right colours.
+Each is 16 tiles, 4bpp, laid four tiles wide -- 32x32.
+
+### What is still not done
+
+The extraction stage itself. This pass is the part that could not be guessed;
+writing it is now mechanical:
+
+  1. locate the table by the signature above and read 468 rows;
+  2. for each item, decode `mem[iconID]` against `mem[paletteID]` at four tiles
+     wide and save it;
+  3. publish an `items` key in `gen4_graphics` so `Gen4BagMenu` can draw one at
+     the `itemIcon` slot the layout already reserves (x = 3, y = 150).
+
+Deliberately NOT done half-way: the icons are not being written into the cache
+ahead of the extractor, because an asset the importer cannot reproduce
+disappears at the next re-import, which is worse than an empty frame.
+
+## Pass 96 -- the item icon, extracted
+
+Pass 95 found the pairing; this is the stage that uses it. `Gen4ItemIcons`
+states the archive, finds `sItemArchiveIDs` by bounds and asserts the twelve
+rows that were checked by looking; `RomExtractorGen4:extractItemIcons` composes
+one 32x32 picture per ITEM into the same `index.screens` every other picture
+goes into, under `items/icon_nnn`; `Gen4BagMenu` draws the selected item's.
+
+### Two numbers neither stage had to be told
+
+The table's length is not a new constant. It is the item data archive's count
+plus the gap `Gen4Items` already measured -- 446 records and a 22-row hole
+starting at id 113 -- which is 468, and 468 is exactly the length of the array
+the scan finds. `Gen4Items.GAP_FIRST = 113` and `GAP_SIZE = 22` were written
+during the item-table work from a completely different direction, and the
+table's own `index - dataID` takes exactly those two values and no others: 0
+for 112 rows, 22 for 333, with 23 rows pointing at `none` between them.
+
+Two stages written months apart agreeing on the same two numbers is why neither
+is guessed here.
+
+### The scan needed no tie-break
+
+Unlike `Gen4Icons`, which had two candidate runs and had to pick one on
+entropy, requiring 468 consecutive 8-byte rows whose `dataID` is below the data
+archive's count and whose icon and palette are below the icon archive's 711
+matches **exactly one offset in the whole ARM9**. Run against the cartridge:
+one match, 0.35 s, and all twelve verified rows pass. The structural assertions
+are kept anyway, because "unique in this binary" is a measurement of this
+binary and not a property of the format.
+
+### Where it goes on screen
+
+`sBagUISpriteTemplates[BAG_SPRITE_ITEM]` is `{ .x = 22, .y = 172 }`, a DS
+sprite's template position is its centre, so a 32x32 icon lands at (6, 156) --
+inside the white frame the art leaves at the bottom left. Centred from the
+image's own size rather than a written-down 32.
+
+The row now carries the item's NUMERIC id beside its inventory key: `id` is
+whatever key the inventory used and is a string on this cache, while the
+record's own `id` is the cartridge's number, and it is the number that names
+the icon.
+
+### Verified by looking
+
+The whole screen, with the Items pocket open: Black Flute selected in a red
+outline on the white list panel, its description in white on the purple strip,
+and **its own icon in the frame at the bottom left**.
+
+### What is not shipped with this
+
+The 468 icons themselves. The stage produces them on the next import; they are
+not being written into the cache from here, because these were composed by a
+separate decoder to prove the screen draws them, and shipping those instead of
+the importer's own output would mean the cache and the importer could differ
+without anything saying so.
+
+### Changed
+
+- `src/import/Gen4ItemIcons.lua` -- new.
+- `src/import/RomExtractorGen4.lua` -- `extractItemIcons`, called from the
+  graphics stage so the icons land in the same index as the rest.
+- `src/ui/Gen4BagMenu.lua` -- `iconId` on the row, and the draw.
+
+## Pass 97 -- two open items that were already answered, one of them in the other direction
+
+### "Use Platinum's own font, not the Game Boy face" -- already true, now checked twice
+
+Pass 92 established this on the bag by comparing the extracted sheet glyph for
+glyph against pokeplatinum's `res/fonts/font_system.png` and the advances
+against its `glyphWidths`. That is a claim about `data.font`, which
+`Font.load` makes global, so it should hold on every screen -- but "should"
+is not "does", and this item sits with the battle-screen reports rather than
+the bag's.
+
+Ran the battle harness and looked: TURTWIG and STARLY on their healthboxes are
+the same glyph shapes the bag draws. The letters are Platinum's everywhere,
+because there is only one font to be.
+
+(The numbers beside them -- `Lv12`, `36/36` -- come from the healthbox's own
+glyph strip, which is a different question and already settled; and the "HP"
+label still renders with a stray glyph, which is the open HP-bar item and not
+this one.)
+
+### "Load gen4_fonts, or delete it" -- neither, and the reason is already written down
+
+The premise is right as far as it goes: `gen4_fonts` is written by the importer
+and no reader for it exists in any of the 310 files under `src/`, and it is not
+in `Data`'s `GEN4_PREFIXED` list, so it is never even loaded.
+
+It is a DELIBERATE PROVENANCE DUMP, and `tools/gen4_cache_wiring_check.lua`
+already says so by name: one of eight tables listed as "written and unread",
+`gen4_fonts = "lowered into `font`"`. The Gen 4 importer lowers its own
+intermediate shape into the engine's shared `font` table and dumps the
+intermediate beside it -- and what the intermediate carries that `font` does
+not is the provenance: each face's archive member, its glyph count, its tile
+dimensions and the role table (0 nothing, 1 letter, 2 shadow) that pass 92's
+colour work needed.
+
+That check is also what stops the list growing quietly, and its header records
+that `gen4_overworld` was a ninth entry until "no reader" stopped being true of
+it and nothing noticed.
+
+So the answer is to leave it, and the useful part of this pass is that
+deleting it was a step away: 48 KB per cache looks like dead weight right up
+until you find the file that explains why it is there.
+
+## Pass 98 -- the starter screen: a flip that a fixed bug had been hiding, and a reveal that was never the ROM's
+
+Reported from play: "the starter selection briefcase seems to be upside down
+and the pokeballs too", and "in the rom it doesnt show the name or picture of
+the pokemon until you click it".
+
+### Upside down, and the cause was already written down in another file
+
+Looked at it: the Poke Balls drew WHITE HALF UP, and the case opened its lid
+DOWNWARDS and tipped the balls out upwards. Not a subtle framing problem -- the
+whole scene was mirrored in Y.
+
+`Gen4Title` hit this first and its note names the cause and this very file:
+
+> CLIP Y POINTS THE OTHER WAY INTO A CANVAS. ... a canvas's framebuffer counts
+> its rows the opposite way round from the screen. `Gen4Model.orbit` does not
+> hit this because the starter select composes it with a Z-up-to-Y-up rotation
+> that inverts the axis on the way past; a plain `lookAt` has nothing to hide
+> it.
+
+So the `Z_UP_TO_Y_UP` this file's own header describes removing was wrong AND
+was cancelling the canvas flip. **Taking the wrong one away uncovered the one
+it had been hiding.** Two mistakes had been making a right picture; one was
+fixed and nothing was put in the other's place.
+
+The fix is the one `Gen4Title` already uses -- negate clip Y, composed in front
+of projection x view, rather than flipping the up vector, which would swap the
+handedness of the side vector and mirror the case left to right instead.
+
+Verified by looking: balls red-up with the band across the middle, the case
+upright with its lid open behind it and its red lining showing, the balls
+tipping forward onto their own shadows.
+
+### The name and the picture were both wrong, in opposite directions
+
+This screen drew ALL THREE NAMES in a row under the case from the moment the
+case finished opening -- and it never drew a picture at all. Its own comment
+admitted where the names came from: "the cartridge puts these on the bottom
+screen, which this port does not have yet."
+
+`AdvancePokeballConfirmGraphics` is the cartridge's sequence and every part of
+it waits for the button. On A it hides the cursor, **deletes the subplane
+window** -- the bottom screen the three names live on, which is why they were
+never on the top screen to begin with -- slides the preview window in, clears
+`MON_SPRITE_HIDE` on that one sprite, plays its cry, and only then prints bank
+360's entry `1 + cursorPosition`, which is the line that names the species.
+Cancel slides it back out, re-hides the sprite and prints entry 7 again.
+
+So the name was never a thing to draw separately: it arrives inside the offer
+text, and the offer text arrives on A.
+
+Three changes, all of them the cartridge's behaviour:
+  * moving the cursor reveals nothing -- `ChangePokeballChoice` turns the ball
+    and moves the cursor and does not name anything. This screen dropped into
+    its `offering` phase on every left/right, which named all three in turn
+    just by holding a direction.
+  * the row of three names is gone.
+  * the chosen one's front sprite is drawn at `POKEMON_SPRITE_POS_X` 128,
+    `POKEMON_SPRITE_POS_Y` 96 -- the middle of the DS screen, and exactly where
+    `StartPreviewGraphicsMovement` ends at scale 1.0.
+
+Verified by looking: three balls and no names while choosing; on A, Turtwig in
+the middle of the screen over "Tiny Leaf Pokemon TURTWIG! Will you take this
+Pokemon?"
+
+### A harness gap that looked like a bug for one run
+
+The picture did not appear on the first try, and the reason was the harness's
+trimmed asset tree rather than the draw: `assets/generated/gen4/battle/front/`
+is not in it. That is the seventh time a harness gap has presented as an engine
+fault. The rule stands and is worth restating: before believing a screen does
+not draw something, check that the thing is there to draw.
+
+### Still open on this screen
+
+The case is cropped at the top of the frame once the camera settles, and that
+follows arithmetically from the cartridge's own numbers -- pitch -50, distance
+200, target (0, 0, 36), half-fov 22 degrees puts the case's 116-unit lid above
+the visible half-height of 80.8. Either the pivot differs from the cartridge's
+or the real game crops it too. Not touched, because changing a camera the game
+states outright needs evidence and not a hunch; worth a look on the cartridge.
+
+### Changed
+
+- `src/ui/Gen4StarterSelect.lua` -- `FLIP_Y`, the reveal, the picture.
+- `tools/gen4_overworld_harness/main.lua` -- `SCREEN` falls back to pushing
+  `src.ui.<name>` by module name, so a screen that is pushed by script rather
+  than named in `Screens` can be looked at at all.
+
+## Pass 99 -- the lakes: the first warp on a tile wins, not the last
+
+Reported from play: "if i go to the lake next to twinleaf after visiting the
+professor in sangem it starts the team galactic event before ever getting to
+the point where it should be activated."
+
+### Two warps on one tile, and the port took the wrong one
+
+Verity Lakefront carries FOUR warps on TWO tiles:
+
+    tile (49, 43)   warp 1 -> header 311, D27R0101
+    tile (48, 43)   warp 2 -> header 311, D27R0101
+    tile (48, 43)   warp 3 -> header 312, D27R0102
+    tile (49, 43)   warp 4 -> header 312, D27R0102
+
+Header 311 and header 312 are both "Lake Verity". Their message banks say which
+is which without any guessing: bank 291 is Cyrus at the lakeside -- "...The
+flowing time... ...The expanding space... Cyrus is my name" -- and bank 292 is
+"Rowan: Ah! ... Those Team Galactic scoundrels are after the legendary
+Pokemon!"
+
+`Map.new` built its tile index with a plain assignment:
+
+    self.warpAt[w.y * self.widthCells + w.x] = { index = i, def = w }
+
+so the LATER warp overwrote the earlier one and both entrances led to 312.
+
+**The cartridge takes the first.** `MapHeaderData_GetIndexOfWarpEventAtPos`
+walks the array from zero and returns on the first coordinate that matches. The
+later duplicates are ARRIVAL ANCHORS -- where a scripted warp puts you down
+once the story is ready for that version of the map -- not things you can walk
+into.
+
+### It was never only Verity
+
+Measured across all 593 Sinnoh maps: **15 tiles carry more than one warp, and
+on all 15 the destination differs.** Among them are both entrances to all three
+lakes -- Verity, Valor and Acuity -- so Valor and Acuity had the same fault
+waiting.
+
+    L01  (48,43) warp2->311 vs warp3->312      L02  (45,24) warp4->314 vs warp6->315
+    L01  (49,43) warp1->311 vs warp4->312      L02  (45,25) warp5->314 vs warp7->315
+    L03  (20,37) warp1->317 vs warp3->318      L03  (21,37) warp2->317 vs warp4->318
+    ...and D05R0109, D05R0111, D24R0106, D28R0103, R214, R228
+
+### The control, because `Map` is every game's
+
+`Map.lua` is shared, so the change was measured against another cartridge
+before it was made: **Emerald has ZERO tiles with more than one warp**, across
+439 maps that have warps at all. The rule only ever bites where a tile carries
+two, so this is a no-op everywhere but Sinnoh.
+
+### Verified both ways
+
+`WARPAT` was added to the overworld harness so the REAL `Map` answers rather
+than a second copy of the rule, and the same six tiles were asked before and
+after:
+
+    before   (48,43) -> warp 3, D27R0102 header 312      after   -> warp 2, D27R0101 header 311
+             (49,43) -> warp 4, D27R0102 header 312              -> warp 1, D27R0101 header 311
+             (45,24) -> warp 6, D28R0102 header 315              -> warp 4, D28R0101 header 314
+             (45,25) -> warp 7, D28R0102 header 315              -> warp 5, D28R0101 header 314
+             (20,37) -> warp 3, D29R0102 header 318              -> warp 1, D29R0101 header 317
+             (21,37) -> warp 4, D29R0102 header 318              -> warp 2, D29R0101 header 317
+
+### Changed
+
+- `src/world/Map.lua` -- the first warp on a tile wins.
+- `tools/gen4_overworld_harness/main.lua` -- `WARPAT=x,y ...` prints what the
+  map's own tile index resolves each cell to.
+
+## Pass 100 -- a scripted move has to survive a save
+
+Reported from play: "If i save when im able to pick my starter when i reload
+professor rowan and dawn are in the wrong spot."
+
+They were. The lake scene walks them out of their map-defined places with
+`applymovement`, nothing recorded where they ended up, and a reload rebuilt
+every object from the map -- putting them back where the scene had moved them
+FROM.
+
+### The cartridge saves the lot
+
+`MapObject_Save` writes, per live object: x, y and z, the INITIAL x, y and z,
+the facing, moving and initial directions, the graphics id, the movement type,
+the movement range, the flag and the script. `MapObjectMan_SaveAll` runs it
+over every object and `MapObjectMan_LoadAllObjects` puts them all back.
+
+Two of those fields being separate is the whole design: `xInitial` is where the
+object belongs and `x` is where it is standing. This port already had the
+first -- `gen3ObjectHomes`, the template a script rewrites with
+`setobjectxyperm`, the place a wanderer walks back towards -- and had nothing
+for the second.
+
+### Gen 4 only, and that is the cartridges' difference rather than caution
+
+Gen 1, 2 and 3 do not save object positions. They rebuild from the map and
+re-pose from the map's callbacks, which is exactly what this engine already
+does for them, so both new blocks sit behind `GameVersion.isGen4()` and neither
+can run for another cartridge.
+
+### Verified both ways
+
+`OBJRELOAD=index,x,y` was added to the overworld harness: it moves that object,
+captures the save, throws the NPC pool away and rebuilds the map the way a
+fresh boot would, then prints where the object came back.
+
+    before the fix                          after the fix
+      #1 starts at (23,14)                    #1 starts at (23,14)
+      moved to (12,14)                        moved to (12,14)
+      save holds NOTHING                      save holds (12,14)
+      after a rebuild #1 is at (23,14)        after a rebuild #1 is at (12,14)
+
+The unpatched line is the report itself: the object snaps back to its map
+position.
+
+### Changed
+
+- `src/world/OverworldController.lua` -- `captureSave` records every live
+  object's cell and facing under `save.gen4Objects[mapId]`, and `pooledNPC`
+  applies it to the LIVE position when an object is built.
+- `tools/gen4_overworld_harness/main.lua` -- `OBJRELOAD`.
+
+## Pass 101 -- item 14: not every tilemap is two bytes a cell
+
+The trainer card has been open since the fifteen-item list was written, and
+pass 93 ruled out the tile-width fault as its cause. This is the cause.
+
+### What the screen was doing, and why
+
+`Gen4TrainerCard:drawFace` never draws `trainer_card_front` at all. It draws a
+`Font.drawBox` and some text -- which is the Game Boy card the report names --
+and the file's own header says why: the composed front is "6,760 opaque pixels
+of 65,536 -- a scattering of small blocks in the top-left corner, not a card."
+
+### The map is ONE BYTE a cell
+
+`trainer_card_front.NSCR` is a 256x256 map -- 1024 cells -- with 1024 bytes of
+data. An AFFINE background's tilemap is one byte a cell: a bare tile number,
+no flip bits and no sub-palette, because an affine layer is always 256-colour.
+Read two bytes at a time it gives half the cells, each built out of two
+neighbours.
+
+**Both symptoms came from that and pointed at it together.** On exactly the
+maps where the declared size disagreed with the cell count, the tile ids also
+ran past the end of the sheet -- `trainer_card_front` asking for tile 978 of a
+240-tile sheet. Read a byte at a time its highest is 226, and every cell lands
+inside the sheet. Across the ten tilemaps in `trainer_case` the correlation is
+exact: the three that fail one test are the three that fail the other.
+
+The identification needed no guessing either -- the ten maps were byte-matched
+against pokeplatinum's own `.NSCR` files, all ten exactly, and
+`trainer_case.order` names every member of the archive in turn.
+
+### The rule decides every case, not most
+
+The map states which it is: its declared width and height give the cell count,
+and the data size is either that or twice it. Measured over the 63 tilemaps in
+the fifteen UI archives: **59 two bytes a cell, 4 one byte, and none neither.**
+The four are `trainer_card_front`, `trainer_card_back` and `badge_case_lid` in
+`trainer_case`, and `pokeball_inside` in the bag -- which is the bottom screen
+this port does not draw yet, so nothing visible changes there.
+
+### Verified through the engine's own composer
+
+Not through a second decoder: `Gen4Graphics.tilemap`, `.tiles`, `.palette` and
+`.compose` were run under texlua against the members dumped straight out of the
+cartridge.
+
+    trainer_card_front   256x256  cells=1024  expected=1024  max tile=226  affine=true
+    case_top_screen      256x192  cells=768   expected=768   max tile=39   affine=nil
+    badge_case           256x192  cells=768   expected=768   max tile=255  affine=nil
+    composed 256x256, 42192 opaque pixels of 65536
+
+and the picture is the card: the red face, "TRAINER CARD" across the top, the
+five label rows, the portrait box on the right and the badge strip along the
+bottom. The two-byte maps beside it are unchanged, which is the control.
+
+A one-byte slip is worth recording: the first attempt read `at + i + 1` where
+`u16` beside it takes a 1-BASED index, so the map came out 1023 cells with
+every cell shifted by one -- and it still composed to **exactly 42,192 opaque
+pixels**, because the row it dropped was blank. The pixel count agreed while
+the data was wrong; the cell count is what caught it.
+
+### What is left
+
+The screen. `drawFace` still has to be rebuilt around the real face -- the
+label rows placed into the card's own slots and the portrait into its box --
+and the card's palette chosen by badge level, which is what
+`trainer_card_normal / cobalt / bronze / silver / gold / black` are for. That
+is now a screen job against a correct asset rather than a blocked one, and the
+asset arrives with the next import.
+
+### Changed
+
+- `src/import/Gen4Graphics.lua` -- `tilemap` reads one byte a cell when the
+  map says so, and records `affine` on the result.
+
+## Pass 102 -- item 14: the trainer card is Platinum's now
+
+Pass 101 fixed the tilemap and left the screen. This is the screen -- and a
+second fault in the asset that the first one was hiding.
+
+### The portraits were never "composing correctly"
+
+Pass 101's note said `lucas` and `dawn` "compose correctly ... 1,120 and 1,043
+opaque pixels of 65,536". The count was right and the claim was wrong. Put the
+picture on screen and Lucas has a **tan cap, a washed-out jacket and brown
+trousers**: the right shape in the wrong paint.
+
+`/graphic/trainer_case.narc` carries thirteen NCLRs and **not one of them is
+named after the card**. So `trainer_card_front`, `trainer_card_back`, `lucas`
+and `dawn` -- all four tilemaps with no palette of their own -- fell through
+the planner's name rules to the archive's shared palette, which resolves to
+the first group holding all three roles: `badge_case_lid_tiles.NCLR`. The
+badge case composed correctly the whole time, which is exactly why nothing
+looked wrong.
+
+The cartridge says which palette it is, in its own comment:
+`TrainerCase_DrawTrainerCard` loads `trainer_card_normal.NCLR` over the whole
+sub-BG palette first, "will mostly be overwritten ... with the exception of
+the palette for the trainer sprite". One file, all four pictures.
+
+So `Gen4Screens` gains `palettesFrom`, the same shape as `tilesFrom` and for
+the same reason: written down per archive for the groups where the rules pick
+the wrong file, outranking every other source. `lucas_dp` and `dawn_dp` are
+deliberately **not** in it -- their palette is `player_dp_tiles.NCLR`, whose
+first two rows the cartridge loads to `PLTT_OFFSET(4)`, so the file's colours
+0..31 are the tilemap's 64..95 and composing against it unshifted is wrong by
+64. Naming it would look right and read wrong. A palette shift is its own
+change; those two are unreachable in a Platinum port meanwhile.
+
+Both faults needed **looking at the picture**. Neither showed up in a number:
+the scrambled face still counted 42,192 opaque pixels, and an opaque-pixel
+count cannot see a colour at all.
+
+### The card's rows are in the cartridge, to the pixel
+
+`sTrainerCardWindowTemplates[]` gives all eleven windows. Every one has
+`tilemapLeft = 2` and `height = 2`, so every label starts at **x = 16** and
+every row is 16 pixels tall. `PARTIAL_WIDTH` is 17 tiles and `FULL_WIDTH` 28,
+so a value's right edge is **x = 152** on the short rows and **x = 240** on
+the long ones. `tilemapTop` gives the front's rows as 4, 6, 9, 12, 15, 18, 20:
+
+| row | y | width |
+| --- | --- | --- |
+| IDNo. | 32 | partial |
+| NAME | 48 | partial |
+| MONEY | 72 | partial |
+| POKeDEX | 96 | partial |
+| SCORE | 120 | partial |
+| TIME | 144 | full |
+| ADVENTURE STARTED | 160 | full |
+
+and the back's as 2 (height 4), 7, 9, 11 -- y = 16 and 32 for the two Hall of
+Fame lines, then 56, 72, 88.
+
+Checked against the composed face rather than trusted: reading down x = 140 of
+the picture, the light bands start at exactly 32, 48, 72, 96, 120, 144 and
+160. The templates and the art agree without a fudge factor.
+
+Every value is **right-aligned to its window's far edge**:
+`TrainerCard_DrawNumber` and `TrainerCard_DrawString` both print at
+`windowWidth - (width + endXOffset)`, and the three fields that do not go
+through them compute the same offset by hand. Labels print at 0. Label left,
+value right, one line.
+
+The portrait needs no placement at all: its tilemap is full-screen and already
+positioned, so drawn at (0, 0) over the front the figure lands inside the
+card's own box at x 185..220, y 55..120.
+
+### Three things this screen had wrong about its own data
+
+- **The enum puts ID before NAME.** The screen printed NAME first, which is
+  the Game Boy card's order.
+- **POKeDEX is the SEEN count**, `Pokedex_CountSeen`. The screen counted
+  owned.
+- **The ID is the low half**, `TrainerInfo_ID_LowHalf`, five digits
+  zero-padded. Taking it modulo 100000 shows a six-digit id's bottom five
+  rather than its real low half.
+
+And the row is **left out entirely** before the Pokedex is obtained, as
+`TrainerCard_DrawFrontText` does -- both branches photographed, because a row
+that is only ever absent proves as little as one that is only ever present.
+
+### The money sign is "$", and it is not a dollar
+
+Platinum's format string is `${STRVAR_1 55, 5, 0}` -- a literal ASCII `$` --
+because the DS English font draws that character as the **Poke-dollar**, a P
+with a double stroke. The extracted charmap agrees: code 424 is "$", and
+glyph 424 on `font_message_sheet.png` is that sign, confirmed by looking at
+it. The rest of the engine writes money as the Game Boy fonts' own sign, which
+this font does not have -- printing it logged `font: no glyph` and drew
+something else. `ShopMenu` carries the same line and will show the same fault
+in a Gen 4 shop; that is its own fix.
+
+### The card level is not the badge count
+
+Task #154 said to "pick the palette by badge level". That was a guess and it
+was wrong. `TrainerCase_CalculateTrainerCardLevel` counts five unrelated
+things -- game completed, national dex completed, a 100-win Battle Tower
+streak, contest master in any of five ranks, an Underground Platinum base flag
+-- and picks `normal / cobalt / bronze / silver / gold / black` by the total.
+Only the first is reachable in the port today.
+
+The six palettes differ **only in rows 1-3 and row 15**; row 0 is byte-identical
+in all six, and the front's tiles use only rows 0-3. So a level face is one
+more compose of the same tilemap against a different NCLR -- an EXTRACTOR
+change, not a screen one. The cache carries one face today and that face is
+correct for every save that has not finished the game.
+
+### The A button, and why it is a three-way cycle
+
+Platinum shows both at once. `GX_SetDispSelect(GX_DISP_SELECT_SUB_MAIN)` puts
+the sub engine on the TOP screen, and the card's three layers are all sub
+while the badge case's two are main -- so **the card is the top screen, the
+badge case is the touch screen**, and A flips only the card. This port shows
+one screen at a time, so A walks front -> back -> badge case. The faithful
+arrangement is for the case to sit on the bottom screen behind the
+screen-toggle button, and that is where it belongs once that is wired.
+
+### What the port cannot fill in, named rather than faked
+
+SCORE is `GameRecords_GetTrainerScore`, which the port has no record of, so it
+prints 0 -- what a new cartridge save prints too. ADVENTURE STARTED needs a
+start date the save does not keep, so it prints the cartridge's own blank
+form, `--- --, ----`. The whole back face is link and Hall-of-Fame records the
+port does not keep, so it prints the cartridge's blanks and zeroes, which is
+exactly what Platinum prints before any of it has happened. The signature
+panel is part of the art and nothing is written into it.
+
+### Verified by looking, all three pages
+
+Through the overworld harness with the four re-composed PNGs in place -- the
+same pictures the next import will write -- at `SCREEN=Gen4TrainerCard`:
+
+- **Front**: the red card, IDNo. 52049, NAME RED, MONEY with the Poke-dollar,
+  SCORE 0, TIME 0:00, ADVENTURE STARTED blank, Lucas standing in the portrait
+  box.
+- **Front with the dex obtained**: POKeDEX 5 appears at y = 96 between MONEY
+  and SCORE, and nothing else moves.
+- **Back**: HALL OF FAME DEBUT over two lines, TIMES LINKED 0, LINK BATTLES
+  W 0 L 0, LINK TRADES 0, the signature panel blank.
+- **Badge case**: unchanged, eight empty sockets.
+
+### Changed
+
+- `src/import/Gen4Screens.lua` -- `palettesFrom`, and the trainer card
+  archive's four entries in it.
+- `src/ui/Gen4TrainerCard.lua` -- rebuilt around the cartridge's own face:
+  the two composed faces, the portrait by gender, the seven front rows and
+  four back rows at the cartridge's coordinates, its text colours, the three
+  data corrections, the Poke-dollar, and a three-page A cycle. The port's own
+  frame is kept as the fallback for a cache with no card art.
+
+### Still open
+
+- **The level palettes.** Emit `trainer_card_front` once per NCLR so a
+  finished game gets its cobalt card and a dex-less save its `no_dex` one.
+- **The `_dp` portraits' 64-colour palette shift.**
+- **`ShopMenu`'s money sign in Gen 4.**
+- **The badge case belongs on the bottom screen**, not on a third page of this
+  one.
+
+## Pass 103 -- the screens' text colours come out of the cartridge now
+
+Two screens had their ink written down by hand, and both files said in their
+own headers that publishing the palettes was the proper fix (#170). Doing it
+turned up that the hand-written colours were also **wrong**.
+
+### Why a picture cannot carry them
+
+Platinum's font sheet carries ROLES, not colours: every pixel is 0 for
+nothing, 1 for the letter, 2 for its shadow. Each printer call names which
+entries of which sub-palette those roles take -- `TEXT_COLOR(1, 2, 0)` on BG
+palette 3 in the bag, on BG palette 15 on the trainer card. A composed screen
+picture therefore **cannot contain a colour that appears nowhere but in text**,
+and no amount of looking at the PNG recovers it.
+
+### Five of six, and one of two, were a unit low
+
+The bag's three pairs and the card's one, read out of the cartridge through the
+engine's own decoder:
+
+| | written down | cartridge |
+| --- | --- | --- |
+| bag list ink | 16, 24, 32 | **16, 25, 33** |
+| bag list shadow | 172, 189, 189 | **173, 189, 189** |
+| bag description | 255,255,255 / 0,0,0 | same |
+| bag moving ink | 164, 180, 205 | **165, 181, 206** |
+| bag moving shadow | 106, 139, 180 | **107, 140, 181** |
+| card ink | 74, 74, 74 | same |
+| card shadow | 164, 164, 164 | **165, 165, 165** |
+
+One cause for all of them. The hand-written values had been read off a
+throwaway decoder doing `v * 255 // 31`, and `Gen4Graphics.ch` -- which
+composed every picture on those same screens -- does
+`floor(v * 255 / 31 + 0.5)`. The 5-bit channel 20 is 164.516: floored 164,
+rounded 165. The description pair survived only because 31 and 0 floor and
+round alike.
+
+A one-unit difference is invisible on a screen, so **nothing was ever going to
+catch it**. That is the argument for publishing rather than transcribing, and
+it is a better argument than tidiness.
+
+### What is published
+
+`Gen4Screens` jobs now carry `paletteName`, resolved where the four palette
+rules already live rather than recomputed downstream. The graphics stage
+writes `gen4_graphics.palettes`, **one entry per palette FILE**, and gives
+every screen record a `paletteKey`. Measured: 394 screen jobs across the
+fifteen UI archives share **146 palettes** -- the trainer card alone points
+five screens at `trainer_card_normal` -- and the planner produces exactly 146
+distinct keys with no key naming two different members.
+
+Stored as hex, `RRGGBB` per colour with no separator. 33,904 colours in all
+(129 of the 146 are full 256-colour banks): about 200 KB as hex against about
+850 KB as nested `{ r, g, b }` tables, on a `gen4_graphics.lua` that is
+currently 368 KB. It decodes with one `tonumber` per channel.
+
+`src/render/Gen4Palettes.lua` is the reading end: `text(data, screenKey, slot,
+letter, shadow)` returns the `{ ink, shadow }` pair `Font.pushStyle` wants, or
+nil so a caller falls back in one test rather than two. What stays written
+down is the SLOT AND THE TWO INDICES -- 3 and (1,2)/(15,14)/(8,9) for the bag,
+15 and (1,2) for the card -- because those live in the app's C code, not in
+any file the importer can read.
+
+### Verified by a control, because the obvious test cannot fail
+
+Rendering the two screens with and without the palettes in the cache gave
+BYTE-IDENTICAL PNGs -- necessarily, because the fallback constants had just
+been corrected to the same values. That measurement says nothing.
+
+So the fallbacks were poisoned instead: card ink to magenta on a green shadow,
+bag list likewise, and each screen run twice.
+
+    card, poisoned fallback, no palettes   13c835f7...   magenta text
+    card, poisoned fallback, palettes      84efbadb...   identical to the correct render
+    bag,  poisoned fallback, no palettes   c556bbe2...
+    bag,  poisoned fallback, palettes      489cc4c4...   identical to the correct render
+
+and at the pixel, on the card's IDNo. row: the same 304 letter pixels and 340
+shadow pixels in both runs, `(255,0,255)`/`(0,255,0)` in one and
+`(74,74,74)`/`(165,165,165)` in the other. On the bag, 2,112 pixels differ
+between the two runs and **every one of them** goes from the poison to
+`(16,25,33)` or `(173,189,189)`; nothing else on either screen moves.
+
+That is the cache value overriding the constant, delivering the cartridge's
+own numbers, and touching only the text.
+
+### What is NOT verified here
+
+The eight lines in `RomExtractorGen4.extractGraphics` that build the table have
+not been run -- that needs a full import. Their two inputs are checked
+separately (the planner's 146 distinct keys, and the encoder's exact round trip
+over all 768 channels of a 256-colour bank), and the key expression is the same
+one the planner probe exercised, but the block itself lands with the next
+import.
+
+### Changed
+
+- `src/import/Gen4Screens.lua` -- jobs carry `paletteName`; the four palette
+  rules now name their source instead of only returning it.
+- `src/import/Gen4Graphics.lua` -- `paletteHex` and `slotFromHex`.
+- `src/import/RomExtractorGen4.lua` -- the graphics stage publishes
+  `index.palettes` and stamps `paletteKey` on every screen record.
+- `src/render/Gen4Palettes.lua` -- NEW, the reading end.
+- `src/ui/Gen4BagMenu.lua`, `src/ui/Gen4TrainerCard.lua` -- read their ink from
+  the cache, with corrected constants as the fallback.
+
+## Pass 104 -- the trainer card's seven faces, and a Pokedex check that never said yes
+
+Pass 102 left the level palettes as a follow-up (#178) on the grounds that
+they were unreachable. Looking at them showed that was wrong twice over.
+
+### The palette draws the stars, and hides a row
+
+Composing the one front tilemap against each of the seven NCLRs:
+
+- `normal` is the red card everyone starts with.
+- `cobalt`, `bronze`, `silver`, `gold`, `black` are blue, tan, pale green,
+  yellow and grey -- and each one shows **one more STAR** in the top-right
+  corner, one through five.
+- `no_dex` is the red card with the **POKeDEX row's BAND missing**.
+
+Both of those are painted by the palette alone. The star tiles are in the
+tilemap the whole time and the normal palette makes them the colour of the
+card; the POKeDEX slot's lighter band likewise. That is why
+`TrainerCard_DrawFrontText` only has to skip the row's TEXT -- the cartridge
+hides the slot itself in the palette.
+
+So a port that draws the normal face to a player without a Pokedex shows an
+empty slot the cartridge does not, which is what pass 102 shipped. `no_dex` is
+reachable from the very first save, and `cobalt` the moment the game is
+finished.
+
+### One tilemap, seven composes
+
+`Gen4Screens` gains `paletteVariants`: extra copies of a job with the same
+tiles and tilemap and a different palette, emitted as ORDINARY JOBS so the
+graphics stage needs no knowledge of them. The trainer card declares six for
+each face, giving `trainer_card_front_cobalt` and the rest.
+
+Measured after the change: **394 jobs to 406, and 146 distinct palettes to
+152** -- twelve new pictures and six new palettes, each variant keeping its
+donor's tiles and tilemap with only the palette moved.
+
+Nothing needed stitching or shifting: the front's tiles use only palette rows
+0-3, row 0 is byte-identical in all seven files, and
+`TrainerCase_LoadCardPalette` swaps rows 1-3 and 15.
+
+### The Pokedex check answered NO for every Sinnoh save
+
+`Gen4TrainerCard:hasPokedex` asked `Flags.hasPokedex`, on the reasoning that it
+is the port's own answer and differs per cartridge. It tests
+`EVENT_GOT_POKEDEX` and `ENGINE_POKEDEX`, which are **Game Boy flag names**.
+Platinum's own flag is not in this port's Gen 4 save, so it answers no on every
+Sinnoh save and would never answer anything else -- the card would have shown
+the no-dex face and hidden the POKeDEX row for the whole game, with a full dex.
+
+Pass 102 did not catch this because the row was photographed in both states,
+and the "obtained" photograph was taken with the function stubbed. The stub
+made the branch reachable and hid that nothing else could reach it.
+
+The fix is the fallback `Gen4MainMenu` already uses for the same question: a
+dex with anything in it is a dex you were given. The flag is still asked first.
+
+**`Gen4StartMenu` has the same line and no fallback** (`available("pokedex")`),
+so the POKeDEX row is very likely missing from the Gen 4 start menu for the
+same reason. Raised as its own task rather than changed blind from here.
+
+### Verified by looking, all three reachable faces
+
+Through the overworld harness against a cache carrying all fourteen composed
+faces and their palettes:
+
+- **new save, no dex** -- red card, and the card body runs straight from MONEY
+  to SCORE with no POKeDEX band and no row.
+- **dex, no Hall of Fame** -- red card, POKeDEX band back, count 5.
+- **dex and a Hall of Fame entry** -- the **cobalt blue card with one star**,
+  text still legible against it.
+
+The ink follows the face, because it is read from THAT face's `paletteKey`
+rather than from the normal palette -- which is what makes the black card's
+yellow-on-dark letter come out right when it is ever reachable.
+
+### Changed
+
+- `src/import/Gen4Screens.lua` -- `paletteVariants`, and the trainer card's
+  twelve.
+- `src/ui/Gen4TrainerCard.lua` -- `cardLevel` (the one criterion of five the
+  port can evaluate, with the other four named rather than silently scored
+  zero), `faceSuffix`, the face and ink chosen from it, and the Pokedex check
+  that can now say yes.
+- `tools/gen4_overworld_harness/main.lua` -- `HOF=n`, and an `Env:` list in the
+  header that had fallen a dozen variables behind.
+
+## Pass 105 -- every price in Sinnoh was printed with the Japanese yen kanji
+
+#180 was raised off the trainer card as a one-line fix in `ShopMenu`. It was
+five places, and the character was not the one the task said.
+
+### What was actually on screen
+
+The engine writes money in five places and prints `"\194\165"` -- U+00A5 -- in
+all of them except `ShopMenu` on Gen 3. The Gen 4 charmap maps U+00A5 to code
+**274**, and glyph 274 on `font_message_sheet.png` is the **Japanese yen
+kanji**, 円.
+
+Rendered side by side through the Gen 4 font to be sure rather than to infer:
+
+    today:  円3000     <- U+00A5, the kanji
+    fixed:  (Poke-dollar)3000   <- ASCII "$", code 424
+    gen3:   (no-glyph hook)3000 <- U+20BD, which this font does not have
+
+The third is what `Gen4TrainerCard` was drawing before pass 102, so the same
+mistake had been made twice from opposite directions: one screen reached for
+Hoenn's sign and got nothing, five reached for Kanto's and got a kanji.
+
+### What the cartridge uses
+
+A literal ASCII `$`. Platinum's own format string is `${STRVAR_1 55, 5, 0}`,
+the extracted charmap puts `"$"` at code 424, and glyph 424 is the Poke-dollar
+-- a P with a double stroke.
+
+`Gen4Text` already had this right in both directions -- `[0x01A8] = "$"` and
+`[0x0112] = "\194\165"` -- so ROM-sourced money strings were never affected.
+The fault was only in the engine's own English fallbacks, which is exactly
+where a Gen 4 game spends its time, because no Gen 4 dataset has the
+`_Pokemart*` or `_MoneyForWinningText` keys those fallbacks stand in for.
+
+### One function, and it hands back the caller's own answer
+
+`GameVersion.moneySign(fallback)` returns `"$"` on Gen 4 and `fallback` (or
+U+00A5) otherwise.
+
+Taking the non-Gen-4 answer as an ARGUMENT rather than deciding it is
+deliberate. The engine does not agree with itself below Gen 4: `ShopMenu`
+prints U+20BD on Gen 3 while `QuantityBox`, `ListMenu`, `BagMenu` and
+`BattleState` print U+00A5, so **Hoenn already shows two different signs on
+two screens**. Answering only the Gen 4 question means nothing below Sinnoh
+changes by a single byte. Making the four agree on Gen 3 is a real fix and a
+separate one -- it needs a Hoenn screen looked at, not an assumption -- so it
+is written down instead.
+
+Proved rather than asserted, over every registered version:
+
+    red blue yellow gold silver crystal prism polishedcrystal emerald firered
+      moneySign()       -> C2 A5     (unchanged)
+      moneySign(HOENN)  -> E2 82 BD  (unchanged)
+    platinum
+      both              -> 24        ("$")
+
+which is the standing "do not break Crystal, Gold, Silver or Prism"
+constraint, checked rather than reasoned about.
+
+### Verified by looking
+
+The real `ShopMenu` opened on a real stock list in the overworld harness,
+before and after. Before: `円3000` in the money box, `円300` / `円100` /
+`円250` down the item rows, and `×01. 円300` in the quantity box. After: the
+Poke-dollar in all six places, and nothing else on the screen moved.
+
+### Changed
+
+- `src/core/GameVersion.lua` -- `moneySign(fallback)`.
+- `src/ui/ShopMenu.lua` -- routes through it; Hoenn's U+20BD written as
+  escapes beside Kanto's, for the reason the file already gives for Kanto's.
+- `src/ui/ListMenu.lua` -- the money box.
+- `src/ui/BagMenu.lua` -- the money line, lifted into a `moneyLine` helper
+  because it was written out twice.
+- `src/ui/QuantityBox.lua` -- the quantity times unit price line.
+- `src/battle/BattleState.lua` -- the prize money and Pay Day lines.
+
+### Still open
+
+`ShopMenu` and the other four disagree about Gen 3's sign. One of them is
+wrong on Hoenn and this pass deliberately did not guess which.
+
+## Pass 106 -- item 14 of the battle list, and the third field with the same bug
+
+#136 said "Scratch does nothing" and quoted a message reading `TURTWIG's / o!`.
+Both halves turned out to be the id-versus-name bug, and chasing the second
+half found it in a **third** field that nothing had looked at.
+
+### Scratch itself is already fixed
+
+Run in the battle harness on the current cache, Chimchar against a Starly:
+
+    [msg] CHIMCHAR / used Scratch!
+    [hp] after 900 ticks: player 33/33  enemy 0/15
+
+The name decodes and the move kills. Putting the moves table back into the
+shape it had before the type and effect fixes -- `effect` and `type` as
+NUMBERS -- reproduces the report exactly, in the same build:
+
+    [msg] CHIMCHAR / used Scratch!
+    [msg] Enemy STARLY's / 0!
+    [msg] Enemy STARLY's / HP is full!
+    [msg] But, it failed!
+    [hp] after 900 ticks: player 34/34  enemy 16/16
+
+So the reported `o!` was a **ZERO, not the letter o**, and "does nothing" was
+literal: the enemy took no damage across the whole run. Both are
+[[gen4_type_system]] and [[gen4_move_effects]], both fixed, both waiting on the
+re-import.
+
+### The zero led somewhere else
+
+That `0` is not a move at all. It is an ABILITY, printed through
+`Strings("%s's\n%s!", who, abilityLabel(ability))`, and measuring what the
+battle actually holds:
+
+    [abil] player CHIMCHAR abilities={66, 0} slot=2 -> of()=0 (number)
+    [abil] enemy  STARLY   abilities={51, 0} slot=2 -> of()=0 (number)
+    [abil] ability entries that are NAMES across all species: 0
+
+**TWO FAULTS, AND NEITHER IS ABOUT MOVES.**
+
+1. **Every ability is an id, and every table in `Abilities.lua` compares
+   against a name** -- WATER_ABSORB, SAND_VEIL, INTIMIDATE. Zero of the
+   ability entries across all 508 species were names, so nothing ever matched:
+   **no ability did anything in Sinnoh at all.**
+
+2. **`ABILITY_NONE` is written out as a literal 0, and 0 is TRUTHY in Lua.**
+   `Abilities.of` ends `return list[slot] or list[1]`, which is right for a
+   list where an absent second ability is a HOLE -- which is how the Gen 3
+   extractor writes it -- and does nothing at all for a sentinel. A Pokemon
+   with `abilitySlot = 2` and one ability got `0`. The cartridge's own rule is
+   in `pokemon.c`: `if (ability2 != ABILITY_NONE) { ability = personality & 1 ?
+   ability2 : ability1 } else { ability = ability1 }` -- an absent second
+   ability means slot one, whatever the personality says.
+
+**THIS IS THE THIRD TIME THIS EXACT BUG HAS APPEARED IN THIS PORT.**
+`move.effect` was a number where the battle dispatched on a name;
+`move.type` was a number where `Damage` wanted one; and the search that found
+the second did not find this. Anything the cartridge stores as an id and this
+engine dispatches on by name is worth auditing before it is reported from play.
+
+### The names are derived, and the table closes
+
+`src/import/Gen4Abilities.lua`, from two independent sources:
+
+1. pokeplatinum's `generated/abilities.txt`, an ORDERED list -- index 0
+   `ABILITY_NONE` through index 123 `ABILITY_BAD_DREAMS`.
+2. its `res/pokemon/<name>/data.json`, which names each species' two abilities
+   independently (`["ABILITY_BLAZE", "ABILITY_NONE"]` for Chimchar).
+
+Joining the cartridge's own numeric species table to (2) by species name and
+resolving through (1): **492 species agree, 0 disagree.** The four that do not
+join are name-spelling misses rather than data ones -- species 0 (the `-----`
+placeholder), both NIDORAN (gender symbols) and FARFETCH'D (a curly
+apostrophe) -- and their resolved names are Poison Point / Rivalry and Keen Eye
+/ Inner Focus, which are right.
+
+And it closes: the species table uses **124 distinct ids, the highest is 123,
+and every one has a name.** Nothing falls off the end.
+
+The `ABILITY_` prefix is stripped because that is already the engine's
+spelling, from the Gen 3 side. An absent second ability is written as a HOLE,
+matching Gen 3's shape, so `list[slot] or list[1]` works on its own.
+
+### Verified by a before and after in one build
+
+Chimchar against a Staravia, whose ability is Intimidate:
+
+    BEFORE  abilities={66, 0} / {22, 0}   of() -> 66 / 22 (number)
+            names across all species: 0
+            [msg] Wild STARAVIA / appeared!
+            [msg] Go! CHIMCHAR!
+            [msg] CHIMCHAR / used Scratch!          <- no ability, ever
+
+    AFTER   abilities={BLAZE} / {INTIMIDATE}  of() -> BLAZE / INTIMIDATE (string)
+            names across all species: 777
+            [msg] Enemy STARAVIA's / INTIMIDATE!
+            [msg] CHIMCHAR's / ATTACK fell!         <- it fires, and it lands
+
+The "after" applies the same `Gen4Abilities.list` the extractor now calls, so
+the harness is looking at the shape the next import writes.
+
+### Changed
+
+- `src/import/Gen4Abilities.lua` -- NEW: the 124 names, `name(id)` and
+  `list(first, second)`.
+- `src/import/Gen4Species.lua` -- writes names, with the absent second ability
+  left as a hole.
+- `src/battle/Abilities.lua` -- `of()` treats the sentinel as absent, per the
+  cartridge's own rule. Named and fixed here as well as at the import, because
+  a stale cache is still a cache this has to read.
+
+### >>> IT NEEDS A RE-IMPORT
+
+The species table is written by the import stage, so until Platinum is
+re-imported every Sinnoh ability is still an id and still does nothing.
+
+## Pass 107 -- the audit, and a fourth instance found by it
+
+Pass 106 ended by saying a fourth id-versus-name field was "more likely than
+not" and raising an audit. The audit found one within the hour.
+
+### The check needs no knowledge of the engine
+
+The first instinct was to scan the source for `X.field == "NAME"` and for
+string-keyed table lookups. That would have missed the original bug entirely:
+`move.effect` is dispatched through `data.move_effects[name]`, which is a table
+lookup and matches no `==` pattern.
+
+The rule that works is simpler and has nothing to do with the engine.
+pokeplatinum's `res/` files describe **the same records** and spell every enum
+as a NAME. So:
+
+> numeric in the cache **and** named in pokeplatinum  ->  an unresolved id
+
+No source scanning, no guessing which tables are keyed by string, and nothing
+to keep in step with the engine as it changes.
+
+### Eleven fields, and one of them is live
+
+    pokemon   abilities            508 records   <- fixed in pass 106
+    moves     effect                59 of 471    <- deliberate, see below
+              range                471
+    items     holdEffect           446           <- LIVE AND BROKEN
+              battlePocket         446
+              battleUseCategory    446
+              fieldPocket          446
+              fieldUseFunc         446
+              flingEffect          446
+              naturalGiftType      446
+              pluckEffect          446
+
+**`item.holdEffect` is the fourth instance.** `battle/HoldItems.lua` compares
+against fourteen names -- LEFTOVERS, CHOICE_BAND, SCOPE_LENS, SOUL_DEW,
+CURE_STATUS and the rest -- and every one of the 446 Gen 4 items carries a
+number. **158 of them carry a NON-ZERO hold effect, and not one of them does
+anything in Sinnoh.**
+
+It is a quieter failure than the abilities one, because `HoldItems.effectOf`
+already guards with `if type(effect) ~= "string" then return nil end` and its
+comment says a nameless effect "matches no rule below, which is the same
+silence an unknown ability gets". That comment was written believing abilities
+degraded gracefully. They did not -- they returned the number and printed it.
+
+There is a **second** fault in the same field: the engine reads
+`def.holdEffectParam` and the Gen 4 cache writes `effectParam`. So even with
+names, every parameter would be zero.
+
+AND THE NAMES ARE NOT A PREFIX STRIP THIS TIME, which is why this is its own
+task rather than another twenty minutes. pokeplatinum names hold effects after
+their BEHAVIOUR and this engine names them after the ITEM --
+`HOLD_EFFECT_HP_RESTORE_GRADUAL` is LEFTOVERS, `HOLD_EFFECT_CHOICE_ATK` is
+CHOICE_BAND, `HOLD_EFFECT_CRITRATE_UP` is SCOPE_LENS. The same split the move
+effects had ("Hoenn names an effect after its MOVE, pret after its
+BEHAVIOUR"), and it needs the same care: a mis-mapped hold effect does the
+WRONG thing, which is worse than doing nothing.
+
+### `move.effect` is deliberate, and the check made someone say so
+
+59 of 471 moves still carry a number, and that is
+[[gen4_move_effects]]' own policy: the 412 ids with a pret name carry it, and
+the 59 Sinnoh-only ids with none are left as numbers so each logs itself once
+through `missing()` rather than pretending to be a plain hit.
+
+The check does not know that, and it should not. It refused to pass until the
+reason was written into `KNOWN` -- which is the point of it. It also pins the
+count: **if 59 rises, the effect table has regressed.**
+
+### The check's own first version was broken, and the control caught it
+
+Version one classified only scalar values, so it walked straight past
+`abilities` -- a LIST of ids -- and reported eight fields where there were
+eleven. **A check that misses the bug you already know about is worth nothing
+against the one you do not**, so `abilities` is the control: on a cache written
+before the `Gen4Abilities` stage the check must find it, and the run says out
+loud which world it is in so a silent report can never be mistaken for a clean
+one.
+
+### Proved to fail
+
+    planted: holdEffect removed from KNOWN   -> exit 1, reported as NEW
+    no pokeplatinum directory                -> exit 1, three failures
+    clean run                                -> exit 0, zero NEW
+
+The second matters most: without it, pointing the check at the wrong directory
+would have reported a clean port.
+
+### Changed
+
+- `tools/gen4_idname_check.lua` -- NEW.
+  `texlua tools/gen4_idname_check.lua <cache>/data/generated <pokeplatinum dir>`
+
+## Pass 108 -- the Pokedex row that could never appear
+
+Pass 104 fixed this on the trainer card and raised #181 because `Gen4StartMenu`
+had the same line with no fallback. Looked at rather than assumed, and it was
+exactly that.
+
+### What the menu showed
+
+The Gen 4 START menu, rendered with FIVE SPECIES ALREADY SEEN:
+
+    BAG / RED / SAVE / OPTIONS / EXIT
+
+No POKeDEX row. `Gen4StartMenu:available("pokedex")` returns
+`Flags.hasPokedex(save)`, which tests `EVENT_GOT_POKEDEX` and `ENGINE_POKEDEX`
+-- both GAME BOY event constants. Platinum's own "dex obtained" flag is not in
+this port's Gen 4 save at all, so that call answered NO on every Sinnoh save
+and **could not answer anything else**: the row was unreachable for the whole
+game.
+
+The same call is why the trainer card hid its own POKeDEX row and drew the
+no-dex face forever, which pass 104 worked around with a local fallback.
+
+### The fix went into `Flags`, not into the two callers
+
+Two screens asking one question through one function must not drift, so the
+Gen 4 arm lives in `Flags.hasPokedex` and `Gen4TrainerCard` now just calls it.
+Sinnoh falls back to the question `Gen4MainMenu` already answers this way on
+its CONTINUE panel: **a dex with anything in it is a dex you were given.**
+
+It sits BEHIND the flag test and behind an `isGen4` gate. Widening it to every
+cartridge was the tempting version and is wrong -- it would open Kanto's
+Pokedex early for anything that marks a species seen before Oak hands it over,
+which is a real risk for no gain.
+
+It is one encounter behind the truth. That is the same place the continue
+screen's own count stands, and the right trade against a row that never
+appears at all.
+
+### Nothing below Sinnoh moves
+
+Asked of every registered version with three saves -- the flag set, a
+populated dex and no flag, and neither:
+
+    red gold crystal prism polishedcrystal emerald firered
+       flag set -> true      dex only -> false     neither -> false
+    platinum
+       flag set -> true      dex only -> TRUE      neither -> false
+
+Every non-Gen-4 answer is what it was before, and "neither" is still false
+everywhere -- so an empty dex does not open the row.
+
+### Verified by looking, with the control
+
+    BEFORE, five seen        BAG / RED / SAVE / OPTIONS / EXIT
+    AFTER,  five seen        POKeDEX / BAG / RED / SAVE / OPTIONS / EXIT
+    AFTER,  empty dex        BAG / RED / SAVE / OPTIONS / EXIT
+
+The third is the one that matters: the row appears because the dex has
+something in it, not because it now always appears.
+
+And the trainer card, which changed hands to the shared function, still draws
+the no-dex face on an empty dex and the normal face with POKeDEX 5 beside it.
+
+### Changed
+
+- `src/script/Flags.lua` -- `hasPokedex` grows a Gen 4 arm.
+- `src/ui/Gen4TrainerCard.lua` -- its local copy defers to it.
+
+## Pass 109 -- held items, the fourth instance, closed
+
+#185 came out of the pass-107 audit rather than a play report -- the first of
+these four the port caught before a player did.
+
+### What was wrong
+
+Every one of the 446 Gen 4 items carried a NUMERIC `holdEffect`, and
+`battle/HoldItems.lua` compares against 33 names. **158 items carry a non-zero
+hold effect and not one of them did anything in Sinnoh.**
+
+Quieter than the abilities bug, because `HoldItems.effectOf` already guards
+with `if type(effect) ~= "string" then return nil end` and its comment calls
+that "the same silence an unknown ability gets" -- written believing abilities
+degraded gracefully, which they did not.
+
+A SECOND fault in the same field: the engine reads `def.holdEffectParam` and
+the Gen 4 cache wrote `effectParam`. So even once named, **Leftovers would have
+healed nothing**, because its 10 would never have arrived.
+
+### The names are not a prefix strip, so the join went through the items
+
+pokeplatinum names a hold effect after its BEHAVIOUR and this engine names it
+after the ITEM: `HOLD_EFFECT_HP_RESTORE_GRADUAL` is LEFTOVERS,
+`HOLD_EFFECT_CHOICE_ATK` is CHOICE_BAND, `HOLD_EFFECT_CUBONE_ATK_UP` is
+THICK_CLUB. The same split the move effects had.
+
+So every non-zero id was listed with **the items that carry it** and its
+pokeplatinum name, and the mapping was read off that table rather than from
+memory -- which is why every row in `Gen4HoldEffects.ENGINE` carries the item
+that settled it beside the claim.
+
+Joining the cache's items to `res/items/data/*.json` by item name: **438 of 446
+join, 146 distinct ids resolved, and no id carries more than one pokeplatinum
+name.** The id determines the effect with no ambiguity.
+
+CHECKED THREE WAYS: all 33 engine names are mapped; none is mapped twice; and
+-- the one that matters for the 113 ids the engine has no rule for -- **no
+unmapped id's pokeplatinum name is also an engine name.** So the rest carry
+their own names and read as work rather than as integers, with no chance of
+one accidentally firing an engine rule.
+
+### One row deliberately left unmapped
+
+**Sitrus Berry, id 13, `HP_PCT_RESTORE`.** The engine's `RESTORE_HP` heals a
+FLAT `param` -- right for Oran's 10 and Berry Juice's 20, wrong for Sitrus,
+whose 25 is a PERCENTAGE. Mapping it would heal 25 HP flat. It stays silent
+until the engine has a percentage rule, because **a mis-mapped hold effect does
+the WRONG thing, which is worse than doing nothing.**
+
+### Verified by a control in the same build -- and the first measurement was
+### vacuous
+
+Chimchar holding Leftovers, hurt to a quarter, against a Starly:
+
+    BEFORE   holdEffect=69            hurt to 12/51  ->  ended 9/51
+    AFTER    holdEffect=LEFTOVERS     hurt to 12/49  ->  ended 15/49
+             [msg] CHIMCHAR restored a little / HP using its / Leftovers!
+
+Off, the HP only goes down. On, it ends ABOVE where it started.
+
+THE FIRST ATTEMPT AT THAT MEASUREMENT PROVED NOTHING and is worth recording:
+the battle harness had no `HURT`, so the lead started at full health, every
+heal rule declined, and both arms reported 52/52. A healing test on a
+full-health Pokemon is a test that cannot fail. `HURT` is now in the harness
+with that written above it.
+
+### Changed
+
+- `src/import/Gen4HoldEffects.lua` -- NEW: 146 names, 33 of them the engine's,
+  each with the item that settled it.
+- `src/import/Gen4Items.lua` -- writes the name, and writes the parameter under
+  BOTH spellings, because the cartridge's field is `effectParam` and
+  `HoldItems` asks for `holdEffectParam` and each is right where it is.
+- `tools/gen4_battle_harness/main.lua` -- `HURT`, `HOLD=<item id>`, `MSGTRACE`,
+  `MOVES`, `ABIL`, and an end-of-run HP line.
+- `tools/gen4_idname_check.lua` -- `holdEffect` moves from OPEN to FIXED.
+
+### >>> IT NEEDS A RE-IMPORT
+
+The item table is written by the import stage. Until Platinum is re-imported
+again, every hold effect is still an id and still does nothing.
+
+## Pass 110 -- the HP bar, and a guard that asked for a key nobody writes
+
+#128 said "healthboxParts.gauges is in the cache and nothing draws it". Half of
+that was out of date -- `Gen4Battle.drawGauges` exists, is complete, and is
+called every frame. It just never drew anything.
+
+### The cause
+
+`drawGauge` opened with
+
+    local gauge = rec and rec.gauges and rec.gauges[rampName]
+    if not (gauge and img and quads) then return false end
+
+which is right for `"exp"` and wrong for `"hp"`, because **there is no
+`gauges.hp`.** The cache carries `hp_green`, `hp_yellow` and `hp_red`, and the
+ramp is chosen from the fill -- twelve lines BELOW the guard that had already
+returned false.
+
+So the HP bar never drew, on any box, in any battle, while the EXP bar beside
+it worked off the same function. And `drawGauges` is called inside a `pcall`,
+so nothing ever said a word.
+
+Measured rather than read: `gauges["hp"] = nil` while the three ramps are
+tables, and the call site is there on line 1393.
+
+The fix resolves the ramp BEFORE the guard, and takes the width from a real
+ramp (all three are the same six cells) instead of from the key that does not
+exist.
+
+### And the "wrong HP glyph" was the same bug wearing a hat
+
+The second half of #128 -- "the HP label glyph is the wrong size and in the
+wrong place" -- turns out to have been the empty groove. With no bar drawn, the
+box art's own bar ENDS read as a cramped `HP|` with a stray `|` off to the
+right. Draw the bar over the groove and the label reads as plain `HP` followed
+by a full-width bar, which is what the cartridge shows.
+
+Worth writing down because the report was accurate about what it LOOKED like
+and wrong about what it was, and a fix aimed at the glyph would have found
+nothing wrong with the glyph.
+
+### Verified with its own control: three HP levels, one build
+
+    full HP      48/48   full-width GREEN bar
+    a quarter    12/48   short YELLOW segment
+    a twelfth     4/51   tiny RED sliver
+
+One HP level only ever proves one colour, so `HURT` in the battle harness now
+takes a DIVISOR (`HURT=12` for a twelfth) rather than always quartering. That
+is the second time this pass that the harness had to grow before the
+measurement meant anything -- the first was `HURT` existing at all, in pass
+109.
+
+The ramp itself was already right and is the cartridge's: `App_BarColor` is
+handed PIXELS, not HP, so the colour steps where the BAR steps.
+
+### Changed
+
+- `src/battle/Gen4Battle.lua` -- `drawGauge` resolves the ramp before it
+  guards.
+- `tools/gen4_battle_harness/main.lua` -- `HURT` takes a divisor.
+
+## Pass 111 -- two fixes tested rather than assumed, and a harness that was lying
+
+#135 and #137 were both recorded as fixed in earlier passes and both still
+open, because the standing rule is that nothing closes until it has been
+tested. Testing them found a third thing.
+
+### #135, the move-menu d-pad: fixed, and now proved exhaustively
+
+`moveGridNavigate` already carries the `gen4Layout()` arm. A single press would
+only ever prove one arrow, and the reported fault -- "down moves the cursor
+right" -- is a property of the TABLE. So the harness now prints the whole
+thing: every direction from every cell.
+
+Four moves, drawn two across:
+
+    from   up    down  left  right
+    1      3     3     2     2
+    2      4     4     1     1
+    3      1     1     4     4
+    4      2     2     3     3
+
+Down from 1 is 3, not 2. Every one of the sixteen transitions is what a
+wrapping 2x2 should give.
+
+AND THE RAGGED CASES, which is where grid navigation usually breaks:
+
+    1 move    everything stays on 1
+    2 moves   up/down stay put, left/right swap
+    3 moves   from 2, up/down STAY -- the cell below it is empty
+              from 3, left/right STAY -- nothing to its right
+
+**No cursor ever lands on a move that is not there.**
+
+### #137, the platforms: on screen, both of them
+
+Rendered at rest: the player's slab under Chimchar on the left, the enemy's on
+the right, both fully on screen. That is the pass that fixed
+`platformSlideElapsed` holding -- the bug parked them at step 0, which is where
+they BEGIN, one mostly off the right edge and the other entirely off the left.
+
+### And the harness had been drawing a picture no player sees
+
+The battle harness defaulted to a 512x384 canvas. The FIELD fills the canvas
+while the 2D HUD draws in the screen's own 256x192 space -- so at twice the
+size the healthboxes, the message box and the menus all sat in the TOP-LEFT
+QUARTER of a full-size field.
+
+Every HUD-versus-field question ever asked of this harness at that size was
+asked of the wrong image. Nothing in this pass or the last turned on it --
+the HP bar work was about a box's own contents, and the strip and platform
+numbers came from the cartridge rather than from a screenshot -- but it could
+have, and the next question would have been the one that did.
+
+The default is now the DS's own 256x192, with the reason written above it.
+`W` and `H` still override.
+
+### Changed
+
+- `tools/gen4_battle_harness/main.lua` -- `MOVEGRID=<n>` prints the whole
+  cursor transition table; the canvas defaults to 256x192.
+
+## Pass 112 -- item 21: the enemy floated, and the cartridge had already said by how much
+
+Reported from play with a screenshot: "the enemy pokemon is standing a bit too
+high". It was, and only the enemy -- the player's back sprite looked planted,
+which is the detail that gave it away.
+
+### Measured, not guessed
+
+Every battle sprite is an 80x80 frame and the Pokemon does not fill it. On the
+extracted PNGs:
+
+    Piplup   front   opaque rows 22..56   23 empty rows beneath
+    Starly   front   opaque rows 21..59   20 empty
+    Chimchar back    opaque rows  5..71    8 empty
+
+Drawn centred on the frame, a front sprite's visible feet land about fifteen
+pixels higher than a back sprite's. That is the whole fault, and it is why it
+showed on one side only.
+
+### The correction was already in the cache, and nothing read it
+
+`BoxPokemon_SpriteYOffset` reads `poketool/pokegra/height.narc`, and the import
+already writes it as `gen4_species_sprites.species[id].frontOffset` /
+`.backOffset`. **Nothing in `src/` had ever read either field.**
+
+AND THE TWO SOURCES AGREE EXACTLY, which is what makes this a derivation rather
+than a nudge:
+
+    species        cartridge offset    empty rows in the PNG
+    Piplup  front        23                     23
+    Starly  front        20                     20
+    Chimchar back         8                      8
+
+Three species, two independent sources, no discrepancy.
+
+The SIGN is the cartridge's too: `send_phase.c` positions with
+`y = (100 - 20) + BoxPokemon_SpriteYOffset(...)` -- it ADDS, so a bigger offset
+pushes the picture DOWN, which is what a mon with more empty space beneath it
+needs.
+
+### Applied where it cannot reach the other generations
+
+`Gen4Battle.drawBattlers` only, immediately after `corner()` and BEFORE the
+three branches below it (scissored, ball-absorb, plain), because each of them
+derives from that y. Gen 1, Gen 2 and Gen 3 go through `BattleState` and are
+not touched.
+
+### Verified by looking, before and after in one build
+
+Piplup drops 23 pixels and its feet meet the slab instead of hanging above it.
+
+### Changed
+
+- `src/battle/Gen4Battle.lua` -- `spriteYOffset`, read from the cache the
+  import already fills, and applied in `drawBattlers`.
+
+## Pass 113 -- the house with no textures: a Game Boy respelling given to a Gen 4 map id
+
+Cedric, after the starter battle in Platinum: teleported back into the house
+with no indoor textures.  He sent the log, and the log named the fault outright:
+
+```
+[warn] gen4 ground: T_01R_0201 names no texture set; keeping the stand-in
+[info] map: T_01R_0201 at (2,6)
+```
+
+### What it was
+
+`Data.normalizeMapId` exists for the Game Boy games, where a map id wants
+friendly spelling, and it inserts an underscore before any digit run that
+follows a letter.  Pointed at a Gen 4 cartridge it rewrites the developers'
+own internal names: `T01R0201` -- the name `mapname.bin` states, and the name
+every Gen 4 cache index is keyed by -- becomes `T_01R_0201`.  `aliasMap`
+publishes that as a COPY with `id` set to the new spelling, so a map loaded
+through the alias carries an id no Gen 4 index has ever heard of.
+
+`Gen4Ground.forMap` then looks the map up in `gen4_terrain.maps`, finds
+nothing, and keeps the checkerboard stand-in.  That stand-in is what "no
+textures for the indoors of the house" was.
+
+This is the fourth member of the family already recorded here: Game Boy-era
+code applied to Gen 4 data, after `Flags.hasPokedex`, `ShopMenu`'s money sign,
+and the id-versus-name confusions.  It is the first one where the Game Boy
+code corrupts an IDENTIFIER, so it fails silently at every join rather than
+at one display site.
+
+### What the cache actually says
+
+- All 593 terrain records carry a valid texture set.  ZERO are broken.
+- ZERO of the 593 terrain ids contain an underscore.
+- `maps["T01R0201"]` is present; `maps["T_01R_0201"]` is nil.
+- Header 414: `id="414"`, `internalName="T01R0201"`, label "Twinleaf Town".
+
+The record was there under the cartridge's own name the whole time.  Nothing
+was missing from the import; the lookup was asking under a name the engine had
+invented for itself.
+
+### Verified with its own control, four arms in one build
+
+A temporary probe on the line that resolves the set, so the answer is the set's
+NAME and not merely "not nil":
+
+| arm | `id` | `sourceId` | record | texture | set |
+| --- | --- | --- | --- | --- | --- |
+| stock, alias spelling | `T_01R_0201` | `T01R0201` | false | nil | **false** |
+| stock, real spelling | `T01R0201` | nil | true | 20 | true |
+| **fixed, alias spelling** | `T_01R_0201` | `T01R0201` | true | **20** | **true** |
+| fixed, real spelling | `T01R0201` | nil | true | 20 | true |
+
+The fixed alias arm resolves texture set **20** -- the same set the correctly
+spelled map resolves.  A measurement that only asked "is the set non-nil"
+could not have distinguished the right set from any set; this one could.
+
+Rendered frames from the same three arms, 512x384:
+
+- stock + alias: 26 distinct colours, two alternating greys at ~34,700 px each
+  -- the checkerboard stand-in.
+- stock + real spelling (the reference): 20 distinct colours.
+- fixed + alias: 19 distinct colours, and **4 differing pixels out of 196,608**
+  against the reference -- a 2x2 block at (424,382), one animation phase apart.
+
+Stated plainly, because the frames do not show it: this harness cache has no
+tileset art (`missing image assets/generated/gen4/tileset/standin.png`), so all
+three frames are dark.  What the frames establish is that the aliased map now
+renders IDENTICALLY to the correctly spelled one, and what the probe
+establishes is that it resolves the same texture set.  Whether Cedric's house
+has its textures back is his play-test, not mine.
+
+### The shape of the fix
+
+`aliasMap` was already copying the map; it now records where the copy came
+from, and the join asks for that first:
+
+```lua
+mapped.sourceId = source
+...
+local record = terrain.maps
+  and (terrain.maps[def.sourceId or def.id] or terrain.maps[def.id])
+```
+
+Recovering the original by stripping underscores back out would work today and
+is guessing at an inverse of a lossy rewrite -- `T_01R_0201` and a genuine
+`T_01R_0201` would be indistinguishable.  Carrying the id itself cannot be
+wrong.
+
+### What this does not fix
+
+Terrain was the join that Cedric could SEE.  Every other Gen 4 index keyed by
+internal name has the same exposure through the same aliases, and a silent miss
+there looks like a missing feature rather than an error.  Logged as its own
+task rather than declared handled.
+
+### Changed
+
+- `src/core/Data.lua` -- `aliasMap` stamps `sourceId` on the copy.
+- `src/render/Gen4Ground.lua` -- `forMap` prefers `def.sourceId`.
+
+## Pass 114 -- item 2: every sign in Sinnoh, and the reason that was wrong about why
+
+Cedric: *"signs also still dont appear this screenshot is of me talking to the
+tile that should have it on it i cant walk through it but theres nothing
+rendered"*.  His screenshot shows the sign's TEXT reading correctly, so the
+script and the collision were both right and only the art was missing.
+
+### The premise this port had recorded, and what killed it
+
+`Gen4ObjectGfx.NO_SPRITE` marked ids 91-96 "signpost", with the reason that *a
+signpost is part of the map*.  Twinleaf Town is the counter-example:
+
+- its chunk carries 8 prop placements -- four buildings (`t1_h01`, `t1_h01`,
+  `t1_s01`, `t1_s02`) each paired with model 67, which is `t1_door1`.  FOUR
+  DOORS, not four signs.  The nearest of them is 123 units -- 7.7 tiles -- from
+  the readable sign.
+- all 19 of its mesh shapes are terrain materials: tree01, tree04_2, ngrass,
+  nhana, imped, nsandp, nsand, hage, seaside3, conttree_b, conttree_t, tshadow,
+  lakep, lake, puddle_b, s_snow03, s_snow, s_snow04, s_sonwp.
+- its 32-model prop allow-list holds no signpost and no mailbox.  `kanban01`
+  and `fs_kanban` exist in `build_model.narc` and are not in this area's list.
+
+The art is not in the map.  Signs are ordinary OBJECT EVENTS -- Twinleaf places
+four (gfx 91, 92, 92, 94) and the cartridge has **212 placements of 91-96 across
+65 event entries**, every one of them drawing nothing.
+
+The sprite table really does have no row for them -- it runs gfx 90 -> member 88
+and then straight to gfx 97 -> member 91 -- so "no sprite" was CORRECT and only
+the reason for it was wrong.  That distinction is the whole bug: a true
+statement with a false explanation stopped anyone looking further.
+
+### What draws them
+
+A SECOND nine-row table of the same `{ id, member }` shape, whose member column
+indexes a DIFFERENT archive -- `data/mmodel/fldeff.narc`, 201 members:
+
+| gfx | name | member | model |
+| --- | --- | --- | --- |
+| 91 | map_signpost | 69 | `board_a` |
+| 92 | mailbox | 70 | `board_b` |
+| 93 | signboard | 71 | `board_c` |
+| 94 | arrow_signpost | 72 | `board_d` |
+| 95 | gym_signpost | 73 | `board_e` |
+| 96 | trainer_tips_signpost | 74 | `board_f` |
+| 183 | book | 79 | `book` |
+| 209 | elite_four_room_door | 110 | `door2` |
+| 262 | wall_blocking_rotoms_room | 149 | `rotomwall` |
+
+All nine are BMD0.  WHAT MAKES THE TABLE TRUSTWORTHY is the right-hand column
+against the middle one: the names come from pret, the models from the
+cartridge, and the two had never been joined before.  All nine agree -- a book
+on a book, a door on the Elite Four door, `rotomwall` on Rotom's wall, six
+boards on the six signposts.  Plausible numbers cannot do that.
+
+### The near-miss, kept on purpose
+
+`mmodel.narc` has 470 members of which 50 are never named by the 440-row sprite
+table, and members 429-434 are ALSO called `board_a`..`board_f`.  Six boards for
+six ids is a tidy story and it is WRONG: no table anywhere in overlay 5 contains
+429..434, at any stride.  Checked before it was believed.
+
+### Found by a rule that can reject
+
+THREE places in overlay 5 carry the run 91,92,93,94,95,96 at stride 8, so the
+ids alone do not identify the table -- exactly the almost-true invariant the
+comment on `find` already warns about.  Requiring the member column to be in
+range AND strictly ascending leaves **one offset in the whole overlay**
+(0x2F4B0).  The rejected two fail on the member column: one is 35,631,104 six
+times, the other a constant 2.  `findModels` returns nil if ever two offsets
+satisfy it, rather than taking the first.
+
+Verified with its own control: the real table decodes 9 rows, and the same
+reader given `memberCount = 60` -- which puts the real table out of range --
+REFUSES rather than falling through to either decoy.
+
+### A trap caught before it shipped
+
+`Gen4Ground:building` reaches a model as `set.models[index + 1]`.  That is right
+for `build_model.narc` only by coincidence, and the coincidence is measurable:
+
+| set | models | `member == index-1` | not |
+| --- | --- | --- | --- |
+| buildings | 590 | **590** | 0 |
+| starter | 6 | 0 | 6 |
+| opening | 16 | 0 | 16 |
+| title | 3 | 0 | 3 |
+
+Position equals member for the buildings and for NOTHING ELSE, because the
+packer appends one entry per MODEL and a member may carry several -- and
+`fldeff.narc` is 201 members of which only 145 are BMD0 at all.  Indexed by
+position a signpost would have drawn the WRONG MODEL and still drawn something,
+which is the failure that looks like success.  So every set now publishes
+`byMember`, built from the member each entry already carried and that nothing
+had ever read.
+
+### What is NOT done
+
+THE DRAW.  This pass lands the data: the archive, the table, `fldeffModel` on
+every map object, and the member index.  Nothing renders a signpost yet, so
+after a re-import Cedric will see no change in play -- said here plainly rather
+than left to be discovered.  The draw needs the map's object events inside
+`Gen4Ground`, which is a bigger change than one pass can verify by looking.
+
+### Changed
+
+- `src/import/Gen4ObjectGfx.lua` -- `findModels`, `readModels`,
+  `MODEL_ARCHIVE`, `MODEL_MEMBERS`; the NO_SPRITE reasons for 91-96 and for
+  183/209/262 now say `model`, and the stale "part of the map" reason is gone.
+- `src/import/RomExtractorGen4.lua` -- `fldeff.narc` added to `MODEL_ARCHIVES`,
+  `objectModelTable`/`modelFor`, `fldeffModel` on each object, and `byMember`
+  on every model set.
+
+## Pass 115 -- the signpost finding, made into a check that can fail
+
+Pass 114 landed the data behind item 2.  This pass makes it a STANDING CHECK,
+because the thing that went wrong here was not a wrong number -- it was a true
+statement carrying a false reason, and a number check would not have caught it.
+
+`tools/gen4_signpost_check.lua <rom>` -- **67 checks, 0 failures**.
+
+### What it proves, in five sections
+
+1. The sprite table really has no row for 91-96, AND ITS NEIGHBOURS DO: gfx 90
+   resolves to member 88 and gfx 97 to member 91.  Without the neighbours a
+   broken reader and a genuine gap look identical.
+2. Twinleaf's chunk does not contain a sign: build_model 67, the prop repeated
+   four times there, is `t1_door1` -- a DOOR.  If that assertion ever starts
+   naming a signpost model, the "signs are map geometry" theory is back and this
+   file should be re-read rather than deleted.
+3. The model table decodes 9 rows, plus the control below.
+4. Every row lands on a model whose NAME agrees with pret's name for the id.
+5. The port agrees with itself: each of the nine reports reason `model`, and
+   none of them appears in both tables.
+
+### The control, and why the finder needed one
+
+THREE places in overlay 5 carry the ids 91,92,93,94,95,96 at stride 8.  The ids
+alone identify nothing, which is the same almost-true invariant the comment on
+`find` has warned about since the sprite table was found.  So the check tells
+the reader the archive is 60 members instead of 201 -- which puts the real table
+out of range -- and requires it to REFUSE.  If it matched on ids alone it would
+return a decoy there, and the decoys are obvious once seen: one has 35,631,104
+as its member column six times over, the other a constant 2.
+
+### Verified by making it fail, four ways
+
+A check that has only ever passed has not been tested, so each of these was run:
+
+| poisoned | result |
+| --- | --- |
+| expected model name for gfx 92 -> `board_z` | 1 failure |
+| expected member for gfx 95 -> 99 | 1 failure |
+| assert gfx 91 SHOULD have a sprite row | 1 failure |
+| revert NO_SPRITE 91-93 to `"signpost"` | 3 failures |
+| nothing | **0 failures** |
+
+### A header that was teaching the wrong thing
+
+`tools/gen4_mapprops_check.lua` opened by stating that items 2 and 4 are "one
+fault" and that a signpost is a map prop.  That is where the dead theory was
+written down most confidently, and it is the first thing anyone investigating
+signs would have read.  Corrected: they are TWO faults, item 4 is still the
+dummy box and the per-area allow-list and that half was always right, and the
+file now points at the signpost check for the other half.  Its own 5,224 checks
+still pass -- the edit is its header only.
+
+### Changed
+
+- `tools/gen4_signpost_check.lua` -- NEW.
+- `tools/gen4_mapprops_check.lua` -- header corrected; no assertion touched.
+
+## Pass 116 -- item 2 finished: the signposts are drawn
+
+Passes 114 and 115 found the models and proved the table.  This draws them.
+
+### The two spaces, which is the whole of the work
+
+A chunk prop states its position in UNITS FROM ITS CHUNK'S CENTRE and carries its
+own `y`.  A map object states MAP-LOCAL TILES and carries no height at all.  So
+`signpostsFor` converts, and the conversion is the same arithmetic `heightsAt`
+already does -- global tile, then chunk cell, then the tile's CENTRE in the
+chunk's own space:
+
+```
+mx, my = tx + originX, ty + originY
+cx, cy = floor(mx / 32), floor(my / 32)
+x = ((mx % 32) + 0.5) * 16 - 256        z = ((my % 32) + 0.5) * 16 - 256
+y = self:heightAt(tx, ty)
+```
+
+`y` comes from the ground because Sinnoh is not flat and a sign at a fixed
+height would sink into every slope in the game.
+
+### Verified against a hand-computation done from the cache, not from the code
+
+The placements were worked out separately, straight out of `gen4_events`, and
+only then compared with what the renderer produces:
+
+| gfx -> model | computed by hand | produced by the renderer |
+| --- | --- | --- |
+| 91 board_a | cell (3,27), (8.0, -24.0) | land 0, (8.0, -24.0) |
+| 92 board_b | (40.0, 88.0) | (40.0, 88.0) |
+| 92 board_b | (-40.0, -72.0) | (-40.0, -72.0) |
+| 94 board_d | cell (3,**26**), (-40.0, 136.0) | land **5**, (-40.0, 136.0) |
+
+THE FOURTH ROW IS THE ONE WORTH HAVING.  Twinleaf's arrow sign sits at map-local
+y = -8 -- ABOVE the map's own origin -- so it belongs to a different chunk than
+the other three, and both the hand-computation and the code put it on land 5.
+A test where every case lands on one chunk would not have exercised the grid
+lookup at all.
+
+All four resolve `y = 16.0`, which is the height the chunk's four houses stand
+at.  The signs are on the same floor as the buildings beside them.
+
+### Three draws, not one
+
+`record.objects` was read in FIVE places.  Three of them DRAW props -- the two
+live passes and the bake -- and those now read `objectsFor(land, record)`, which
+is the chunk's own props plus this map's signposts.  The other two are left
+alone on purpose: the canopy pass builds the mask that hides the player behind
+tall things, and the moving-prop pass collects what needs its own animated
+canvas.  A signpost is neither.
+
+`self.terrain.chunks` IS SHARED BETWEEN MAPS -- one table for the whole
+cartridge -- so the signposts are NOT appended to `record.objects`.  Doing that
+would leak Twinleaf's mailboxes into every other map drawing the same chunk, and
+would do it again on every load.
+
+### Two ways the same number means two different things
+
+`building(index)` and `animationsFor(index)` both took a bare member number and
+both assumed `build_model.narc`.  Handed an fldeff member neither FAILS -- they
+return whatever building sits at that position:
+
+- `building` now takes an `archive`, keeps a separate cache per archive, and
+  resolves fldeff through `byMember` (pass 114) rather than by position.
+- `animationsFor` refuses fldeff outright.  `bm_anime` is paired to
+  `build_model` BY MODEL NAME through a position lookup, so a signpost would
+  have been handed another model's animations -- a wrong answer, not a missing
+  one.
+- `capBack` is off for fldeff.  The generated back wall copies a face, which is
+  right for a house with an unmodelled north side and wrong for a board that is
+  MEANT to be thin.
+
+### The control: it must change nothing without the data
+
+On a cache imported before pass 114 there is no fldeff set, so nothing should
+draw and nothing else should move.  Stock against patched on Twinleaf:
+**0 differing pixels of 196,608**, 0 errors.
+
+A zero is also what a dead code path scores, so the path was shown live in the
+same build: with the members stamped in, `objectsFor` reports `own=8 mine=3` on
+Twinleaf's chunk -- the eight props and the three signposts standing on it.
+`lua_use_before_local.py`: 314 files, 1 site, and the UNPATCHED tree has the
+same 1 (`src/core/DiscordPresence.lua:141`, pre-existing, logged separately).
+
+### What is still not verified by looking
+
+That a resolved fldeff model DRAWS.  This cache has none, so the last link --
+geometry on screen -- waits on a re-import.  Everything up to it is measured:
+the table against the ROM (pass 115), the placement against a hand-computation,
+and the inertness against a pixel diff.
+
+### Changed
+
+- `src/render/Gen4Ground.lua` -- `signpostsFor`, `objectsFor`; `building` and
+  `animationsFor` take an archive; three draw sites read `objectsFor`.
+
+## Pass 117 -- item 20: the briefcase, and a model the cartridge swaps away from
+
+Cedric, with a reference frame from the real game: *"the case still isnt
+correct"*.  The port drew the lid, a gold band, then nothing -- no interior, no
+front face -- with the three Poke Balls floating in the dark BELOW the case.
+
+### What it was
+
+`Make3DGraphics` in `choose_starter_app.c` builds SIX 3D objects and shows only
+two.  The members line up with this port's own model set exactly:
+
+| object | member | model | at start |
+| --- | --- | --- | --- |
+| [0] | 1 (anim 0) | `psel_all` | VISIBLE |
+| [1] | 8, no anim | `psel_trunk` | hidden |
+| [2..4] | 3, 5, 7 (anims 2, 4, 6) | `psel_mb_a/b/c` | hidden |
+| [5] | 9, no anim | `pmsel_bg` | VISIBLE |
+
+and then, the instant the opening animation reaches its last frame:
+
+```c
+if (Advance3DGraphicsAnimationIfNotLastFrame(&app->starter3DGraphics[0])) {
+    Set3DGraphicsIsVisible(&app->starter3DGraphics[0], FALSE);  // psel_all OFF
+    Set3DGraphicsIsVisible(&app->starter3DGraphics[1], TRUE);   // psel_trunk ON
+    Set3DGraphicsIsVisible(&app->starter3DGraphics[2], TRUE);   // the three
+    Set3DGraphicsIsVisible(&app->starter3DGraphics[3], TRUE);   // ball models
+    Set3DGraphicsIsVisible(&app->starter3DGraphics[4], TRUE);   // ON
+```
+
+THE CARTRIDGE STOPS DRAWING `psel_all` AND DRAWS `psel_trunk` PLUS THREE BALL
+MODELS.  This screen never swapped, so it went on drawing `psel_all` at its
+FINAL FRAME -- a pose nobody is meant to see, because at that instant the
+cartridge stops drawing that model at all.  The case with no bottom IS that
+pose; the balls below it are where its own animation left them.
+
+`psel_trunk` is the case the player chooses from.  This file's header already
+described it -- *"the case on its own, in its own rest pose with the lid already
+swung back"* -- and then never used it.
+
+### Two sources that never met, agreeing to the unit
+
+The ball positions are hard-coded in the cartridge as `selectionMatrix`:
+
+    [0] = { -44, -4, 32 }   [1] = { 0, -4, 62 }   [2] = { 38, -4, 26 }
+
+and the LAST FRAME of `psel_all`'s animation leaves its ball joints at
+(-44,-4,32), (0,-4,62) and (38,-4,26) -- read out of the packed track data,
+with no knowledge of the C.  The animation carries the balls out of the case and
+the separate models are then planted exactly where it left them.  The port's
+ball placement was never wrong; only the case it drew them against was.
+
+### The floor, a second bug in the same function
+
+```c
+Set3DGraphicsPosition(.., 0, -28 * FX32_ONE, 40 * FX32_ONE);
+Set3DGraphicsScale(.., FX32_CONST(3.50f), FX32_ONE, FX32_CONST(3.50f));
+Set3DGraphicsRotation(.., 0, (180 * 0xffff) / 360, 0);
+```
+
+`pmsel_bg` needs a position, a 3.5x scale in X and Z and a half turn about Y.
+This screen drew it with NO matrix at all, which is why no ground ever reached
+the frame.  The half turn is (-1, 1, -1) on the diagonal, so it folds into the
+scale rather than being multiplied every frame.
+
+### Verified by looking, against the player's own reference
+
+Before: 32 distinct colours, 61% of the frame near-black, no interior, balls
+adrift.  After: 73 distinct colours, **0.3% near-black** -- the case open with
+its contents (the striped cylinder, the grey slab, the purple mat, the teal
+cloth), the three balls sitting ON them inside the case, and grass either side.
+It matches the reference frame.
+
+### What was ruled out on the way, each by measurement
+
+- THE GEOMETRY WAS NEVER MISSING: `psel_all` carries all 29 shapes and every one
+  has an image.
+- THE CAMERA IS INNOCENT.  Swept the final stage over (-50,200,36),
+  (-50,300,36), (-50,380,36), (-35,260,36), (-50,300,0) and (-40,300,36):
+  pulling back only shrinks everything and the body is missing in ALL of them.
+  The cartridge's pitch, distance and target stand unchanged.
+- Applying the cartridge's "target z 0 -> 36" to Y instead of Z -- tempting,
+  since this file has that history -- makes the framing WORSE.  Rejected.
+- `camStep` and `self.frame` are both clamped; neither overshoots, and running
+  the animation to its last frame is CORRECT (the cartridge clamps there too).
+- THE ONE COMPARISON THAT ISOLATED IT: same camera, same tick, pose forced nil
+  versus applied.  Animation off gave a complete case body; animation on lost
+  it.  That is what pointed at the model rather than the shot.
+
+### Still not right, and a correction to the line above it
+
+The chosen ball's lift is a flat `SELECTED_LIFT`, and THIS PORT INVENTED IT.
+
+An earlier draft of this entry said the cartridge bobs the BALL on a sine.  That
+was wrong, and it was wrong in the way that matters: it named a real cartridge
+function and attached it to the wrong object.  `SetupStarterRotation(&cursor->
+starterRotation, 8 * FX32_ONE, 32)` is real, and `AdvanceCursorMovement` applies
+its output to `Sprite_SetPosition(cursor->sprite, ..)` -- THE 2D CURSOR SPRITE,
+never a ball.
+
+What the cartridge actually does: `MakeSelectionMatrices` and
+`SetSelectionMatrixObjects` are each called ONCE, at setup.  The three balls are
+planted at (-44,-4,32), (0,-4,62), (38,-4,26) and NEVER MOVE AGAIN.  The choice
+is marked by a cursor sprite drawn over the chosen ball at the screen positions
+`otherSelectionMatrix` holds -- (78,55), (130,82), (172,50) -- bobbing plus or
+minus 8 pixels on a 32-frame sine.
+
+So the lift is a STAND-IN, kept only because it is the one thing telling the
+player which ball is chosen until that cursor exists.  It is labelled as such in
+the source now rather than left looking cartridge-derived.
+
+READ A SYMBOL'S CALLER BEFORE QUOTING IT.  Every number in that first draft was
+real; the object they applied to was not, and nothing about the constants
+themselves would ever have revealed it.
+
+### Changed
+
+- `src/ui/Gen4StarterSelect.lua` -- `psel_trunk` and the three ball models are
+  built and drawn once the opening ends; `BALL_STANDS` from `selectionMatrix`;
+  `GROUND_MATRIX` for `pmsel_bg`.
+
+## Pass 118 -- item 22: three trees on one pivot, and a threshold set exactly on the data
+
+Reported a third time: *"some of the trees are pivoting together for example 3
+trees are pivoting from one point making it look really weird in first or third
+person"*.
+
+The two earlier reports were fixed (the pivot moved off the centroid and onto
+the trunk line), and the strip exclusion that was supposed to handle THIS one
+already existed.  It was letting the commonest strip in the game through by a
+hair.
+
+### The hair
+
+`billboardPivots` excludes a continuous strip with
+
+```lua
+if (uhi[r] - lo) > STRIP_REPEATS * tw then strip[r] = true end
+```
+
+and `STRIP_REPEATS` was **1.5**.  Replaying the classifier over all 666 chunks
+of the cartridge, u-span divided by texture width lands on clean values:
+
+| repeats | components | |
+| --- | --- | --- |
+| 0.66 / 0.53 / 0.34 | 6,328 / 6,279 / 6,272 | single trees |
+| 4.00 | 3,534 | excluded |
+| **1.50** | **2,396** | **ON the threshold -- the test is `>`, so KEPT** |
+| 1.00 | 2,250 | a single tree, correctly kept |
+| 2.50 / 2.00 | 1,187 / 1,159 | excluded |
+
+A strict `>` against 1.5 lets all 2,396 through, and at a 64-wide texture such a
+component is **96 world units across -- three 32-unit trees turning about one
+pivot**, which is the report word for word.
+
+1.25 rather than 1.49 because it is the MIDDLE OF A MEASURED GAP: 21,758
+components sit at or under 1.00 repeats, 2,396 at exactly 1.50, and only
+EIGHTEEN of 30,147 lie strictly between.  A threshold in an empty gap cannot be
+knocked over by float wobble in the s16 divide -- which is what putting it on
+1.5 and switching to `>=` would have risked.
+
+### ...and the rule that does most of the work
+
+The u-span test is a PROXY: it reads the texture's repeat, not the quad's size,
+so it misses strips whose UVs are stretched rather than tiled.  The cartridge
+names them instead -- `conttree` is CONTINUOUS tree -- and the separation is
+total:
+
+| | n | min width | median | at or under 40 units |
+| --- | --- | --- | --- | --- |
+| `conttree*` | 10,217 | **64.0** | 128.0 | **ZERO** |
+| every other card | 19,930 | 4.6 | 33.0 | 19,595 (98.3%) |
+
+The narrowest `conttree` in the game is 64 units, already two trees; an ordinary
+tree card is 33.  There is no overlap to argue about, so a `conttree` never
+billboards.  The name test sits OUTSIDE the `tw` block on purpose: a name is
+readable whether or not the texture loaded, and a cache with no textures should
+still not swing a forest border as one card.
+
+### Measured effect
+
+| | billboarded | wider than 48 units | widest |
+| --- | --- | --- | --- |
+| before | 24,174 | 4,493 (18.6%) | 96.0 |
+| name rule only | 19,755 | 74 (0.4%) | 96.0 |
+| **both** | **19,732** | **51 (0.3%)** | **85.3** |
+
+The name rule alone takes it from 18.6% to 0.4%; the threshold trims the rest.
+p90 of a billboarded card is 40.0 units either way -- the population that still
+turns is single trees.
+
+### Two hypotheses killed before this one, both recorded so they are not retried
+
+1. THE NO-TEXTURE PATH.  The strip test is wrapped in `if tw and tw > 0`, and
+   the call site passes `image and tw or nil` -- so a shape whose texture failed
+   to load skips the test entirely, which is the reported symptom exactly, and
+   the source documents that choice deliberately.  Measured at Twinleaf: every
+   billboard shape reports `tw=16`.  Not the cause.
+2. A UNIT MISMATCH IN THE TEST.  A vertex's stored `u` is divided by `tw`, so
+   comparing a span against `STRIP_REPEATS * tw` looked off by a factor of the
+   texture width.  It is not: `positions[i][4]` is the raw TEXEL u, kept
+   separately for exactly this reason, and the code says so.
+
+### How this was verified, stated precisely
+
+The numbers above come from REPLAYING the classifier -- the same union-find, the
+same face-normal test, the same u-span rule -- over Cedric's re-imported cache
+and its chunk store, offline.  THE ENGINE ITSELF WAS NOT RE-RUN ON THAT CACHE:
+this container's own cache is the 14-byte-vertex one, where the classifier finds
+zero cards, so it cannot exercise the path at all.  The change is grounded in
+the cartridge's geometry rather than in a rendered frame, and Cedric's play-test
+is what confirms it.
+
+!! AND `posScale` IS WHY THE FIRST RUN SAID THERE WAS NO PROBLEM.  Decoding chunk
+vertices without each chunk's `posScale` (64) gives widths a sixty-fourth of the
+truth, and the first pass of this measurement reported "0 cards wider than 48
+units" -- a clean bill of health produced entirely by a missing multiply.
+
+### Changed
+
+- `src/render/Gen4Model.lua` -- `STRIP_REPEATS` 1.5 -> 1.25, and
+  `isContinuousStrip` excludes any `conttree*` card.
+
+
+## Pass 119 -- the sea drew as opaque as the cliffs, and the value had been computed all along
+
+Flagged in passing at the close of pass 118: `shape.material` comes back nil on
+terrain chunk shapes, while `Gen4Ground:building` explicitly carries
+material/texture/alpha for props with a comment recording that dropping them
+once cost the building shadows.  Chasing that flag found the `material` half to
+be harmless -- and the `alpha` half to be a live bug two files up from where the
+flag pointed.
+
+### What the flag was actually worth
+
+`material` costs nothing on its own.  Only two consumers read it: `shapeAlpha`,
+which falls back to `shape.material or shape.texture` and `texture` IS carried;
+and the animated-material lookup, and no animation in the cartridge names any
+material, shape or texture of a land chunk.  So on that field the flag was a
+false alarm, and saying so is the honest end of it.
+
+`alpha` is not.  Following the same field one level up the import:
+
+- `Gen4Nsbmd` reads the polygon attribute and keeps `alpha` -- polyAttr bits
+  16..20, a 0..31 value.  It has since the house shadows came out black.
+- `Gen4ModelPack.pack` carries it onto every shape, kept only when under 31.
+- **`Gen4Terrain.append` did not copy it into the index.**  Name, offsets,
+  counts, texture, palette, material -- and not alpha.
+- so the cache has no alpha for terrain, and `Gen4Ground:modelFor` had nothing
+  to forward even if it had tried.
+
+`Gen4Model.shapeAlpha` has honoured `shape.alpha` the whole time.  The value was
+computed, then dropped one line short of the cache, and every terrain shape in
+Sinnoh drew fully opaque.
+
+!! THE EARLIER MEASUREMENT COULD ONLY FAIL.  Pass 118 recorded "0 of 7,547
+terrain chunk shapes carry an alpha field at all" and read it as licence to drop
+alpha.  That count was taken on the CACHE, which is downstream of the drop -- it
+would have returned zero whatever the cartridge said.  The mirror of the house
+rule: a measurement that can only fail says nothing either.
+
+### What the cartridge actually states
+
+Measured with `Gen4Nsbmd` straight off land_data.narc, all 666 chunks, before
+any of this was called a bug -- 155 of 7,346 terrain materials state an alpha
+below 31, across 107 chunks:
+
+| material / texture | alpha | shapes |
+| --- | --- | --- |
+| `sea` | 13/31, 21/31 | 12, 12 |
+| `shadowchip` | 12/31 | 27 |
+| `h_kage` and friends | 3..15/31 | 30 |
+| `dun_shadow` | 10..19/31 | 8 |
+| `bf_ueki02` | 12/31 | 6 |
+| `stair_d01_shade` | 12/31 | 4 |
+| `wtk_kabe_garasu3` | 16..20/31 | 3 |
+| `water01`, `water02` | 13/31, 15/31 | 1, 1 |
+
+`garasu` is glass, so that one is a window.  `shadowchip` is the ground shadow
+decal, which is the same fault Cedric reported for the houses -- *"there are
+shadows for the houses but they're showing as black"* -- still live one file
+over, for the ground.  And the water being as opaque as the cliffs it runs up
+against is the most visible of the set.
+
+Of the 155, the existing `kage` name fallback already rescues 30.  The other
+**125 drew fully opaque**.
+
+### The trap in supplying `material`
+
+`shapeAlpha` read `shape.material or shape.texture` -- an `or` where the
+question is an either.  Counted over the same 666 chunks:
+
+- 17 shadow materials say `kage` in **both** names,
+- **11 say it only in the TEXTURE** -- `chair4`, `chair8`, `counter2`, `shelf2`,
+  `lambert7`, `lambert10`, `isu:lambert9`, `a`, `pasted__chair4` all wear
+  `h_kage` or `m_dun06_kage` under a name that says nothing,
+- 2 say it only in the MATERIAL (`kage`, with no texture at all).
+
+So which of the 30 the fallback caught depended on which field the caller
+happened to carry.  Terrain carried texture and got the 11 right; adding
+`material` in this pass would have moved it to the other side of the `or` and
+**turned those 11 correct shadows opaque on every cache already on disk**, since
+an existing cache has `material` but no `alpha`.  Both names are now tested.
+
+Worth recording against the fallback's own comment, which says `h_kage` "is
+9/31 on every material that wears it": true of the building models it was
+measured on, not of terrain, where `h_kage` is 6/31 on `h_kage1`, `kage` and
+`kage:kage`, and `m_dun06_kage` is 15/31.  Moot once the real value is carried,
+which is the point of carrying it.
+
+### Not a Game Boy regression
+
+All three files are Gen 4 only -- `Gen4Terrain`, `Gen4Ground`, and a local
+function inside `Gen4Model`.  Crystal, Gold/Silver and Prism reach none of them.
+`alpha` is additive and read as `s.alpha`, so no verifier enumerates the key set
+and an old cache still loads; it just keeps the name fallback until a re-import.
+
+### Changed
+
+- `src/import/Gen4Terrain.lua` -- `append` carries `alpha = shape.alpha` into
+  the chunk index.
+- `src/render/Gen4Ground.lua` -- `modelFor` forwards `material` and `alpha` onto
+  every terrain shape.
+- `src/render/Gen4Model.lua` -- `shapeAlpha`'s name fallback tests the material
+  name AND the texture name, instead of whichever exists first.
+
+**Needs a re-import** for the sea, the water and the shadow decals to go
+translucent; the fallback covers the `kage` shapes until then.
+
+
+## Pass 120 -- the alpha finding, made into a check that can fail, and two corrections to pass 119
+
+Pass 119 landed the field.  This pass makes it a STANDING CHECK, for the reason
+that question earned one: it was measured wrong twice, in both directions.
+
+`tools/gen4_terrain_alpha_check.lua` -- 50 checks, 0 failures, ROM only.
+Sections 1-3 read the cartridge; section 4 runs the real `Gen4Terrain.chunk` and
+`Gen4Terrain.append` and looks in the index they produce, because the bug was
+never in the cartridge or the parser -- it was one missing line in `append`, and
+only reading `append`'s output can catch that.
+
+### The control was run, in the same build
+
+Removing the one `alpha = shape.alpha` line from the fixed importer and running
+the check again:
+
+```
+FAIL: Gen4Terrain.append dropped the alpha for chunk 26: 1 packed shapes carry one, 0 of 13 index entries do
+FAIL: Gen4Terrain.append dropped the alpha for chunk 28: 3 packed shapes carry one, 0 of 25 index entries do
+FAIL: Gen4Terrain.append dropped the alpha for chunk 34: 1 packed shapes carry one, 0 of 21 index entries do
+50 checks, 6 failures
+```
+
+So the check distinguishes the two states it claims to.  It also carries its own
+control in the other direction: a chunk the cartridge says is fully opaque must
+come out of `append` with no alpha on any shape, so section 4 cannot be passed
+by stamping a constant on everything.
+
+### Correction 1: `stair_d01_shade` is a MATERIAL name, not a texture
+
+Pass 119's table keyed on `m.texture or m.name`, which silently conflates the
+two -- the same shape of mistake as the `or` in `shapeAlpha` that this work was
+already about.  Asserting those names as textures failed immediately:
+
+```
+FAIL: stair_d01_shade states no alpha at all; it should state 12/31
+```
+
+It states 12/31 as a material with **`texture` nil**.  So do `shade` (x2),
+`table01_1_shade` and `table_l01:shade`, and so does `kage` on two shapes.
+
+### Correction 2: twenty of the 155 have no texture at all
+
+Counted properly: **20 of the 155 translucent terrain materials carry no texture
+whatsoever** -- untextured, vertex-lit quads at 12/31.  That is the subset no
+texture-name rule could ever have reached, and it is the one that drew as solid
+black patches rather than merely too-solid ones.  It also means the `kage` name
+fallback was never a complete answer for terrain even in principle, only a
+bridge for caches written before the field existed.
+
+### Changed
+
+- `tools/gen4_terrain_alpha_check.lua` -- NEW.  50 checks, 0 failures, needs
+  only the ROM.
+
+
+## Pass 121 -- item 5's deliberate gap: which slot each encounter variant replaces
+
+Item 5 (no wild Pokemon in grass, water or caves) was fixed two passes of work
+ago and closed with an honest gap written into the source:
+
+> Which index each one replaces is a rule this has not read off the cartridge,
+> and guessing it would put the wrong species in the grass rather than none, so
+> the base twelve stand until that is measured.
+
+Measured. The cartridge states it outright, in the grass branch of
+`WildEncounters_TryWildEncounter` (pokeplatinum `src/overlay006/wild_encounters.c`):
+the table is filled from the twelve base slots and then five calls each overwrite
+a named pair, in order, followed by the radar inside
+`TryGenerateGrassEncounter_WithRadar`.
+
+| variant | cartridge slots | 1-based | applied? |
+| --- | --- | --- | --- |
+| day / night | `[2]`, `[3]` | 3, 4 | **yes** |
+| swarm | `[0]`, `[1]` | 1, 2 | no -- no daily-swarm record in the save |
+| Trophy Garden | `[6]`, `[7]` | 7, 8 | no -- needs two save-stored daily species |
+| dual slot | `[8]`, `[9]` | 9, 10 | **argued no-op** -- there is no GBA slot 2 |
+| radar | `[4]`, `[5]`, `[10]`, `[11]` | 5, 6, 11, 12 | no -- needs the radar and its chain |
+| Great Marsh | the whole table | -- | no -- daily rotation |
+
+`formRates` and `unownTable` are not slot substitutions at all: only the first two
+`formRates` entries are read, and only to pick Shellos/Gastrodon's form, and
+`unownTable` selects Solaceon Ruins' letter distribution.
+
+!! AND `ReplaceSwarmEncounters` NAMES ITS OWN PARAMETERS `radarSlot1` AND
+`radarSlot2`. They are not radar slots -- the caller passes grass slots 0 and 1.
+Quoting the callee's signature would have put the swarm Pokemon in the radar's
+places, in code that runs and looks right. This is the third time this session
+that reading a symbol without reading its caller produced a plausible wrong
+answer; it is the same family as the cursor-bob correction.
+
+### Day/night, and why it is applied unconditionally
+
+Only `.species` is written -- every one of those assignments does -- so a night
+Pokemon inherits the LEVEL and the chance of the base slot it displaces. A
+substitution that also carried a level would be inventing one.
+
+Morning is not a third table. The cartridge's own comment reads "Default
+encounters are morning. They get replaced by this if it is not morning", and the
+function leaves both slots untouched for it. Twilight rides with day and late
+night with night, which is the cartridge's pairing, not an approximation. From
+`TimeOfDayForHour` (`src/rtc.c`), hour by hour: **4-9 morning, 10-19 day, 20-3
+night**.
+
+Applied without a per-area guard because the data supports it, measured over all
+183 areas: **not one has a zero in either its `day` or its `night` pair**, so the
+substitution can never write species 0 into the grass. And it earns its keep --
+**115 of the 171 areas with grass vary by time of day** (27 differ by day, 115 by
+night), so until now most of Sinnoh showed its morning line-up at midnight. Area
+10 reads base 307,35 / day 307,74 / night 41,35: Zubat after dark.
+
+### One transcription of the clock, not two
+
+`Gen4Commands.timeOfDayValue` already held that 24-entry lookup. Rather than
+write a second copy, the canonical one moved to `Gen4Encounters` -- which has NO
+requires and can therefore be loaded by a check on its own, where `Gen4Commands`
+is far too entangled -- and the command delegates to it. Same reasoning as moving
+`coversScreen` out of the extractor.
+
+### The cache had to learn about the clock
+
+`Encounter.forMap` memoises its Gen 4 view per map definition. A view built at
+noon holds the day species, so returning it after dark is the very bug the
+substitution exists to fix, arriving by a different door. The view now records
+its band and rebuilds when the band changes -- three rebuilds a day per map --
+while still returning the same object for two hours inside one band, so
+`gen4Table`'s own cache is not churned.
+
+### Four planted faults, all caught
+
+A new `tools/gen4_encounter_slots_check.lua` -- 100 checks, 0 failures -- and the
+plants that show it bites:
+
+| plant | failures |
+| --- | --- |
+| `TIMED_SLOTS = {1,2}` instead of `{3,4}` | 5 |
+| cache not keyed on the band | 2 |
+| morning substitutes the day pair instead of returning nil | 1 |
+| the substituted array aliases the base slots instead of copying | 3 |
+
+The Gen 1/2/3 control is the whole of "do not break Crystal": a table with no
+`grassRate` must come back as **the same object**, not a copy and not a view, so
+nothing downstream can observe that this code ran -- asserted at all 24 hours,
+since the band is computed before the shape is known. The `Gen4Encounters`
+require also sits INSIDE the Gen 4 branch, after Gen 1/2/3 have returned.
+
+### Changed
+
+- `src/import/Gen4Encounters.lua` -- the slot constants, `timeOfDayForHour`,
+  `timedBand` and `timedGrass`.
+- `src/world/Encounter.lua` -- `forMap` takes an optional hour, applies the
+  day/night substitution, and keys its cache on the band; the stale "does not do
+  this yet" comment is replaced by the table above.
+- `src/script/Gen4Commands.lua` -- `timeOfDayValue` delegates.
+- `tools/gen4_encounter_slots_check.lua` -- NEW, 100 checks, ROM only.
+
+Still not done, and now listed with their indices rather than as an unknown:
+swarm, Trophy Garden, radar and Great Marsh all need save state the port does not
+keep. Encounters still do not vary by swarm or radar -- but they now vary by time
+of day, which is the one an ordinary play-through meets.
+
+
+## Pass 122 -- Sinnoh's starters came out red and pink, and the art was never wrong
+
+Reported from play with a screenshot: *"you messed up the color of pokemon
+spirtes and possibly the trainer sprites too"*. Turtwig crimson with salmon
+highlights, Chimchar pink and white.
+
+### The extracted art is correct -- measured before anything was changed
+
+Read straight out of Cedric's re-imported cache:
+
+| file | palette entries |
+| --- | --- |
+| `387_turtwig.png` | `(58,165,66)` green, `(123,214,107)` light green, `(99,74,58)` brown |
+| `390_chimchar.png` | `(239,123,66)` orange, `(255,156,99)`, `(255,230,173)` cream |
+| `393_piplup.png` | `(33,99,156)` blue, `(107,165,230)` |
+
+All three are 80x80, 4-bit, colour-type 3, with the colours the cartridge
+states. So the extractor was never in this, and every minute spent there would
+have been spent on the wrong file. **The remap runs at DRAW time.**
+
+### What the two pics had in common
+
+They came out the same wrong colour rather than each wrong in its own way, and
+that is the whole clue: one palette, both pics. `PaletteFX.monPal` states the
+mechanism in its own first comment -- under OG RED a battle mon pic is a BG TILE
+on the Game Boy Color, drawn into the tilemap and coloured by BGP, so it wears
+the global boot-ROM BG palette rather than a per-species one, "matching the
+hardware capture where **both mons are red/pink** (or blue/pink) on the white
+field".
+
+That is the screenshot, described in the port's own source. Confirmed rather
+than assumed: Cedric's `options.lua` reads `colors = "ogred"`.
+
+### The guard was already written, one generation too early
+
+`BattleState.trainerPalette` returns nil for Gen 3, with the reason on it: "a
+GBA trainer pic is already in colour: the SGB MEWMON remap would squash it to
+four shades (Trainer Tower's challengers came out purple and orange)". Purple
+and orange then; red and pink now. `monPalette` two dozen lines above it has no
+generation guard at all, and Gen 4 arrived through the same shared path with
+nobody extending either.
+
+**The port's recurring fault in its purest form** -- Game Boy-era code reaching
+Gen 4 data, alongside `Data.normalizeMapId`, `Flags.hasPokedex` and `ShopMenu`'s
+money sign.
+
+Guarded at the call sites rather than inside the `ogred` branch, because the
+fault is not one mode's: no COLORS pack holds a palette for species 387, so
+every mode is either wrong or nil, and nil is the right answer. Gen 4 never
+needs the function either -- a shiny Sinnoh Pokemon is its own PNG
+(`spriteShiny`), not the same pic under a second palette, which is the only
+thing the `shiny` argument is for.
+
+### Not a Game Boy regression
+
+The only line removed is the Gen 3 guard, replaced by one that answers for Gen 3
+**and** Gen 4. Gen 1 and Gen 2 reach neither new branch, and Gen 3 returns nil
+exactly as it did.
+
+### Changed
+
+- `src/battle/BattleState.lua` -- `monPalette` returns nil for Gen 4;
+  `trainerPalette`'s guard covers Gen 4 as well as Gen 3.
+
+No re-import needed: the cache was always right.
+
+
+## Pass 123 -- the free camera drew at DS resolution, and now says how many pixels it wants
+
+Reported from play: *"the first and third person are also really low resolution
+and highly pixelated now add in a resolution option in the options"*.
+
+### Why, measured
+
+`Renderer:fitScale()` is `floor(min(pw / uiW, ph / uiH))` and a Gen 4 UI is the
+DS's own 256x192, so on a 1536-wide window the scale lands near 5 and
+`Renderer:worldViewSize()` hands the pass about **307x230**. `Gen4Ground:drawFree`
+allocated a target of exactly that, and it was blitted up five times with NEAREST
+filtering.
+
+That treatment is RIGHT FOR PIXEL ART -- an integer scale with nearest is what
+keeps a 16x16 tile crisp -- and wrong for perspective geometry, which has no
+pixel grid to preserve. It is why the flat and tilted views look fine and only
+the free camera reads as low resolution. **So this is a bug with an option
+attached, not merely a missing option.** `Renderer.lua` already carried
+`TODO(tilt): optionally render this at 2x for extra crispness` at the spot.
+
+### Supersampling, not a bigger viewport
+
+The target grows by `k` in each axis and `endFree` blits it back at `1/k` with
+linear filtering, so the DOWNSAMPLE is the anti-aliasing. The projection is
+untouched: a matrix depends on the ASPECT, which `k` does not change, and 3D
+geometry lands in NDC and fills whatever target is bound. **The view therefore
+shows exactly the same amount of Sinnoh at every setting** -- growing `vw`/`vh`
+instead would show more world than the game ever does, which is the 512x384
+harness trap this port has already walked into twice.
+
+### The sprites came along for free, and that is what made it safe
+
+I stopped once before writing this, because the pass is deliberately left OPEN
+across function boundaries -- `drawFree` binds the target and returns, the entity
+pass draws characters into it, `drawCanopy`/`endFree` closes it -- and a graphics
+transform with that lifetime is exactly what produced the two `setCanvas` crashes
+already quoted in this file.
+
+Reading further removed the need for one. `self.freeW/freeH` has **exactly one
+reader**: `Gen4Ground:freeEntity`, which projects a character through
+`view3d:project(..., vw, vh)` and applies the scale that comes back. Setting them
+to the TARGET's size moves every character into target pixels by itself. No
+transform spans the pass; the factor rides on the module beside `freeOpen`, for
+the same stated reason -- `endFree` may be run by a different ground than the one
+that opened the pass.
+
+### Scope, and the control that holds it
+
+`beginWorld` -- the live/tilted pass, composed with the pixel-art world canvas --
+still allocates at the logical size and never mentions `renderScale`. That is
+asserted, not assumed, and is the check's most useful section: it is what would
+catch this leaking into the view that is supposed to stay crisp at an integer
+scale.
+
+### The option
+
+`3D RES` in the Gen 4 OPTIONS block, beside `CAM TILT`: **DS / 2X / 3X / 4X**,
+defaulting to DS, which is the picture every previous build drew. Saved as
+`gen4RenderScale` and taken up in `OverworldState:enter` next to the camera
+tilt's own sync -- the same gap for the same reason, since `Gen4Ground` is built
+by `MapLoader.load` and is never handed a game.
+
+### Changed
+
+- `src/render/Gen4Ground.lua` -- `RENDER_SCALES`, `setRenderScale`,
+  `renderScale`, `syncRenderScale`; `drawFree` targets/projects/sizes at `tw,th`;
+  `endFree` blits back at `1/scale`.
+- `src/ui/OptionsMenu.lua` -- the `3D RES` row.
+- `src/world/OverworldController.lua` -- the boot-time sync.
+- `tools/gen4_render_scale_check.lua` -- NEW, 52 checks, needs no ROM.
+
+### What the check does NOT prove, said plainly
+
+Nothing here renders a frame. It proves the default is the identity, that the
+ladder refuses nonsense, and that the wiring goes where it claims -- **not that
+the picture looks better**. That needs Cedric's eyes. Five planted faults all
+bite: the projection built from the logical size (1), sprites projected in
+logical coordinates (1), `endFree` not blitting back down (1), a default rung
+that is not 1 (13), and the factor left set when the pass closes (1).
+
+
+## Pass 124 -- the correction: pass 123's supersample was thrown away one step later
+
+Reported after pass 123 shipped: the option appears -- *"i see the new option"* --
+but *"doesnt seem to change anything though"*. Correct, and the fault is mine.
+
+### What I got wrong
+
+I verified where `drawFree`'s target is ALLOCATED and never checked where it is
+CONSUMED. The chain:
+
+```
+OverworldState:draw -> Renderer:beginWorldPass   binds worldCanvas at the
+                                                 LOGICAL size (~307x230)
+                    -> drawWorld -> drawFree     its own target, now k x
+                    -> Gen4Ground:endFree        blits it BACK INTO worldCanvas
+                    -> Renderer:endFrame         blits worldCanvas to screen ~5x
+```
+
+So the supersampled frame was downsampled into a 307x230 canvas one step after
+being drawn, and THAT canvas was what got upscaled. Every extra pixel was
+discarded immediately; the change bought anti-aliasing and nothing else. **The
+resolution ceiling was never `drawFree`'s target -- it is the world canvas
+downstream of it.**
+
+!! AND THE CHECK COULD NOT CATCH IT. Its 52 assertions all held while the feature
+did nothing visible, because they assert that the target size and the blit factor
+agree WITH EACH OTHER -- which they did -- and say nothing about what happens to
+the result afterwards. A check written around the half of the pipeline I was
+looking at. Same family as measuring the alpha on the cache in pass 119: measure
+the end that answers the question, not the end you are standing at.
+
+### The seam already existed
+
+`Renderer:setWorldOverride(canvas)` is built for exactly this and is what the mod
+render pipelines use: `endFrame` composites the handed canvas INSTEAD of the world
+canvas. Its own comment settles the sizing question without any new code --
+"MEASURE THE CANVAS; DO NOT ASSUME ITS RESOLUTION ... a supersampled or
+deliberately low-res canvas is simply fitted".
+
+A free-camera frame meets that contract as written: terrain, props AND characters
+are all in this one target, because `freeEntity` draws the characters into it
+while the pass is open. That is the same property that made pass 123's sprite
+handling work, read the other way round.
+
+### Gated above 1X, which is the whole safety argument
+
+At the default the renderer is never told anything and `endFree` is byte-for-byte
+what it was. Nobody who has not chosen a higher setting can be affected -- not by
+this, and not by the override's "nothing else drew into the world canvas"
+assumption, which is the one part of this that is still an assumption rather than
+a measurement. The blit into the world canvas is KEPT as well as the override, so
+anything that declines the override still finds a correct picture there.
+
+`Game` is reached through `require`, not a bare `_G.Game`, which is nil in a real
+session -- a fault this port has already paid for once.
+
+### Changed
+
+- `src/render/Gen4Ground.lua` -- `endFree` publishes the frame through
+  `setWorldOverride` when the scale is above 1.
+- `tools/gen4_render_scale_check.lua` -- 52 -> **57 checks**, 0 failures.
+
+The five new assertions are the ones that would have caught the original gap, and
+they are proved to: run against pass 123's own `Gen4Ground` they fail four times,
+naming the missing override, the missing gate, and the ordering.
+
+### Still not proven
+
+Nothing here renders a frame. That the picture is now sharper at 2X is Cedric's
+to confirm -- and pass 123 is the standing reminder of why that matters: 52
+checks, 0 failures, no visible change.
+
+
+## Pass 125 -- item 10: the characters were see-through because a draw did not put the colour back
+
+Reported repeatedly, most recently as *"the npc and player sprites are still see
+through specifically with the 3d camera on in tilted views and first and third
+person"*, and originally as Rowan alone.
+
+### Two lines, and neither of them is in the sprite code
+
+`Gen4Model:draw` borrows four pieces of global graphics state. It reads the
+shader, the depth mode and the cull mode on entry and puts all three back on
+exit. It also sets, per shape:
+
+```lua
+g.setColor(1, 1, 1, shapeAlpha(shape))
+```
+
+which is right -- a model mixes opaque walls with a translucent shadow, and one
+colour for the whole model would make one of them wrong -- and it never put that
+back. **So whatever the LAST shape asked for was still in force when the function
+returned.**
+
+`SpriteRenderer` sets no colour of its own; it inherits. The free camera draws
+every chunk and prop through `Gen4Model:draw` and then draws the characters into
+the same target through `freeEntity`. A character drawn after a chunk whose final
+shape was translucent was therefore drawn AT THAT SHAPE'S ALPHA.
+
+### Which is why it was indoors, and why it was never a depth bug
+
+Indoors is where the translucent terrain shapes are. `shade`,
+`stair_d01_shade`, `table01_1_shade` and `dun_shadow` all state **12/31**, so a
+character came out at about **39% opacity** -- see-through, evenly, across the
+whole body. That is what the screenshot shows: the TV and the books visible
+*through* two people, not an edge or a sorting artefact.
+
+It also explains the scope exactly. Only with the 3D camera, because only there
+do sprites draw after `Gen4Model:draw` into the same pass; in tilted AND free
+views, because both go through that function.
+
+### AND IT IS PARTLY MINE
+
+The bug predates the terrain alpha work -- the `kage` name fallback already gave
+9/31 to kage-named shapes, so this bit wherever a model happened to end on one,
+which is how ROWAN alone was translucent. Pass 119 carried the cartridge's real
+alpha for 155 materials, and turned a few rooms into most of them. The report
+got louder because I made the underlying fault more reachable.
+
+### The shape of the omission
+
+The three restores that WERE there are what make this an omission rather than a
+design: the function knew it was borrowing shared state. The `setColor(1, 1, 1, 1)`
+at the top of the loop is that same knowledge, said once at the wrong end -- it
+protects the model from its caller and leaves the caller unprotected from the
+model.
+
+### Changed
+
+- `src/render/Gen4Model.lua` -- `draw` reads the colour on entry beside the
+  other three and restores it on exit. Two lines; nothing removed.
+- `tools/gen4_render_scale_check.lua` -- 57 -> **66 checks**, 0 failures.
+
+The new section asserts all four restores by name and that the colour one sits
+AFTER the shape loop rather than inside it. Run against the leaking
+`Gen4Model.lua` it fails three times. `drawSky` -- which sets a fade alpha and
+has always put it back -- is the control, and passes in both, which is how we
+know there was one leak and not two.
+
+
+## Pass 126 -- the resolution row only went one way, and the log said the pass was fine
+
+Reported: *"for the resolution it doesnt seem to change the camera resolution at
+all"*. Before changing anything, I read the session log rather than the source:
+
+```
+gen4 ground: T01 drew THIRD PERSON -- 21 chunk(s), 4096x3072 target, eye (1855,76,14269) ...
+gen4 ground: T01 drew THIRD PERSON -- 21 chunk(s), 1024x768 target, eye (1855,76,14269) ...
+```
+
+**The supersample works.** Those two lines are the same eye and the same chunk
+count: one frame at 4X, the next back at 1X, while standing still. So the pass
+had been asked for 4096x3072 and produced it -- and then the setting went back to
+the default on its own.
+
+Two things also fall out of that log and are worth writing down, because both
+correct guesses made earlier:
+
+- the free camera's logical view here is **1024x768**, not the ~307x230 estimated
+  from `fitScale` in pass 123. The estimate was never measured on his window.
+- 4X on a 1024x768 view is a **4096x3072** target, which is 12.6M pixels and two
+  canvases of it. That is the setting to watch for framerate, not 2X.
+
+### Why it went back
+
+`Gen4Options:cycle` passes the direction through as
+`row.engine.step(self.game, delta)` -- `-1` for left, `+1` for right and A. The
+row's step IGNORED it and always advanced. With four rungs that is worse than it
+sounds: from 4X the next press of EITHER key wraps to DS. A player raising the
+setting to look at it lands back on the default, sees the default, and reports
+that nothing changes -- which is exactly what happened.
+
+`Gen4Camera`'s CAM TILT row ignores `dir` the same way, and gets away with it
+because its ladder is ten rungs of angles where wrapping is the point. Four rungs
+of resolution is a different shape.
+
+### Changed
+
+- `src/ui/OptionsMenu.lua` -- the `3D RES` step takes `dir` and wraps in both
+  directions.
+- `tools/gen4_render_scale_check.lua` -- 66 -> **81 checks**, 0 failures.
+
+The new assertions read the row with comments stripped (it now discusses `dir` in
+prose, which a naive source search would have matched) and walk the arithmetic:
+from every rung, up-then-down and down-then-up must return to where they started,
+and both ends must wrap. Against the always-forward version it fails four times.
+
+### The standing lesson
+
+**Read the log before re-reading the source.** Two passes were spent reasoning
+about where pixels go; one `grep` of the player's own log settled that the
+renderer was right and the menu was wrong. The port writes that line precisely so
+the target size can be read back from a real session, and I had not looked at it.
+
+
+## Pass 127 -- the standing grass wore the texture four times, and one of my three guesses was wrong
+
+Reported: *"some of the grass sprites arent standing up, some are but are too
+tall instead of starting at the ground. also some are rendered with 2x2 grass
+textures in a square for 1 tile."* Three symptoms; I measured all three before
+changing anything, and that was worth doing because **one of them was not what I
+thought**.
+
+### The census
+
+Grass-ish materials on Sinnoh's terrain, by shape count, over all 666 chunks:
+
+| material | shapes |
+| --- | --- |
+| `ngrass` | 224 |
+| `nectgr` | 97 |
+| `s_grass` | 20 |
+| `bf_ngrass` | 9 |
+| `l_grass_d` / `_m` / `_u` | 6 / 5 / 5 |
+| `grow_01`..`grow_08`, `gym04_daigrass02`, `ngrass02` | 1 each |
+
+`GRASS_MATERIALS` contains exactly one: `nectgr`.
+
+### The 2x2 squares, quantified
+
+**2,812 of `nectgr`'s 3,440 triangles (81.7%) span more than one tile**, and the
+commonest case is exactly **2x2** -- 924 of them, then 2x1 and 1x2 at 288 and
+284, and 4x4 at 182.
+
+`addGrassCards` grouped TRIANGLES by the tile their centre fell in and took that
+group's min/max UV as the card's rectangle. A quad covering 2x2 tiles therefore
+produced a card whose UV range was two texture widths in each axis -- the texture
+four times in one square. Measured on the old algorithm: **the median card's u
+span was 32 texels for a 16-unit tile**, i.e. the typical card already wore two
+tiles of texture, not one.
+
+Keying cannot fix that, because no key splits a triangle covering several tiles.
+The walk is now the other way round: for every tile a triangle touches, ask the
+TRIANGLE what the ground and the texture do at that tile's centre, by one
+barycentric solve (y, u and v are each affine in x and z on a flat quad). A tile
+is claimed by the first triangle that contains its centre, so it is never built
+twice nor averaged across a seam. The UV rectangle comes from the mapping's own
+RATE at that tile, so it is exactly one tile of texture whichever way the
+mapping runs and whatever corner of the atlas the chunk uses.
+
+Measured after, on the same geometry:
+
+| | old | new |
+| --- | --- | --- |
+| cards | 3,126 | 9,284 |
+| median u span | 32.0 (two tiles) | 16.0 (one tile) |
+| cards wearing more than one tile | the median one | **0 of 9,284** |
+
+Three times as many cards because the old grouping was also SKIPPING tiles it had
+merged away.
+
+### !! THE "TOO TALL" GUESS WAS WRONG, and the measurement says so
+
+I expected the base to be the group's minimum y over a multi-tile patch, which on
+sloping ground would start the card below the ground. Compared per tile against
+the ground at that tile's own centre, over 3,126 shared tiles: **mean error 0.00
+units, worst 0.00**. Sinnoh's grass quads are flat, so the old base was already
+right and the new one is identical.
+
+So "too tall instead of starting at the ground" is NOT the base. What is left is
+the HEIGHT, which is `tileUnits` -- 16 units -- against `Gen4View.EYE_HEIGHT` of
+26 and a measured doorway of 30.5. **A grass card is 62% of eye height: chest-high
+grass.** That is a design number with no cartridge truth behind it, because the
+cartridge draws this grass FLAT and standing it up is an addition rather than a
+fix; it is not something to guess at, so it is left at 16 pending Cedric saying
+what he wants.
+
+Fixing the texture repeat may also change how tall it READS: a card that showed
+its tuft twice stacked now shows it once over the full 16 units.
+
+### Still one material
+
+`s_grass`, `bf_ngrass` and `l_grass_u/m/d` really are on Sinnoh's terrain -- 50
+shapes between them -- and none of them stands. They stay out until their art has
+been LOOKED at, which is how `nectgr` earned its place (21.1% flat colour over
+nine, mostly leaf) and how `ngrass` was kept out (57.4% one flat green, which
+stood up is a slab that blanks the path behind it).
+
+### Changed
+
+- `src/render/Gen4Model.lua` -- `addGrassCards` walks tiles per triangle instead
+  of grouping triangles by tile, and takes the UV rectangle from the mapping's
+  local rate.

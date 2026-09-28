@@ -57,12 +57,16 @@ local Gen4Graphics = require("src.import.Gen4Graphics")
 local Gen4HealthboxParts = require("src.import.Gen4HealthboxParts")
 local Gen4Subscreen = require("src.import.Gen4Subscreen")
 local Gen4Icons = require("src.import.Gen4Icons")
+local Gen4ItemIcons = require("src.import.Gen4ItemIcons")
 local Gen4SpecialChars = require("src.import.Gen4SpecialChars")
 local Gen4Trades = require("src.import.Gen4Trades")
 local Gen4Elevators = require("src.import.Gen4Elevators")
 local Gen4Archives = require("src.import.Gen4Archives")
 local Gen4Screens = require("src.import.Gen4Screens")
 local Gen4Battle = require("src.import.Gen4Battle")
+local Gen4MoveAnim = require("src.import.Gen4MoveAnim")
+local Gen4Particle = require("src.import.Gen4Particle")
+local Gen4CellAnim = require("src.import.Gen4CellAnim")
 local Gen4Cells = require("src.import.Gen4Cells")
 local Gen4Font = require("src.import.Gen4Font")
 local Gen4Tileset = require("src.import.Gen4Tileset")
@@ -74,6 +78,8 @@ local Gen4Otherpoke = require("src.import.Gen4Otherpoke")
 local Gen4ObjectGfx = require("src.import.Gen4ObjectGfx")
 local Gen4Facings = require("src.import.Gen4Facings")
 local Gen4Terrain = require("src.import.Gen4Terrain")
+local Gen4AreaLight = require("src.import.Gen4AreaLight")
+local Gen4PropShapes = require("src.import.Gen4PropShapes")
 local Gen4ScriptBands = require("src.import.Gen4ScriptBands")
 local Gen4Pickups = require("src.import.Gen4Pickups")
 local Gen4Bdhc = require("src.import.Gen4Bdhc")
@@ -209,7 +215,22 @@ local BANK = {
 RomExtractorGen4.BANK = BANK
 
 local STAGES = {
-  "text", "species", "moves", "items", "encounters",
+  -- THE PROGRESS BAR'S DENOMINATOR, so a stage added to `run()` and not to this
+  -- list makes the bar run past its own end. `gen4_move_anims` sits beside
+  -- "moves" for the same reason it does in `run()`: it is the same 501 slots
+  -- read a second way.
+  --
+  -- BOTH ANIMATION STAGES CARRY THE `gen4_` PREFIX, and that is not cosmetic --
+  -- it is the whole reason the move animations were dead. `Data` loads a Gen 4
+  -- table by its FILE NAME, and only the prefixed ones are on its Gen 4 list,
+  -- so a stage writing `move_anims.lua` wrote a file nothing ever opened:
+  -- `Gen4MoveAnimPlayer.new` reads `data.gen4_move_anims`, found nil on every
+  -- boot and returned nil, and every move in Platinum fell through to the
+  -- fallback animation. Written on every import, loaded by nothing -- the same
+  -- trap `gen4_species_sprites` sat in, and `tools/gen4_cache_wiring_check.lua`
+  -- now exists so the third one cannot hide.
+  "text", "species", "moves", "gen4_move_anims", "gen4_particles",
+  "gen4_cellactors", "items", "encounters",
   "trainers", "maps", "events", "regions", "tilesets", "scripts", "link",
   "graphics", "fonts", "constants", "overworld", "species_sprites",
   "trainer_sprites",
@@ -374,6 +395,344 @@ function RomExtractorGen4:extractMoves()
   for id, m in pairs(out) do m.description = self:string(BANK.moveDescription, id) end
   self:write("moves", out)
   return out
+end
+
+-- The move ANIMATION programs -- what a move does on screen, as opposed to
+-- what it does to the other Pokemon.
+--
+-- `/wazaeffect/we.arc` is a NARC despite the extension and holds one bytecode
+-- program per move slot.  `Gen4MoveAnim` carries the opcode widths, derived
+-- from pret's handler bodies and checked by CLOSURE -- every program has to
+-- walk to its exact last word, and `tools/gen4_moveanim_check.lua` asserts all
+-- 501 do.  A program that does not walk is dropped and COUNTED rather than
+-- written half-decoded, because a truncated animation is one that stops in the
+-- middle of a battle rather than one that looks slightly wrong.
+--
+-- WHAT IS AND IS NOT HERE.  The program says what to load, what to play and how
+-- long to wait; the visible burst of nearly every move is an `SPA ` particle
+-- program in waza_particle.narc.  `particles` below is a list of INDICES INTO
+-- THAT ARCHIVE -- Scratch is 40, Pound 31 -- and the `gen4_particles` stage
+-- below now extracts every one of them, emitters and all, so the index is a
+-- join that resolves rather than a note for later.
+function RomExtractorGen4:extractMoveAnims()
+  self:beginStage("gen4_move_anims")
+  local arc = self:archiveAt(Gen4MoveAnim.ARCHIVE_PROGRAMS)
+  if not arc then
+    -- Not fatal: a cartridge without it still gives a playable game, and a
+    -- stage that errors here would cost the whole import over animations.
+    self:write("gen4_move_anims", { programs = {}, skipped = 0, absent = true })
+    return
+  end
+
+  local programs, skipped = {}, 0
+  for index = 0, arc.count - 1 do
+    local data = arc:get(index)
+    local decoded = data and Gen4MoveAnim.decode(data)
+    if decoded then
+      local code, wordAt = {}, {}
+      for i, row in ipairs(decoded) do
+        local instruction = { row.op }
+        for j = 1, #row.args do instruction[j + 1] = row.args[j] end
+        code[i] = instruction
+        -- WHERE EACH INSTRUCTION STARTED, IN WORDS. 77 of the 501 programs
+        -- branch, and every jump target in them is a WORD offset into the
+        -- original stream -- so a player walking a decoded instruction list
+        -- cannot follow one without this map. Stored as `wordAt[i]` rather
+        -- than folded into the instruction so the instruction stays exactly
+        -- "opcode then operands".
+        wordAt[i] = row.at
+      end
+      local s = Gen4MoveAnim.summary(decoded)
+      programs[index] = {
+        code = code,
+        wordAt = wordAt,
+        particles = s.particles,
+        sounds = s.sounds,
+        delayFrames = s.delayFrames,
+      }
+    else
+      skipped = skipped + 1
+    end
+    self:tick("gen4_move_anims", index + 1, arc.count)
+  end
+
+  local out = {
+    programs = programs,
+    count = arc.count,
+    skipped = skipped,
+    particleArchive = Gen4MoveAnim.ARCHIVE_PARTICLES,
+  }
+  self:write("gen4_move_anims", out)
+  -- KEPT FOR THE NEXT STAGE. `gen4_cellactors` extracts exactly the 2D sprite
+  -- resources the PROGRAMS ask for, so it needs them decoded -- and decoding all
+  -- 501 a second time to learn what 38 sprites reference would be wasteful. It
+  -- falls back to decoding if this is absent, so the two stages stay independent.
+  self._moveAnims = out
+  return out
+end
+
+-- The particle EFFECTS -- the pictures a move's animation actually throws.
+--
+-- `Gen4MoveAnim` decodes the program and `move_anims` writes it; this writes
+-- what `loadparticlesystem <slot> <member>` points AT. Scratch's program names
+-- member 40, and member 40 holds a 64x64 texture of three claw slashes: that
+-- picture is the move's whole visible effect, and without it a perfectly
+-- decoded program has nothing to draw.
+--
+-- THE TEXTURES AND THE EMITTERS. An earlier version of this stage wrote only
+-- the art and said so in a comment that is worth keeping the shape of: "a
+-- guessed emitter produces motion that is plausible and wrong". That was the
+-- right call while the emitter layout was a guess. It is not one now -- every
+-- emitter block length was measured by single-bit subtraction until all 608
+-- files closed exactly on their own declared emitter area, and the field
+-- offsets were then confirmed against pret's `lib/spl/include/spl_resource.h`,
+-- which lays `SPLResourceHeader` out to the same 88 bytes and names the same
+-- eleven flag bits. Two methods that share no assumption agreed, so the
+-- emitters go in the cache.
+--
+-- WHY THEY GO IN AT ALL, rather than being read from the ROM at battle time:
+-- the cartridge is not redistributable and the running game never opens it. A
+-- decoded emitter is data about the game, the same as a base stat.
+--
+-- THE FIELDS ARE STORED AS `Gen4Particle` DECODES THEM, fixed point already
+-- divided out, and that round-trips exactly: all 1,468 emitters survive
+-- `LuaWriter` and come back bit-identical, which the wiring check asserts
+-- rather than assumes.
+function RomExtractorGen4:extractParticles()
+  self:beginStage("gen4_particles")
+
+  local index = { effects = {}, skipped = {}, textures = 0, emitters = 0 }
+  local sources = {
+    { key = "move", path = Gen4Particle.ARCHIVE_MOVES },
+    { key = "ball", path = Gen4Particle.ARCHIVE_BALLS },
+  }
+  local total = 0
+  for _, src in ipairs(sources) do
+    local arc = self:archiveAt(src.path)
+    if arc then total = total + arc.count end
+  end
+  if total == 0 then
+    self:write("gen4_particles", index)
+    return index
+  end
+
+  local done = 0
+  for _, src in ipairs(sources) do
+    local arc = self:archiveAt(src.path)
+    if arc then
+      for member = 0, arc.count - 1 do
+        local data = arc:get(member)
+        local list = data and Gen4Particle.textures(data)
+        if list then
+          -- THE EMITTERS ARE WHAT MAKES THE ART MOVE, and they are read here
+          -- rather than inferred at battle time. `emitters()` returns nil when
+          -- the blocks do not tile their own declared area exactly, so a file
+          -- whose emitters did not close contributes its textures and no
+          -- motion instead of motion that is wrong.
+          local emitters = Gen4Particle.emitters(data)
+          local entry = { textures = {}, emitters = emitters or nil }
+          for i, texture in ipairs(list) do
+            local image = Gen4Particle.rgba(texture)
+            local name = ("particle/%s_%03d_%d"):format(src.key, member, i - 1)
+            local saved = self:saveImage(name, image, {
+              format = texture.formatName,
+              colours = #texture.palette,
+            })
+            if saved then
+              entry.textures[#entry.textures + 1] = saved
+              index.textures = index.textures + 1
+            end
+          end
+          -- AN EFFECT WITH EMITTERS AND NO TEXTURES IS STILL AN EFFECT.  The
+          -- old gate was `#entry.textures > 0`, which was right when textures
+          -- were all this stage wrote; keeping it now would drop an emitter
+          -- list on the floor for a file whose art lives in another member.
+          if #entry.textures > 0 or entry.emitters then
+            index.effects[src.key .. "_" .. member] = entry
+            if entry.emitters then
+              index.emitters = (index.emitters or 0) + #entry.emitters
+            end
+          end
+        else
+          -- COUNTED, NOT DROPPED SILENTLY. A move whose effect did not decode
+          -- is a move that will draw nothing, and the number is how anyone
+          -- finds out without playing all 467 of them.
+          index.skipped[#index.skipped + 1] = src.key .. "_" .. member
+        end
+        done = done + 1
+        self:tick("gen4_particles", done, total)
+      end
+    end
+  end
+
+  self:write("gen4_particles", index)
+  return index
+end
+
+-- THE 2D CELL-ACTOR SPRITES -- the third and last layer of a move's animation.
+--
+-- A move's visible effect is up to three things: the battlers moving (the
+-- program alone), a 3D particle burst (`gen4_particles`) and a flat 2D sprite
+-- animated from a cell bank. THIRTY-TWO of the 501 programs use the third, and
+-- until this stage they drew nothing at all.
+--
+-- THIS STAGE EXTRACTS WHAT THE PROGRAMS ASK FOR, NOT EVERYTHING IN THE ARCHIVES.
+-- The four archives hold 37/39/37/37 members and a sprite pairs one of each, so
+-- extracting every combination would be 37 x 39 images of which 29 tuples are
+-- ever named. Reading the programs first and extracting their 29 is not a
+-- shortcut: it is the only version that cannot produce art nothing points at.
+-- Anything a program names that does not resolve is COUNTED in `skipped`, which
+-- is the number that says the join is incomplete.
+function RomExtractorGen4:extractCellActors()
+  self:beginStage("gen4_cellactors")
+
+  local index = { sprites = {}, skipped = {}, images = 0, tuples = 0 }
+  local char = self:archiveAt(Gen4CellAnim.ARCHIVE_CHAR)
+  local pltt = self:archiveAt(Gen4CellAnim.ARCHIVE_PALETTE)
+  local cellArc = self:archiveAt(Gen4CellAnim.ARCHIVE_CELL)
+  local animArc = self:archiveAt(Gen4CellAnim.ARCHIVE_ANIM)
+  if not (char and pltt and cellArc and animArc) then
+    -- Not fatal, for the same reason the move-animation stage is not: a cache
+    -- without these still plays every move's timing, sound and motion.
+    self:write("gen4_cellactors", { sprites = {}, skipped = {}, images = 0,
+                                    tuples = 0, absent = true })
+    return
+  end
+
+  -- WHAT THE PROGRAMS NAME. `addsprite` and `addspritewithfunc` carry the four
+  -- member indices directly -- pret's macro says "Index of the character
+  -- resource to use. (Same as for LoadCharResObj)", so these are NARC member
+  -- indices and not slots in the manager, which is the one thing here that reads
+  -- like a slot and is not.
+  local programs = self._moveAnims and self._moveAnims.programs
+  if not programs then
+    local arc = self:archiveAt(Gen4MoveAnim.ARCHIVE_PROGRAMS)
+    programs = {}
+    if arc then
+      for i = 0, arc.count - 1 do
+        local decoded = Gen4MoveAnim.decode(arc:get(i) or "")
+        if decoded then
+          local code = {}
+          for k, row in ipairs(decoded) do
+            local instruction = { row.op }
+            for j = 1, #row.args do instruction[j + 1] = row.args[j] end
+            code[k] = instruction
+          end
+          programs[i] = { code = code }
+        end
+      end
+    end
+  end
+
+  local OP_LOAD_PALETTE = 75
+  local OP_ADD_WITH_FUNC = 78
+  local OP_ADD = 79
+  local wanted, order = {}, {}
+  for id, program in pairs(programs or {}) do
+    -- The palette BANK the program uploads, per palette member. It is 1 on all
+    -- 34 calls in the cartridge, and it matters: the OAM entries' own palette
+    -- field then indexes what was uploaded, not the file's banks.
+    local bankOf = {}
+    for _, row in ipairs(program.code or {}) do
+      if row[1] == OP_LOAD_PALETTE then bankOf[row[3]] = row[4] end
+    end
+    for _, row in ipairs(program.code or {}) do
+      if row[1] == OP_ADD_WITH_FUNC or row[1] == OP_ADD then
+        local c, p, ce, an = row[4], row[5], row[6], row[7]
+        local key = ("%s_%s_%s_%s"):format(tostring(c), tostring(p),
+                                           tostring(ce), tostring(an))
+        if not wanted[key] then
+          wanted[key] = { char = c, palette = p, cell = ce, anim = an,
+                          bank = bankOf[p] or 0, moves = {} }
+          order[#order + 1] = key
+        end
+        local moves = wanted[key].moves
+        moves[#moves + 1] = id
+      end
+    end
+  end
+  table.sort(order)
+  index.tuples = #order
+
+  local function member(arc, i)
+    if i == nil or not arc then return nil end
+    local bytes = arc:get(i)
+    if not bytes then return nil end
+    if Gen4Graphics.isCompressed(bytes) then
+      bytes = Gen4Graphics.decompress(bytes)
+    end
+    return bytes
+  end
+
+  for step, key in ipairs(order) do
+    local want = wanted[key]
+    local sheet = Gen4Graphics.tiles(member(char, want.char))
+    local colours = Gen4Graphics.palette(member(pltt, want.palette))
+    local bank = nil
+    local cellBytes = member(cellArc, want.cell)
+    if cellBytes then bank = Gen4Cells.parse(cellBytes, Gen4Graphics) end
+    local animBytes = member(animArc, want.anim)
+    local anim = animBytes and Gen4CellAnim.parse(animBytes, Gen4Graphics)
+
+    -- THE FILE'S COLOURS ARE PADDED UP TO THE BANK ITS OAM ASKS FOR, which is
+    -- what `Gen4CellAnim.paletteFor` is for -- see its comment. The script's own
+    -- `paletteIndex` operand is 1 on every call in the cartridge and so cannot
+    -- be what selects anything; the cell bank's OAM field can, and does.
+    local oamBank = Gen4CellAnim.bankOf(bank)
+    if oamBank == nil then
+      index.skipped[#index.skipped + 1] = key .. " (its cell bank mixes palette banks)"
+      colours = nil
+    else
+      colours = Gen4CellAnim.paletteFor(colours, oamBank)
+    end
+
+    if sheet and colours and bank and anim then
+      local images, blank = {}, 0
+      for i, cell in ipairs(bank.cells) do
+        if #(cell.oam or {}) == 0 then
+          -- AN EMPTY CELL IS A BLANK FRAME, not a failure. Cell 0 of members 17,
+          -- 19 and 26 has no OAM entries at all and their animations name it --
+          -- a deliberate beat of nothing before the sprite appears.
+          blank = blank + 1
+        else
+          local image = Gen4Cells.assemble(cell, sheet, colours, bank,
+                                           Gen4Graphics)
+          local saved = image and self:saveImage(
+            ("cellactor/%s_%02d"):format(key, i - 1), image,
+            { cellIndex = i - 1 })
+          if saved then
+            images[i] = saved
+            index.images = index.images + 1
+          else
+            index.skipped[#index.skipped + 1] =
+              ("%s cell %d did not assemble"):format(key, i - 1)
+          end
+        end
+      end
+      index.blank = (index.blank or 0) + blank
+      if next(images) then
+        index.sprites[key] = {
+          char = want.char, palette = want.palette, cell = want.cell,
+          anim = want.anim, bank = want.bank,
+          cells = images,
+          sequences = anim.sequences,
+          moves = want.moves,
+        }
+      else
+        index.skipped[#index.skipped + 1] = key .. " (no cell assembled)"
+      end
+    else
+      -- NAMED, NOT DROPPED: which of the four did not read is the only useful
+      -- thing to know here.
+      index.skipped[#index.skipped + 1] = ("%s (sheet %s palette %s bank %s anim %s)")
+        :format(key, tostring(sheet ~= nil), tostring(colours ~= nil),
+                tostring(bank ~= nil), tostring(anim ~= nil))
+    end
+    self:tick("gen4_cellactors", step, #order)
+  end
+
+  self:write("gen4_cellactors", index)
+  return index
 end
 
 function RomExtractorGen4:extractItems()
@@ -818,6 +1177,11 @@ function RomExtractorGen4:extractRegions(events, names)
         sprite = spriteKey,
         spriteName = Gen4ObjectGfx.name(o.graphics),
         noSprite = noSprite,
+        -- ...and, when the reason is that it is a MODEL, which one.  A
+        -- member of fldeff.narc, not of the sprite archive: the two are
+        -- different files and the same number means different things in
+        -- each, so this is deliberately not called `member`.
+        fldeffModel = self:modelFor(o.graphics),
         -- What the script id MEANS, rather than only what it is.
         scriptKind = kind,
         -- ...and, for the 417 trainers, WHICH TRAINER.  The id comes from the
@@ -1384,6 +1748,22 @@ function RomExtractorGen4:composeJob(arc, job)
 
   local sheet = Gen4Graphics.tiles(member(job.tiles))
   local palette = Gen4Graphics.palette(member(job.palette))
+  -- A JOB MAY SAY WHICH SUB-PALETTE ITS COLOURS GO IN. Almost nothing needs to:
+  -- a 256-colour sheet has one palette and a 16-colour one usually ships all
+  -- sixteen sub-palettes together. The move-animation effect backgrounds are the
+  -- exception -- one sixteen-colour palette that the game loads into slot 9, with
+  -- tilemap cells that name slot 9 -- and composing those at slot 0 produces a
+  -- blank picture rather than a wrong one.
+  if palette and job.paletteSlot and job.paletteSlot ~= 0 then
+    palette = Gen4Graphics.paletteAtSlot(palette, job.paletteSlot)
+  end
+  -- ...AND A JOB MAY ASK FOR THE GREY VERSION OF ITS COLOURS. `SetBgGrayscale`
+  -- rewrites the background's palette entries outright, so for an indexed picture
+  -- greying the palette and greying the pixels are the same operation -- done here,
+  -- once per import, rather than sixty times a second at draw time.
+  if palette and job.grayscale then
+    palette = Gen4Graphics.grayscalePalette(palette)
+  end
   if not (sheet and palette) then return nil end
 
   local map
@@ -1611,7 +1991,7 @@ function RomExtractorGen4:extractGraphics()
 
   local index = {
     backgrounds = {}, terrain = {}, battleObjects = {}, screens = {},
-    skipped = {},
+    palettes = {}, skipped = {},
   }
 
   -- Battle backgrounds: 23 backgrounds x 3 times of day over one shared
@@ -1636,10 +2016,77 @@ function RomExtractorGen4:extractGraphics()
         else
           index.skipped[#index.skipped + 1] = "battle/background/" .. name
         end
+        -- ...and the grey one, for `SetBgGrayscale` (18 calls over 5 programs, nine
+        -- on and nine off). A second picture rather than a draw-time filter,
+        -- because the cartridge's operation is on the PALETTE and this is the same
+        -- operation performed once: see Gen4Graphics.grayscalePalette for the
+        -- five-bit arithmetic and why it is not done on the expanded channels.
+        local gray = spec and self:composeJob(bgArc, {
+          tiles = spec.tiles, palette = spec.palette, tilemap = spec.tilemap,
+          grayscale = true,
+        })
+        local grayEntry = self:saveImage("battle/background/" .. name .. "_gray",
+                                         gray, {
+          background = i, time = spec.time, fadeTo = spec.fadeTo, grayscale = true,
+        })
+        if grayEntry then
+          index.backgrounds[name .. "_gray"] = grayEntry
+        else
+          index.skipped[#index.skipped + 1] =
+            "battle/background/" .. name .. "_gray"
+        end
         done = done + 1
         self:tick("graphics", done, total + 200)
       end
     end
+
+    -- ...and the MOVE ANIMATION backgrounds out of the same archive: 58 of them,
+    -- each with a normal, a mirrored and a contest arrangement over one tile
+    -- sheet and one sixteen-colour palette. See Gen4Battle.EFFECT_BG_MEMBERS for
+    -- where the table comes from and why it cannot be computed.
+    --
+    -- DEDUPED BY THE THREE MEMBERS. 174 combinations resolve to 81 distinct
+    -- pictures -- most backgrounds use the same tilemap for two or three of the
+    -- arrangements -- so the image is written once under a name built from the
+    -- members and every key that resolves to it points at that file.
+    index.effects = {}
+    local byArt, effectsWritten = {}, 0
+    for bg = 0, Gen4Battle.EFFECT_BG_COUNT - 1 do
+      for _, variant in ipairs(Gen4Battle.EFFECT_VARIANTS) do
+        local spec = Gen4Battle.effectBackground(bg, variant)
+        local key = spec and Gen4Battle.effectKey(bg, variant)
+        if spec and key then
+          local entry = byArt[spec.art]
+          if entry == nil then
+            local image = self:composeJob(bgArc, {
+              tiles = spec.tiles, palette = spec.palette,
+              tilemap = spec.tilemap, paletteSlot = spec.slot,
+            })
+            -- WHETHER THE PICTURE COVERS THE SCREEN, measured rather than assumed.
+            -- The layer is 4bpp and its holes show whatever is underneath, so a
+            -- whole-screen operation on it -- the `fadebg` type 2 blend, which
+            -- tints this layer's sixteen colours and nothing else -- is only
+            -- reproducible as a whole-screen quad where there ARE no holes.
+            -- Measured over all 81: 35 cover the visible 256x192 completely and
+            -- the thinnest covers 72.7% of it.
+            local opaque = image and Gen4Graphics.coversScreen(image) or nil
+            entry = self:saveImage("battle/effect/" .. spec.art, image, {
+              tiles = spec.tiles, palette = spec.palette,
+              tilemap = spec.tilemap, paletteSlot = spec.slot,
+              opaque = opaque,
+            }) or false
+            byArt[spec.art] = entry
+            if entry then effectsWritten = effectsWritten + 1 end
+          end
+          if entry then
+            index.effects[key] = entry
+          else
+            index.skipped[#index.skipped + 1] = "battle/effect/" .. spec.art
+          end
+        end
+      end
+    end
+    index.effectsWritten = effectsWritten
   end
 
   -- Terrain platforms: the ground each side stands on, chosen from the tile
@@ -1799,6 +2246,32 @@ function RomExtractorGen4:extractGraphics()
         local frames = self:assembleCells(arc, job, sheet, palette)
         local wrote = false
 
+        -- THE SCREEN'S COLOURS, published beside its picture.
+        --
+        -- A composed picture cannot hold a colour that appears only in TEXT,
+        -- and Platinum draws text at runtime out of a sub-palette its own C
+        -- code names -- TEXT_COLOR(1, 2, 0) on BG palette 3 for the bag, on
+        -- BG palette 15 for the trainer card.  Without this, every screen
+        -- that prints anything has its ink WRITTEN DOWN by hand, and a hand
+        -- written colour can be wrong with nothing to catch it.  It was:
+        -- five of the six colours in `Gen4BagMenu` and one of the two in
+        -- `Gen4TrainerCard` were a unit low in at least one channel, because
+        -- they were read off a decoder that floored where `Gen4Graphics`
+        -- rounds.  Invisible on screen and wrong all the same.
+        --
+        -- ONE ENTRY PER PALETTE FILE, not per screen: 394 jobs across the
+        -- fifteen UI archives share 146 palettes, and the trainer card alone
+        -- points five screens at `trainer_card_normal`.  `paletteName` comes
+        -- from the planner, which is the only place the four resolution rules
+        -- live; recomputing it here would be those rules written twice.
+        local paletteKey
+        if palette and job.paletteName then
+          paletteKey = plan.archive.out .. "/" .. job.paletteName
+          if not index.palettes[paletteKey] then
+            index.palettes[paletteKey] = Gen4Graphics.paletteHex(palette)
+          end
+        end
+
         if frames then
           -- Assembled from a cell bank: a real sprite, at its real size.
           for _, frame in ipairs(frames) do
@@ -1808,6 +2281,7 @@ function RomExtractorGen4:extractGraphics()
               cellMatch = job.cellMatch,
               cell = frame.cellIndex,
               borrowedPalette = job.borrowedPalette or nil,
+              paletteKey = paletteKey,
             })
             if entry then
               index.screens[relative .. frame.suffix] = entry
@@ -1823,6 +2297,7 @@ function RomExtractorGen4:extractGraphics()
             provisionalLayout = (job.tilemap == nil) or nil,
             borrowedTiles = job.borrowedTiles or nil,
             borrowedPalette = job.borrowedPalette or nil,
+            paletteKey = paletteKey,
           })
           if entry then
             index.screens[relative] = entry
@@ -1837,6 +2312,11 @@ function RomExtractorGen4:extractGraphics()
     end
   end
 
+  -- THE ITEM ICONS GO IN THE SAME INDEX as every other picture, under
+  -- `items/icon_nnn`, so the bag reaches them through the `img` it already
+  -- has rather than through a record of their own.
+  self:extractItemIcons(index)
+
   index.frames = self:extractWindowFrames()
 
   -- Kept for the menus stage, which names the title art by role and would
@@ -1845,6 +2325,113 @@ function RomExtractorGen4:extractGraphics()
 
   self:write("gen4_graphics", index)
   return index
+end
+
+-- ---------------------------------------------------------------------------
+-- The item icons
+-- ---------------------------------------------------------------------------
+
+-- One 32x32 picture per ITEM, not per sprite, because a third of the items
+-- borrow another item's shape and recolour it -- see `Gen4ItemIcons`. Writing
+-- one file per sprite and pairing later would put every flute in the same
+-- colour, which is the failure that looks like a palette bug.
+--
+-- HOW MANY ROWS THE TABLE HAS is not a new constant: it is the data archive's
+-- count plus the gap `Gen4Items` already measured. 446 records and a 22-row
+-- hole from id 113 is 468 ids, and 468 is exactly the length of the array the
+-- scan finds. Two stages that were written months apart agreeing on the same
+-- two numbers is the reason neither of them is guessed here.
+function RomExtractorGen4:extractItemIcons(index)
+  local arc = self:archiveAt(Gen4ItemIcons.PATH)
+  if not (arc and index) then return nil end
+
+  local okArm, arm9 = pcall(function() return self.rom:arm9() end)
+  if not (okArm and type(arm9) == "string") then return nil end
+
+  local items = self:archive("items")
+  local dataCount = tonumber(items and items.count) or 446
+  local rows = dataCount + Gen4Items.GAP_SIZE
+  local members = tonumber(arc.count) or 711
+
+  local at, matches = Gen4ItemIcons.findTable(arm9, members, dataCount, rows)
+  if not at then
+    require("src.core.Logger").warn(
+      "gen4 item icons: no %d-row archive table in the ARM9 -- the bag's "
+      .. "icon frame stays empty", rows)
+    return nil
+  end
+
+  -- A WRONG ARRAY DOES NOT FAIL, IT MIS-DRAWS.  Every item would still get an
+  -- icon; a third of them would get somebody else's.  So the twelve rows that
+  -- were checked by looking are asserted, and the stage declines outright
+  -- rather than filling the bag with plausible wrong pictures.
+  local okTable, wrong = Gen4ItemIcons.verify(arm9, at)
+  if not okTable then
+    require("src.core.Logger").warn(
+      "gen4 item icons: the table at 0x%X disagrees with the verified "
+      .. "items (%s) -- skipped rather than drawn wrong",
+      at - 1, table.concat(wrong, ", "))
+    return nil
+  end
+  if matches and matches > 1 then
+    require("src.core.Logger").warn(
+      "gen4 item icons: %d arrays fit the bounds; took the first, which "
+      .. "passes the verified rows", matches)
+  end
+
+  local function member(i)
+    local bytes = i and arc:get(i)
+    if not bytes then return nil end
+    if Gen4Graphics.isCompressed(bytes) then
+      bytes = Gen4Graphics.decompress(bytes)
+    end
+    return bytes
+  end
+
+  -- Palettes are shared far more than sprites are, and composing is the
+  -- expensive half; both get held for the whole run.
+  local sheets, palettes = {}, {}
+  local written, skipped = 0, 0
+  for item = 0, rows - 1 do
+    local _, iconId, palId = Gen4ItemIcons.row(arm9, at, item)
+    if iconId and palId then
+      if sheets[iconId] == nil then
+        sheets[iconId] = Gen4Graphics.tiles(member(iconId)) or false
+      end
+      if palettes[palId] == nil then
+        palettes[palId] = Gen4Graphics.palette(member(palId)) or false
+      end
+      local sheet, palette = sheets[iconId], palettes[palId]
+      if sheet and palette then
+        local cells = {}
+        for i = 0, sheet.count - 1 do
+          cells[i + 1] = { tile = i, flipX = false, flipY = false, palette = 0 }
+        end
+        local image = Gen4Graphics.compose({
+          width = Gen4ItemIcons.SIZE,
+          height = Gen4ItemIcons.SIZE,
+          cells = cells,
+        }, sheet, palette)
+        local key = ("items/icon_%03d"):format(item)
+        local entry = image and self:saveImage(key, image, {
+          kind = Gen4Screens.SHEET,
+          item = item, icon = iconId, palette = palId,
+        })
+        if entry then
+          index.screens[key] = entry
+          written = written + 1
+        else
+          skipped = skipped + 1
+        end
+      else
+        skipped = skipped + 1
+      end
+    end
+  end
+  if written == 0 then return nil end
+  index.itemIcons = { count = written, size = Gen4ItemIcons.SIZE,
+                      key = "items/icon_%03d" }
+  return written, skipped
 end
 
 -- ---------------------------------------------------------------------------
@@ -3013,6 +3600,32 @@ function RomExtractorGen4:extractConstants()
     world = {
       -- A Gen 4 cell is sixteen pixels, and the map defs say so too.
       blockPx = 16,
+      -- PLATINUM'S OWN STEP TIMINGS, AND THE PORT WAS USING GEN 1/2'S.
+      --
+      -- `MovementAction_InitWalk(mapObj, dir, distance, duration, ...)` is called
+      -- once per speed in `unk_020655F4.c`, and every row multiplies out to the
+      -- sixteen pixels of one cell:
+      --
+      --     FX32_CONST(0.5), 32    slower
+      --     FX32_CONST(1),   16    slow
+      --     FX32_CONST(2),    8    WALK NORMAL
+      --     FX32_CONST(4),    4    walk fast
+      --     FX32_CONST(8),    2    faster
+      --     FX32_CONST(16),   1    instant
+      --     FX32_CONST(4),    4    RUN            <- gMovementActionFuncs_Run*
+      --
+      -- so a Sinnoh walk is TWO pixels a frame over eight frames, not one over
+      -- sixteen. The fallbacks in FieldDefaults are 16 and 8, which are Gen 1/2's
+      -- numbers, and a Gen 4 cache that does not state its own inherits them --
+      -- every step in Sinnoh was running at half the cartridge's pace.
+      stepFrames = 8,
+      -- ...and the run is the WALK-FAST row, four pixels over four frames.
+      -- `MOVEMENT_ACTION_RUN_*` is a distinct action with an identical distance
+      -- and duration to `MOVEMENT_ACTION_WALK_FAST_*`; the only argument that
+      -- differs is the last one, which pret stores into a field it names
+      -- `unused`. So the run is not a different SPEED from walk-fast, it is a
+      -- different ANIMATION at the same speed.
+      runStepFrames = 4,
     },
     source = ("ROM:Platinum (types bank %d, natures bank %d, type chart overlay %s)")
       :format(BANK.typeName, BANK.nature, tostring(parsed and parsed.overlay)),
@@ -3100,6 +3713,25 @@ function RomExtractorGen4:objectGfxTable()
   local map = overlay and Gen4ObjectGfx.read(overlay, members and members.count or 470)
   self._objectGfx = map or false
   return self._objectGfx
+end
+
+-- The graphicsId -> fldeff member table, read once.  Separate from the sprite
+-- table above because it is a DIFFERENT table naming a DIFFERENT archive, and
+-- folding them together would lose which archive a member belongs to -- which
+-- is the whole content of the answer.
+function RomExtractorGen4:objectModelTable()
+  if self._objectModels ~= nil then return self._objectModels end
+  local overlay = self.rom and self.rom:overlay(Gen4ObjectGfx.OVERLAY)
+  local map = overlay and Gen4ObjectGfx.readModels(overlay,
+                                                   Gen4ObjectGfx.MODEL_MEMBERS)
+  self._objectModels = map or false
+  return self._objectModels
+end
+
+-- modelFor(graphicsId) -> fldeff member, or nil
+function RomExtractorGen4:modelFor(graphicsId)
+  local map = self:objectModelTable()
+  return map and map[graphicsId] or nil
 end
 
 -- spriteFor(graphicsId) -> key, member, reason
@@ -3957,8 +4589,11 @@ function RomExtractorGen4:extractMenus()
 
   -- THE BAG.  Eight pocket names and where the screen puts things; the art
   -- itself is already in `gen4_graphics.screens` under `bag/`.
-  out.bag = { bank = BANK.bagPockets, pockets = {}, layout = Gen4Menus.BAG_LAYOUT,
-              icon = Gen4Menus.BAG_ICON, iconColumns = Gen4Menus.BAG_ICON_COLUMNS }
+  out.bag = { bank = BANK.bagPockets, pockets = {},
+              layout = Gen4Menus.BAG_LAYOUT,
+              icon = Gen4Menus.BAG_ICON,
+              iconCell = Gen4Menus.BAG_ICON_CELL,
+              iconStride = Gen4Menus.BAG_ICON_STRIDE }
   for i = 0, Gen4Menus.BAG_POCKETS - 1 do
     out.bag.pockets[i + 1] = self:string(BANK.bagPockets, i)
   end
@@ -4561,7 +5196,29 @@ function RomExtractorGen4:playerSheets()
     return key
   end
 
-  local function formFor(prefix, label)
+  -- THE BATTLE BACK PIC, which is a different sheet from every field one.
+  --
+  -- Item 7 of the play-test list: *"No trainer sprite in battle before the
+  -- Pokemon is sent out"*.  Half of that was the renderer, which never drew one;
+  -- the other half is here.  `field.playerPics` is not written by this
+  -- extractor at all, so `Sprites.playerPath(data, "back")` fell through to the
+  -- generation-agnostic default and answered `assets/generated/battle/redb.png`
+  -- -- RED'S GEN 1 BACK SPRITE, on a Sinnoh cache.  `playerForms` was written
+  -- but carried field sprites only, and `back` is the key
+  -- `Sprites.playerForm` reads.
+  --
+  -- LUCAS AND DAWN are Diamond and Pearl's two player characters and these are
+  -- their names in the cartridge's own sprite order -- `trainer_backs/` runs
+  -- lucas_dp, dawn_dp, barry_dp (the rival), then the five stat trainers.  The
+  -- names are the evidence: pokeplatinum was searched for a gender-to-index
+  -- constant and has none to find.
+  --
+  -- Frame 00 of five.  The other four are the throw, which nothing plays yet.
+  local function backPic(art)
+    return ("assets/generated/gen4/battle/trainer_backs_%s_00.png"):format(art)
+  end
+
+  local function formFor(prefix, label, backArt)
     local form = {
       label = label,
       walk = sheet(prefix),
@@ -4569,12 +5226,13 @@ function RomExtractorGen4:playerSheets()
       surf = sheet(prefix .. "_surf"),
       fieldMove = sheet(prefix .. "_holding_poke_ball"),
       fishing = sheet(prefix .. "_fishing"),
+      back = backArt and backPic(backArt) or nil,
     }
     return form.walk and form or nil
   end
 
-  local boy = formFor("player_m", "BOY")
-  local girl = formFor("player_f", "GIRL")
+  local boy = formFor("player_m", "BOY", "lucas_dp")
+  local girl = formFor("player_f", "GIRL", "dawn_dp")
   if not (boy or girl) then return nil, nil end
 
   local default = boy or girl
@@ -4729,12 +5387,24 @@ function RomExtractorGen4:extractTerrain(names)
     local area = record and Gen4Maps.areaData(record)
     if mapId and area then
       out.maps[mapId] = { texture = area.mapTexture, area = h.areaData,
-                          lighting = area.lighting }
+                          -- `areaLight`, not the old `lighting`: that name was on
+                          -- pret's `dummy04` and selected nothing. See
+                          -- Gen4Maps.areaData for how the ROM settled which is
+                          -- which.
+                          areaLight = area.areaLight,
+                          outdoors = area.outdoors,
+                          -- `mapPropArchivesID`: which of the 71 prop
+                          -- allow-lists this map loads. Without it a prop id
+                          -- cannot be told from a dummy box.
+                          props = area.buildings }
       attributed = attributed + 1
     elseif mapId then
       noArea = noArea + 1
     end
   end
+
+  self:areaLights(out.maps)
+  self:mapProps()
 
   self:write("gen4_terrain", out)
   self.terrainReport = {
@@ -4744,6 +5414,202 @@ function RomExtractorGen4:extractTerrain(names)
     geometry = #geometry, heights = #heights,
   }
   return out
+end
+
+-- THE MAP PROPS, AND THE ALLOW-LIST THAT DECIDES WHETHER ONE DRAWS AT ALL.
+--
+-- Reported from play as items 2 and 4: "signs are not rendered at all" and "some
+-- areas draw placeholder tile art". Those are one fault, not two, and the
+-- placeholder IS the cartridge's own dummy box.
+--
+-- A signpost in Platinum is not a sprite and not a tile. It is a MAP PROP -- an
+-- entry in a land chunk's object records, carrying a model id, a position, a
+-- rotation and a scale -- so it arrives with the houses through the same model
+-- path. `Gen4Maps.objects` has decoded those records for as long as the terrain
+-- stage has existed and `build_model.narc` is extracted beside them.
+--
+-- WHAT WAS MISSING IS THE INDIRECTION IN THE MIDDLE, AND IT IS NOT OPTIONAL.
+-- `AreaDataManager_Load` does this:
+--
+--     mapPropModelIDs = NARC read of area_build.narc[areaData.mapPropArchivesID]
+--     mapPropModelIDsCount = mapPropModelIDs[0]              // first u16 is a COUNT
+--     GF_ASSERT(count < MAX_MAP_PROP_MODEL_FILES)            // 768
+--     for (i = 0; i < count; i++) {
+--         u16 id = mapPropModelIDs[i + 1];
+--         mapPropModelFiles[id] = NARC read of build_model.narc[id];
+--     }
+--
+-- so each area loads a SUBSET of `build_model.narc`, the ids are GLOBAL members
+-- of that archive, and `mapPropModelFiles` is sparse -- indexed by the global id,
+-- not by position in the list.
+--
+-- AND AN ID OUTSIDE THAT SUBSET DOES NOT VANISH, IT BECOMES A BOX:
+--
+--     if (mapPropModelFiles[mapPropModelID] == NULL) {
+--         // Return the dummy box model if the requested one is not loaded
+--         return &mapPropModelFiles[0];
+--     }
+--
+-- with `map_prop.c` forcing `loadedProp->modelID = 0` alongside it, and
+-- `AreaDataManager_Load` guaranteeing member 0 is resident whatever else is. That
+-- member is `dmybox00` -- confirmed by reading it: build_model.narc member 0 is
+-- 1900 bytes of NSBMD and the string "dmybox" is inside it. **The placeholder art
+-- in the report is this model.** Any prop the port cannot resolve is not a
+-- missing sign, it is a visible grey box, which is exactly what was seen.
+--
+-- `Gen4Maps.areaBuildings` HAS DECODED THIS LIST CORRECTLY THE WHOLE TIME AND
+-- NOTHING EVER CALLED IT. All 71 members decode on the count-then-ids shape with
+-- none refused, the largest list is 138 against the cartridge's 768 assert, and
+-- the 527 distinct ids top out at 589 against a 590-member archive. A decoder
+-- with no caller is the same failure as a table with no reader, one step earlier.
+--
+-- THE ASSOCIATION IS MEASURED, NOT ASSUMED. Walking every map's matrix and
+-- testing its chunks' prop ids against its own area's list: of the 204 matrices
+-- that carry props, **201 are covered exactly**. Three are not, and matrix 0 is
+-- the loudest -- 501 placements with 101 distinct ids outside every single area
+-- list, which is what a matrix shared by maps from different areas looks like
+-- when only one area's subset is resident. On the cartridge those props draw the
+-- dummy box, so the three exceptions are the rule working, not the rule failing.
+--
+-- Keyed by the ARCHIVE MEMBER and not by map, for the same reason the area lights
+-- are: 71 lists against 593 maps.
+function RomExtractorGen4:mapProps()
+  local buildArc = self:archiveAt("/fielddata/areadata/area_build_model/area_build.narc")
+  local texArc = self:archiveAt("/fielddata/areadata/area_build_model/areabm_texset.narc")
+  local modelArc = self:archiveAt("/fielddata/build_model/build_model.narc")
+  if not buildArc or not modelArc then
+    self.mapPropReport = { sets = 0, reason = "archive missing" }
+    return
+  end
+
+  local out = { sets = {}, models = modelArc.count, dummy = 0 }
+  local decoded, refused, largest, ids = 0, 0, 0, {}
+  for m = 0, buildArc.count - 1 do
+    local list, err = Gen4Maps.areaBuildings(buildArc:get(m))
+    if list then
+      decoded = decoded + 1
+      if #list > largest then largest = #list end
+      for _, id in ipairs(list) do ids[id] = true end
+      out.sets[m] = {
+        props = list,
+        -- `areabm_texset.narc` is read with the SAME member index as
+        -- `area_build.narc`, and both archives are 71 long. The prop texture is
+        -- bound to every model in the list by
+        -- `Easy3D_BindTextureToResource(mapPropModelFiles[id], mapPropTexture)`,
+        -- so a prop without its area's texture set is an untextured prop, not
+        -- merely a differently-coloured one.
+        texture = (texArc and m < texArc.count) and m or nil,
+      }
+    else
+      refused = refused + 1
+    end
+  end
+
+  local distinct, highest = 0, -1
+  for id in pairs(ids) do
+    distinct = distinct + 1
+    if id > highest then highest = id end
+  end
+
+  -- ...AND THE DRAW LIST, which is the other half of making a prop appear right.
+  --
+  -- `MapProp_Draw` never hands the model to the renderer whole. It walks a
+  -- (material, shape) list out of `build_model_matshp.dat` and issues one
+  -- `NNS_G3dDraw1Mat1Shp` per pair, so the file IS the draw order. It is not the
+  -- shapes' own order either: 160 of the 478 non-empty lists put their shape ids
+  -- out of sequence, and models 22, 23 and 236 draw material 0 LAST after
+  -- materials 1..4 -- translucency ordering, which comes out wrong if a prop is
+  -- drawn the obvious way. Folded into this table rather than given its own so
+  -- that everything a prop needs arrives together.
+  local shapeBytes = self.rom and self.rom:read(Gen4PropShapes.PATH)
+  local shapes, shapeErr = shapeBytes and Gen4PropShapes.parse(shapeBytes)
+  if shapes then
+    out.draw = shapes.lists
+    out.drawModels = shapes.models
+    out.drawPairs = shapes.pairs
+  end
+
+  self:write("gen4_mapprops", out)
+  self.mapPropReport = {
+    sets = decoded, refused = refused, largest = largest,
+    distinct = distinct, highest = highest, models = modelArc.count,
+    textureSets = texArc and texArc.count or 0,
+    drawLists = shapes and shapes.models or 0,
+    drawPairs = shapes and shapes.pairs or 0,
+    drawError = (not shapes) and (shapeErr or "file missing") or nil,
+  }
+end
+
+-- THE AREA LIGHTS, WHICH IS THE COLOUR OF THE WORLD AND WAS NOT BEING EXTRACTED.
+--
+-- Reported from play as the overworld "rendering everything as flat 2d", with a
+-- Twinleaf shot beside the cartridge's. The geometry was only part of it: the
+-- port's grass is a BRIGHT SATURATED GREEN and its path YELLOW, where the
+-- cartridge's are a muted olive and a warm ORANGE-BROWN. Same textures. The
+-- cartridge LIGHTS them and this port was drawing them unlit, and unlit textures
+-- always come out brighter and flatter than lit ones.
+--
+-- THE INDEX WAS IN THE CACHE THE WHOLE TIME, UNREAD AND POINTING AT THE WRONG U16.
+-- The terrain stage above has written a byte onto all 593 maps since it was first
+-- written, straight off the area record beside `texture`, under the name
+-- `lighting`. It was pret's `dummy04` -- the one field of `AreaDataFile` the
+-- cartridge never reads -- and the real `areaLightArchiveID` sat in the next u16
+-- under the name `flags`. Writing a field nobody reads is how that survives:
+-- there was no consumer to be wrong, so nothing ever disagreed with it.
+--
+-- `Gen4Maps.areaData` now names both correctly and records how the ROM settled
+-- it. The corrected index is what this stage keys on.
+--
+-- THAT WOULD HAVE BEEN THE SIXTH WRITE-AND-NEVER-READ TABLE, after
+-- gen4_species_sprites, gen4_move_anims, gen4_particles, gen4_overworld (which
+-- was Dawn) and the terrain byte itself -- which had gone one worse than unread,
+-- because an unread field is also an unchecked one and this one was the wrong
+-- field entirely. It is written under the
+-- `gen4_` prefix and listed in Data's GEN4_PREFIXED for exactly that reason, so
+-- `tools/gen4_cache_wiring_check.lua` can see it.
+--
+-- KEYED BY THE BYTE, NOT BY MAP. There are four members and 593 maps, so keying
+-- per map would store the same fifteen templates 593 times; the byte is what the
+-- cartridge selects on and it is already on every map record.
+function RomExtractorGen4:areaLights(mapsByName)
+  local raw = self.rom and self.rom:read(Gen4AreaLight.PATH)
+  local arc = raw and Narc.parse(raw)
+  if not arc then
+    self.areaLightReport = { members = 0, reason = "archive missing" }
+    return
+  end
+
+  local out = { members = {}, path = Gen4AreaLight.PATH }
+  local templates, parsed = Gen4AreaLight.all(arc)
+  for m = 0, arc.count - 1 do
+    out.members[m] = templates[m]
+  end
+
+  -- ...and which of the four each map actually asks for, so a check can prove the
+  -- index and the archive meet rather than assuming they do.
+  local used, unknown = {}, 0
+  for _, record in pairs(mapsByName or {}) do
+    local light = record and record.areaLight
+    if light then
+      if light < Gen4AreaLight.FILE_COUNT and out.members[light] then
+        used[light] = (used[light] or 0) + 1
+      else
+        -- GF_ASSERT(archiveID < AREA_LIGHT_FILE_COUNT) is the cartridge's own
+        -- bound, so a byte past it is a parse fault upstream and not a map that
+        -- happens to be unlit.
+        unknown = unknown + 1
+      end
+    end
+  end
+  out.used = used
+
+  self:write("gen4_arealight", out)
+  local total = 0
+  for _, ts in pairs(out.members) do total = total + #ts end
+  self.areaLightReport = {
+    members = parsed, count = arc.count, templates = total,
+    used = used, unknown = unknown,
+  }
 end
 
 local MODEL_ARCHIVES = {
@@ -4789,6 +5655,14 @@ local MODEL_ARCHIVES = {
   -- untextured and are drawn that way rather than wearing a borrowed picture.
   { path = "/fielddata/build_model/build_model.narc", out = "buildings",
     label = "map buildings" },
+  -- THE OBJECTS THAT ARE MODELS RATHER THAN BILLBOARDS -- every sign and
+  -- every mailbox in Sinnoh, and they were invisible until this archive was
+  -- read.  `board_a`..`board_f` at members 69-74 are the six signpost
+  -- graphics ids; see Gen4ObjectGfx.readModels for the nine-row table that
+  -- names them and for why the six identically-named models in mmodel.narc
+  -- are NOT the answer.  201 members, 145 of them BMD0, 319KB in all.
+  { path = "/data/mmodel/fldeff.narc", out = "fldeff",
+    label = "field-effect models" },
 }
 
 -- Platinum's 3D, in the shape the engine can load: packed geometry, the
@@ -5117,6 +5991,27 @@ function RomExtractorGen4:extractModels()
       end
     end
 
+    -- BY MEMBER, BECAUSE POSITION IS NOT MEMBER.
+    --
+    -- `Gen4Ground:building` reaches a model as `set.models[index + 1]`, which is
+    -- right for `build_model.narc` ONLY because that archive happens to be one
+    -- model per member with every member decoding.  It is a coincidence, not a
+    -- rule: this loop appends one entry per MODEL and an NSBMD member may carry
+    -- several, and `fldeff.narc` is 201 members of which only 145 are BMD0 at
+    -- all.  Indexing it by position would put the wrong model on every sign and
+    -- still draw something, which is the failure that looks like success.
+    --
+    -- So the member each entry actually came from -- which the loop above has
+    -- always stamped and nothing has ever read -- is published as an index.
+    -- First one wins, so a member carrying several models resolves to its first,
+    -- the same one the cartridge's own single-model lookup would take.
+    set.byMember = {}
+    for i, model in ipairs(set.models) do
+      if model.member and set.byMember[model.member] == nil then
+        set.byMember[model.member] = i
+      end
+    end
+
     out.sets[entry.out] = set
   end
 
@@ -5179,6 +6074,16 @@ function RomExtractorGen4:run()
   self:extractText()
   self:extractSpecies()
   self:extractMoves()
+  -- BESIDE THE MOVES, because it is the same 501 slots read a second way and a
+  -- reader looking for "what does this move do" should find both in one place.
+  self:extractMoveAnims()
+  -- ...and the pictures those programs point at, beside them for the same
+  -- reason: "what does this move look like" is one question with two halves.
+  self:extractParticles()
+  -- ...and the THIRD layer, the flat 2D sprites 32 of the programs build out of
+  -- four separate archives. It runs after the programs because it extracts
+  -- exactly the resource tuples they name.
+  self:extractCellActors()
   self:extractItems()
   self:extractEncounters()
   self:extractTrainers()

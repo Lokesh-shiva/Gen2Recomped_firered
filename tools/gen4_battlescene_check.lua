@@ -61,6 +61,9 @@ table.insert(package.searchers, 1, function(name)
   if name == "src.import.Gen4TypeChart" then return nil end
   if name == "src.import.Gen4Species" then return nil end
   if name == "src.import.Gen4Moves" then return nil end
+  -- ...and the tile compositor, whose cell PLACEMENT the backdrop section below
+  -- asserts directly.
+  if name == "src.import.Gen4Graphics" then return nil end
   if name:sub(1, 4) ~= "src." then return nil end
   return function() return inert end
 end)
@@ -1381,6 +1384,363 @@ do
   else
     io.write("  --    cached type chart absent; re-import to check it\n")
   end
+end
+
+-- ---------------------------------------------------------------------------
+-- WHERE A TILEMAP'S CELLS LAND, which is what made the backdrop a stack of
+-- chopped strips.
+--
+-- The DS lays background screen data out in 32x32-ENTRY BLOCKS, one per
+-- 256x256 pixels, in reading order. A 512x256 map is TWO blocks side by side,
+-- so its first 1024 cells are the WHOLE LEFT HALF -- not the top two rows of
+-- the full width. `Gen4Graphics.compose` read it as one 64-wide grid, which
+-- interleaves the halves every 32 cells.
+--
+-- Reported from play: the battle backdrop drew "flat horizontal bands with a
+-- black stripe through the middle". The bands are Platinum's own art -- an
+-- outdoor backdrop IS a sky-to-ground gradient -- but the STRIPE was the
+-- transparent bottom of each half landing in the middle of the picture.
+--
+-- The checks below drive `compose` with a sheet whose tile n paints the
+-- constant value n, so reading a pixel back says WHICH TILE landed there. A
+-- digest that only asked which pixels were opaque could not tell the two
+-- layouts apart -- the same cells are opaque either way -- and would have been
+-- a measurement that cannot fail.
+-- ---------------------------------------------------------------------------
+do
+  local Gfx = require("src.import.Gen4Graphics")
+
+  -- tile n is 64 bytes of value (n % 255) + 1, so a pixel reads back as a tile
+  local parts = {}
+  for n = 0, 4095 do parts[n + 1] = string.rep(string.char((n % 255) + 1), 64) end
+  local sheet = { bpp = 8, perTile = 64, count = 4096,
+                  pixels = table.concat(parts) }
+  local pal = {}
+  for i = 1, 256 do pal[i] = { i - 1, 0, 0 } end
+
+  -- a map of `cells` cells where cell i holds tile i
+  local function mapOf(w, h)
+    local cells = {}
+    for i = 1, (w / 8) * (h / 8) do
+      cells[i] = { tile = i - 1, flipX = false, flipY = false, palette = 0 }
+    end
+    return { width = w, height = h, cells = cells }
+  end
+  -- which tile is at pixel (x, y), or nil where nothing was drawn
+  local function tileAt(img, x, y)
+    local o = (y * img.width + x) * 4
+    if img.rgba:byte(o + 4) == 0 then return nil end
+    return img.rgba:byte(o + 1)
+  end
+
+  -- 512x256: cell 1024 opens the RIGHT half, not row 128
+  local wide = Gfx.compose(mapOf(512, 256), sheet, pal)
+  ok(wide and wide.width == 512 and wide.height == 256,
+     "a 512x256 tilemap composes at its stated size",
+     wide and (wide.width .. "x" .. wide.height), "512x256")
+  ok(tileAt(wide, 256, 0) == (1024 % 255) + 1,
+     "512x256: cell 1024 starts the RIGHT half",
+     tostring(tileAt(wide, 256, 0)), (1024 % 255) + 1)
+  ok(tileAt(wide, 0, 128) ~= (1024 % 255) + 1,
+     "...and NOT the middle row, which is the bug",
+     tostring(tileAt(wide, 0, 128)), "anything else")
+  ok(tileAt(wide, 0, 0) == 1 and tileAt(wide, 248, 0) == 32,
+     "512x256: the left block's first row is cells 0..31",
+     ("%s..%s"):format(tostring(tileAt(wide, 0, 0)),
+                       tostring(tileAt(wide, 248, 0))), "1..32")
+  ok(tileAt(wide, 0, 8) == 33,
+     "...and the row under it is cell 32, not cell 64",
+     tostring(tileAt(wide, 0, 8)), 33)
+
+  -- 512x512: four blocks in reading order
+  local big = Gfx.compose(mapOf(512, 512), sheet, pal)
+  local function want(n) return (n % 255) + 1 end
+  ok(big and tileAt(big, 0, 0) == want(0)
+     and tileAt(big, 256, 0) == want(1024)
+     and tileAt(big, 0, 256) == want(2048)
+     and tileAt(big, 256, 256) == want(3072),
+     "512x512 is four blocks in reading order",
+     big and ("%s/%s/%s/%s"):format(tostring(tileAt(big, 0, 0)),
+       tostring(tileAt(big, 256, 0)), tostring(tileAt(big, 0, 256)),
+       tostring(tileAt(big, 256, 256))),
+     ("%d/%d/%d/%d"):format(want(0), want(1024), want(2048), want(3072)))
+
+  -- NOTHING NARROWER MOVES, and this is the half that protects every screen
+  -- that already worked: at 256 wide the two mappings are the same arithmetic.
+  local narrow = Gfx.compose(mapOf(256, 256), sheet, pal)
+  local drift = 0
+  for i = 0, 1023 do
+    local x, y = (i % 32) * 8, math.floor(i / 32) * 8
+    if tileAt(narrow, x, y) ~= want(i) then drift = drift + 1 end
+  end
+  ok(drift == 0, "a 256x256 tilemap is laid out exactly as before",
+     drift .. " cells moved", "0")
+
+  -- ...and a 256-wide map TALLER than 256 is the same too, because one column
+  -- of blocks stacked IS the linear order. Stating it keeps the rule honest:
+  -- the split is about columns, not about being oversized.
+  local tall = Gfx.compose(mapOf(256, 512), sheet, pal)
+  local tallDrift = 0
+  for i = 0, 2047 do
+    local x, y = (i % 32) * 8, math.floor(i / 32) * 8
+    if tileAt(tall, x, y) ~= want(i) then tallDrift = tallDrift + 1 end
+  end
+  ok(tallDrift == 0, "a 256x512 tilemap is unchanged (one block column)",
+     tallDrift .. " cells moved", "0")
+
+  -- A SIZE THE HARDWARE HAS NO BG FOR STAYS LINEAR. Seven members in the
+  -- cartridge state sizes like 352x192, 384x144, 448x192 and 320x72; those are
+  -- laid out by hand and splitting them would scramble screens that work.
+  local odd = Gfx.compose(mapOf(352, 192), sheet, pal)
+  local oddDrift = 0
+  for i = 0, (352 / 8) * (192 / 8) - 1 do
+    local x, y = (i % 44) * 8, math.floor(i / 44) * 8
+    if tileAt(odd, x, y) ~= want(i) then oddDrift = oddDrift + 1 end
+  end
+  ok(oddDrift == 0, "352x192 is not a hardware BG size and stays linear",
+     oddDrift .. " cells moved", "0")
+
+  -- ...AND NEITHER IS 1024x1024, the one place it would be tempting to
+  -- extrapolate. Two members of /graphic/demo_trade state that size and carry
+  -- 8,192 cells -- exactly half the grid -- so BOTH readings fill the same top
+  -- half and neither is distinguishable from the data. An unverified rule
+  -- applied anyway is a guess wearing a rule's clothes; it stays linear.
+  local huge = Gfx.compose(mapOf(1024, 1024), sheet, pal)
+  ok(huge and tileAt(huge, 0, 8) == want(128),
+     "1024x1024 is not a hardware BG size and stays linear",
+     huge and tostring(tileAt(huge, 0, 8)), want(128))
+end
+
+-- ---------------------------------------------------------------------------
+-- THE PARTICLES REACH THE SCREEN.
+--
+-- `Gen4ParticleSystem` simulates them, `Gen4MoveAnimPlayer` runs them and hands
+-- over a draw list, and both of those are proved by checks of their own. None of
+-- that puts a pixel anywhere: this screen has to ask for the list and blit it,
+-- and until it did, Scratch was a correct simulation of an invisible effect.
+-- ---------------------------------------------------------------------------
+io.write("\nthe particles on the field\n")
+ok(type(Gen4Battle.drawParticles) == "function",
+   "the battle scene has a particle draw path",
+   type(Gen4Battle.drawParticles), "function")
+ok(type(Gen4Battle.particleOrigin) == "function",
+   "...and resolves an emitter's origin to a point",
+   type(Gen4Battle.particleOrigin), "function")
+
+-- IT IS CALLED, and from the battler pass rather than merely defined. The
+-- comments come out first: a call deleted with its comment left behind is the
+-- exact fault that made a `gen4Layout()` guard look present in the move
+-- animation check after it had been removed.
+do
+  local f = io.open(root .. "../src/battle/Gen4Battle.lua", "rb")
+  local src = f and f:read("*a")
+  if f then f:close() end
+  src = src and src:gsub("\r\n", "\n"):gsub("%-%-[^\n]*", "") or ""
+  local at = src:find("function Gen4Battle.drawBattlers", 1, true)
+  local stop = at and src:find("\nfunction Gen4Battle%.", at + 10)
+  local body = at and src:sub(at, stop or #src) or ""
+  ok(body:find("Gen4Battle.drawParticles(battle)", 1, true) ~= nil,
+     "...and drawBattlers actually calls it",
+     body:find("Gen4Battle.drawParticles(battle)", 1, true) ~= nil, true)
+
+  -- AND THE BLIT IS ANCHORED AT THE CENTRE, asserted from the SOURCE because
+  -- there is no graphics context here to draw into and read back. That is a
+  -- weaker check than every other one in this file and it is worth saying so:
+  -- it can see the two offset arguments disappear -- which is what dropping
+  -- them looks like, and dropping them makes every effect drift down and right
+  -- as it scales, because LOVE anchors the top-left by default -- and it cannot
+  -- see them being wrong in some subtler way. Planting the removal passed every
+  -- other assertion in this section, so a weak check beats none.
+  -- AND THE THIRD LAYER'S DRAW PATH, which is a separate call because it is a
+  -- separate kind of thing: a flat animated sprite out of four archives rather
+  -- than a 3D particle burst. 32 of the 501 programs use it.
+  ok(type(Gen4Battle.drawCellActors) == "function",
+     "...and a 2D cell-actor draw path",
+     type(Gen4Battle.drawCellActors), "function")
+  ok(body:find("Gen4Battle.drawCellActors(battle)", 1, true) ~= nil,
+     "...which drawBattlers also calls",
+     body:find("Gen4Battle.drawCellActors(battle)", 1, true) ~= nil, true)
+  local ca = src:find("function Gen4Battle.drawCellActors", 1, true)
+  local caEnd = ca and src:find("\nfunction Gen4Battle%.", ca + 10)
+  local caBody = ca and src:sub(ca, caEnd or #src) or ""
+  ok(caBody:find("getWidth() / 2", 1, true) ~= nil,
+     "...and draws each sprite from its own centre",
+     caBody:find("getWidth() / 2", 1, true) ~= nil, true)
+  -- A BLANK FRAME MUST BE SKIPPED RATHER THAN DRAWN AS NOTHING: the animations
+  -- name empty cells on purpose, and a draw path that did not check would try to
+  -- load a nil path every one of those 79 frames.
+  ok(caBody:find("s.blank", 1, true) ~= nil,
+     "...and skips the cartridge's own blank frames",
+     caBody:find("s.blank", 1, true) ~= nil, true)
+  -- AND IT HONOURS AN ABSOLUTE POSITION, ON EITHER AXIS. Two callbacks need one:
+  -- Fissure places its sprite at a fixed screen Y rather than an offset from a
+  -- battler, and IcicleSpear flies a path BETWEEN the two battlers, which no
+  -- offset from either one could express. A draw path that ignored the Y would
+  -- open the crack at the defender's feet wherever those happen to be; one that
+  -- ignored the X would leave all three icicles stacked on the defender.
+  -- Source-level, with the same live-guard test the tiling branch gets, because
+  -- `if false then` leaves every string intact.
+  ok(caBody:find("s.absoluteY", 1, true) ~= nil,
+     "...and reads an absolute height when the record carries one",
+     caBody:find("s.absoluteY", 1, true) ~= nil, true)
+  ok(caBody:find("s.absoluteX", 1, true) ~= nil,
+     "...and an absolute X, which the flying callbacks need",
+     caBody:find("s.absoluteX", 1, true) ~= nil, true)
+  for _, axis in ipairs({ { "oy, sy = absY", "absY" }, { "ox, sx = absX", "absX" } }) do
+    local at = caBody:find(axis[1], 1, true)
+    local guard = nil
+    if at then
+      for line in caBody:sub(1, at):gmatch("[^\n]*if [^\n]*") do guard = line end
+    end
+    ok(guard ~= nil and guard:find(axis[2], 1, true) ~= nil,
+       "...under a guard that names " .. axis[2] .. ", not a dead one",
+       guard and guard:gsub("^%s+", "") or "no guard found",
+       "if " .. axis[2] .. " then ...")
+  end
+  -- +Y IS DOWN, and this is the assertion that says so. The offsets on these
+  -- records are what `ManagedSprite_OffsetPositionXY` would have added and every
+  -- constant in pret is written in that frame, so the draw ADDS the record's Y.
+  -- An earlier version subtracted it, which drew move 265's sprite twenty-four
+  -- pixels above the battler where the cartridge puts it twenty-four below --
+  -- and nothing could see it, because a sprite in the wrong place still draws.
+  ok(caBody:find("oy + sy", 1, true) ~= nil and caBody:find("oy - sy", 1, true) == nil,
+     "...and adds the record's Y, because +Y is down on the hardware",
+     caBody:find("oy + sy", 1, true) ~= nil and caBody:find("oy - sy", 1, true) == nil,
+     true)
+  -- WHAT THE CALLBACK DID TO IT reaches the screen: five channels, and each one
+  -- is identity on a sprite whose callback is not ported.
+  for _, field in ipairs({ "s.scaleX", "s.scaleY", "s.rotation", "s.flipX", "s.alpha" }) do
+    ok(caBody:find(field, 1, true) ~= nil,
+       "...and the draw reads " .. field,
+       caBody:find(field, 1, true) ~= nil, true)
+  end
+  -- A FLIP IS A NEGATIVE X SCALE about the centre, which is what `SetFlipMode` is
+  -- on the hardware -- and MetalClaw's left pair is the only user of it.
+  ok(caBody:find("scaleX = -scaleX", 1, true) ~= nil,
+     "...and a flip is a negative X scale, not a second image",
+     caBody:find("scaleX = -scaleX", 1, true) ~= nil, true)
+
+  -- THE BACKGROUND'S PALETTE FADE, WHICH HAS TO LAND IN THE RIGHT PLACE.
+  -- `fadebg` blends the BACKGROUND's palettes and nothing else, so the quad that
+  -- reproduces it must be drawn AFTER the field and BEFORE the battlers. Drawn
+  -- last it would dim the Pokemon too, which the cartridge does not -- and that is
+  -- an ordering bug no assertion about the fade's arithmetic could see, so it is
+  -- asserted as an ordering here.
+  do
+    local dr = src:find("function Gen4Battle.draw(battle)", 1, true)
+    local drBody = dr and src:sub(dr, (src:find("\nfunction Gen4Battle%.", dr + 10)) or #src) or ""
+    local atField = drBody:find("battle:drawBattleField()", 1, true)
+    local atFade = drBody:find("Gen4Battle.drawBackgroundFade(battle)", 1, true)
+    local atBattlers = drBody:find("Gen4Battle.drawBattlers(battle)", 1, true)
+    ok(atFade ~= nil, "the background fade is drawn at all", atFade ~= nil, true)
+    ok(atField ~= nil and atFade ~= nil and atBattlers ~= nil
+       and atField < atFade and atFade < atBattlers,
+       "...after the field and BEFORE the battlers, so it dims neither Pokemon",
+       ("field %s, fade %s, battlers %s"):format(tostring(atField),
+                                                tostring(atFade),
+                                                tostring(atBattlers)),
+       "in that order")
+    local bf = src:find("function Gen4Battle.drawBackgroundFade", 1, true)
+    local bfBody = bf and src:sub(bf, (src:find("\nfunction Gen4Battle%.", bf + 10)) or #src) or ""
+    ok(bfBody:find('groupTint(player, "base")', 1, true) ~= nil
+       or bfBody:find('"base"', 1, true) ~= nil,
+       "...reading the base group, not a screen-wide tint",
+       bfBody:find('"base"', 1, true) ~= nil, true)
+    -- A FILLED QUAD AT THE FADE'S OWN ALPHA IS THE EXACT OPERATION, because
+    -- `BlendColor` IS alpha compositing; the assertion is that the alpha comes
+    -- from the fade rather than being a constant somebody liked the look of.
+    ok(bfBody:find("rectangle(\"fill\", 0, 0, Gen4Battle.WIDTH", 1, true) ~= nil,
+       "...as one quad over the whole DS screen",
+       bfBody:find("rectangle(\"fill\", 0, 0, Gen4Battle.WIDTH", 1, true) ~= nil,
+       true)
+    ok(bfBody:find("setColor(r or 0, g or 0, b or 0, a)", 1, true) ~= nil,
+       "...at the fade's own colour and alpha, not a constant",
+       bfBody:find("setColor(r or 0, g or 0, b or 0, a)", 1, true) ~= nil, true)
+  end
+
+  local dp = src:find("function Gen4Battle.drawParticles", 1, true)
+  local dpEnd = dp and src:find("\nfunction Gen4Battle%.", dp + 10)
+  local dpBody = dp and src:sub(dp, dpEnd or #src) or ""
+  ok(dpBody:find("w / 2, h / 2", 1, true) ~= nil,
+     "...and draws each particle from its own centre",
+     dpBody:find("w / 2, h / 2", 1, true) ~= nil, true)
+  -- AND IT TINTS. Four fifths of the cartridge's emitters carry a colour and the
+  -- draw list hands over the product of the particle's and the emitter's -- so a
+  -- path that called `setColor(1, 1, 1, a)` unconditionally would draw the whole
+  -- game's particles grey. Source-level for the same reason as the anchor: there
+  -- is no graphics context here to read a pixel back from.
+  ok(dpBody:find("q.colour", 1, true) ~= nil,
+     "...and takes its colour from the draw record",
+     dpBody:find("q.colour", 1, true) ~= nil, true)
+  -- AND IT TILES. 647 emitters repeat their texture, which needs a wrapped quad
+  -- rather than a bigger sprite: the footprint is unchanged and the texture
+  -- repeats inside it.
+  ok(dpBody:find("tiledQuad", 1, true) ~= nil
+     and dpBody:find("setWrap", 1, true) ~= nil,
+     "...and repeats a tiled texture inside the same footprint",
+     ("tiledQuad %s, setWrap %s")
+       :format(tostring(dpBody:find("tiledQuad", 1, true) ~= nil),
+               tostring(dpBody:find("setWrap", 1, true) ~= nil)),
+     "both")
+  ok(dpBody:find("sx / tileS", 1, true) ~= nil,
+     "...by dividing the scale rather than growing the particle",
+     dpBody:find("sx / tileS", 1, true) ~= nil, true)
+  -- AND THE BRANCH IS REACHABLE. `if false then` above the tiled draw leaves
+  -- every string above intact and the code dead -- the same fault a dead guard
+  -- above the animator's tick pulled once. The nearest `if` must name `tileS`.
+  do
+    -- THE LAST `if` BEFORE THE CALL, whichever line it is on. Matching "two lines
+    -- above" broke on the real source the moment a comment sat between them --
+    -- and it broke by FAILING, which is the right way round for a check to be
+    -- wrong. Scanning for the nearest preceding `if` does not care about layout.
+    local at = dpBody:find("tiledQuad", 1, true)
+    local guard = nil
+    if at then
+      for line in dpBody:sub(1, at):gmatch("[^\n]*if [^\n]*") do
+        guard = line
+      end
+    end
+    ok(guard ~= nil and guard:find("tileS", 1, true) ~= nil,
+       "...under a guard that names tileS, not a dead one",
+       guard and guard:gsub("^%s+", "") or "no guard found",
+       "if tileS > 1 ...")
+  end
+end
+
+-- THE ORIGIN SWAPS WITH THE SIDE, which is the one thing here that can be wrong
+-- without looking wrong: an attacker origin pinned to the player draws the
+-- opponent's moves out of the player's Pokemon, and half of every battle is
+-- fought from the other side.
+if type(Gen4Battle.particleOrigin) == "function" then
+  local me = Gen4Battle.BATTLER_POS[0]
+  local foe = Gen4Battle.BATTLER_POS[1]
+  local ax, ay = Gen4Battle.particleOrigin(nil, "attacker", true)
+  local dx, dy = Gen4Battle.particleOrigin(nil, "defender", true)
+  ok(ax == me.x and ay == me.y,
+     "the player attacking emits from the player's Pokemon",
+     ("%s,%s"):format(tostring(ax), tostring(ay)),
+     ("%s,%s"):format(tostring(me.x), tostring(me.y)))
+  ok(dx == foe.x and dy == foe.y, "...and lands on the foe's",
+     ("%s,%s"):format(tostring(dx), tostring(dy)),
+     ("%s,%s"):format(tostring(foe.x), tostring(foe.y)))
+  local bx, by = Gen4Battle.particleOrigin(nil, "attacker", false)
+  ok(bx == foe.x and by == foe.y, "...and the foe attacking is the other way up",
+     ("%s,%s"):format(tostring(bx), tostring(by)),
+     ("%s,%s"):format(tostring(foe.x), tostring(foe.y)))
+  -- THE MIDPOINT IS BETWEEN THEM, not at one of them: five of the twenty-three
+  -- callbacks converge on the centre of the field and a midpoint that collapsed
+  -- onto a battler would look like a move aimed at the wrong Pokemon.
+  local mx, my = Gen4Battle.particleOrigin(nil, "midpoint", true)
+  ok(mx == (me.x + foe.x) / 2 and my == (me.y + foe.y) / 2,
+     "...and the centre of the field is between the two",
+     ("%s,%s"):format(tostring(mx), tostring(my)),
+     ("%s,%s"):format(tostring((me.x + foe.x) / 2), tostring((me.y + foe.y) / 2)))
+  -- AND AN UNKNOWN NAME DOES NOT LAND AT (0,0), which is the top-left corner of
+  -- the screen and where a nil-defaulting origin would put a whole effect.
+  local ux, uy = Gen4Battle.particleOrigin(nil, "no such callback", true)
+  ok(tonumber(ux) and tonumber(uy) and (ux ~= 0 or uy ~= 0),
+     "...and an origin this screen does not know is still on the field",
+     ("%s,%s"):format(tostring(ux), tostring(uy)), "not 0,0")
 end
 
 io.write(("\n%d checks, %d failures\n"):format(checks, fails))

@@ -546,7 +546,20 @@ end
 itemKey = function(data, id)
   local items = data and data.items
   if not items then return id end
-  if items[id] then return id end
+  -- A NUMBER IS NEVER A BAG KEY, and this branch used to hand one over.
+  --
+  -- `items[id]` succeeding says the id NAMES AN ITEM; it does not say the id
+  -- is the form the BAG wants.  On a Gen 4 cache the table is keyed 0..445,
+  -- so `items[17]` is a hit and 17 was returned -- and the bag is
+  -- string-keyed throughout (`Bag.isBadge` does `id:find("BADGE")`), so
+  -- every pickup, gift and Mart purchase in Sinnoh died on
+  -- `Bag.lua:59: attempt to index local 'id' (a number value)`.
+  --
+  -- Measured through this very function: `g4_give_item(ctx, 17, 2)` and
+  -- `(ctx, 4, 2)` both raised before this line changed.
+  --
+  -- Gen 1/2/3 pass strings, so they take the same branch they always did.
+  if type(id) ~= "number" and items[id] then return id end
   local named = ("ITEM_%03d"):format(tonumber(id) or 0)
   if items[named] then return named end
   return id
@@ -914,6 +927,30 @@ local warnedCamera = false
 local function objectById(ctx, id)
   local overworld = ctx.overworld
   local wanted = tonumber(id)
+  -- AN OBJECT ID OPERAND IS A VAR OR A LITERAL, and this read the literal
+  -- only.  Every object-id operand on the cartridge is read with
+  -- `ScriptContext_GetVar`, which is `FieldSystem_TryGetVar`: if the number
+  -- names a variable, take its value; if it does not, the number IS the
+  -- value.  `valueOf` above is already that rule -- it was written for
+  -- `g4_set_var` and never reached the object lookup.
+  --
+  -- WHAT IT COST: `ApplyMovement VAR_0x8007` walked local id **32775**.
+  -- Measured in the overworld harness, talking to the Pokemon Centre nurse:
+  -- `no object with localId 32775 on T02PC0101 -- the movement is dropped`
+  -- (live localIds 0,1,2,3,4).  She never turns to the machine and never
+  -- turns back, which is the play report's "does not animate".
+  --
+  -- 39 of Sinnoh's 2,215 ApplyMovement sites name a var, and 29 of those are
+  -- `VAR_LAST_TALKED` -- the ordinary "the person you are talking to moves"
+  -- idiom -- so this is not one nurse.
+  --
+  -- RESOLVED BEFORE the 0xFF/0xF2/0xF1 branches below, because the cartridge
+  -- resolves first too and a var can legitimately hold LOCALID_PLAYER.
+  -- Cannot collide with a real local id: those are 0..255 plus the three
+  -- specials, and `VARS_START` is 0x4000.
+  if wanted and ctx.save and isVarId(wanted) then
+    wanted = tonumber(valueOf(ctx, wanted)) or wanted
+  end
   if not (overworld and overworld.entities and wanted) then return nil end
   if wanted == 0xFF then return overworld.player end
   if wanted == 0xF2 then
@@ -1825,18 +1862,38 @@ function Commands.g4_running_shoes(ctx)
   save.hasRunningShoes = true
 end
 
+-- `ScrCmd_CheckRunningShoesAcquired`: `*destVar = PlayerData_HasRunningShoes(playerData)`.
+--
+-- THE FLAG ABOVE WAS WRITTEN AND READ BY NOTHING -- the sixth time this port has
+-- done that, after gen4_species_sprites, gen4_move_anims, gen4_particles,
+-- gen4_overworld and the terrain's own area-light byte. The comment on
+-- `g4_running_shoes` says it writes both spellings "so whatever already gates
+-- running agrees", and nothing did: `OverworldState:runFrames` refused every Gen 4
+-- dataset outright, and 0x159 had no lowering at all, so neither the engine nor a
+-- script could see the shoes the player had been given.
+--
+-- `PlayerData_HasRunningShoes` returns TRUE/FALSE, so the var gets 1 or 0 and not
+-- a Lua boolean: the comparisons that follow it are numeric.
+function Commands.g4_has_running_shoes(ctx, destVar)
+  local save = ctx.save
+  local shoes = save
+    and (save.hasRunningShoes
+         or (save.player and save.player.runningShoes))
+  setVar(ctx.save, destVar, shoes and 1 or 0)
+end
+
 -- `TimeOfDayForHour` (src/rtc.c), transcribed from its 24-entry lookup:
 -- 0-3 LATE_NIGHT, 4-9 MORNING, 10-16 DAY, 17-19 TWILIGHT, 20-23 NIGHT.  The
 -- values are the 0-based `generated/time_of_day.txt` enum -- MORNING 0, DAY 1,
 -- TWILIGHT 2, NIGHT 3, LATE_NIGHT 4 -- and NOT this engine's own Gen 2 period
 -- names, which are a different set with a different ordering.
+-- DELEGATED, so there is ONE transcription of that lookup rather than two that
+-- can drift.  It moved to `Gen4Encounters` because the encounter roll needs the
+-- same answer and that module has no requires -- a check can load it alone,
+-- which this file is far too entangled to allow.  Required lazily, matching how
+-- this file already reaches `Gen4Text`.
 local function timeOfDayValue(hour)
-  hour = tonumber(hour) or 12
-  if hour < 4 then return 4 end
-  if hour < 10 then return 0 end
-  if hour < 17 then return 1 end
-  if hour < 20 then return 2 end
-  return 3
+  return require("src.import.Gen4Encounters").timeOfDayForHour(hour)
 end
 Gen4Commands.timeOfDayValue = timeOfDayValue
 
@@ -3443,6 +3500,29 @@ end
 
 
 pending("g4_common", "the common-script archive")
-pending("g4_unimplemented", "the opcode itself")
+-- NOT `pending`, BECAUSE THIS ONE CARRIES THE ANSWER AND pending DROPS IT.
+--
+-- `Gen4ScriptVM` emits `{ "g4_unimplemented", ins.name }` -- the opcode's
+-- own name -- and its comment says exactly why: "a silently dropped command
+-- is a script that runs and quietly does the wrong thing, which is far
+-- harder to find than one that reports what it could not do".
+--
+-- `pending`'s closure takes NO ARGUMENTS, so the one thing the row was built
+-- to carry was thrown away and every unlowered command in Sinnoh logged the
+-- same line: the WRAPPER's name, never the opcode's.  Found from the
+-- Jubilife mart -- talking to the clerk produced one line, and which command
+-- the mart needed was not in it.
+--
+-- Once per opcode rather than once for the wrapper, which is the whole
+-- point; `said` would have hushed the second distinct opcode for ever.
+local saidUnlowered = {}
+function Commands.g4_unimplemented(_, name, note)
+  local key = tostring(name)
+  if saidUnlowered[key] then return end
+  saidUnlowered[key] = true
+  Logger.info("gen4 script: `%s` is decoded but not lowered%s -- the row is "
+              .. "stepped over and the script carries on", key,
+              note and (" (" .. tostring(note) .. ")") or "")
+end
 
 return Gen4Commands

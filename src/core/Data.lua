@@ -105,10 +105,40 @@ local GEN4_MODULES = {
 -- resolve through the additive overlay to the ROOT cache -- Red's -- on every
 -- other game, which is the exact trap CLASSIC_ONLY below exists to close.
 --
--- The nine OTHER gen4_ modules on disk (gen4_text, gen4_events,
--- gen4_map_permissions, gen4_overworld, ...) are extractor INPUT: they are
--- lowered into `text`, `map_scripts`, `maps` and `sprites` before the cache is
--- written, and no running screen reads them.  They are deliberately absent.
+-- The OTHER gen4_ modules on disk (gen4_text, gen4_events,
+-- gen4_map_permissions, ...) are extractor INPUT: they are lowered into `text`,
+-- `map_scripts`, `maps` and `sprites` before the cache is written, and no
+-- running screen reads them.  They are deliberately absent.
+--
+-- !! `gen4_overworld` WAS ON THAT LIST AND IS NOW ON THIS ONE, and the reason it
+-- moved is the FOURTH instance of the bug the paragraphs below are about -- in
+-- the one direction the wiring check cannot see.
+--
+-- It was correctly described as extractor input when that sentence was written:
+-- the stage lowers it into `sprites` and nothing read the index itself. Then
+-- `OverworldController.resolveGraphicsVar` started reading it. The sixteen
+-- graphics ids 101..116 (`var_0`..`var_f`) are not pictures -- each names a
+-- script var holding the real id -- and turning that id into a sheet needs the
+-- NAME -> ARCHIVE MEMBER hop that only this index carries
+-- (`gen4_overworld.sprites["player_f"].member` = 91 -> SPRITE_G4_091). With the
+-- module unloaded the hop returned nil for every one of them, so EVERY var_N
+-- OBJECT IN THE GAME KEPT ITS PLACEHOLDER AND DREW NOTHING.
+--
+-- Reported from play twice: "dawn and professor are supposed to be there but
+-- they aren't", and then "dawns sprite seems to be missing shes invisible
+-- particularly if i start as a boy". The log said so outright and precisely --
+--   gen4 object: graphics id 101 is var_0 (var 0x4020) and it holds 97 --
+--   this object keeps the placeholder and will not draw
+-- -- 97 being `player_f`, which is the RIGHT answer: the entry script had run,
+-- the gender branch was right, the var was written, and the only thing missing
+-- was the table that turns 97 into a sheet.
+--
+-- WHY THE WIRING CHECK DID NOT CATCH IT. `tools/gen4_cache_wiring_check.lua`
+-- compares every name the extractor WRITES against this list, which catches a
+-- module written and never loaded. This was the mirror image: a module
+-- deliberately not loaded that a consumer later began to READ. The check now
+-- asserts that direction too -- every `data.gen4_*` read anywhere in `src/`
+-- must name a module on this list.
 -- `gen4_species_sprites` IS ON THIS LIST NOW, and it was not before -- so the
 -- whole index the species stage writes was DEAD DATA: written on every import,
 -- loaded by nothing, read by nothing. The battle's own front and back pictures
@@ -118,10 +148,43 @@ local GEN4_MODULES = {
 -- also worth a look the next time somebody wants what else is in there: the
 -- per-species sheet paths, the female variants and the height offsets are all
 -- sitting in it unused.
+--
+-- `gen4_move_anims` AND `gen4_particles` ARE THE SECOND AND THIRD TABLES TO
+-- HAVE BEEN WRITTEN AND NEVER LOADED, and the pair cost every move in Platinum
+-- its animation. The extractor wrote `move_anims.lua`; `Gen4MoveAnimPlayer.new`
+-- reads `data.gen4_move_anims`, got nil on every boot, and returned nil -- so
+-- the whole 501-program player, every opcode of it, sat behind a constructor
+-- that never succeeded. Nothing failed, nothing logged, and the moves fell
+-- back to the generic animation, which is what "written on every import,
+-- loaded by nothing" looks like from the player's side of the screen.
+--
+-- The stages are named `gen4_move_anims` and `gen4_particles` now, which is
+-- what puts them on this list at all -- and `tools/gen4_cache_wiring_check.lua`
+-- compares every name the Gen 4 extractor writes against this file, so a
+-- fourth one cannot happen quietly.
 local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         "gen4_naming", "gen4_dex", "gen4_models",
                         "gen4_terrain", "gen4_distortion_world",
-                        "gen4_species_sprites" }
+                        "gen4_species_sprites",
+                        "gen4_move_anims", "gen4_particles",
+                        "gen4_cellactors",
+                        -- the name -> archive member hop for `var_0`..`var_f`;
+                        -- see the paragraph above for what its absence cost
+                        "gen4_overworld",
+                        -- `/data/arealight.narc`: four members of fifteen
+                        -- time-of-day templates, selected by the `lighting` byte
+                        -- that `gen4_terrain`'s `maps` table has carried on all
+                        -- 593 maps since the terrain stage was written and that
+                        -- nothing has ever read. Listed here from the day the
+                        -- stage was added rather than after someone notices the
+                        -- world is drawn unlit -- which is how the four above it
+                        -- were found, one report at a time.
+                        "gen4_arealight",
+                        -- the 71 per-area prop allow-lists: a chunk object's
+                        -- model id is a GLOBAL build_model.narc member, and one
+                        -- outside its area's list draws `dmybox00` rather than
+                        -- nothing, which is the "placeholder tile art" report
+                        "gen4_mapprops" }
 
 -- WHAT A GEN 3 CACHE MUST NOT INHERIT.
 --
@@ -305,11 +368,32 @@ local function normalizeMapId(mapId)
   return table.concat(out)
 end
 
+-- AN ALIAS REMEMBERS WHAT IT WAS MADE FROM.
+--
+-- `normalizeMapId` exists for the Game Boy games, where a map id like
+-- `POKEMON_TOWER_1F` wants friendly spelling, and it INSERTS an underscore
+-- before any digit run that follows a letter.  Run over a Gen 4 cartridge it
+-- rewrites the developers' own internal names: `T01R0201`, the name that
+-- `mapname.bin` states and that every Gen 4 cache index is keyed by, becomes
+-- `T_01R_0201`.  The alias is a COPY with `id` set to the new spelling, so a
+-- map loaded through it carries an id no Gen 4 index has ever heard of, and
+-- any join on it fails SILENTLY.
+--
+-- It did: `Gen4Ground.forMap` looks its map up in `gen4_terrain.maps`, found
+-- nothing for `T_01R_0201`, and kept the checkerboard stand-in -- which is
+-- what "no textures for the indoors of the house" was.  ZERO of the 593
+-- terrain records are broken and ZERO of their ids contain an underscore;
+-- the record was there under the cartridge's own name the whole time.
+--
+-- So the copy carries `sourceId`, and a join that wants the cartridge's
+-- spelling asks for that first.  Recovering it by stripping underscores would
+-- work today and is guessing at an inverse; this is the id itself.
 local function aliasMap(maps, source)
   local alias = normalizeMapId(source)
   if alias == source or maps[alias] or not maps[source] then return end
   local mapped = copy(maps[source])
   mapped.id = alias
+  mapped.sourceId = source
   maps[alias] = mapped
 end
 
@@ -1972,6 +2056,51 @@ function Data:load()
         Logger.warn("gen4 cache: '%s' is missing (%s) -- the screens that "
                     .. "read it fall back to the engine's own art", name,
                     tostring(mod))
+      end
+    end
+
+    -- ITEM IDS, PUBLISHED AS STRINGS AS WELL -- THE BAG'S KEYS ARE STRINGS.
+    --
+    -- Measured on a Platinum cache: `items` carries 446 entries keyed 0..445
+    -- and **zero** string keys, while the bag is string-keyed throughout
+    -- (`Bag.isBadge` does `id:find("BADGE")`).  `itemKey` in `Gen4Commands`
+    -- returns the id unchanged when `items[id]` exists -- which on a
+    -- numerically-keyed table is the NUMBER -- and `Bag.add` then indexes it:
+    --
+    --     Bag.lua:59: attempt to index local 'id' (a number value)
+    --
+    -- Measured through the engine's own path, not a hand call:
+    -- `Commands.g4_give_item(ctx, 17, 2)` and `(ctx, 4, 2)` both raised that.
+    -- So EVERY pickup, gift and Mart purchase in Sinnoh raised, and the bag
+    -- screen's `data.items[id]` found nothing either -- which is the play
+    -- report's "no item art or descriptions", from the same one cause.
+    --
+    -- AN ALIAS RATHER THAN A NUMERIC BAG: those keys are a SAVE format shared
+    -- with four other cartridges, and `ITEM_%03d` is the spelling `itemKey`
+    -- already reaches for on its second branch -- so this makes that branch
+    -- able to succeed rather than inventing a convention.  The alias is the
+    -- SAME TABLE, not a copy, so a mod that patches one sees the other.
+    --
+    -- Collected before it is assigned: adding keys to a table while `pairs`
+    -- is walking it is undefined in Lua.
+    if type(self.items) == "table" then
+      local aliases = {}
+      for id, def in pairs(self.items) do
+        if type(id) == "number" then
+          aliases[("ITEM_%03d"):format(id)] = def
+        end
+      end
+      local added = 0
+      for key, def in pairs(aliases) do
+        if self.items[key] == nil then
+          self.items[key] = def
+          added = added + 1
+        end
+      end
+      if added > 0 then
+        Logger.info("gen4 items: published %d item(s) under ITEM_nnn as well "
+                    .. "as their numeric id -- the bag's keys are strings",
+                    added)
       end
     end
 

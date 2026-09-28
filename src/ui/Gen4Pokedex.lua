@@ -27,6 +27,10 @@
 -- port chose how to round.
 
 local Assets = require("src.render.Assets")
+
+-- `NATIONAL_DEX_COUNT (MAX_SPECIES - 2)` from pokeplatinum's
+-- `include/constants/species.h`; `MAX_SPECIES` is `SPECIES_BAD_EGG` = 495.
+local NATIONAL_DEX_COUNT = 493
 local Font = require("src.render.Font")
 local Logger = require("src.core.Logger")
 local Sprites = require("src.pokemon.Sprites")
@@ -101,7 +105,29 @@ function Gen4Pokedex:listing()
   local data = self.game.data or {}
   local mons = data.pokemon or {}
   local out = {}
-  for id = 1, (data.constants or {}).dexSize or 493 do
+  -- `x or 493` CANNOT CATCH A ZERO, and the zero is what arrives.
+  --
+  -- `Data.lua` derives `dexSize` as the highest `def.dex` across the species
+  -- table.  A GEN 4 CACHE CARRIES NO `dex` FIELD AT ALL -- measured, 0 of
+  -- 508 species have one, which is the same fact the comment above this
+  -- function states from the other side: Platinum numbers its species in
+  -- national order, so there is nothing separate to read.  So `highest`
+  -- stays 0 and `dexSize` is written as 0.
+  --
+  -- In Lua only `nil` and `false` are falsy, so `0 or 493` is 0, the loop
+  -- `for id = 1, 0` runs no times, and `entries` is EMPTY.  The screen then
+  -- draws a correct listing of nothing and refuses to open any entry page,
+  -- because `status(species())` is asked about a nil species.  Measured:
+  -- `index=1 species=nil` on every tick with the whole dex marked seen.
+  --
+  -- 493 is the cartridge's own number, not a guess: `species.h` has
+  -- `NATIONAL_DEX_COUNT (MAX_SPECIES - 2)` with `MAX_SPECIES SPECIES_BAD_EGG`
+  -- = 495, and Arceus -- the last species with a dex number -- is 493.  The
+  -- cache's ids run to 507 because the 14 rows above 493 are alternate
+  -- FORMS, which is why the highest id is the wrong upper bound here.
+  local size = tonumber((data.constants or {}).dexSize)
+  if not size or size < 1 then size = NATIONAL_DEX_COUNT end
+  for id = 1, size do
     if mons[id] then out[#out + 1] = id end
   end
   return out

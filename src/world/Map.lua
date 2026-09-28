@@ -498,9 +498,34 @@ function Map.new(def, tilesetDef)
   -- agreeing about def.width, and a cell a script shut must not be able to
   -- go missing down that seam.
   self.shutCells = {}
+  -- THE FIRST WARP ON A TILE WINS, NOT THE LAST.
+  --
+  -- Reported from play: "if i go to the lake next to twinleaf after visiting
+  -- the professor in sangem it starts the team galactic event before ever
+  -- getting to the point where it should be activated."
+  --
+  -- Sinnoh puts TWO warps on each of the lake entrances: Verity Lakefront's
+  -- tile (48, 43) carries warp 2 to header 311 -- the lake as it is at the
+  -- start -- and warp 3 to header 312, the same lake with Team Galactic in
+  -- it. A plain assignment let the later one overwrite the earlier, so both
+  -- entrances led to the Galactic version from a new game.
+  --
+  -- The cartridge takes the FIRST. `MapHeaderData_GetIndexOfWarpEventAtPos`
+  -- walks the array from zero and returns on the first coordinate that
+  -- matches; the later duplicates are ARRIVAL ANCHORS, the place a scripted
+  -- warp puts you down when the story is ready for that version of the map.
+  --
+  -- MEASURED BEFORE CHANGING IT, because this table is every game's:
+  -- Platinum has 15 tiles carrying more than one warp and the destination
+  -- differs on all 15 -- both entrances to all three lakes among them, so
+  -- Valor and Acuity had it too. EMERALD HAS NONE AT ALL, in 439 maps with
+  -- warps, which is what makes this a no-op everywhere but Sinnoh.
   self.warpAt = {}
   for i, w in ipairs(def.warps or {}) do
-    self.warpAt[w.y * self.widthCells + w.x] = { index = i, def = w }
+    local at = w.y * self.widthCells + w.x
+    if self.warpAt[at] == nil then
+      self.warpAt[at] = { index = i, def = w }
+    end
   end
   self.signAt = {}
   for _, s in ipairs(def.signs or {}) do
