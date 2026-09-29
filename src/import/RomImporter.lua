@@ -2112,13 +2112,57 @@ local function pendingRomPaths()
   return paths
 end
 
-local function findPendingRom(ready)
+-- WHERE A PENDING FILE REALLY IS ON DISK, which a Gen 4 import cannot do
+-- without.
+--
+-- Reported from play on Android: "failed to import please import from a file on
+-- disk but i did import from a file on disk". Both halves are true and the
+-- message was the misleading part. The Android route never goes through
+-- `startPath`; it scans the save directory with `love.filesystem` and calls
+-- `startData(data, name)` with NO third argument, so `self.romPath` is nil --
+-- and `RomExtractorGen4` is the one extractor that takes a PATH rather than
+-- bytes, because a 128 MB DS cartridge is reopened rather than carried. So the
+-- "must be imported from a file on disk" guard fired on every Android Platinum
+-- import, however the file got there.
+--
+-- The file IS on disk: `love.filesystem.getRealDirectory` names the directory it
+-- was actually found in -- the save directory for a SAF pick or a USB copy, or
+-- the game directory on an unpacked handheld build -- and both are readable by
+-- `io.open` from our own process.
+--
+-- PROBED, NOT ASSUMED. A file found inside the mounted .love (a zip) has a real
+-- directory too and cannot be opened as a file, so the open is the test. Nil
+-- here leaves the old guard to fire, which is the honest answer for that case.
+local function realPathFor(name)
+  local ok, dir = pcall(love.filesystem.getRealDirectory, name)
+  if not ok or type(dir) ~= "string" or dir == "" then return nil end
+  local path = dir .. "/" .. name
+  local handle = io.open(path, "rb")
+  if not handle then return nil end
+  handle:close()
+  return path
+end
+
+-- `skip` holds the names of files whose import has already FAILED this session.
+--
+-- Reported in the same breath: "its also preventing people from importing other
+-- roms after getting the error on android". That is this loop. It returns the
+-- FIRST pending file whose version is not ready, and a cart that fails is still
+-- pending -- so the next Choose finds the same one, fails the same way, and no
+-- other cartridge can ever be reached. One bad file blocked the whole importer.
+--
+-- Skipped rather than deleted: the file is the player's, it may be perfectly
+-- good and merely unsupported on this build, and quietly removing someone's ROM
+-- is not ours to do. The set lives for the session, so relaunching retries.
+local function findPendingRom(ready, skip)
   for _, name in ipairs(pendingRomPaths()) do
-    local data = love.filesystem.read(name)
-    if type(data) == "string" and isSupportedRomSize(#data) then
-      local version = GameVersion.forSha1(sha1(data))
-      if version and not ready[version] then
-        return name, data
+    if not (skip and skip[name]) then
+      local data = love.filesystem.read(name)
+      if type(data) == "string" and isSupportedRomSize(#data) then
+        local version = GameVersion.forSha1(sha1(data))
+        if version and not ready[version] then
+          return name, data, realPathFor(name)
+        end
       end
     end
   end
@@ -2847,9 +2891,9 @@ function RomImporter.new(onComplete, opts)
     if not self.ready[version] then needRom = true; break end
   end
   if android and needRom then
-    local name, data = findPendingRom(self.ready)
+    local name, data, romPath = findPendingRom(self.ready, self.failedRoms)
     if name then
-      self:startData(data, name)
+      self:startData(data, name, romPath)
     else
       -- The picker runs as its own activity and Android may kill us while it
       -- is up, so a rejected pick can outlive the focus handler (#442).
@@ -3048,9 +3092,9 @@ function RomImporter:focus(f)
   end
   for _, v in ipairs(GameVersion.ORDER) do
     if not self.ready[v] then
-      local name, data = findPendingRom(self.ready)
+      local name, data, romPath = findPendingRom(self.ready, self.failedRoms)
       if name then
-        self:startData(data, name)
+        self:startData(data, name, romPath)
       elseif consumePickedRomError(self) then
         if self:_pickManyActive("rom") then self:_pickManyTally(false) end
       elseif self:_pickManyActive("rom") then
@@ -3068,6 +3112,14 @@ end
 
 function RomImporter:setError(message, version)
   require("src.import.CacheFs").prefix = ""
+  -- THIS FILE HAS HAD ITS TURN. Without this the Android scan hands the same
+  -- failing cartridge back on every attempt and nothing else can be imported;
+  -- with it, the next Choose moves on to the next pending file.
+  if type(self.importSourceName) == "string" and self.importSourceName ~= "" then
+    self.failedRoms = self.failedRoms or {}
+    self.failedRoms[self.importSourceName] = true
+  end
+  self.importSourceName = nil
   self.workState = "error"
   self.errorVersion = version or self.importing or self.chooseVersion or "red"
   self.importing = nil
@@ -3148,6 +3200,10 @@ function RomImporter:startData(data, displayName, sourcePath)
   self.progress = 0
   self.romData = data
   self.romPath = sourcePath
+  -- KEPT SO A FAILURE CAN BE ATTRIBUTED. `setError` clears everything else, and
+  -- without the name there is no way to know which pending file to stop
+  -- offering -- see `findPendingRom`'s `skip`.
+  self.importSourceName = displayName
   -- BREADCRUMBS THROUGH THE IMPORT, for the same reason boot has them.
   --
   -- An import is the longest, most memory-hungry thing this program does -- a
@@ -4368,9 +4424,9 @@ function RomImporter:choose(version)
     -- Prefer a not-yet-imported .gb/.gbc already in the save dir (USB copy, or
     -- a fresh SAF pick).  Never reuse an already-imported cart's file -- that
     -- was the #167 failure mode (second Choose just re-extracted Red).
-    local name, data = findPendingRom(self.ready)
+    local name, data, romPath = findPendingRom(self.ready, self.failedRoms)
     if name then
-      self:startData(data, name)
+      self:startData(data, name, romPath)
     elseif consumePickedRomError(self) then
       return   -- a rejected pick explains itself instead of silently reopening
     elseif not pickFile() then
@@ -4397,9 +4453,9 @@ function RomImporter:choose(version)
   -- kdialog.  Fall back to the same "drop a .gb/.gbc next to the game" scan
   -- used on Android, which works when the game is launched as an unpacked
   -- directory (see build-rg34xxsp.sh).
-  local name, data = findPendingRom(self.ready)
+  local name, data, romPath = findPendingRom(self.ready, self.failedRoms)
   if name then
-    self:startData(data, name)
+    self:startData(data, name, romPath)
     return
   end
   if love.system.getOS() == "Linux" then
