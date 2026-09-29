@@ -4301,6 +4301,21 @@ function OverworldState:handleInput()
   -- menu already lists -- so it is rebindable without this screen knowing how
   -- rebinding works.  Gated on the cartridge HAVING a second screen, so no
   -- Gen 1-3 press changes behaviour.
+  -- R STEPS THE FIELD CAMERA, which on a phone is the only way to reach it.
+  --
+  -- Requested: "on Android allow user to use the R button to switch between
+  -- camera tilt options". The same ladder the "3" key walks -- CARTRIDGE, the
+  -- fixed angles, then third and first person -- through the one method that
+  -- owns it, so the two cannot drift apart.
+  --
+  -- `cycleGen4CameraTilt` answers false off a Sinnoh map, so R stays free for
+  -- every other cartridge rather than silently doing nothing visible.
+  if input:wasPressed("r") and Game.cycleGen4CameraTilt then
+    if Game:cycleGen4CameraTilt() then
+      Game:writeOptions()
+      return
+    end
+  end
   if input:wasPressed("l") then
     local SecondScreen = require("src.ui.SecondScreen")
     if SecondScreen.available(Game) then

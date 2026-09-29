@@ -1038,6 +1038,33 @@ function Gen4Ground:liveTargetFor(vw, vh)
   if self.liveW == vw and self.liveH == vh and self.liveColour then
     return self.liveColour, self.liveDepthBuf
   end
+  -- RETRACTED BEFORE IT IS FREED, because it may still be published.
+  --
+  -- `endFree` hands this canvas to `Renderer:setWorldOverride` above 1x, and
+  -- the renderer holds it until it composites the frame. Freeing it here left
+  -- the renderer measuring a released object:
+  --     Renderer.lua:997: Cannot use object after it has been released
+  -- reported from Android when CAM TILT was stepped between CARTRIDGE and 90,
+  -- which switches between the free and oblique passes and so asks for a
+  -- different target size -- the one thing that reaches this branch.
+  --
+  -- Whoever publishes a canvas owns the retraction: the renderer cannot know
+  -- when we free it, and there is no way to ask a LOVE object whether it is
+  -- still alive. Only OUR canvas is withdrawn -- a mod pipeline's override is
+  -- left alone.
+  if self.liveColour then
+    local got, Game = pcall(require, "src.core.Game")
+    local renderer = got and Game and Game.renderer
+    if renderer and renderer.worldOverride == self.liveColour
+       and renderer.setWorldOverride then
+      renderer:setWorldOverride(nil)
+    end
+    -- ...and the module-global the free pass blits from, for the same reason:
+    -- it outlives the ground that opened the pass (see `freeOpen`).
+    if Gen4Ground.freeColour == self.liveColour then
+      Gen4Ground.freeColour = nil
+    end
+  end
   if self.liveColour and self.liveColour.release then pcall(self.liveColour.release, self.liveColour) end
   if self.liveDepthBuf and self.liveDepthBuf.release then pcall(self.liveDepthBuf.release, self.liveDepthBuf) end
   self.liveColour, self.liveDepthBuf = Gen4Model.newTarget(vw, vh)

@@ -46,10 +46,26 @@ local DPAD_DEAD = 0.16
 -- hit slop: how far past the visible edge a press still counts, as a
 -- multiplier on the control's half-width.  START/SELECT get more because
 -- the glyphs are small.
-local SLOP = { a = 1.3, b = 1.3, start = 1.4, select = 1.4 }
+local SLOP = { a = 1.3, b = 1.3, start = 1.4, select = 1.4, l = 1.3, r = 1.3 }
 
-local BUTTONS = { "a", "b", "start", "select" }
-local CONTROLS = { "dpad", "a", "b", "start", "select" }
+-- L AND R, asked for so a phone can reach what a pad can.
+--
+-- Requested: "on Android allow user to use the R button to switch between
+-- camera tilt options and add buttons to the touch display for l and r".
+-- Both are already real actions -- `Input` maps Q to L and E to R, and L has
+-- raised the Poketch since the second-screen work -- so this adds the way to
+-- press them, not the actions themselves.
+--
+-- OPTIONAL BY CONSTRUCTION: `loadImages` returns nil if ANY image is missing
+-- and that switches the whole overlay off, so an install whose assets predate
+-- these two would lose its d-pad. They are skipped instead -- see OPTIONAL.
+local BUTTONS = { "a", "b", "start", "select", "l", "r" }
+local CONTROLS = { "dpad", "a", "b", "start", "select", "l", "r" }
+
+-- Buttons the overlay can do without. A missing REQUIRED image still turns the
+-- overlay off, which is the old behaviour and the right one: half a d-pad is
+-- worse than none.
+local OPTIONAL = { l = true, r = true }
 
 -- Per-orientation layout buckets (#633).  Orientation comes from the safe
 -- rect, not the device: sw > sh is landscape, so a resized desktop window
@@ -70,6 +86,8 @@ local IMAGES = {
   b = "assets/touch/b.png",
   start = "assets/touch/start.png",
   select = "assets/touch/select.png",
+  l = "assets/touch/l.png",
+  r = "assets/touch/r.png",
 }
 
 local function clamp01(v)
@@ -150,6 +168,7 @@ function TouchControls.defaultLayout(ww, wh, ox, oy, scale)
   local dpadW = math.min(180, short * 0.34) * clampScale(scale)
   local abW = dpadW * 0.46
   local ssW = dpadW * 0.30
+  local lrW = dpadW * 0.52
   local margin = dpadW * 0.12
   return {
     dpad = { cx = ox + margin + dpadW / 2, cy = oy + wh - margin - dpadW / 2, w = dpadW },
@@ -157,6 +176,12 @@ function TouchControls.defaultLayout(ww, wh, ox, oy, scale)
     b = { cx = ox + ww - margin - abW * 1.60, cy = oy + wh - margin - abW * 0.55, w = abW },
     start = { cx = ox + ww / 2 + ssW * 0.60, cy = oy + wh - margin - ssW * 0.95, w = ssW },
     select = { cx = ox + ww / 2 - ssW * 0.60, cy = oy + wh - margin - ssW * 0.95, w = ssW },
+    -- THE SHOULDERS GO AT THE TOP CORNERS, where the hardware puts them and
+    -- where a hand already holding the phone can reach without covering the
+    -- screen. Sized off `dpadW` like everything else here, so the size slider
+    -- moves them with the rest.
+    l = { cx = ox + margin + lrW / 2, cy = oy + margin + lrW * 0.30, w = lrW },
+    r = { cx = ox + ww - margin - lrW / 2, cy = oy + margin + lrW * 0.30, w = lrW },
   }
 end
 
@@ -164,9 +189,14 @@ local function loadImages()
   local img = {}
   for name, path in pairs(IMAGES) do
     local ok, im = pcall(love.graphics.newImage, path)
-    if not ok then return nil end
-    im:setFilter("linear", "linear")
-    img[name] = im
+    if not ok then
+      -- An OPTIONAL button simply does not appear; a required one still turns
+      -- the overlay off, because a d-pad with no art is not a control.
+      if not OPTIONAL[name] then return nil end
+    else
+      im:setFilter("linear", "linear")
+      img[name] = im
+    end
   end
   return img
 end
@@ -282,8 +312,10 @@ end
 -- Layout in LOVE units (density-independent on mobile), recomputed when
 -- the window or safe area changes (rotation, resize, notch insets).
 -- Default: d-pad bottom-left, B/A bottom-right with A above B (the Game Boy
--- diagonal), START/SELECT flanking the bottom center -- all inside the
--- device safe area so thumbs clear the home indicator / cutouts.
+-- diagonal), START/SELECT flanking the bottom center, and L top-left with R
+-- top-right where the shoulders are on hardware -- all inside the device safe
+-- area so thumbs clear the home indicator / cutouts, and so the two at the top
+-- clear a notch or punch-hole rather than sitting under it.
 -- Custom positions (normalized 0..1 within the safe rect) override centers
 -- while sizes stay derived from the short edge, times the orientation's
 -- size setting (#633).
@@ -378,7 +410,7 @@ end
 function TouchControls:hitTest(x, y)
   local L = self:layout()
   for _, btn in ipairs(BUTTONS) do
-    if inCircle(L[btn], x, y, SLOP[btn]) then return btn end
+    if self.img[btn] and L[btn] and inCircle(L[btn], x, y, SLOP[btn]) then return btn end
   end
   local dz = L.dpad
   local half = dz.w * 0.65
@@ -434,7 +466,7 @@ function TouchControls:touchpressed(id, x, y)
   end
   local L = self:layout()
   for _, btn in ipairs(BUTTONS) do
-    if inCircle(L[btn], x, y, SLOP[btn]) then
+    if self.img[btn] and L[btn] and inCircle(L[btn], x, y, SLOP[btn]) then
       self.touches[id] = { control = btn }
       pressBtn(self, btn)
       return
@@ -536,7 +568,9 @@ function TouchControls:draw()
   drawIcon(dir and self.img["dpad_" .. dir] or self.img.dpad, L.dpad,
            dir ~= nil, alphaMul)
   for _, btn in ipairs(BUTTONS) do
-    drawIcon(self.img[btn], L[btn], self.held[btn] ~= nil, alphaMul)
+    if self.img[btn] and L[btn] then
+      drawIcon(self.img[btn], L[btn], self.held[btn] ~= nil, alphaMul)
+    end
   end
 
   -- the +/- glyphs alone don't say which is which; shadowed so the text

@@ -1169,6 +1169,33 @@ function Game:unstick()
   Logger.flush()
 end
 
+-- STEP THE GEN 4 FIELD CAMERA, or say it was not ours to step.
+--
+-- One implementation for two ways in: the "3" hotkey below, and the R button,
+-- which the overworld routes here so a phone can reach the ladder at all
+-- (requested: "allow user to use the R button to switch between camera tilt
+-- options"). Returns false off a Sinnoh map, which is what lets "3" fall
+-- through to the Game Boy tilt it has always cycled.
+function Game:cycleGen4CameraTilt()
+  local ow = self.overworld
+  local renderer = ow and ow.map and ow.map.renderer
+  if not (renderer and renderer.gen4Ground) then return false end
+  local Gen4Camera = require("src.render.Gen4Camera")
+  local Tilt = require("src.render.Tilt")
+  -- not `next`: that is a Lua global and shadowing it here is a trap for
+  -- whoever edits this next
+  local nextIndex = (Gen4Camera.chosen % #Gen4Camera.TILTS) + 1
+  local _, index = Gen4Camera.setTilt(nextIndex)
+  self.save.options.gen4CameraTilt = index
+  -- ...and the other tilt goes to OFF and stays there, so a save that carried
+  -- a tilt level in from a Johto session cannot warp Sinnoh.
+  if Tilt.level > 0 then
+    Tilt.setLevel(0)
+    self.save.options.tilt = 0
+  end
+  return true
+end
+
 function Game:keypressed(key)
   -- ...ahead of the delegation below, which is unconditional.
   if key == "f9" then return self:unstick() end
@@ -1231,21 +1258,10 @@ function Game:keypressed(key)
       -- under the sprites -- reported as *"messes up the placement of sprites
       -- and isnt changing the in game camera tilt/angle"*.  Both complaints,
       -- one cause.
-      local ow = self.overworld
-      local renderer = ow and ow.map and ow.map.renderer
-      if renderer and renderer.gen4Ground then
-        local Gen4Camera = require("src.render.Gen4Camera")
-        -- not `next`: that is a Lua global and shadowing it inside a handler
-        -- this long is a trap for whoever edits the block after me
-        local nextIndex = (Gen4Camera.chosen % #Gen4Camera.TILTS) + 1
-        local _, index = Gen4Camera.setTilt(nextIndex)
-        self.save.options.gen4CameraTilt = index
-        -- ...and the other one goes to OFF and stays there, so a save that
-        -- carried a tilt level in from a Johto session cannot warp Sinnoh.
-        if Tilt.level > 0 then
-          Tilt.setLevel(0)
-          self.save.options.tilt = 0
-        end
+      -- LIFTED INTO A METHOD so the R button can step the same ladder without
+      -- a second copy of it -- see `Game:cycleGen4CameraTilt`.
+      if self:cycleGen4CameraTilt() then
+        -- handled
       else
         self.save.options.tilt = Tilt.cycle()
       end
