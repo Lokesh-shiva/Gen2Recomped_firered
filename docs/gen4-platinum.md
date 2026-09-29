@@ -28724,3 +28724,532 @@ words, so the find matched the COMMENT while the condition itself was gone.
 Anchored to `if drew == 0 or not gen3WinSaid[` now. Passes 134, 137, 140 and
 this one: **a pin is only worth what it cannot match.**
 
+## Pass 142 - Sinnoh's items: a ball that was not a ball, and every medicine behind it
+
+Reported from play: "pokeballs arent working in platinum they give an error not
+the place this item should be used, make sure all items are cabable of being
+used properly."
+
+Two causes, and they are the same shape: a second cartridge spelling something
+differently, and one file knowing only the first spelling.
+
+### The balls
+
+Every one of Platinum's sixteen balls carries `pocket = "POKE_BALLS"` --
+`Gen4Items` writes the cartridge's own eight pocket names and slot 2 is that.
+Emerald's twelve carry `"BALL"`. `ItemEffects.isBall` tested for one of those,
+so **no Sinnoh ball was ever a ball**: `use` fell past the ball branch and ended
+at the refusal, which is the message that was reported.
+
+The knowledge was already in the tree and in the wrong place for it:
+`Gen3BagMenu` normalises POKE_BALLS to BALL for its own pocket tabs and nothing
+else ever saw that line.
+
+### ...and everything else in the bag, which was worse
+
+Chasing it turned up the bigger half. The rest of `use` dispatches on a NAME --
+POTION, FULL_RESTORE, ETHER -- which `alias` resolves from the item record's
+`key`. **A Platinum item record has no `key`**: the cache is 446 rows keyed
+0..445, republished as ITEM_000.. because the bag's keys are strings. So a
+Potion answered "ITEM_017", every name test failed, and it ended at the same
+refusal. Not one medicine, stone or candy in Sinnoh did anything.
+
+### The cartridge states it, per item, and the cache already carried it
+
+Not a name table -- that is the trap that has already cost this port its Gen 4
+type chart, its abilities and its move effects. `ItemData.partyUseParam`
+(pokeplatinum `include/item.h`) is an `ItemPartyParam`: twenty bytes naming
+every effect the item has on a party member. The extractor has been writing it
+out verbatim with nothing reading it.
+
+`ItemEffects.gen4RecordFor` decodes it into **the Gen 3 record's own shape**, so
+Sinnoh's medicine is run by `gen3Use` -- the HP fill, the status clear, the PP
+restore, the EV ceilings, the friendship steps -- rather than by a second copy
+of that code that will drift.
+
+The layout is not guessed. Four independent facts in the shipped data land
+exactly where the struct says they should:
+
+- Potion / Super / Hyper read 20 / 50 / 200 at byte 13, and Max Potion 255.
+- Revive reads 254 and Max Revive 255, both with the revive bit set: the two
+  sentinels are "half" and "all".
+- Rare Candy and PP Up carry +5 / +3 / +2 at bytes 15..17 -- Gen 4's own
+  friendship steps.
+- The Energy Root reads -10 / -10 / -15 there, which is why those bytes have to
+  be SIGNED. Unsigned they read 246 / 246 / 241 and nothing else would notice.
+
+### Three things the struct does not say plainly
+
+**`partyUse` is a gate, not a hint.** `ItemData` declares the field as
+`union { u8 dummy; ItemPartyParam partyUseParam; }` and `Item_Get` switches on
+`partyUse`: TRUE reads the struct, FALSE reads `dummy` and every party question
+answers from that one byte. Read without the gate, a Great Ball's `dummy` of 2
+came back as healPoison and a Good Rod's 1 as healSleep -- twenty-eight items
+that would have opened a party picker and cured a status. The gate is one line
+and it is the cartridge's own.
+
+**A Rare Candy is not a Revive.** Its byte 1 is 0x05: levelUp AND revive. The
+second bit is the cartridge saying the item may be used on a fainted Pokemon,
+not that it brings one back -- and `gen3Use`'s revive arm would have filled its
+HP and stopped there, with the level never happening. A record that levels up
+says only that.
+
+**Confusion and infatuation are volatiles with bits of their own.** The Persim
+Berry sets ONLY the confusion one, so it decoded to nothing until those two bits
+were read -- a berry with a stated effect doing nothing, sitting in the bag next
+to the medicine that had the same problem.
+
+### What now works that did not
+
+Balls throw. Every Potion, Restore, Heal, Revive, Ether, Elixir, vitamin, PP Up
+and PP Max runs with the cartridge's own numbers. Rare Candy raises a level
+through the existing branch -- the one that already uses the Gen 3 stat formula
+and fires the follower's happiness step. And the evolution stones work, by the
+struct's `evolve` bit rather than by name, **which includes the Dawn, Dusk,
+Shiny and Oval stones**: four evolution families Sinnoh could not reach at all.
+
+Recorded and not run, which the audit counts rather than hides: the stat-stage
+items (X Attack and the rest), Guard Spec and Dire Hit. They are battle flows of
+their own.
+
+### Changed
+
+- `src/inventory/ItemEffects.lua` - `BALL_POCKETS`, `gen4RecordFor`,
+  `recordFor`, and three arms taught to ask the record instead of the name.
+- `tools/gen4_item_use_check.lua` - new, 100 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the ball pocket knows only Hoenn's spelling | 16 balls unrecognised, and the ball never throws |
+| the `partyUse` gate is removed | 28 items decode that the cartridge excludes |
+| the friendship bytes are read unsigned | the Energy Root's -10/-10/-15 |
+| hpRestored read one byte early | 11 checks: every amount, both sentinels |
+| a Rare Candy is allowed to be a revive | it comes back a revive, and the level never happens |
+| a comment word changes | nothing - 100 checks, 0 failed |
+
+Section 4 does not read the record, it RUNS `ItemEffects.use` against a party
+member and looks at what happened: a Potion heals exactly 20 and refuses on a
+full Pokemon, an Antidote clears poison and refuses a burn, a Full Restore does
+both, a Revive gives back half, a Rare Candy raises the level, and a Poke Ball
+answers "ball". A record read correctly that then reaches no arm is exactly the
+bug being fixed, and only running it can tell the two apart.
+
+Section 5 holds Hoenn still: its twelve balls are still balls, and no Emerald
+item decodes as a Sinnoh struct.
+
+### The audit's shape, for the next one
+
+159 of Sinnoh's 446 items are gated in by `partyUse`; 75 decode to a record and
+84 ship twenty zero bytes, which is the cartridge's own "this does nothing to a
+party member from the bag". The assertion is not "every gated item decodes" --
+that would be false and would stay false. It is **no non-empty struct decodes to
+nothing**, which is an effect being dropped, and **nothing the gate excludes
+decodes at all**. Both directions are needed: a decoder that answers for
+everything passes the first alone, and one that answers for nothing passes the
+second.
+
+## Pass 143 - the player's back sprite, painted in Mew's colours
+
+Reported from play, on Platinum: "my trainers backsprite and possibly others are
+drawing with a red hue overlay rather than their proper colors."
+
+It is not a tint, and it is not a palette decode fault. The chain, end to end:
+
+1. `field.playerForms.boy.back` in the Platinum cache is
+   `trainer_backs_lucas_dp_00.png` -- Lucas's own back sprite, in colour,
+   written by the trainer-graphics stage. **The right picture has been there all
+   along.**
+2. `Sprites.playerPath` picks it correctly.
+3. That record carries no `trueColor`, so `playerPath`'s second return value is
+   FALSE.
+4. `BattleState` calls `getImage(path, namedPalette(data, "MEWMON"), false)`, and
+   a false there means REPAINT THIS to the four-shade SGB ramp.
+5. `MEWMON` is the palette the intro uses while the back pic is up, because
+   `wBattleMonSpecies` is still 0 when SET_PAL_BATTLE runs. **Mew's palette is
+   pink.**
+
+So a full-colour Lucas is repainted in Mew's colours. That is the red hue, and
+it is one absent field.
+
+### The fix is a flag that already exists
+
+`trueColor` is not new and it is already honoured -- Crystal's KRIS and Hoenn's
+WALLY both set it, for exactly this reason. `Sprites.markFormsTrueColor` says it
+for a generation whose art is in colour by construction, and `Data` stamps it on
+load rather than the extractor writing it, so an existing cache is fixed without
+a re-import.
+
+Only `nil` is filled in: a dataset or mod shipping four-shade player art still
+says `trueColor = false` and keeps it.
+
+### Changed
+
+- `src/pokemon/Sprites.lua` - `markFormsTrueColor`.
+- `src/core/Data.lua` - calls it in the Gen 4 branch.
+- `tools/gen4_player_pic_check.lua` - new, 23 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the flag is never stamped | 5 checks, including playerPath's own answer |
+| the `order` list is stamped as a form | 4 checks |
+| an explicit `false` is overwritten | the mod-override check |
+| `Data` stops calling the lift | the wiring pin |
+| a comment word changes | nothing - 23 checks, 0 failed |
+
+Section 1 reads the REAL cache and reports what it ships before anything touches
+it -- "2 player form(s) carry a back pic, 0 of them state trueColor" -- which is
+the half of this bug that is not in any code. Section 3 holds Kanto still: its
+back pic is four-shade art and the SGB recolor is correct for it, so a lift that
+marked everything would leave RED grey on a colour display, which is the
+opposite mistake and just as invisible without a check.
+
+### Still open from the same report
+
+"Missing pokemon party sprites from the pokemon start menu" is not this, and is
+not yet found. `Data` already lifts `gen4_species_sprites.icons` into `icons`
+for the party menu (see the note there); whatever the START menu's party strip
+reads, it is not that, and it is the next thing to look at.
+
+
+## Pass 144 - the gym, walked through headlessly: the player lands exactly where the cartridge says
+
+Cedric, on the Petalburg Gym report: *"I suspect its drawing the right room but
+not spawning the player in the right location after going through the doors."*
+He cannot reproduce it -- it is a community report -- so the only way to test
+that is to run it.
+
+Pass 141 proved the DATA can draw. It could not answer where the player ends up,
+because it never took a warp. `tools/gen3_gym_warp_check.lua` does: it stands up
+the **real `OverworldController`** on the real Emerald cache and takes the player
+through all thirty-six of the gym's self-warps by the engine's own
+`takeWarp` -> `startWarpTo` -> `setMap` path.
+
+    38 warps, 36 of them back into this map
+    36 self-warps taken: 0 landed wrong, 0 drew nothing,
+                         24 landed on an impassable cell
+    16 doorways, 0 leave the player stuck, 0 read as door tiles
+
+    207 checks, 0 failed
+
+**Every door lands the player on exactly the cell the cartridge names**, in
+bounds, with the camera following and the tile pass filling every visible cell.
+The hypothesis is disproved, which is worth as much as confirming it would have
+been: the arrival is not where the fault is.
+
+### Getting a Hoenn overworld to stand up with no LOVE
+
+Three things were in the way, and all three are in the harness rather than in
+the engine:
+
+- **`bit`.** LuaJIT has it, texlua does not. A small shim provides only the ops
+  the engine reaches.
+- **The transition.** `startWarpTo` hands the map change to a fade and the fade
+  runs it a frame later. With no frames the warp never completes and every
+  assertion would have been about the cell the player started on -- the harness
+  runs the body at once and says so.
+- **The renderer.** The real one wants canvases and a shader; `enter` and the
+  camera between them ask it two questions, so it is two functions.
+
+### What it found that is worth knowing anyway
+
+**Twenty-four of the thirty-six arrivals are on an IMPASSABLE cell.** That is
+not a fault: the destination is the lower half of the sliding door, and
+`PetalburgGymSetDoorMetatiles` (field_specials.c) ORs `MAPGRID_IMPASSABLE` onto
+both halves in **every frame, open or shut** -- the port's `petalburgDoorFrame`
+is faithful to it, coordinate for coordinate across all eight rooms. So the
+player really does land standing in a doorway, on the cartridge too.
+
+That is only correct as long as it is not a trap, so section 4 asks whether they
+can get out. All sixteen doorways can be stepped out of, downward, every time.
+
+**None of the sixteen reads as a door tile.** The Gen 3 arrival step-out is
+gated on the cell's behaviour being a door, and these carry behaviour 0 -- they
+are sliding gym doors, not the animated doors `MetatileBehavior_IsDoor` names.
+So the player is left standing in the doorway rather than walked a tile clear of
+it, exactly as on the cartridge. Printed rather than asserted, because "why am I
+standing in the door" is a question this file should be able to answer.
+
+### What is left
+
+The engine path is proven for data, tilesets, the id space, the window bounds,
+the camera, the warp targets, the arrival cells and the way out. What the
+harness does NOT run is the real render pipeline -- `Renderer:beginFrame` /
+`endFrame`, `PaletteFX`, the zone pass -- and mods. That is now the whole of the
+remaining search space, and `[gen3window]` in `probe.txt` is what narrows it from
+a reporter's machine.
+
+### Changed
+
+- `tools/gen3_gym_warp_check.lua` - new, 207 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the warp id is read one entry late | 38 checks -- every arrival cell |
+| `setMap` drops the player at the map's corner | 37 checks |
+| a warp pointed at the wrong destination | section 3's in-run control |
+| a comment word changes | nothing - 207 checks, 0 failed |
+
+## Pass 145 - the AYN Thor's bottom screen, through two files instead of a rebuilt engine
+
+Reported: *"the second screen isnt working on the ayn thors bottom screen for
+platinum"*.
+
+### Why it could not have worked
+
+`display` mode is gated on a transport, and the only transport was an FFI
+bridge to three C symbols -- `love_android_secondary_ready`,
+`love_android_push_secondary`, `love_android_secondary_enable` -- that live in
+`mobile/android/love/src/jni/`. Nothing has ever compiled them. Asked
+headlessly what Platinum is actually offered:
+
+```
+available: true   mode (default): swap   MODES: swap inset display off
+  display  -> mode=swap     (bridge symbols not found; second display disabled)
+deviceReady: false
+```
+
+So the mode degrades to `swap` on every device, every time. The panel was never
+going to light up, and no amount of play-testing would have said anything
+different.
+
+The obvious fix -- write the C, rebuild love-android -- is the one that cannot
+be done: `mobile/android/love` sits nine folders below the connected folder and
+staging reaches seven, `device_bash` is down, and even with the tree in hand it
+would mean a patched NDK build for every release, forever.
+
+### The second transport: three files, no native code
+
+So `src/render/SecondScreen.lua` now has a second backend that needs no engine
+change at all. `backend()` answers `"ffi"`, `"file"`, or nil; `available()`,
+`push()` and `usable()` fall through to the file protocol whenever `C == nil`.
+Nothing about the FFI path changed, so a future native build still wins.
+
+```
+second_display/host.txt    written by the HOST, once a second:
+                           "<version> <displays> <width> <height>".
+                           Lua offers `display` only while this says a matching
+                           version and displays >= 2. Its being rewritten is
+                           the heartbeat.
+second_display/frame.bin   written by LUA: "G2SD", then version, width, height
+                           and sequence as little-endian u16 -- twelve bytes --
+                           then width*height*4 bytes of RGBA.
+second_display/touch.txt   appended by the HOST, read and truncated by Lua:
+                           "<down|move|up> <id> <x> <y>" a line.
+```
+
+Two decisions are worth stating because they are the ones that bite.
+
+**The sequence number, not a rename.** LOVE's filesystem has no rename, so a
+read can land mid-write. The host skips a frame whose sequence it has already
+drawn or whose length does not match, and waits for the next one, rather than
+blitting half a picture.
+
+**The touch file is emptied BEFORE the events are handed out**, not after. A
+handler that raises must not leave the same taps in the file to be replayed on
+every frame for the rest of the session.
+
+`SecondScreen.pumpInput` in `src/ui/SecondScreen.lua` routes each event to
+`touchpressed` / `touchmoved` / `touchreleased` with the injecting flag set, and
+is called from `flush`, which `Game:draw` already ran every frame.
+
+### The host half
+
+`mobile/second-display/SecondDisplayHost.java`. It is deliberately NOT inside
+`mobile/android/`: that directory is a vendored love-android checkout that gets
+wiped and re-cloned, and anything left in it goes with it.
+`install_second_display_host` in `scripts/build_android.sh` copies it into the
+app module and registers it, both steps idempotent.
+
+It registers as a `<provider>`, not as `<application android:name>`. A provider
+is constructed before `Application.onCreate` and is handed a Context, which is
+all this needs -- and registering one ADDS an element to love-android's
+manifest, where `android:name` would REPLACE whatever that vendored manifest
+already declares, which is a file this machine cannot read.
+
+Taps are mapped into the bottom screen's own 256x192 coordinates, and a tap
+that lands in the letterbox is **dropped rather than clamped**: a clamped tap is
+a button press the player did not make, which is worse than a lost one.
+
+### The two ends never meet, so they are checked against each other
+
+This is the shape of bug this project keeps hitting -- the same thing spelled
+differently in two files that never meet -- and here the two files are in
+different languages, in different trees, built by different toolchains.
+`tools/second_display_protocol_check.py` reads both and fails on drift:
+
+- **tier 1** compares the constants by text: version, magic, header size, the
+  directory, the three filenames, the three touch verbs, and the save identity
+  against `conf.lua`. No toolchain needed.
+- **tier 2** generates a frame by running the **real** Lua transport under
+  `texlua`, then hands it to the **real** Java decoder, compiled against
+  generated stubs of the 25 Android classes it touches. Skipped, loudly, when
+  `javac` or `texlua` is missing.
+
+### Changed
+
+- `src/render/SecondScreen.lua` - the file transport: `readHost`,
+  `fileAvailable`, `filePush`, `pollTouch`, `backend`.
+- `src/ui/SecondScreen.lua` - `pumpInput`, called from `flush`.
+- `mobile/second-display/SecondDisplayHost.java` - new, the host half.
+- `scripts/build_android.sh` - `install_second_display_host`.
+- `tools/gen4_second_display_file_check.lua` - new, 36 checks.
+- `tools/second_display_protocol_check.py` - new, 26 checks.
+
+Regression: 13 argument-free tools green, 0 failing;
+`gen4_second_display_check` 76, `gen_script_registry_check` 351,
+`gen4_item_use_check` 97, `gen4_player_pic_check` 23. Gen 1/2 untouched --
+nothing here runs outside `display` mode, which no desktop build offers.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| width and height swapped in the header | the header, field by field |
+| header written 11 bytes, or declared 16 | the frame's total length |
+| frame sequence never increments | the host cannot tell two frames apart |
+| pixels dropped, header only written | length, and a byte compare |
+| a host with ONE display accepted | `fileAvailable`, and a tap delivered |
+| protocol version unchecked | a host speaking protocol 99 |
+| touch file never truncated | the file still holds the taps; a second poll |
+| a well-formed line with an unknown verb | the surviving event's kind |
+| x and y swapped on the way in | the parsed event, and the delivered tap |
+| move and up both sent as `touchpressed` | three taps, three handlers |
+| `pumpInput` ignores the mode | the file was drained with no panel attached |
+| the injecting flag left set | every later window click becomes a panel tap |
+| big-endian header; fields shifted by two | the Java end cannot decode Lua's |
+| magic or version unchecked in Java | a bad magic, and protocol 99, decoded |
+| letterbox taps clamped, not dropped | a tap in the letterbox reached a button |
+| the panel origin not subtracted | the panel's centre mapped to 170,96 |
+| either end's constant edited alone | tier 1, on all ten constants |
+| a comment word changes | nothing - 62 checks, 0 failed |
+
+Two planted faults did NOT bite and were confirmed harmless rather than
+unmeasured: removing `filePush`'s `imageData` guard, and removing `readHost`'s
+junk guard, both leave a downstream guard that produces identical observable
+behaviour (no file written; not available).
+
+### Untested, and it has to be said plainly
+
+The Lua half is measured. The Java half **compiles** and its decoder and touch
+mapping are checked against real Lua-written frames -- but it has never run on
+an Android device, and no machine here can build an APK or read love-android's
+manifest to confirm the provider merges. What a play-test settles: whether the
+Thor reports its panel as a presentation display at all, whether LOVE's save
+directory is where `getExternalFilesDir(null)/save/pokemon-love2d` says, and
+whether ~60fps of 192KB writes is fast enough on that hardware. If the option
+does not appear in the menu, `second_display/host.txt` under the app's files
+folder is the first thing to look at: absent means the provider never
+constructed; present with a leading `1 1` means Android is reporting one
+display.
+
+## Pass 146 - Petalburg Gym: the render was right, the framing was not
+
+Reported three times now: *"petalburg gym in emerald still showing as a black
+background when i warp through the rooms even with no mods on"*, and then
+*"I suspect its drawing the right room but not spawning the player in the right
+location after going through the doors."*
+
+Passes 141 and 144 proved the data, the tilesets, the metatile id space, the
+window bounds, the camera, all 38 warps, every arrival cell and the way out --
+1,826 checks between them. They were right, and the gym was still black. This
+pass asked the question none of them had: **how much of the SCREEN does a
+correct render of this map account for?**
+
+### What the cartridge itself says
+
+Three readings, each from Emerald's own data rather than from anything this
+engine believes:
+
+`data/layouts/PetalburgCity_Gym/border.bin` is **metatile 0x208, four times**.
+0x208 is black in all 256 of its pixels. The gym's border is pure black, on the
+cartridge, by design.
+
+The gym is **9 blocks wide** -- 144 world pixels. A Game Boy Advance shows 240,
+so even the cartridge draws three columns of black either side: 40% of its own
+screen. That is what Petalburg Gym looks like on hardware.
+
+`data/tilesets/secondary/petalburg_gym/metatile_attributes.bin` gives the room
+doors -- `METATILE_PetalburgGym_SlidingDoor_Frame0..4`, 0x218..0x21C --
+behaviour **0x00**. Only `METATILE_PetalburgGym_Door` (0x224) carries
+`MB_PETALBURG_GYM_DOOR` (0x8D), and the two `RoomEntrance` tiles carry 0x65.
+Our cache reports exactly two cells at 0x65 in the whole 1008-cell map and
+zero everywhere else -- **which is correct, tile for tile**.
+
+That settles the door theory for good. `MetatileBehavior_IsDoor` returns FALSE
+for a sliding door on the cartridge too, `SetUpWarpExitTask` picks
+`Task_ExitNonDoor`, and the player stands in the doorway there as well. Pass
+144 said so and pass 144 was right.
+
+### So what was wrong
+
+`Renderer:worldViewSize` returned `windowPixels / zoomScale` with no reference
+to the map at all. On a phone in landscape that is several times 240 pixels
+wide -- and on this map every extra column is more border, which is more black.
+The engine was filling a letterbox void with more void.
+
+Measured, on the gym's real extent:
+
+| window | view before | off-map | view after | off-map |
+| --- | --- | --- | --- | --- |
+| 240x160 | 240x160 | 40.0% | 240x160 | 40.0% |
+| 480x320 | 240x160 | 40.0% | 240x160 | 40.0% |
+| 640x360 | 320x180 | 55.0% | 240x180 | 40.0% |
+| 960x540 | 320x180 | 55.0% | 240x180 | 40.0% |
+| 1280x720 | 320x180 | 55.0% | 240x180 | 40.0% |
+
+40% is the cartridge's own figure. The engine now never shows more off-map than
+the hardware did.
+
+### The change
+
+`Renderer:setWorldBounds(w, h)` takes the current map's extent in world pixels;
+`worldViewSize` clamps to `min(view, max(ownScreen, mapExtent))` on each axis.
+`OverworldState:setMap` publishes it on every load.
+
+Three properties make this safe to put in front of Gen 1, Gen 2 and Prism:
+
+- it can only ever **reduce** the view, never grow it;
+- it never goes **below the generation's own screen**, so a small map is never
+  framed tighter than its cartridge framed it;
+- bounds are **nil for everything that is not the overworld** -- battles, menus,
+  the title screen -- which leaves those callers bit-for-bit unchanged.
+
+A map at least as large as its own screen in both axes -- very nearly all of
+them, in every generation -- comes out at exactly the size it did before.
+
+### Honest limits
+
+This removes the engine's contribution. It does not make Petalburg Gym bright:
+40% of the view is still off-map black, plus block 520 filler inside the map --
+36 of the 90 on-map cells in the worst arrival window. That is the map the
+cartridge ships. If the gym still reads as too dark after this, the remaining
+question is a deliberate framing choice (letterbox the narrow map rather than
+scale it up), not a defect.
+
+### Changed
+
+- `src/render/Renderer.lua` - `setWorldBounds`, and the clamp in `worldViewSize`.
+- `src/world/OverworldController.lua` - publishes the extent from `setMap`.
+- `tools/gen3_narrow_map_view_check.lua` - new, 37 checks.
+
+Regression: 14 argument-free tools green, 0 failing; `gen3_map_render_check`
+1,619; `gen3_gym_warp_check` 207; `second_display_protocol_check` 26.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the clamp removed entirely | no window size shows less void |
+| clamped to the map alone, ignoring the screen | a 2x2 map framed to 32x32 |
+| `max` instead of `min` -- the view grows | a 320px map at 240x160 came out 320 |
+| width clamped by the height bound | the same, on the wrong axis |
+| a zero or negative bound accepted | `0` is truthy in Lua; 4 checks |
+| bounds that cannot be cleared | the gym's 144px followed the player out |
+| the clamp's own parity fix-up dropped | an odd view, which shimmers |
+| a comment word changes | nothing - 37 checks, 0 failed |

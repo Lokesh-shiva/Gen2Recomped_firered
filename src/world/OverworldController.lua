@@ -1023,6 +1023,21 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
     end
   end
   self.map = MapLoader.load(Game.data, mapId)
+  -- THE VIEW IS TOLD HOW MUCH WORLD THERE IS, because on a map smaller than
+  -- the window the rest of the window is border -- and a border is not always
+  -- scenery. Petalburg Gym's is metatile 0x208, which is pure black in all 256
+  -- of its pixels, so filling a phone's letterbox with more of it filled the
+  -- screen with black. Renderer:worldViewSize clamps against this and can only
+  -- ever shrink the view, never below the generation's own screen, so every
+  -- map at least that big is unchanged. See the note there.
+  do
+    local px = (tonumber(self.map.blockTiles) or 4) * 8
+    local d = self.map.def
+    if Game.renderer and Game.renderer.setWorldBounds and d then
+      Game.renderer:setWorldBounds((tonumber(d.width) or 0) * px,
+                                   (tonumber(d.height) or 0) * px)
+    end
+  end
   -- Every block change is re-derived from the map's callbacks on each load
   -- (GSC rebuilds wOverworldMap from the ROM blockdata), so the previous
   -- visit's patches have to go first: a Ruins of Alph wall that the callback

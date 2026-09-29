@@ -291,8 +291,39 @@ end
 -- still cannot make the readback the frame budget.
 SecondScreen.PUSH_INTERVAL = 1 / 30
 
+-- THE PANEL'S OWN TAPS, COLLECTED BEFORE THE FRAME GOES OUT.
+--
+-- The file transport's host writes what it has seen into a file and this is
+-- what reads it.  Above the dirty check on purpose: a frame that drew nothing
+-- new still has to take the taps, or a panel the player is prodding while the
+-- picture is still would be dead.
+--
+-- Each one goes in through `injectTouch`, which is the same door the native
+-- bridge will use, so the battle, the mining screen and the Poketch keep
+-- asking the question they already ask and neither transport gets a path of
+-- its own.
+local TOUCH_METHOD = { down = "touchpressed", move = "touchmoved",
+                       up = "touchreleased" }
+
+function SecondScreen.pumpInput(game)
+  if not game or SecondScreen.mode(game) ~= "display" then return 0 end
+  local T = transport()
+  if not (T and T.pollTouch) then return 0 end
+  local okPoll, events = pcall(T.pollTouch)
+  if not (okPoll and type(events) == "table") then return 0 end
+  local taken = 0
+  for _, e in ipairs(events) do
+    local method = TOUCH_METHOD[e.kind]
+    if method and SecondScreen.injectTouch(game, method, e.id, e.x, e.y) then
+      taken = taken + 1
+    end
+  end
+  return taken
+end
+
 function SecondScreen.flush(game)
   if not game or SecondScreen.mode(game) ~= "display" then return false end
+  SecondScreen.pumpInput(game)
   if not game.secondScreenDirty then return false end
   local canvas = SecondScreen.canvas(game)
   if not canvas then return false end

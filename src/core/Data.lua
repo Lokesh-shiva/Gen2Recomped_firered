@@ -2136,6 +2136,21 @@ function Data:load()
       local icons = sprites and sprites.icons
       if icons and icons.bySpecies then self.icons = icons end
     end
+
+    -- SINNOH'S TRAINER ART IS ALREADY IN COLOUR, AND NOTHING SAID SO.
+    -- `Sprites.markFormsTrueColor` has the whole story; the short version
+    -- is that the player's back pic was being repainted with Mew's SGB
+    -- palette, which is the reported "red hue overlay".  Stamped here
+    -- rather than in the extractor so an existing cache is fixed without a
+    -- re-import.
+    do
+      local marked = require("src.pokemon.Sprites")
+                       .markFormsTrueColor(self.field)
+      if marked > 0 then
+        Logger.info("gen4 player: %d player form(s) marked true-colour, "
+                    .. "so the back pic keeps its own palette", marked)
+      end
+    end
   end
   -- Hand the cartridge's own battle tables to the two modules that would
   -- otherwise have to approximate them.  Both are no-ops on a Gen 1/Gen 2
