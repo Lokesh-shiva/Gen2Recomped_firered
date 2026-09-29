@@ -3890,6 +3890,57 @@ function BattleState:reportStadiumBattle(when)
   end)
 end
 
+-- TAPPING THE BOTTOM SCREEN IN A BATTLE.
+--
+-- Asked for: *"ensure touch input and mouse clicks works on the bottom screen for
+-- battle, the underground and everything else"*.  `Game:touchpressed` offers a
+-- pointer to the top state before the d-pad now (pass 135), and this is the
+-- battle taking it.
+--
+-- A TAP BECOMES A REAL BUTTON PRESS rather than a second way to choose an
+-- action.  `Input:overlayPressed` is how the on-screen d-pad already works, and
+-- routing through it means the tap goes through every gate a physical A goes
+-- through -- the ghost check, the Bug Contest ball, the forced-replacement
+-- branch, the demo.  A handler that called `menuActions()` itself would be a
+-- second copy of that logic and would drift from it.
+--
+-- Returning TRUE for a tap that hit no button is deliberate: the panel is the
+-- battle's while it is up, and letting a miss fall through would work the d-pad
+-- underneath it.
+function BattleState:touchpressed(_, px, py)
+  if not GameVersion.isGen4() then return false end
+  local over
+  if self.phase == "menu" then over = "action"
+  elseif self.phase == "moveSelect" then over = "moves"
+  else return false end
+
+  local okG, Gen4B = pcall(require, "src.battle.Gen4Battle")
+  if not okG then return false end
+  -- The same question the draw asks, so the hit test can never be live while
+  -- the buttons are somewhere else: `menuPresentation` answers "bottom" only
+  -- when the second screen is actually up and carrying them.
+  local presentation, SecondScreen = Gen4B.menuPresentation(self, self.phase)
+  if presentation ~= "bottom" or not SecondScreen then return false end
+
+  local x, y = SecondScreen.toLocal(self.game, px, py)
+  if not x then return false end
+  local kind, index = Gen4B.bottomHit(x, y, over)
+  local input = self.game and self.game.input
+  if not input then return true end
+  if kind == "cancel" then
+    input:overlayPressed("b")
+    input:overlayReleased("b")
+  elseif kind == "action" then
+    self.menuIndex = index
+    input:overlayPressed("a")
+    input:overlayReleased("a")
+  elseif kind == "move" then
+    self.moveIndex = index
+    input:overlayPressed("a")
+    input:overlayReleased("a")
+  end
+  return true
+end
 function BattleState:update(dt)
   self:tickFx()
   -- one sample a second into the fight, while it is still on screen

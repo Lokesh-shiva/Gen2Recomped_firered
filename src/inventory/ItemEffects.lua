@@ -15,6 +15,12 @@ local Strings = require("src.core.Strings")
 
 local ItemEffects = {}
 
+-- ITEM_USE_FUNC_EXPLORER_KIT, the index of the Explorer Kit's row in
+-- `sItemUseFuncs` (item_use_functions.c).  A Platinum item record names its
+-- row in `fieldUseFunc`; the Explorer Kit's is 3.
+local ITEM_USE_FUNC_EXPLORER_KIT = 3
+
+
 local HEAL_AMOUNT = {
   POTION = 20, SUPER_POTION = 50, HYPER_POTION = 200,
   FRESH_WATER = 50, SODA_POP = 60, LEMONADE = 80,
@@ -865,6 +871,26 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
       return "failed", { Strings("This isn't the time to use that!") }
     end
     return "pokeblock_case"
+  end
+  -- THE EXPLORER KIT, and it is found by the cartridge's own dispatch index
+  -- rather than by item 428.  A Platinum item record carries `fieldUseFunc`,
+  -- which indexes `sItemUseFuncs` (item_use_functions.c), and slot 3 is
+  -- `ITEM_USE_FUNC_EXPLORER_KIT` = { UseExplorerKitFromMenu,
+  -- UseExplorerKitInField, CanUseExplorerKit }.  Keying on the number is what
+  -- the cartridge does, it survives a re-extraction that renumbers nothing,
+  -- and it cannot match in Gen 1, 2 or 3 -- no item record in those datasets
+  -- has the field at all, so this arm is unreachable there by construction
+  -- rather than by a version test bolted on the front.
+  --
+  -- Whether the kit may be used HERE is eight separate questions and they live
+  -- with the Underground (Gen4Underground.canUse), not here: this line only
+  -- says which item was used.
+  if itemDef and itemDef.fieldUseFunc == ITEM_USE_FUNC_EXPLORER_KIT then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!",
+                                 save.player.name) }
+    end
+    return "explorer_kit"
   end
   if itemId == "TOWN_MAP" then
     if battle then

@@ -38,10 +38,41 @@ function SecondScreen.usable()
   return C ~= nil
 end
 
+-- IS A SECOND PANEL ATTACHED RIGHT NOW.
+--
+-- CACHED, because src/ui/SecondScreen.lua asks this from `mode`, and `mode` is
+-- asked several times per frame by every caller that has to decide where to
+-- draw.  It is still RE-asked -- a display can be plugged in or pulled out
+-- mid-session -- just not thousands of times a second.  The window is short
+-- enough that plugging a screen in is noticed within a few frames of a second.
+SecondScreen.PROBE_INTERVAL = 0.5
+local probedAt, probed = nil, false
+
+local function clock()
+  if love and love.timer and love.timer.getTime then
+    local ok, t = pcall(love.timer.getTime)
+    if ok then return t end
+  end
+  return nil
+end
+
 function SecondScreen.available()
   if not C then return false end
+  local now = clock()
+  if probedAt and now and (now - probedAt) < SecondScreen.PROBE_INTERVAL then
+    return probed
+  end
   local ok, r = pcall(C.love_android_secondary_ready)
-  return ok and r ~= 0
+  probed = (ok and r ~= 0) and true or false
+  probedAt = now or probedAt or 0
+  return probed
+end
+
+-- Force the next `available` call to ask the host again.  Called when the mode
+-- changes, so a player who has just plugged a screen in does not wait out the
+-- probe interval to see the option take.
+function SecondScreen.forget()
+  probedAt, probed = nil, false
 end
 
 function SecondScreen.push(imageData, w, h)

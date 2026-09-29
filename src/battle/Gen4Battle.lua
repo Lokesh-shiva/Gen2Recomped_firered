@@ -2395,6 +2395,94 @@ end
 -- action layer over it. Drawn through SecondScreen, which owns where that
 -- surface is and at what scale -- whole window on `swap`, a corner panel on
 -- `inset` -- so nothing here has to know.
+-- THE WORDS, which the cartridge's art does not carry.
+--
+-- Reported from play: *"in battles with the bottom screen theres no text for the
+-- moves or fight, bag, pkmn, or run buttons"*.  Opening the extracted layers
+-- settles why in a second: `action.png` is a big red panel and three small
+-- coloured ones, `moves_00.png` is four cream panels and a blue bar, and there is
+-- not a letter anywhere in either.  The DS prints the words into WINDOWS over the
+-- buttons at run time rather than baking them into the tilemap, so a port that
+-- draws the tilemap and stops gets exactly what was reported: the right buttons,
+-- unlabelled.
+--
+-- The compact presentation has drawn these all along (`drawCompactActions`,
+-- `drawCompactMoves`); the bottom-screen one never did.  Same labels, same
+-- source, centred in the cartridge's own rectangles.
+local function centreText(text, rect)
+  local Font = require("src.render.Font")
+  if not (text and rect) then return end
+  local tw = Font.width and Font.width(text) or (#text * 8)
+  local th = Font.glyphHeight and Font.glyphHeight() or 8
+  Font.draw(text, math.floor(rect.left + (rect.right - rect.left - tw) / 2),
+            math.floor(rect.top + (rect.bottom - rect.top - th) / 2))
+end
+
+-- Black, because every one of these panels is a light or saturated fill and the
+-- compact buttons are lettered the same way.
+function Gen4Battle.drawBottomLabels(battle, over)
+  local g = love.graphics
+  g.setColor(0, 0, 0, 1)
+  if over == "action" then
+    local labels = Gen4Battle.actionLabels(battle)
+    for i = 1, 4 do
+      local slot = Gen4Battle.COMPACT_SLOTS[i]
+      centreText(labels[i], slot and Gen4Battle.ACTION_RECTS[slot.art])
+    end
+  elseif over == "moves" then
+    local chooser = battle.menuBattler and battle:menuBattler()
+    for i = 1, 4 do
+      local mv = chooser and chooser.curMoves and chooser.curMoves[i]
+      -- An empty slot is left BLANK rather than drawn with a dash: the
+      -- cartridge hides the button entirely, and a labelled empty button is an
+      -- invitation to press something that does nothing.
+      if mv then
+        local def = battle.data and battle.data.moves and battle.data.moves[mv.id]
+        centreText(def and def.name or tostring(mv.id), Gen4Battle.MOVE_RECTS[i])
+      end
+    end
+  end
+  g.setColor(1, 1, 1, 1)
+end
+
+-- WHICH BUTTON A TAP LANDED ON, in bottom-screen pixels.  The rectangles are the
+-- cartridge's own touch rects -- sBattleMenuTouchRects and
+-- sMoveSelectMenuTouchRects -- so this is the same hit test the DS does, not a
+-- second set of boxes drawn to match the first.
+--
+-- Returns "action"|"move" with an index, or "cancel", or nil.
+function Gen4Battle.bottomHit(x, y, over)
+  -- HALF-OPEN, because the cartridge's compare is unsigned:
+  --
+  --     (touchX - left < right - left) & (touchY - top < bottom - top)
+  --
+  -- On u32, `touchX - left` wraps to something enormous when touchX is left of
+  -- the rect, so that one expression is `touchX >= left and touchX < right`.
+  -- Bottom and right are EXCLUSIVE.
+  --
+  -- Written inclusive first, and the check caught it: FIGHT's bottom is 144 and
+  -- ITEM's and PARTY's top is 144, so an inclusive test makes row 144 belong to
+  -- two buttons at once and the first one wins. One row of pixels, and the kind
+  -- of thing nobody ever notices and nobody can explain when they do.
+  local function inside(r)
+    return r and x >= r.left and x < r.right and y >= r.top and y < r.bottom
+  end
+  if over == "action" then
+    for i = 1, 4 do
+      local slot = Gen4Battle.COMPACT_SLOTS[i]
+      if inside(slot and Gen4Battle.ACTION_RECTS[slot.art]) then return "action", i end
+    end
+  elseif over == "moves" then
+    -- CANCEL FIRST.  Its bar overlaps nothing, but the move rects run to y 144
+    -- and the bar starts at 152, so testing it last would still be right and
+    -- testing it first makes that independent of the numbers.
+    if inside(Gen4Battle.MOVE_CANCEL) then return "cancel" end
+    for i = 1, 4 do
+      if inside(Gen4Battle.MOVE_RECTS[i]) then return "move", i end
+    end
+  end
+  return nil
+end
 function Gen4Battle.drawBottomScreen(battle, SecondScreen, over)
   local base = subscreenLayer(battle, "base")
   local top = subscreenLayer(battle, over)
@@ -2404,6 +2492,9 @@ function Gen4Battle.drawBottomScreen(battle, SecondScreen, over)
     g.setColor(1, 1, 1, 1)
     if base then g.draw(base, 0, 0) end
     if top then g.draw(top, 0, 0) end
+    -- Over the buttons and UNDER the cursor wash, so the highlight tints the
+    -- word with the button rather than covering it.
+    Gen4Battle.drawBottomLabels(battle, over)
     -- The cursor, in the engine's own marker rather than the cartridge's
     -- `cursor` tilemap: that layer draws all four move outlines at once and
     -- has nothing for the action buttons, so it cannot say WHICH is chosen.

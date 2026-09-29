@@ -10015,7 +10015,7 @@ are the anchors a save will carry.
 ### The behaviour it produces, checked against the engine's own rules
 
 * A Gen 4 tileset sets `warpsAreEvents`, and for a non-FireRed Gen 4 cache
-  `Map:isDoorTileCell` reduces to `warpAtCell(...) ~= nil` — so a lift pad fires
+  `Map:isWarpTileCell` reduces to `warpAtCell(...) ~= nil` — so a lift pad fires
   **on the completed step onto it**, which is what standing on a platform should
   do.
 * `OverworldState:refreshStandingOnWarp` plus the `if entry then -- still
@@ -26964,3 +26964,1763 @@ the picture answers in a second. **Sixteen samples is not a measurement.**
 
 - `src/render/Gen4Model.lua` -- `GRASS_MATERIALS` gains `s_grass`; the stale
   "not extracted here" note is replaced by the census and the verdicts.
+
+## Pass 129 — the doorway: a Game Boy question asked of Gen 4 data, for the third time
+
+Reported from play: *"ive noticed when walking out of doors in platinum it doesnt
+make me walk one block out of the door i exit and im standing in the doorway fix
+this"*.
+
+It is the same bug as the Hoenn one whose write-up is still sitting in
+`Map:isDoorTileCell` — *"every door in Hoenn answered 'not a door',
+`PlayerStepOutFromDoor` never ran, and the player was left standing on the mat"* —
+one generation further on. The step-out itself was never Gen 2-only: the block in
+`OverworldState:startWarpTo` runs for every cartridge. What it asks first is
+`self.map:isDoorTileCell(player.cellX, player.cellY)`, and on this cartridge that
+question has two independent answers of no.
+
+### Reason one: the tile cannot be read at all
+
+`Gen4Tileset` sets `behaviourBytes = true`, so `isDoorTileCell` takes the Gen 3
+branch and calls `cellBehaviour`. That function opens:
+
+```lua
+function Map:cellBehaviour(cx, cy)
+  if not self.def.collisionCells then return nil end
+```
+
+`Gen4Maps.mapDef` returns `width`, `height`, `blocks`, `borderBlock` and
+`generation`. **There is no `collisionCells`** — the behaviour byte is written
+into `blocks` itself, which is why `Gen4Tileset.collision` is the identity map
+0..255. So the guard closes on every cell in Sinnoh, `b ~= nil` fails, and the
+branch falls through to `return false`.
+
+Worth saying plainly: that guard is not reading `collisionCells`, it is only
+*testing* it. It is a flag meaning "this cartridge speaks behaviours", and Gen 4
+speaks behaviours while spelling the flag differently.
+
+### Reason two: the list it would check matches nothing
+
+Even with the tile readable, `doorTiles` for Gen 4 is
+`Gen4Behaviors.group("door")` = `matching("^DOOR")` = `{ 0x69 DOOR }`. Joining all
+1,213 warps in the cartridge `destMap`/`destWarp` to the cell they land on and
+reading the behaviour there:
+
+| behaviour at the arrival cell | count |
+| --- | --- |
+| `WARP_ENTRANCE_SOUTH` 0x65 | 244 |
+| `WARP_NORTH` 0x6E | 177 |
+| masked to `BLOCKED_CELL` 0xFF | 172 |
+| `WARP_SOUTH` 0x6F | 92 |
+| `WARP_STAIRS_EAST` 0x5E | 91 |
+| `WARP_STAIRS_WEST` 0x5F | 83 |
+| `ESCALATOR_FLIP_FACE` 0x6A | 72 |
+| `WARP_WEST` 0x6D | 61 |
+| `WARP_EAST` 0x6C | 59 |
+| `WARP_PANEL` 0x67 | 55 |
+| `NONE` 0x00 | 39 |
+| `WARP_ENTRANCE_EAST` 0x62 | 24 |
+| `WARP_ENTRANCE_WEST` 0x63 | 24 |
+| `ESCALATOR` 0x6B | 10 |
+| `REFLECTIVE` 0x2C | 2 |
+| `UNKNOWN_x60` 0x60 | 2 |
+| **`DOOR` 0x69** | **0** |
+
+**Zero.** 0x69 is the door tile in the wall, which the player never stands on.
+
+### The first draft of that table was wrong, and the way it was wrong is the lesson
+
+Indexing a map-local arrival coordinate straight into the layout grid produced
+293 arrivals reading `BLOCKED_CELL`, including things like *exit Hearthome's
+Pokemon Center into Hearthome City*. **84 of Sinnoh's maps share layout 0**, the
+960x960 region grid — the same sharing that over-counted the item 4 join — and
+each map is a sub-rectangle of it at its own `originX`/`originY`. The fix was to
+read through `MapLoader.resolveBlocks`, the engine's own carve, rather than a
+second implementation of it; the check tool does the same, for the same reason.
+
+A count of 0 is also exactly the shape of a measurement that cannot fail, so the
+tool carries the control beside it: the identical join with `WARP_ENTRANCE_SOUTH`
+planted in the door list returns **244**. Without that number the zero above
+would be worth nothing.
+
+### What the cartridge actually asks
+
+Not the tile. `Field_CheckMapTransition` (`overlay005/field_control.c`) hands the
+direction the player was *walking* to `Location_Set` as the arrival facing, and
+`sub_02056C18` picks a transition type from the kinds of map either side —
+building -> outdoors is type 0 — which indexes the arrival table `Unk_020EC544`.
+Every arm of that table which steps the player out (`ov5_021D5020` for type 0,
+`ov5_021D5150` for types 1, 4 and 6) gates the step on one thing:
+
+```c
+if (v3 == 1) { MapObject_SetHidden(v0, 1); (v2->unk_00) = 1; }
+else         { MapObject_SetHidden(v0, 0); (v2->unk_00) = 3; }
+...
+case 1: MapObject_SetHidden(v0, 0);
+        LocalMapObj_SetAnimationCode(v0, MOVEMENT_ACTION_WALK_NORMAL_SOUTH);
+```
+
+`v3` is `PlayerAvatar_GetFacingDir` and `1` is `DIR_SOUTH`
+(`constants/map_object.h`). **Facing south on arrival: hidden through the fade,
+revealed already walking one tile south. Any other facing: just appear.** No tile
+is read.
+
+And that is self-consistent with play: you leave a house by walking *south* onto
+the exit mat, so you arrive outside facing south and step south out of the
+doorway; you enter by walking *north* into the door, arrive inside facing north,
+and stay standing on the mat — which is what the cartridge does too.
+
+`startWarpTo` already carries `local facing = self.player.facing` across the
+warp, which is the same number `transitionDir` is. The gate needed no new data,
+only the right question.
+
+### Changed
+
+- `src/world/OverworldController.lua` — the step-out gate becomes two-armed:
+  Gen 4 tests `self.player.facing == "down"`, everything older keeps
+  `isDoorTileCell` character for character. The `Collision.canMove` guard and the
+  arrival-guard reasoning above it are untouched, so a blocked cell south of the
+  door still turns the step into a turn rather than a clip.
+- `tools/gen4_door_stepout_check.lua` — new. 14 checks: the join, the zero, the
+  control that makes the zero mean something, the absence of `collisionCells` from
+  `Gen4Maps.mapDef`, and the gate construct itself pinned in source so a later
+  edit that hands Gen 4 back to the tile fails here instead of in a play-test.
+- `docs/gen4-platinum.md` — the lift section said `Map:isDoorTileCell` reduces to
+  `warpAtCell(...) ~= nil` for a Gen 4 cache. That is `Map:isWarpTileCell`;
+  `isDoorTileCell` reduces to `false`, which is this pass. Corrected in place.
+
+### Proved bites, not just passes
+
+Three planted faults, each failing the file: the pre-fix controller (3 failures),
+the Gen 4 arm replaced with `stepsOut = true` (2), and the pre-Gen 4 arm
+sabotaged (1). One of the assertions had to be rewritten during this: `find("if
+GameVersion.isGen4() then")` **cannot fail** in this file, because that line
+appears eight other times in it. Its replacement pins the whole construct with a
+plain find — plain, because `isGen4()` inside a Lua pattern is a position
+capture rather than a literal, and the first attempt failed against the *correct*
+file for that reason alone.
+
+### Deliberately not done
+
+- **The `collisionCells` guard is left as it is.** Widening it to accept
+  `behaviourBytes` would make `cellBehaviour` answer for Gen 4, and there are
+  **fourteen other `behaviourBytes` branches in `Map.lua`** waiting behind it —
+  ledges, warp pads, grass, ice, mud, bookshelves. All fourteen would switch on
+  together, none of them has been looked at against Sinnoh, and turning them all
+  on as a side effect of a doorway fix is how a small pass becomes an unexplained
+  regression. Its own pass.
+- **The cartridge's `TileBehavior_IsDoor` branch is not ported.** Both arrival
+  tasks check it first and route a door tile to the door-opening animation
+  instead of the step. It would be dead code twice over here: there is no
+  arrival door animation to route to, and `cellBehaviour` answers nil anyway.
+
+### Open, found on the way and not part of this fix
+
+**198 of 1,213 warp cells — 16.3% — read `BLOCKED_CELL` on the DEPARTING side**, and
+172 on the arriving side. That is not an indexing error: the departing count is
+the control, and it is the same rate. `Gen4Maps.mapDef` replaces the behaviour
+byte with 255 whenever `Gen4Maps.blocks(word)` is true, so any warp cell the
+cartridge marks impassable loses its behaviour on import. Consistent with Gen 4
+placing warps on door tiles the player cannot normally occupy — but it means the
+behaviour of exactly the cells a door check would want is the behaviour the
+importer throws away. Worth its own look before anything else is built on
+arrival-cell behaviours.
+
+
+## Pass 130 — the Underground: the map was in the dataset all along
+
+Asked for: *"ensure the platinum underground is working as intended if nto
+implement everything that needs to be implemented"*.
+
+### First, the honest scope
+
+It was not partly working. It was absent — fourteen stubbed script opcodes and
+nothing else, which is what the opcode-coverage table in this document already
+said when it grouped the Underground with contests and the move tutor as *"six
+absent systems, lowered by feature rather than by opcode, because that is how
+they will be built"*. On the cartridge it is about 26,000 lines: `src/underground/`
+alone is 23,521 across nineteen files, plus `underground.c`,
+`underground_map_transition.c`, `scrcmd_underground_inventory.c` and
+`secret_base_props.c`. Roughly a third of that — `comm_manager.c`, most of
+`secret_bases.c`, `player_talk.c`, much of `traps.c` — is DS-to-DS wireless and has
+no meaning in this port.
+
+So this pass is the part everything else needs: **getting down there and back up**.
+Mining, spheres, traps, secret bases, the vendors and the top-screen radar are
+not written.
+
+### The map was never missing
+
+`MAP_HEADER_UNDERGROUND` is an entirely ordinary map header — index 2,
+`mapMatrixID = map_matrix_002`, `eventsArchiveID = events_underground`,
+`mapType = MAP_TYPE_UNDERGROUND`, label `LocationNames_Text_MysteryZone`. Not a
+runtime-generated cave network, just a map. And it is in the dataset:
+
+| | |
+| --- | --- |
+| id | `UG` |
+| header | 2 |
+| size | 480x480 (15x15 chunks) |
+| label | Mystery Zone |
+| music | 1060 (`SEQ_TANKOU`) |
+| objects | 21 |
+| message bank | 625 |
+
+**It looked absent because of how it is written.** `grep 'id = "UG"' maps.lua`
+returns nothing, and that is not a typo: the dataset writer PACKS a large map
+entry into a chunk function of its own, so the file says `__t["id"] = "UG"` where
+every smaller map says `id = "C01",`. The entries big enough to be packed are
+exactly the interesting ones, so this will happen again — **grepping a generated
+Lua dataset for `field = value` silently skips every packed entry.** The Lua
+lookup was right and the grep was the faulty instrument.
+
+What was actually missing was anything that *named* it: zero references to `"UG"`
+anywhere in `src/`.
+
+### Where the Explorer Kit puts you
+
+`MapChangeUndergroundContext_New` (`field_map_change.c`), verbatim:
+
+```c
+int matrixX = location->x / MAP_TILES_COUNT_X - 1;
+int matrixZ = location->z / MAP_TILES_COUNT_Z - 6;
+GF_ASSERT(matrixX >= 0); GF_ASSERT(matrixZ >= 0);
+int x = matrixX % 2 == 0 ? 8 : 23;
+int z = matrixZ % 2 == 0 ? 8 : 23;
+matrixX = matrixX / 2 + SECRET_BASE_WIDTH / MAP_TILES_COUNT_X;
+matrixZ = matrixZ / 2 + SECRET_BASE_DEPTH * 2 / MAP_TILES_COUNT_Z + 1;
+ctx->destX = matrixX * MAP_TILES_COUNT_X + x;
+ctx->destZ = matrixZ * MAP_TILES_COUNT_Z + z;
+```
+
+All four constants are 32. One chunk off the west edge, six off the north, then
+two overworld chunks fold into one Underground chunk — which is how 960x960
+becomes 480x480 — and the parity picks which half you stand in.
+
+**`location->x` and `->z` are MAIN-MATRIX GLOBAL cells.** On the cartridge the
+player's position already is global; this port carves each map's own rectangle
+out of the shared grid, so `originX`/`originY` have to be added back before the
+arithmetic. `Gen4Underground.cellFor` is the only place that conversion is
+allowed to happen, precisely because getting it wrong is what produced 293
+phantom blocked arrivals in pass 129.
+
+### Measured over all 84,598 of them
+
+Every walkable cell on the 960x960 region grid, pushed through the formula:
+
+| | |
+| --- | --- |
+| walkable main-matrix cells | 84,598 |
+| hit the two `GF_ASSERT`s | **0** |
+| landed outside the 480x480 map | **0** |
+| landed on a cell the Underground calls blocked | **0** |
+| landed on walkable Underground ground | **84,598** |
+| distinct entry points | **170** |
+
+Four zeros in a row is the shape of a test that cannot fail, so the check carries
+a control: the same arithmetic with the 2:1 fold removed puts **1,424** arrivals
+outside the map. The zeros are load-bearing. And this was not a foregone
+conclusion — working the ranges by hand predicted `destX` could reach 503 on a
+960-wide matrix, which is off a 480-wide map; the reachable overworld simply
+never goes that far east.
+
+### Finding the item without hardcoding 428
+
+A Platinum item record carries `fieldUseFunc`, which indexes `sItemUseFuncs`
+(`item_use_functions.c`). Row 3 is
+`ITEM_USE_FUNC_EXPLORER_KIT = { UseExplorerKitFromMenu, UseExplorerKitInField,
+CanUseExplorerKit }`, and item 428's record says `fieldUseFunc = 3`. Keying on
+the row is what the cartridge does, and it cannot reach Gen 1, 2 or 3 by
+construction rather than by a version test on the front: no item record in those
+datasets has the field at all. The dataset uses 25 distinct rows, which the check
+asserts — otherwise "exactly one item on row 3" would pass for the wrong reason.
+
+### The eight guards, and the three that are named rather than faked
+
+`CanUseExplorerKit` refuses on: the Mystery Zone label, not being on the main
+matrix, the Cycling Road, an active Safari game or Pal Park, surfing, a bridge
+tile, `FORBIDS_EXPLORATION_KIT`, and an object standing on the spot.
+
+Five are implemented. **The Cycling Road, the Safari game and Pal Park are not,
+and are left as named gaps rather than guessed at:** this port has no Gen 4
+notion of any of the three, there is no Sinnoh Safari, and the Cycling Road flag
+is not extracted. A guard written against a flag nobody writes reads as enforced
+and is not, which is the same class of mistake as pass 129's door list.
+
+The label test is deliberately the label and not `id ~= "UG"`: two headers carry
+Mystery Zone — `NOTHING` (1) and the Underground (2) — and both must refuse, which
+is what the cartridge's `MapHeader_GetMapLabelTextID(...) ==
+LocationNames_Text_MysteryZone` says.
+
+### Reading the tile without opening pass 129's box
+
+Two guards need the behaviour underfoot, and `Map:cellBehaviour` answers nil for
+every Gen 4 cell (pass 129). Rather than widen that guard — which switches on
+fourteen unrelated branches at once — these use `Map:blockAt`, which is the right
+accessor and not a dodge: on Gen 4 the block value **is** the behaviour byte,
+since `Gen4Maps.mapDef` writes the permission low byte straight into `blocks`,
+and `blockAt` border-extends and honours block patches like every other reader.
+
+### The bridge range, and why it is a range
+
+`TileBehavior_IsBridge` names thirteen behaviours and they turn out to be
+contiguous, 0x71 `BRIDGE` to 0x7D `BIKE_BRIDGE_E_W_OVER_SAND` — so the test is a
+range. It **excludes 0x70 `BRIDGE_START`**, which has `TileBehavior_IsBridgeStart`
+to itself. Nothing under `src/world`, `src/render` or `src/ui` requires
+`src/import` (zero call sites, checked), so these are literals in runtime code;
+the check re-derives all fifteen values from `Gen4Behaviors`' own name list,
+asserts the contiguity the range depends on, and asserts `BRIDGE_START` is not
+caught. Literals copied out of a table drift from it silently otherwise.
+
+### A deliberate deviation, to avoid a one-way trip
+
+On the cartridge you climb out from the Underground's own touch-screen menu
+(`src/underground/menus.c`), and `CanUseExplorerKit` refuses the kit down there
+*because* the menu is what you use. With neither the menu nor a substitute,
+descending would be a **softlock**. So the kit doubles as the way out until the
+menu exists, and this is written at the call site as well as here so it moves
+behind the menu when there is one.
+
+The return point goes in `save.gen4SpecialLocation` — the slot the lifts already
+use, which is `FieldOverworldState_GetSpecialLocation`. There is only one of it on
+the cartridge too, so a lift's remembered floor being overwritten by a trip
+underground is the cartridge's behaviour and not a collision this port invented.
+It records the POSITION and no warp id: writing `warp = 0` would name warp 1 of
+the map above and put the player in somebody's doorway on the way back up.
+
+### Changed
+
+- `src/world/Gen4Underground.lua` — new. Constants, `descendCell`, `cellFor`,
+  `canUse`, `enter`, `leave`, `isUnderground`.
+- `src/inventory/ItemEffects.lua` — returns `"explorer_kit"` for the item whose
+  `fieldUseFunc` is row 3, and refuses mid-battle.
+- `src/ui/BagMenu.lua` — acts on the verb. Asks *am I underground already?* before
+  `canUse`, because `canUse` refuses underground on purpose and the two tests in
+  the other order would answer a climb-out with the refusal for being down there.
+- `tools/gen4_underground_check.lua` — new, 69 checks.
+
+### Proved bites, not just passes
+
+Four faults planted in the module, each caught, plus a no-op control that stays
+green so the failures are attributable to the faults and not to the re-copying:
+
+| planted fault | caught by |
+| --- | --- |
+| drop the 2:1 fold on X | 46,098 arrivals outside the map; entry points fall 170 -> 82 |
+| bridge range starts at 0x70 | the contiguity assertions, all thirteen |
+| `FORBIDS_EXPLORATION_KIT` set to 0x2C | the re-derivation from `Gen4Behaviors` |
+| surfing guard removed | `guard "surfing" did not bite` |
+| a `sed` that matches nothing | nothing — 69 checks, 0 failed |
+
+One more was found by the file failing on itself: `tostring(select(2, canUse(...)))`
+raises when `canUse` succeeds, because it answers `true` ALONE and `select(2, ...)`
+is then empty rather than nil.
+
+### Next, in order
+
+1. The Underground's own touch-screen menu, which is how you are meant to leave.
+2. Mining: the dig walls, the spheres, the fossils. `src/underground/mining.c` is
+   3,179 lines and its tables are compiled into overlays rather than sitting in a
+   NARC, so they come from pokeplatinum's source, not from a file read.
+3. The five UG graphics NARCs (`ug_anim`, `ug_fossil`, `ug_parts`, `ug_trap`,
+   `underg_radar`), none of which is extracted yet.
+
+
+## Pass 131 — what is buried in an Underground wall
+
+Slice two of the Underground: the mining table and the wall generator. **Nothing
+calls either of them yet** — this pass cannot change what the game does, and mining
+is not playable after it. What it does is put the data in, correct, with the
+arithmetic that uses it proved offline, so the touch-screen part has something
+true to draw.
+
+### Four weights per row, and they are four different numbers
+
+`sMiningObjects` (`src/underground/mining.c`) is 85 rows. Each carries FOUR
+weights, and `Mining_GetWeightOfItem` picks between them on two questions:
+
+```c
+BOOL isTrainerIDOdd = TrainerInfo_ID(SaveData_GetTrainerInfo(saveData)) % 2;
+BOOL isNationalDexObtained = Pokedex_IsNationalDexObtained(SaveData_GetPokedex(saveData));
+if (isNationalDexObtained) {
+    weight += isTrainerIDOdd ? item->oddTIDNatDexWeight : item->evenTIDNatDexWeight;
+} else {
+    weight += isTrainerIDOdd ? item->oddTIDWeight : item->evenTIDWeight;
+}
+```
+
+The four columns total **1017, 1015, 987 and 1019**. Four different numbers, so an
+implementation that collapsed them — which is the obvious simplification, since
+most rows carry similar values — would be wrong in a way no single dig could
+reveal. The Armor Fossil and Skull Fossil are the clearest case: each is weight
+**0 on one trainer-id parity and 25 on the other**, which is how a save gets one
+of the pair and not the other.
+
+Two facts fell out of loading the table that are worth writing down:
+
+- **`MINING_TREASURE_OVAL_STONE` carries 0 in all four columns.** It is in the
+  table and cannot be dug up by any save. Pinned by the check, so a future
+  transcription slip that gives it a weight shows up as a failure rather than as
+  a rumour.
+- **Sixteen rows are National-Dex-only** — the Odd Keystone, all four Helix
+  rotations, the Dome, all four Claw, all four Root and both Old Amber. No fossil
+  can be mined before the National Dex, and that is the weight table saying so,
+  not a script gate.
+
+### The shape bug in the cartridge, and why transcribing would have carried it wrong
+
+`Mining_AreCoordinatesWithinObjectShape` reads occupancy as a **flat** array:
+
+```c
+row = y / 2; column = x / 2; entriesPerRow = object->width / 2;
+if (shape[row * entriesPerRow + column] == 'o') { return FALSE; }
+```
+
+The stride is the record's cell width. That is not always the declared array's
+stride. Across all 43 shape arrays and 85 rows, **exactly one disagrees**:
+
+```c
+static u8 sDampRockShape[3][4] = {   // declared stride 4
+    { 'x', 'x', 'x' },              // three entries, padded to four
+    { 'x', 'x', 'x' },
+    { 'x', 'o', 'x' },
+};
+// record: .width = 3 * 2  ->  the read strides by THREE
+```
+
+Laid out, the memory is `xxx. xxx. xox.` and the `'o'` sits at byte 9. A stride-3
+read of a 3x3 grid reaches bytes 0..8 and never gets there; at rows 1 and 2 it
+lands on the zero padding at bytes 3 and 7, neither of which is `'o'`. **The Damp
+Rock is a solid 3x3 in the game.** Transcribing the initialiser would have given
+it a notch it does not have.
+
+So occupancy is not transcribed. It is generated by **simulating the cartridge's
+read** over the compiler's layout, which preserves that quirk and any like it by
+construction rather than by a special case. The other 42 shapes agree either way,
+which is the control: if the read were being modelled wrongly, they would not.
+
+### The generator, and the three loops it is
+
+`Mining_GenerateGameLayout`. `itemCount = MATH_Rand32(rand, MAX_BURIED_ITEMS - 1)
++ 2`, so two to four treasures. Then a retry loop that rolls a row, discards it
+if it is a plate already mined on this save or already on this wall, rolls a
+position, and places it if it fits. Then **a hundred fixed attempts** at rocks.
+
+Three things in there are easy to get wrong:
+
+- **The fourteen rock rows are not in the weighted pool.** `MINING_ROCK_1` and
+  `MINING_TREASURE_MAX` are the same number, and both `Mining_PickItem` and
+  `Mining_GetTotalItemWeight` **break** at the first row whose itemID equals
+  `MINING_TREASURE_MAX`. So the pool is rows 1..71 and the rocks are placed
+  separately, picked uniformly, their weight columns never read. The break is only
+  equivalent to a filter because every rock sits at the tail — asserted, because
+  a rock in the middle of the table would silently truncate the pool.
+- **`MAX_BURIED_OBJECTS` is 8 and `MAX_BURIED_ITEMS` is 4.** Eight is the total,
+  treasures and rocks together, which is why the rock loop's own
+  `if (objectsPlaced > 12) break;` is dead code — and the cartridge's comment says
+  so. Placement starts failing at eight.
+- **The first dig is rigged twice.** A save that has never mined gets exactly
+  three treasures AND no rocks at all, because the rock loop sits inside
+  `if (!Underground_HasPlayerNeverMined(...))`. A clean first wall is the tutorial.
+
+### Testing a weighted picker without a statistical test
+
+A weighted picker is the classic thing to test by sampling, and sampling is both
+flaky and weak here: an off-by-one at a bucket boundary moves one row's frequency
+by a fraction of a percent and hides in the noise forever. So the check walks
+**every roll** from 0 to `totalWeight - 1`, in all four save combinations, and
+asserts the row it lands on is the row whose cumulative interval contains it.
+**4,038 assertions that cannot be lucky**, plus one that a roll of exactly
+`totalWeight` resolves to nothing — the cartridge's `GF_ASSERT(FALSE)` case.
+
+Planting `counter <= 0` in place of `counter < 0` fails it at roll 30.
+
+### Measured over 4,000 walls
+
+| | |
+| --- | --- |
+| item counts 2 / 3 / 4 | 1334 / 1330 / 1336 |
+| overlapping cells | 0 |
+| objects out of bounds | 0 |
+| walls over `MAX_BURIED_OBJECTS` | 0 |
+| walls holding one plate twice | 0 |
+| worst placement retry count | 21 |
+
+The retry count matters because the cartridge's loop has **no iteration limit** —
+`while (objectsPlaced < itemCount)` cannot fail to terminate on a console, since
+at most four small objects always fit on 13x10 eventually. That reasoning is sound
+and is still a hang here if a caller passes a degenerate `rand`, so the port gives
+up at 100,000 and says so. Twenty-one is the worst real case, which is what makes
+the bound safe rather than arbitrary.
+
+### A fault that could not be caught, and the fix for the check
+
+Six faults were planted. Four failed immediately. The other two are the
+interesting ones.
+
+**Removing `if endX > M.GRID_WIDTH then return false end` changed nothing.** Not
+because the check is wrong — because it is unreachable with this table. The
+overlap loop reads `wall.grid[y][x]` for each solid cell, an off-grid column
+gives `nil`, and `nil ~= 0` refuses the placement by accident. That accident holds
+only while every row has at least one solid cell in its rightmost column and
+bottom row, and **all 85 do** — the most hollow right column is 75% holes. So the
+check now tests the bounds with a **synthetic** 2x2 whose right column is empty,
+which nothing in the overlap loop can see, plus a control that the same object is
+accepted one cell in. That assertion catches the fault; no row in the shipped
+table could.
+
+**Removing the never-mined rock skip appeared to change nothing, and had not been
+applied at all.** The `sed` ended `then$`, and every line in these files ends
+`then\r`, so `$` never matched. A phantom fault reads exactly like a check that
+does not bite. Re-applied CRLF-aware it fails two assertions. **Verify the fault
+landed before believing the check is weak** — diff it.
+
+| planted fault | result |
+| --- | --- |
+| collapse the four weight columns | 4 failures, incl. the distinctness control |
+| `counter <= 0` in `pick` | fails at roll 30, and the out-of-range case |
+| give the Damp Rock its initialiser's notch | 1 failure |
+| drop the `endX` bounds check | **not caught** — section 10 added, now caught |
+| drop the `endY` bounds check | crash, non-zero exit |
+| place rocks on a never-mined wall | phantom (`$` vs CRLF); re-applied, 2 failures |
+| a `sed` that matches nothing | nothing — 271 checks, 0 failed |
+
+### Changed
+
+- `src/import/Gen4Mining.lua` — new. The 85 rows, the 49-entry treasure-to-bag-item
+  map, the grid and plate constants, `solidAt`, `weightOf`, `weightedPool`,
+  `rocks`, `totalWeight`, `pick`, `bagItem`.
+- `src/world/Gen4MiningWall.lua` — new. `new`, `tryPlace`, `generate`, `at`,
+  `treasures`. The random source is injected, with the same contract
+  `MATH_Rand32(rand, n)` has.
+- `tools/gen4_mining_check.lua` — new, 271 checks.
+
+Nothing requires either module yet, so Gen 1, 2 and 3 cannot be affected and
+neither can Platinum — this pass is data plus arithmetic.
+
+### Next
+
+1. `ug_parts.narc` and `ug_fossil.narc`: the buried-object sprites and the
+   mining interface. Neither is extracted, and the table already names every
+   member it needs (`damp_rock_NCGR`, `fossil_NCLR`, and so on).
+2. The dig walls in the Underground map — which cells sparkle, and the tap that
+   opens the game.
+3. The minigame itself: seven dirt layers, the hammer and the pickaxe, the wall
+   collapsing, and awarding through `bagItem`.
+
+
+## Pass 132 — the mining art, and a width the cartridge was stating all along
+
+Slice three of the Underground: extracting `ug_parts.narc` and `ug_fossil.narc`.
+
+### The name tables were already there
+
+`Gen4Archives` has carried the member names for all five UG archives — `ug_anim`,
+`ug_fossil`, `ug_parts`, `ug_trap`, `underg_radar`, plus `ugeffect_obj_graphic`
+and `ugroundeffect` — since the archive tables were built. What was missing was an
+entry in `Gen4Screens.ARCHIVES` telling the graphics stage to extract them. The
+counts confirm the names fit: **ug_parts 116 members, 116 names; ug_fossil 3 and
+3**. A NARC has no directory, so a count that did not match would mean every name
+was off by something.
+
+### Every one of these sheets states its own size
+
+`Gen4Screens` exists largely to write down sheet widths, and its own comment is
+blunt about why: *"A WRONG WIDTH IS NOT A WRONG SIZE, IT IS A DIFFERENT
+PICTURE"*, and of the 113 sheets whose width had been guessed at eight tiles, 110
+were wrong.
+
+None of that applies here. **All 71 NCGR members in `ug_parts` declare a real
+`tilesX`/`tilesY`.** `Gen4Graphics.tiles` already reports those as `nil` for the
+0xFFFF sprite sheets, so a number there is the cartridge stating a size rather
+than a decoder guessing one.
+
+And they are the right sizes. Cross-checked against `Gen4Mining.OBJECTS`, whose
+sizes come from somewhere with no connection to an NCGR header — `sMiningObjects`,
+compiled into an ARM9 overlay — **70 of the 71 agree exactly**, at two tiles per
+mining cell. The one absentee is `dirt_tiles.NCGR`, the seven layers of earth
+over the buried objects, which is not a buried object.
+
+### The extractor was ignoring it
+
+```lua
+local wide = job.tilesWide or 8
+```
+
+No branch for the sheet's own header. Measured across the whole table:
+
+| sheets laid out by a chosen width | 258 |
+| --- | --- |
+| whose NCGR declares `tilesX`/`tilesY` | 65 |
+| **...drawn at a width the file contradicts** | **26** |
+| whose NCGR says 0xFFFF and genuinely needs a bank or a stated width | 193 |
+
+The twenty-six include `pl_winframe`'s message boxes, **declared 6x3 and laid out
+at 8**, and the two standard window frames, declared 3x3.
+
+### Which is why this is opt-in, and not the new default
+
+Making the declared size win everywhere is a one-line change that redraws
+twenty-six existing pictures, several of them visible UI. That wants its own pass
+and its own play-test, not a ride-along with the Underground. So
+`preferDeclaredSize` is a per-archive flag, set on the two UG archives and
+nothing else, and **the check asserts the change is inert everywhere else** —
+across 329 sheets, exactly 71 take the declared-size branch and all 71 are
+ug_parts.
+
+The precedence, in order:
+
+1. **A width written down for this group** (`tilesWideFor`) — measured on purpose,
+   for the cases where nothing else is right. Beats everything.
+2. **The sheet's own header**, if the archive asked for it.
+3. The archive default, or the bare 8.
+
+That first rule needed a new field. `tilesWide = 8` on a message box is the
+archive default falling through; `= 8` on a sheet somebody measured at eight is a
+statement, and downstream the two were indistinguishable. `tilesWideStated`
+records which, and the check asserts it is set on exactly the groups
+`tilesWideFor` names — 329 assertions, one per job.
+
+### And `provisionalLayout` was overstating itself
+
+It was set on every sheet, with the comment *"laid out at a width nothing in the
+cartridge states"*. For 65 sheets that is not true. The flag exists so somebody
+can trust its absence, so a flag that lies in the safe direction is still lying;
+it now follows where the width actually came from, and a sheet laid out at its
+own declared size is final. The provenance rides back from `composeJob` rather
+than being re-derived at the call site.
+
+### Verified by looking
+
+Seven members composed and opened: the small red sphere, the Sun Stone, the Damp
+Rock, the T-shaped rock, a plate, the Skull Fossil and the Rare Bone. Every one a
+coherent picture at the size the mining table predicts — 32x32, 48x48, 48x48,
+48x32, 64x48, 64x64, 48x96. **The T-shaped rock reads as a literal T**, which is
+the nicest possible confirmation: at a wrong width it would not.
+
+### Changed
+
+- `src/import/Gen4Screens.lua` — two archive entries for `/data/ug_parts.narc` and
+  `/data/ug_fossil.narc`, both `out = "underground"`; `preferDeclaredSize` passed
+  through to each job; `tilesWideStated` records whether the width was written
+  down for that group.
+- `src/import/RomExtractorGen4.lua` — `composeJob` picks the width by the three
+  rules above and returns where it came from; `provisionalLayout` now follows
+  that instead of assuming, and `layoutFrom` records it in the index.
+- `tools/gen4_mining_art_check.lua` — new, 707 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| `preferDeclaredSize` on `pl_winframe` | 24 sheets took the declared branch — not inert |
+| flag dropped from `ug_parts` | the archive assertion, and the "branch never taken" control |
+| declared allowed to outrank a written-down width | stated=0, fallback=258 — the precedence collapsed |
+| a change that matches nothing | nothing — 707 checks, 0 failed |
+
+### Next
+
+1. `ug_anim`, `ug_trap` and `underg_radar` — the crack animation, the trap effects
+   and the top-screen map. Same treatment; their sizes have not been checked.
+2. The minigame itself, which now has both its numbers (pass 131) and its
+   pictures.
+3. Separately: the twenty-six contradicted widths. One flag per archive, one
+   play-test, and the message boxes stop being drawn eight tiles wide.
+
+
+## Pass 133 — which walls you can dig, and a polarity that was 1.8% from looking right
+
+Slice four: where excavation sites are. Pass 130 got you down there, 131 said
+what is buried in a wall, 132 drew it. This is the missing join — which of the
+Underground's 156,142 wall cells is a wall you can dig.
+
+### A wall face with floor in front of it
+
+`Mining_CanSpawnMiningSpotOnCoordinates` (`src/underground/mining.c`):
+
+```c
+if (TerrainCollisionManager_CheckCollision(fieldSystem, x, z)) {
+    if (!TerrainCollisionManager_CheckCollision(fieldSystem, x, z + 1)) return TRUE;
+    if (!TerrainCollisionManager_CheckCollision(fieldSystem, x, z - 1)) return TRUE;
+    if (!TerrainCollisionManager_CheckCollision(fieldSystem, x + 1, z)) return TRUE;
+    if (!TerrainCollisionManager_CheckCollision(fieldSystem, x - 1, z)) return TRUE;
+}
+return FALSE;
+```
+
+The cell must be impassable and at least one cardinal neighbour walkable. Plus
+the bounds, and not in secret-base ground.
+
+Measured against the real 480x480 map: **156,142 wall cells, 74,258 floor cells,
+24,824 diggable**, spread over 182 of the 225 chunks. Ignore the neighbour test
+and 116,664 main-area walls pass instead — so it discards **78.7%** of them, which
+is what makes 24,824 a measurement rather than a formality.
+
+### The reading that would have survived review
+
+Everything here turns on `CheckCollision` returning TRUE for **blocked**. Read it
+the other way and `canSpawnAt` becomes "a floor cell with a wall beside it" — which
+still compiles, still runs, still returns a plausible-looking number, and puts
+every excavation site on the ground instead of in a wall.
+
+**The inverted reading yields 25,272 cells against the correct 24,824.** One point
+eight percent apart. Nothing about the count would have given it away; a
+screenshot might not have either, since sparkles on the floor of a cave look like
+sparkles. So the check pins the exact figure, measures the inverted reading
+beside it and asserts the two differ, and separately asserts that every spot the
+spawner produces sits on a cell the map calls solid.
+
+What settles the polarity is not this function but `Field_CheckMapTransition`,
+which steps one cell and then `if (CheckCollision(...) == FALSE) return FALSE;` —
+a warp fires only when the cell stepped INTO is blocked. That is the same fact
+pass 129 measured from the other end: 16.3% of Sinnoh's warp cells read as blocked
+on import, because a door tile is one the player never stands on.
+
+### The sites come in a cluster
+
+`Mining_SpawnMiningSpotsAndTraps` does not scatter them. It picks ONE valid
+centre anywhere in the main area, then:
+
+- `MATH_Rand16(rand, 6) + 6` — six to eleven mining spots,
+- `MATH_Rand16(rand, 6)` — zero to five traps, on **walkable** ground rather than in
+  a wall, which is the same test read the other way,
+- each placed within ten tiles of the centre, a hundred tries, a bad roll
+  discarded rather than nudged.
+
+Over 300 simulated clusters: 6..11 wanted (47/59/59/49/44/42), averaging **8.4
+spots and 2.5 traps**, none outside the window, none on floor, none in
+secret-base ground.
+
+That window is `MATH_Rand16(rand, 20) + centerX - 10`, which is **-10 to +9**, not
+-10 to +10. Writing the symmetric version is a 21-wide window and a different
+distribution; the check catches it at 77 spots out of range.
+
+### The secret-base rectangle is open at both ends
+
+`UndergroundMan_AreCoordinatesInSecretBase` is `x > 32 && z > 64 && x < 479 && z <
+479` returning FALSE. Strict at both ends, so 32 and 479 are base ground and 33
+and 478 are main area, and everything off the map answers true as well. An
+inclusive reading quietly adds the map's outer ring; asserted cell by cell.
+
+### Changed
+
+- `src/world/Gen4MiningSpots.lua` — new. The defs.h constants, `inSecretBase`,
+  `canSpawnAt`, `canTrapAt`, `spawnCluster`, `spawnNearSphere`. Like the wall
+  generator, the random source is injected and the centre search has a give-up
+  bound the cartridge does not need.
+- `tools/gen4_mining_spots_check.lua` — new, 34 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| invert the collision polarity | the count (25,272), the re-derivation, 2,565 spots off walls, 737 traps in walls |
+| secret-base rectangle made inclusive | x = 32 should be secret-base ground |
+| symmetric -10..+10 window | 77 spots outside the window |
+| drop the neighbour requirement | 116,664 instead of 24,824, and the 78.7% control |
+| a change that matches nothing | nothing — 34 checks, 0 failed |
+
+### Next
+
+The minigame now has all three of its parts: the numbers (131), the pictures
+(132) and the places (133). What is left is the screen — seven dirt layers, the
+hammer and the pickaxe, the wall collapsing, and awarding through
+`Gen4Mining.bagItem` — plus the sphere placement that `spawnNearSphere` is written
+against and nothing yet calls.
+
+
+## Pass 134 — digging: two tools, seven layers, and a wall that falls in
+
+Slice five. The minigame's rules — what a tap takes off, how long the wall lasts,
+and whether the thing is winnable. No screen yet; everything here is decidable
+without one, which is how the last section could be measured at all.
+
+### The numbers
+
+| | |
+| --- | --- |
+| every cell starts at dirt | 2 |
+| `INITIAL_WALL_INTEGRITY` | 196 |
+| pickaxe tap | 4 damage |
+| hammer tap | 8 damage |
+
+So a wall survives **49 pickaxe taps or 25 hammer taps** — twenty-four hammer blows
+leave 4, and the twenty-fifth clamps to zero rather than wrapping.
+
+What one tap removes (`Mining_RemoveDirt`):
+
+| | centre | adjacent | diagonal |
+| --- | --- | --- | --- |
+| pickaxe | -2 | -1 | — |
+| hammer | -2 | -2 | -1 |
+
+Each decrement is separately guarded against zero, which is what stops a cell at
+1 going negative when two are applied.
+
+**An exposed rock stops the splash dead.** If the centre holds a rock and its
+dirt has just reached zero, the function returns before touching a single
+neighbour — the centre's own two levels are already gone by then, so a rock costs
+you the tap and the wall and gives nothing back.
+
+A treasure is out when **every** solid cell of it reads zero. Rocks are the
+entries past `itemCount` and are never counted.
+
+### Two more oddities in `Mining_RandomizeDirtLayers`
+
+The terrain is ten stamps of an 8x8 at level 4 over a base of 2, then up to
+fifteen stamps of a 5x5 at level 6. Both stamping loops do something odd.
+
+**One, which pokeplatinum marks `// ?` itself:**
+
+```c
+startX = MATH_Rand32(rand, MINING_GAME_WIDTH  + dirtLayer4MapLength) - dirtLayer4MapLength;
+startY = MATH_Rand32(rand, MINING_GAME_HEIGHT + dirtLayer4MapLength) - dirtLayer6MapLength; // ?
+```
+
+X subtracts 8, the 8x8 stamp's own length. Y subtracts **5**, the other stamp's.
+So the level-4 blobs run startY -5..12 where startX runs -8..12, and the stamp
+cannot start as far above the grid. Measured: **row 0 is raised 14.0% less often**
+than under a symmetric reading (23,796 against 27,676 over 3,000 fields), row 1
+is 5.0% less, and rows 2 down are identical within noise — which is exactly the
+signature the range change predicts.
+
+**Two, unmarked:** the fifteen level-6 stamps decide *where they may go* by
+reading `dirtLayer4Map` — the **8x8** — while writing through `dirtLayer6Map`, the
+5x5. The test therefore masks with the 8x8's top-left corner, a different shape
+from the one it then writes:
+
+```
+test mask (dirtLayer4Map's corner)   what is actually written (dirtLayer6Map)
+  0 0 4 4 4                            0 6 6 6 0
+  0 4 4 4 4                            6 6 6 6 6
+  4 4 4 4 4                            6 6 6 6 6
+  4 4 4 4 4                            6 6 6 6 6
+  4 4 4 4 4                            0 6 6 6 0
+```
+
+Five cells disagree. Tidying it changes 208 of 400 generated fields.
+
+### The thing no amount of reading tells you: is it winnable
+
+Every constant above can be right while the game is unplayable. 196 integrity,
+4 and 8 damage, seven layers and a four-cell splash jointly decide whether four
+buried treasures can be uncovered before the wall falls in, and no one of them
+says so. So the check plays 2,000 walls twice:
+
+| player | won | collapsed | taps to win |
+| --- | --- | --- | --- |
+| oracle (taps the deepest cell of an undug treasure) | **1,989** | 11 | 15.1 |
+| random tapping | 6 | **1,994** | 21.7 |
+
+99.5% against 0.3%. Both halves matter: an oracle that never won would mean the
+numbers are too harsh, and a random tapper that always won would mean the meter
+does nothing. Neither is asserted as a threshold — the assertions are that the
+oracle wins **at least once** and loses **at least once**, which is what actually
+distinguishes working mechanics from a wall that cannot fall or cannot be beaten.
+
+### The check was wrong twice, and the faults found it, not me
+
+Sections 2 and 3 were written first as assertions about the **constants** — that
+`LAYER6_TEST_MASK` equals `LAYER4_MAP`'s corner, and that a histogram of a model
+built inside the check file differs from a symmetric one. Both passed happily
+while the shipped `randomizeDirt` used the tidy mask and the tidy startY, because
+**neither assertion ever asked the shipped function anything**. A table is not the
+code that reads it, and a model reimplemented in the test is not the code either.
+
+Replaced by a golden comparison: a reference implementation with each oddity on a
+switch, compared cell for cell against `randomizeDirt` across 400 seeds, plus two
+sensitivity probes proving the comparison can see each oddity on its own
+(tidying the startY changes 400 of 400 fields; tidying the mask changes 208).
+Now both faults fail it.
+
+The first metric was wrong in a quieter way too: the mean row of the raised cells
+came out 4.605 against 4.511 — a tenth of a row, washed out by clipping at both
+edges. Row 0's occupancy is the discriminator, and the check asserts row 4 does
+**not** differ, so the metric is pinned to the quirk rather than to noise.
+
+### A process failure worth writing down
+
+Two of the six planted faults appeared not to be caught. Both were caught; the
+module under test was simply still faulted. While verifying that fault 2 had
+*landed* — the discipline added in pass 131, after a `sed` that silently matched
+nothing — it was applied and **never restored**, so every run afterwards tested the
+broken module. Half an hour went into re-reading correct code.
+
+**Verify the restore as well as the fault.** The fault battery now diffs against
+the reference copy after restoring and prints `RESTORE FAILED` if they differ,
+and prints `!! fault did not land` if the substitution matched nothing. Both
+directions, every time.
+
+### Changed
+
+- `src/world/Gen4MiningDig.lua` — new. The constants, both stamps and the test
+  mask, `randomizeDirt`, `dig`, `treasuresOut`, `finished`.
+- `tools/gen4_mining_dig_check.lua` — new, 148 checks.
+
+Nothing requires it yet, so this pass cannot change what the game does.
+
+### What is left
+
+The screen. Everything under it is now built and measured: what can be buried
+(131), what it looks like (132), where the diggable walls are (133), and what a
+tap does (134). What remains is drawing the grid and the sidebar, the touch
+input, the crack sprite, the collapse, and handing the result to
+`Gen4Mining.bagItem` — plus the sphere placement `spawnNearSphere` is written
+against and nothing yet calls.
+
+
+## Pass 135 — the mining screen, and teaching the engine that a screen can be touched
+
+Slice six. The grid, the dirt, the sidebar, the crack and the taps.
+
+**It is not reachable yet.** Nothing pushes it: the dig spots are not placed in a
+live Underground and nothing opens the game when you walk into one. That is the
+next pass, and it is the same shape as the trap pass 130 found — a thing that
+exists and is not named.
+
+### Pointer input did not reach screens at all
+
+Every pointer event in this engine went to `TouchControls` and nowhere else:
+
+```lua
+function Game:touchpressed(id, x, y)
+  TouchControls:touchpressed(id, x, y)
+end
+```
+
+Fine for eleven years of Game Boy screens driven by a d-pad. Not fine for a DS
+one: Platinum's mining game is **played entirely by tapping**, and there is no
+button binding to copy because the whole game is the bottom screen.
+
+So a state may now claim a pointer event by defining a handler and returning
+true. Anything else — no handler, or a handler that returns false because the
+point was outside it — and `TouchControls` receives exactly what it received
+before. **No state in the engine defines these today**, so the lookup is nil and
+the next line runs, which is the line that ran before; Gen 1, 2 and 3 cannot be
+affected. The call is wrapped in `pcall` because a state that raises inside a
+touch handler would otherwise take the d-pad down with it, and losing the
+controls is worse than losing the tap.
+
+### Where a tap lands
+
+Read backwards out of `Mining_RemoveDirt`:
+
+```c
+int x = touchX / (TILE_WIDTH_PIXELS * 2);
+int y = touchY / (TILE_HEIGHT_PIXELS * 2) - 2;
+```
+
+A cell is 16px and the grid's top edge is 32px down. 13 cells across puts its
+right edge at 208 — which is exactly the sidebar test
+(`touchX >= MINING_GAME_WIDTH * 2 * TILE_WIDTH_PIXELS`), and 10 cells down puts
+its bottom edge at 192, the screen. The buttons are `sHammerButtonRectangle`
+{26,6,32,14} and `sPickaxeButtonRectangle` {26,15,32,23} in tiles, so 208,48 and
+208,120, both 48x64, both ends exclusive.
+
+### Checking a screen from a terminal
+
+A screen is the one thing here that cannot be play-tested offline, so the
+temptation is to assert the constants and stop — which is precisely what pass 134's
+first check did while the shipped function did something else.
+
+Instead the decisions are published as `Gen4MiningScreen.cellAt` and `.toolAt`,
+the functions `touchpressed` actually calls, and the check **sweeps all 49,152
+pixels** of the 256x192 screen through them, comparing each answer against the
+cartridge's arithmetic computed independently:
+
+| | |
+| --- | --- |
+| pixels swept | 49,152 |
+| diggable | 33,280 (13x10 cells of 16x16) |
+| sidebar | 9,216 |
+| crack strip | 6,656 |
+| disagreements | **0** |
+
+Every cell is reachable and by exactly 256 pixels, which is what catches a grid
+origin or a sidebar edge that is off by anything at all.
+
+### The dirt quads skip a column
+
+`dirt_tiles.NCGR` is 32 tiles in a 16x2 grid — its own header says so — and
+`Mining_DrawDirt` names four tile indices per layer. Index 14 is row 0 column 14,
+index 30 is row 1 of the same column, so each layer is a **column pair**:
+
+```
+layer  0   1  2  3  4  5  6
+col   14  10  8  6  4  2  0
+```
+
+**Twelve is missing.** The sheet holds eight quads, the game uses seven, and the
+unused one is in the middle rather than at the end — so `14 - 2 * level` gives the
+right answer for layer 0 and is wrong from layer 1 on. Pinned, along with an
+assertion that column 12 is never used.
+
+### The crack
+
+Four tile rows at screen column 25, growing **leftward** as the wall weakens
+(`tilemapBuffer[CRACK_START_TILEMAP_INDEX_ROW_n - i]`), art cycling three
+columns. The base tiles are 11, 65, 119 and 173 — which are column 11 of rows 0
+to 3 **only at stride 54**, and 54 is exactly what `interface_tiles.NCGR`
+declares its width to be. Two independent numbers agreeing is what makes that a
+derivation rather than a guess.
+
+Length is 0 tiles at full integrity and 25 at zero, monotone across all 197
+values, never past the strip.
+
+### Getting the treasure into the bag
+
+`Gen4Mining.bagItem` gives the cartridge's `ITEM_*` constant; this dataset keys
+items by number and a Gen 4 item record carries **no symbol**, only a display
+name. So the join is on the name, and all **49 of 49** resolve — asserted, with a
+control that a name which should not resolve does not, because a lookup that
+matches anything would pass the same test.
+
+A plate's once-per-save bit is set when it is **dug out**, not when it is buried:
+burying one you then fail to reach must not lock it away.
+
+### One deviation, stated
+
+The cartridge has no way out of a mining game — you play to a win or a collapse.
+Here B gives up the wall, with the same outcome as a collapse minus the
+animation, because a player may have no touch device at all and a state with no
+exit is worse than an exit the cartridge lacks.
+
+### Changed
+
+- `src/core/Game.lua` — `touchpressed`/`touchmoved`/`touchreleased` offer the event
+  to the top state before the d-pad.
+- `src/ui/Gen4MiningScreen.lua` — new.
+- `tools/gen4_mining_screen_check.lua` — new, 437 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| grid 24px down instead of 32 | 18,304 pixels disagree |
+| sidebar at 200 | 1,280 pixels disagree; 10 cells the wrong size |
+| dirt columns by `14 - 2 * level` | layer 1's column, and column 12 in use |
+| pickaxe button one tile high | the rect assertion |
+| crack length without the `+ 8` | 1 tile at full, 26 at zero, past the strip |
+| a change that matches nothing | nothing — 437 checks, 0 failed |
+
+The fault battery now verifies the restore and warns when a substitution matched
+nothing, which is the discipline pass 134 paid for.
+
+### What is left
+
+Wiring. Place the dig-spot cluster when the player goes down, draw the sparkles,
+and open this screen when they interact with one. After that the Underground is
+playable end to end, and what remains is everything deliberately out of scope:
+the touch-screen menu, secret bases, traps, the vendors, spheres and the radar.
+
+
+## Pass 136 — the Underground, joined up
+
+Slice seven, and the one that makes the other six reachable: place the dig walls
+in a live cave, show them, and open the game when you face one.
+
+### The marker rides an effect that already exists
+
+The obvious way to show an excavation site is to write a marker — and a marker
+written here would have had to learn about both cameras, because Gen 4 draws the
+world flat or through a free perspective and a sprite placed for one is in the
+wrong place in the other.
+
+The overworld already has a sparkle effect that knows: `startSparkle` anchors one
+on its own cell, `drawSparkles` draws the set in screen space, and `fxSparkleOne`
+places each one separately for the projected camera. So the dig walls use it, and
+**no drawing path changed at all**.
+
+It is also the cartridge's own shape rather than a convenience. Sites are not a
+permanent decal there either — `Spheres_AdvanceBuriedSphereSparkleTimer` runs a
+clock and `_EnableBuriedSphereSparkles` / `_Disable` turn the effect on and off
+with it. Here a spot re-sparkles every 90 ticks, and only within 14 cells of the
+player, because an off-screen sparkle costs a list entry and a tick each and is
+never seen.
+
+### Where they go, and when
+
+`ensureSpots` is called every frame from the overworld's update and is a no-op
+almost always: it opens on `GameVersion.isGen4()`, then on being in the
+Underground, then on a set already existing. Gen 1, 2 and 3 pay one version test
+a frame and nothing more.
+
+A fresh set per descent, which is the cartridge's shape and not a choice made
+here — `Mining_SpawnMiningSpotsAndTraps` runs when the Underground is set up, not
+once per save. **Leaving the cave drops the set**, because the coordinates mean a
+different place in the overworld and carrying them would put dig walls in
+Jubilife.
+
+Measured over 60 descents: **520 spots placed, every one of them on a diggable
+wall**, six to eleven each.
+
+### Facing one opens the game
+
+`Mining_CheckForMiningSpotInteract`: you face the wall and press A. The arm sits
+after the NPC check — a wall can never hold an NPC, so it cannot matter, but
+"somebody is standing there" beating "there is a wall there" is the right
+precedence even where it cannot happen.
+
+The spot is spent whichever way the game ends — won, collapsed, or given up —
+because the cartridge never puts a dug wall back. It is **not** spent when the
+screen fails to open at all: `Gen4MiningScreen.new` answers nil when it could not
+lay out a wall, and consuming a site for a screen that never appeared would be
+the worst of both.
+
+### Changed
+
+- `src/world/Gen4Underground.lua` — `ensureSpots`, `spots`, `spotAt`,
+  `removeSpot`, `tickSparkles`. The placement's randomness is injectable for the
+  same reason the wall generator's is: the cluster can then be laid out and
+  inspected with no window open.
+- `src/world/OverworldController.lua` — two inserts. The place-and-pulse beside
+  `updateSparkles`, and the dig-wall arm in `interact`.
+- `tools/gen4_mining_spots_check.lua` — four new sections, 171 checks in all.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the overworld never places the spots | nothing places the dig spots |
+| a dug wall is never spent | the same spot can be mined forever |
+| `ensureSpots` re-rolls every frame | a second call changed the set, 9 -> 11 |
+| sparkle every spot regardless of distance | a player 56 cells away sparkles as much |
+| keep the spots after leaving the cave | leaving kept 8 spots |
+| a change that matches nothing | nothing — 171 checks, 0 failed |
+
+Section 10 exists for one reason: everything in passes 130 to 135 is a library
+nobody runs unless the overworld calls it, which is exactly the shape of the bug
+pass 130 found — a thing that exists and is not named. The five call sites are
+pinned in source.
+
+### The Underground, end to end
+
+Get the Explorer Kit in Eterna City (`C04R0801`, flag 121), use it anywhere on the
+main matrix, arrive at one of 170 entry points, walk until a wall sparkles, face
+it, press A, and dig with a finger. **Re-import the ROM first** or the mining art
+is missing and the screen draws placeholders.
+
+Still out of scope and still absent: the Underground's own touch-screen menu (so
+the Explorer Kit doubles as the way out), secret bases, traps, the vendors,
+spheres and the radar.
+
+
+## Pass 137 — the unlabelled battle menu, and a hit test that disagreed with the picture
+
+Reported from play: *"in battles with the bottom screen theres no text for the
+moves or fight, bag, pkmn, or run buttons"*, and asked for alongside it: *"ensure
+touch input and mouse clicks works on the bottom screen for battle, the
+underground and everything else"*.
+
+### Opening the art settled it in a second
+
+`action.png` is a big red panel and three small coloured ones. `moves_00.png` is
+four cream panels and a blue bar. **There is not a letter anywhere in either.**
+
+The DS prints the words into windows over the buttons at run time rather than
+baking them into the tilemap, so a port that draws the tilemap and stops gets
+exactly what was reported: the right buttons, unlabelled. The compact
+presentation has drawn these all along — `drawCompactActions` and
+`drawCompactMoves` both do — and the bottom-screen one never did. Same labels,
+same source, centred in the cartridge's own rectangles.
+
+An empty move slot is left blank rather than drawn with a dash: the cartridge
+hides the button, and a labelled empty button invites a press that does nothing.
+
+### The two ends of one pipeline disagreed about when the screen exists
+
+`SecondScreen.draw` puts the picture up whenever there is a rect. `toLocal`
+refused unless `raised(game)`. And the battle's bottom screen is drawn on
+`stowed` — a **different question**, and deliberately so: `raised` is transient and
+belongs to a screen you open, while a battle menu is not opened, it is simply
+where the menu lives.
+
+So the picture was on screen and every tap on it was refused, and neither end
+looks wrong on its own. `toLocal` now answers **where**, not **whether**: it maps
+the point exactly where `draw` put the picture, including `draw`'s own fallback
+of running the body untransformed when there is no rect. Whether the surface
+should be taking input is the caller's question, and the callers answer it
+differently — the Poketch by `raised`, a battle by `stowed`, the mining game by
+being open at all.
+
+### The cartridge's rects are half-open, and mine were not
+
+`CheckRectangleTouch` (`src/touch_screen.c`):
+
+```c
+(touchX - rect.left < rect.right - rect.left) & (touchY - rect.top < rect.bottom - rect.top)
+```
+
+On `u32`, `touchX - left` wraps to something enormous when the touch is left of
+the rect, so that one expression is `touchX >= left and touchX < right`. **Bottom
+and right are exclusive.**
+
+Written inclusive first, and the check caught it immediately: FIGHT's bottom is
+144 and ITEM's and PARTY's top is 144, so an inclusive test hands row 144 to two
+buttons at once and whichever is tested first wins. One row of pixels — the kind
+of thing nobody notices and nobody can explain when they do.
+
+### A tap becomes a real button press
+
+Not a second way to choose an action. `Input:overlayPressed` is how the on-screen
+d-pad already works, so routing a tap through it sends it past every gate a
+physical A goes past — the ghost check, the Bug Contest ball, the
+forced-replacement branch, the demo. A handler that called `menuActions()` itself
+would be a second copy of that logic and would drift from it.
+
+A tap that hits no button still returns true: the panel is the battle's while it
+is up, and letting a miss fall through would work the d-pad underneath it.
+
+### The check was weak three times, and the faults found it every time
+
+Three of five planted faults passed at first, all the same failure: **a pin that
+matched something other than what it meant.**
+
+- `find("Gen4Battle.drawBottomLabels(battle, over)")` is satisfied by the
+  function's own **definition**, so deleting the call changed nothing. Now
+  counted — definition is one, call makes two — and anchored on its indentation.
+- The pixel sweep computed an expectation and **never compared it**, only
+  counting hits and per-button reachability, which an inclusive test satisfies
+  perfectly well. Now it asserts per pixel, and catches the inclusive test at
+  `128,24: got move/1, the cartridge's rects give move/2`.
+- `find('input:overlayPressed("a")')` passed with one of the two branches gutted,
+  because the other still had it. Now counted.
+
+Written down because it is the same shape as pass 134's, and it will happen
+again: **a pin is only worth what it cannot match.**
+
+### Changed
+
+- `src/battle/Gen4Battle.lua` — `drawBottomLabels` and `bottomHit`, and
+  `drawBottomScreen` now calls the first.
+- `src/battle/BattleState.lua` — `touchpressed`, gated to Gen 4 and to the
+  bottom-screen presentation by asking `menuPresentation` the same question the
+  draw asks.
+- `src/ui/SecondScreen.lua` — `toLocal` answers where, not whether.
+- `tools/gen4_bottom_screen_check.lua` — new, 63 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| labels never drawn | drawBottomLabels appears once: defined, never called |
+| hit test inclusive again | 510 and 776 pixels disagree, with the boundary named |
+| `toLocal` gated on `raised` | 5,504 points refused in every mode |
+| move tap bypasses the A press | overlayPressed("a") appears once, not twice |
+| ITEM's rect moved four pixels | the rect assertion, and the overlap test |
+| a change that matches nothing | nothing — 63 checks, 0 failed |
+
+### Still to do for the bottom screen
+
+The Underground and the battle both take taps now. The AYN Thor's own second
+panel is a separate matter and a real one: it is a standard Android external
+display that emulators drive with a `Presentation` surface, and SDL2 gives LOVE
+one window on the primary display. The love-android tree is in this repo at
+`mobile/android`, so it can be done here — it is native work on top of
+`GameActivity`, not Lua.
+
+
+## Pass 138 - the device's own second screen, the Lua half
+
+The AYN Thor has a real lower panel. Pass 137 left the bottom screen working in
+the window; this makes it possible for the bottom screen to leave the window
+entirely and go to that panel, and does the half that can be tested here.
+
+### The mode
+
+`SecondScreen.MODES` is now `{ "swap", "inset", "display", "off" }`. `off` stays
+last, because that is where the 2ND SCREEN row's cycle has ended in every build
+so far. `display` means: the window keeps the TOP screen and never shows the
+bottom one; the bottom screen is rendered to its own 256x192 canvas and handed to
+the host, which puts it on the panel.
+
+`src/render/SecondScreen.lua` was already in the tree as an orphan -- an FFI
+bridge to three C symbols, `love_android_secondary_ready`,
+`love_android_push_secondary` and `love_android_secondary_enable`, with nothing
+calling it. It is the transport now, and it caches its readiness probe
+(`PROBE_INTERVAL = 0.5`) because `mode` asks it several times a frame from every
+caller that has to decide where to draw. `forget()` drops the cache.
+
+### It degrades to `swap`, never to `off`
+
+This is the decision worth writing down. A save is portable: the same file opens
+on the handheld with two panels and on a desktop with one. `off` is every
+caller's cue to draw NOTHING -- so had the gate answered `off`, a save made on
+the Thor would open on a PC with no bottom screen anywhere and nothing obviously
+wrong to fix. The gate answers `swap` instead, and it leaves the STORED setting
+exactly as the player set it, so carrying the save back brings the panel back
+with nothing to set again. Section 2 of the check tool asserts both halves.
+
+The options row walks past `display` when no panel is attached, rather than
+letting the cursor park on a setting that visibly does nothing.
+
+### The mid-frame canvas bind
+
+`SecondScreen.draw` runs inside somebody else's render pass. In `display` mode it
+binds its own canvas, and everything the renderer had set has to come back:
+`push("all")` covers transform, colour, blend and scissor; the canvas itself is
+not part of the graphics stack and is restored by hand, to whatever `getCanvas`
+answered -- including nil, which is the default target and a perfectly good thing
+to restore to.
+
+The scissor is the one that bites hardest if forgotten. It is in WINDOW space;
+left set, it clips the panel's canvas to wherever the renderer happened to be
+drawing, and the damage shows up as a bottom screen with a rectangle missing for
+reasons that are nowhere near this file.
+
+### The readback is the cost, so it is gated twice
+
+`flush` is called at the end of `Game:draw`, after the whole frame -- a screen
+pushed late still has to get out, and the GPU readback wants the drawing
+finished. `newImageData` stalls the pipeline to pull 192KB back, so it runs only
+when the frame actually drew a bottom screen (`secondScreenDirty`, set by `draw`)
+AND at most once per `PUSH_INTERVAL` (1/30s). The dirty flag is cleared whether
+or not the push landed: a frame the host refused is stale by the next one, and
+keeping the flag set would re-read the GPU every frame for as long as the panel
+stayed unhappy. The ImageData is released -- 192KB a frame leaked is 5MB a
+second.
+
+### A window click is never a tap on the panel
+
+Pass 137's bug in this mode's shape, and the honest answer flips here. In every
+other mode the picture IS in the window, so `toLocal` maps window points. In
+`display` it is not, so `toLocal` must refuse every window point -- otherwise the
+top-left 256x192 of the field silently doubles as the battle menu, and a tap
+meant for a Pokemon standing there opens FIGHT.
+
+The panel's own touches arrive from the host already in 256x192 space and come in
+through `injectTouch`, which sets a flag `toLocal` looks for and clears it again
+afterwards. That way the battle, the mining screen and the Poketch keep asking
+exactly the question they already ask and none of them learns a second
+coordinate space.
+
+### Changed
+
+- `src/ui/SecondScreen.lua` - the `display` mode, `deviceReady`, the offscreen
+  surface, `flush`, `injectTouch`, and `toLocal`'s refusal.
+- `src/render/SecondScreen.lua` - cached probe, `forget`.
+- `src/ui/OptionsMenu.lua` - the DEVICE label and a step that walks past a mode
+  this machine cannot do.
+- `src/core/Game.lua` - `flush` at the end of `Game:draw`.
+- `tools/gen4_second_display_check.lua` - new, 76 checks, with a recording
+  graphics stub rather than a mock, because every question in section 4 is about
+  ORDER and RESTORATION and a stub that only answers cannot be asked those.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| `display` degrades to `off` | 3 checks: the answer, the rect, the stored setting |
+| `toLocal` stops distinguishing `display` | 5,504 window points accepted as panel taps |
+| the renderer's canvas is never put back | 3 checks, including the restore's own setCanvas |
+| the push interval removed | 2 checks: the same-instant push, and the count |
+| the injecting flag left set | every later window click becomes a panel tap |
+| nothing calls `flush` | the wiring pin in Game:draw, ordered against `_draw` |
+| a comment word changes | nothing - 76 checks, 0 failed |
+
+The four Gen 4 check tools that run without a data root were re-run green
+(bottom screen 63, mining 271, dig 148, second display 76). The three that need
+`G:/Gen2Recomped/platinum/data/generated` fail to load it in this container
+identically before and after the change.
+
+### What is still missing, and the one thing it needs
+
+The native half. The three C symbols the transport looks for do not exist yet;
+until they do, `deviceReady` answers false everywhere, `display` is not offered
+in the options row, and nothing above changes behaviour for anyone. That is the
+intended resting state -- the Lua side is finished and inert.
+
+The native side belongs in the vendored love-android tree, and it CANNOT BE
+REACHED FROM HERE:
+
+- `mobile/android/love/src/main/java/org/love2d/android/GameActivity.java` is
+  nine folders below the connected folder and staging supports seven.
+- `mobile/android/love/src/jni/love/src/common/android.cpp` is eight.
+- `device_bash` reports "Workspace unavailable" on this device, so there is no
+  way around it by running a command there instead.
+
+To unblock it, connect `G:\Github Desktop\0.7.0\Gen2Recomped\mobile\android\love`
+as a folder in the desktop app; that makes both files four and five folders deep
+and reachable.
+
+One constraint for whoever writes it, from `mobile/ANDROID.md`: refreshing the
+vendored tree is `rm -rf mobile/android` and a re-clone, so nothing hand-edited
+in there survives. The pattern that does survive is
+`apply_android_branding` in `scripts/build_android.sh`, which re-applies
+gradle.properties and the manifest trim on every build. So the Java and C++ for
+the Presentation surface should live OUTSIDE the vendored tree -- project-owned,
+shallow, version-controlled -- and be copied in by that function, exactly as the
+branding is. Writing it directly into `mobile/android` would be lost the first
+time the tree is refreshed, silently, with the mode simply never appearing again.
+
+
+## Pass 139 - every Emerald move, measured against the cartridge's own script
+
+Reported from play, and outstanding since it was asked: "go through all of the
+pokemon emerald moves and ensure theyre rendering properly a lot of them seem
+messed up still they should render the moves like they are in the rom."
+
+This pass does not fix a move. It makes the sentence countable, because until it
+is there is no way to tell a fixed move from a move nobody looked at.
+
+### Why the import cannot report its own gaps
+
+`src/import/RomExtractorGen3.lua` reads move animations out of the real ROM and
+does it the right way round: it recognises a visual task by its ADDRESS and then
+VERIFIES, by disassembling the function, that it is the one being claimed -- "the
+colour cycle does not install a step that blends" is one of its own refusals.
+That is why the shakes and blends it does extract can be trusted.
+
+What it cannot do is tell you what it has not learned. A `createvisualtask` whose
+pointer is in no table is silently nothing: the move comes out quiet, the dataset
+records no absence, and the only symptom is a player saying a lot of them seem
+messed up. The information needed is the list of everything the cartridge ASKS
+for, and that is not in the ROM in any readable form -- the ROM has addresses
+where the question needs names.
+
+### Where the names come from
+
+pret/pokeemerald builds byte-for-byte to the retail ROM, so
+`data/battle_anim_scripts.s` IS the cartridge's script data, with every function
+named. `tools/gen3_anim_expect.lua` is that file transcribed: 354 rows, one per
+move the dataset carries, each with its particle count, its background swaps, its
+`monbg` calls, and every `createvisualtask` in order.
+
+Three things were needed to make the transcription honest:
+
+- **The `create_*_sprite` wrappers are `createsprite`.** Fifty-seven macros in
+  `asm/macros/battle_anim_script.inc` expand to it with their arguments
+  pre-filled, and counting only the bare command undercounted the particles by
+  roughly a third.
+- **Sixteen more macros expand to `createvisualtask`.** `blend_color_cycle`
+  alone is 39 calls. Reading only the literal `createvisualtask` lines missed
+  every one of them, and the first draft of the blend census was wrong by 57
+  moves because of it.
+- **A branching script has to be flattened as the UNION of its arms.** FLY, DIG,
+  DIVE, SOLARBEAM, RAZOR WIND, SKY ATTACK, SKULL BASH and BOUNCE pick an arm with
+  `choosetwoturnanim`, and a move that shakes the target only on its second turn
+  still shakes it. Stopping at the first `goto` reported twenty moves as drawing
+  nothing at all, which was a fact about the parser. Each row is therefore an
+  upper bound on any single playthrough of one move and must not be read as a
+  per-turn script.
+
+The table keys are the DATASET's move keys, not the cartridge's: Emerald's
+ANCIENT_POWER is the dataset's ANCIENTPOWER, and seventeen others differ the same
+way. After reconciling those, the two sets match exactly -- 354 rows, 354 moves,
+nothing unmatched in either direction, which is the first thing the tool asserts.
+
+### What the audit found
+
+`tools/gen3_move_anim_audit.lua`, run against the dataset extracted 2026-09-29:
+
+| effect | the script asks for it | the dataset carries it | missing |
+| --- | --- | --- | --- |
+| shake -- the struck mon jerking | 201 | 180 | **21** |
+| blend -- a tint or flash | 118 | 72 | **46** |
+| scale -- the mon growing or squashing | 29 | 27 | **2** |
+| translate -- the ATTACKER moving | 37 | 6 | **31** |
+| rotate -- the mon turning | 8 | 0 | **8** |
+| background swap | 58 | 38 | **20** |
+| particles but no events at all | 10 | - | **10** |
+
+**The translate row is the answer to the complaint.** Thirty-one moves out of
+thirty-seven have no attacker movement at all -- QUICK ATTACK, AERIAL ACE, TAKE
+DOWN, DOUBLE-EDGE, STRENGTH, WING ATTACK, STEEL WING, SUBMISSION, VITAL THROW,
+BRICK BREAK. A contact move where the attacker never leaves its feet does not
+read as an attack however correct its particles are, and that is much more of
+what "messed up" means than any missing sprite.
+
+Rotate is at zero of eight: ARM THRUST, AURORA BEAM, DOUBLE-EDGE, FURY ATTACK,
+LOW KICK, PECK, RAPID SPIN, SKULL BASH.
+
+Ten moves draw nothing whatsoever despite the cartridge spawning particles for
+them: BIDE, DOOM DESIRE, EARTHQUAKE, FAKE OUT, IRON DEFENSE, MAGNITUDE, ODOR
+SLEUTH, ROLE PLAY, SKULL BASH, SKY ATTACK. EARTHQUAKE and MAGNITUDE being in that
+list is worth its own note -- they are two of the most-used moves in the game.
+
+### The tool is a ratchet
+
+Every number above is non-zero today, so a pass/fail check would be permanently
+red and therefore ignored. `BASELINE` in the tool records what each count was
+when it was written and it fails when a count goes UP. Lower a baseline in the
+same commit that fixes the moves and a later change cannot quietly undo the work.
+
+### The fault that got through, and what it taught
+
+A ratchet only bites upward, so a class whose evidence list is too GENEROUS
+cannot be caught by it: adding `duration` -- which every move has -- to the
+translate class made the missing count drop to zero and the tool stayed green.
+That was a planted fault the first draft let through.
+
+The fix is not a bigger list of forbidden keys, it is a measurement: each class's
+evidence keys are checked against the dataset, and a key carried by more than 95%
+of moves is rejected as evidence of anything. 95% sits above `events` (89%) and
+below `sound` (97%) and `duration` (100%), which are the three that would do the
+damage. **A ratchet needs a floor as well as a ceiling.**
+
+### Changed
+
+- `tools/gen3_anim_expect.lua` - new, generated, 354 rows.
+- `tools/gen3_move_anim_audit.lua` - new, 6,719 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| a row lost from the transcription | the file no longer loads |
+| a task name becomes a number | the per-argument type check |
+| the ratchet tightened below the truth | shake: 21 missing, up from 20 |
+| the dataset loses every shake record | shake: 201 missing, up from 21 |
+| a class accepts a key every move has | `duration` is carried by 100.0% of moves |
+| the transcription gains a move Emerald lacks | 355 rows, and the dataset has 354 |
+| a comment word changes | nothing - 6,719 checks, 0 failed |
+
+The census was also computed independently in Python while the tool was being
+written, and the two agree on all seven numbers. Two implementations of the same
+measurement is the control here; one would only have proved the tool runs.
+
+### What this does NOT prove, and the next pass
+
+Presence per class, and nothing finer. A shake of the wrong battler, or four
+frames where the cartridge has twenty, satisfies the test. Values are
+`RomExtractorGen3`'s business and it verifies them against the ROM itself.
+
+The fix has a clear shape and one obstacle. The task ARGUMENTS are in the scripts
+(`AnimTask_TranslateMonEllipticalRespectSide, 2, ANIM_ATTACKER, 12, 4, 1`) and the
+task BEHAVIOUR is in pokeemerald's C (`src/battle_anim_mons.c`), so the motion can
+be reproduced faithfully from pret alone without a symbol table -- and because the
+transcription is static data keyed by move name, the engine can read it directly
+and Cedric would not have to re-extract anything.
+
+The obstacle is that the existing extractor identifies tasks by verified ROM
+address, and mixing a second, unverified source into the same records risks
+double-applying an effect. The rule that avoids it is the one the audit already
+measures: **the transcribed table may only supply a class the ROM-extracted
+record has nothing of.** A move that already shakes cannot be made to shake
+twice, and a move that has never moved gains its lunge. That is the next pass.
+
+There is no Emerald ROM in this container and none in any connected folder
+(Downloads has FireRed, Platinum, Crystal, Gold, Silver and Red), so nothing here
+was checked against the cartridge directly -- only against pokeemerald, which is
+byte-identical to it. Extending the extractor's own verified-by-address coverage,
+as opposed to filling gaps from pret, does need the ROM staged.
+
+
+## Pass 140 - a Sinnoh verb crashing a Hoenn boot, and 107 Hoenn verbs that were never registered
+
+Reported from play, booting Emerald:
+
+    src/mods/Registry.lua:113: commands already registered: g4_check_two_alive
+
+A Gen 4 verb, on a Gen 3 cartridge, from
+`Loader.load` -> `Builtins.install` -> `Commands.registerInto`.
+
+### Why it needed two boots to appear
+
+`Gen4Commands` puts its 143 verbs on the `Commands` TABLE and keeps its helpers
+on its own. `registerInto` required that module AFTER its general "register
+everything on Commands" loop, then ran a second `g4_` loop. So whether the
+general loop saw the Gen 4 verbs depended entirely on whether anything had
+required the module yet -- and this function runs again every time `Loader.load`
+does, which is once at startup and again for every game booted from the launcher.
+
+- First call: not loaded. The general loop missed them; the `g4_` loop
+  registered them.
+- Second call: loaded. The general loop took them; the `g4_` loop registered them
+  a second time into a registry that had just taken them.
+
+**A function whose result depends on whether it has run before.** Calling it once
+proves nothing about calling it twice, which is exactly why nothing caught this.
+
+### The second fault, which never crashed
+
+Writing the check turned up the mirror image in the Gen 3 arm. All 109 of
+`Gen3Commands`' verbs also live on `Commands`, and the `g3_` pass reads the
+MODULE table -- which has none of them. So on a first load they reached the
+registry only if something else had already required the module:
+
+    first registerInto:  219 verbs
+    second registerInto: 326 verbs
+
+in the same process. Dispatch survived it, because `Commands.resolve` has a lazy
+`g3_` fallback that reads the live table -- that fallback is the only reason this
+was not a second crash -- but nothing could OVERRIDE a Hoenn verb that was not in
+the registry, and the first boot of a session was quietly not the same game as
+the second.
+
+### The fix
+
+Both modules are required at the top of `registerInto`, so every call is
+identical and the general loop always takes all 326 verbs. The two tail passes
+stay as backstops for a module that keeps verbs on its own table, and they now
+SKIP anything the registry already has: a require moving back down the function
+must not be able to bring the double registration back, and a guard that asks the
+registry cannot be fooled by load order the way a comment can.
+
+### Changed
+
+- `src/script/Commands.lua` - `registerInto`.
+- `tools/gen_script_registry_check.lua` - new, 351 checks. Every section calls
+  `registerInto` at least twice, because one call cannot see this class of bug.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the requires move back below the general loop | 266 checks: the crash, and 107 verbs short on the first load |
+| Hoenn's module is no longer loaded up front | 110 checks, same shape |
+| the general loop skips Hoenn's verbs | 109 verbs never reach the registry |
+| the `g4_` backstop stops asking the registry | the guard count |
+| a comment word changes | nothing - 351 checks, 0 failed |
+
+### The pin that had to be counted, again
+
+The first draft pinned the backstop's guard with a bare
+`find("and registry:get(verb) == nil")`. The Hoenn backstop has the same line, so
+removing the guard from the SINNOH one left the find satisfied and the planted
+fault walked straight through. Counted now, and required to be at least two.
+Third time this exact shape has bitten (passes 134, 137): **a pin is only worth
+what it cannot match.**
+
+## Pass 140b - Petalburg Gym's black rooms: what it is NOT
+
+Reported from play: "petalburg gym in emerald still showing as a black background
+when i warp through the rooms even with no mods on."
+
+Not fixed. What follows is the ground ruled out, so the next pass does not walk
+it again.
+
+The gym is ONE map, `MAP_G08_N01`, nine blocks wide and 112 tall, with 38 warps
+of which 36 point back at itself -- the rooms are stacked vertically inside a
+single layout and the sliding doors are self-warps. So the failure is specific to
+a warp whose destination map is the map you are already on, and to a map that is
+NARROWER than the screen, which is why the border block is most of what is drawn.
+
+Checked against the cartridge and pret, all sound:
+
+- **The block data.** 2,016 bytes, exactly 9 x 112 x 2, byte-identical in shape
+  to pret's `data/layouts/PetalburgCity_Gym/map.bin`, and it decodes to the same
+  metatile ids row for row.
+- **The tilesets.** `gTileset_Building` really does define only EIGHT metatiles
+  (pret's `primary/building/metatiles.bin` is 128 bytes) and the extractor's
+  derived count of 8 is correct, not truncation -- a dead end that looked very
+  much alive for a while. The gym's blocks use primary 6 and 7 and secondary
+  10-184; `gTileset_PetalburgGym` carries 224. Everything the map asks for
+  exists.
+- **The warps.** All 38 present, coordinates matching pret, and `destWarp` stored
+  one-based against `Warp.destination`'s one-based read. Warp 3 of the gym is
+  (7,85) in both.
+- **The dark-map path.** `requiresFlash` is false on this map in the dataset and
+  in pret, so `Gen3Flash`'s black-window-with-a-hole is not what is on screen.
+
+So the data is right and the failure is in the runtime -- rendering or the
+camera. The screen is not empty, it is the BORDER BLOCK: everything outside a
+nine-wide map is border, the gym's border is secondary metatile 8, and a black
+screen with the player in the middle of it is what "every visible cell is
+out of bounds" looks like. That points at where the player or the camera ends up
+after a self-warp rather than at anything to do with tiles.
+
+**What would settle it in one pass: a `log.txt` from a desktop run that goes
+black.** The save directory is reachable from here, so reproducing it on desktop
+and saying so is enough -- `[info] map: ... at (x,y)` on either side of the warp
+names the coordinates the player was given, and that is the whole question.
+
+
+## Pass 141 - Petalburg Gym: proving the data can draw, and the one line that will name what is wrong
+
+Cedric cannot reproduce the black gym -- it is a community report -- so there is
+no log coming and no session to watch. Pass 140b ruled the data out by reading
+it. This pass rules it out by RUNNING it, and leaves behind the line that will
+name the cause the next time a reporter sends a log.
+
+### The measurement
+
+`tools/gen3_map_render_check.lua` stands up the real `MapLoader` and the real
+`TileRenderer` against the generated Emerald dataset, under a recording LOVE
+whose sprite batch COUNTS what is added to it -- a stub that swallowed `add`
+would answer "the map drew" exactly the same way whether it did or not.
+
+It bakes the gym's tileset pair for real (256x752, 736 metatiles), puts the
+camera where each of the twelve rooms' warps land, and fills the window:
+
+    38 warps, 36 of them back into this map
+    sheet 256x752, 736 metatiles in 737 slots
+    1944 cells across 12 rooms, 1944 with a picture
+
+Every cell of every room resolves to a picture, at every camera the rooms put it
+at, and the batch takes every one of them. **The data can draw.**
+
+Section 2 asks the same question region-wide and cheaply: does any of the 518
+maps name a metatile its tileset pair does not have? None does. That is the
+black-room CLASS -- an id past the end of the baked sheet is skipped by the fill
+loop in silence, with no error and nothing on screen -- and it is now checked for
+Hoenn in one pass rather than for whichever room somebody walked into.
+
+The tightest fit in the region is 0 slots of headroom, and Petalburg Gym is one
+of those: its highest id is 735 against 736 slots. It fits by exactly one, which
+is worth knowing before anything changes the id space by one.
+
+### Ruled out, with the receipts
+
+Added to pass 140b's list, all of it now measured rather than read:
+
+- **The tileset bake.** It happens, and produces a sheet big enough.
+- **The id space.** Every id in the map is inside it, with one slot spare.
+- **The window bounds.** Non-empty at all twelve rooms, correctly clamped to a
+  map nine blocks wide against a fifteen-block screen.
+- **The camera.** `Camera:follow` does not clamp at all -- it centres on the
+  player, which is what the cartridge does, and a map narrower than the screen
+  simply has border either side.
+- **`setmetatile` and the sliding doors.** `Map:setBlock` stores a clean
+  metatile id and keeps collision in a table of its own; the door frames
+  (0x218..0x21C and their +8 tails) are all inside the sheet.
+- **The flash window.** Petalburg Gym's script never touches it; only Dewford
+  Gym's does in the whole region.
+
+### The sensitivity probe, because 1944 of 1944 is only worth what it can fail
+
+One cell is given an id past the end of the sheet -- exactly the fault section 2
+hunts for -- and the count has to drop by exactly one and come back when the cell
+is restored. It does. Without that, "every cell drew" is a sentence a sweep that
+looks at nothing also produces.
+
+### What goes into a reporter's log now
+
+`TileRenderer:ensureWindow` counts its Gen 3 fill and reports it: once per map,
+and EVERY time a fill draws nothing at all, which is what a black room is.
+
+    [gen3window] MAP_G08_N01 cam=(-56,1600) view=240x160 win=0,192..18,224
+                 cells=144 drew=144 body=18x224 slots=737
+
+Those four numbers separate the three things a black screen can be: a camera off
+the map (an empty window), cells with no picture (`cells > 0, drew == 0`), or a
+fill that never ran (no line at all). It goes through `Probe`, not `Logger`,
+because Logger buffers 64 lines and truncates on boot -- a handful of lines
+produced while walking around never reaches the disk.
+
+**What to ask a reporter for: `probe.txt` from the save directory after the gym
+goes black.** One line settles it.
+
+### Changed
+
+- `src/render/TileRenderer.lua` - the window fill counts and reports itself.
+- `tools/gen3_map_render_check.lua` - new, 1,619 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the id space sums the two tileset counts again | 16 checks -- the historical "white house" bug, region-wide |
+| the window report is removed | the wiring pin |
+| the report stops firing on an empty draw | the anchored pin |
+| one cell given an id past the sheet | the sensitivity probe, exactly one cell |
+| a comment word changes | nothing - 1,619 checks, 0 failed |
+
+### The pin that had to be anchored, for the fourth time
+
+The first draft pinned the empty-draw condition with a bare find for
+`drew == 0` -- and the prose explaining the empty-draw case uses those very
+words, so the find matched the COMMENT while the condition itself was gone.
+Anchored to `if drew == 0 or not gen3WinSaid[` now. Passes 134, 137, 140 and
+this one: **a pin is only worth what it cannot match.**
+
