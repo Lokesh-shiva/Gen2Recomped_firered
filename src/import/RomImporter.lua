@@ -1136,11 +1136,84 @@ end
 --       were never asked for at all
 -- v337: Gen 3 object-event frames preserve their gbagfx macroblock layout;
 --       this fixes FireRed's 32x16 Town Map and changes generated sprite data.
--- v338: FireRed exports its fifteen tutor moves and per-species tutor
---       compatibility instead of overreading sTutorLearnsets as moves.
--- v339: Gen 3 battle panels bake every user frame through gUserFrames' real
---       tile/palette pointers, so FireRed battles follow Frame Type 1-10.
-local CACHE_FORMAT = "rom-cache-v339:"
+-- v338: Gen 4 sheets carry `facings` -- which of their own frames faces which
+--       way, read from mmodel.narc's own frame-sequence tables.  Without it
+--       the renderer used the Game Boy's fixed six slots on a sheet that is
+--       not in that order, and the player turned a different way on every
+--       step: "when i try and walk my character spins in circles".  A
+--       Platinum cache written before this has no `facings` at all, and there
+--       is no missing FILE to notice it by, so the format is what says so.
+--       Also: a Gen 4 map's object scripts are filed by the event's POSITION
+--       rather than its localId, which the cartridge reuses inside a map.
+-- v339: the terrain stage.  666 land chunks packed into a side-car binary with
+--       their BDHC heights beside it, the 74 map texture sets as atlases, and
+--       every matrix's chunk grid -- which is what replaces
+--       TILESET_GEN4_STANDIN.  New FILES, but under assets/ and named by a new
+--       module, so the missing-file gate cannot see them either.
+-- v351: Gen 4 `applymovement` carries its DECODED STEPS.  The movement list
+--       lives inside the script member, a signed displacement past the
+--       instruction, so the bytes are only in hand during the import -- an
+--       instruction cached before this has no `movement` field and the
+--       executor falls back to turning the object to face the player, which
+--       is what every one of the cartridge's 3,025 sites did until now.
+-- v352: the Gen 4 scripted menu.  `init(global|local)textmenu` was not lowered
+--       at all, so a cached script carries the menu's entries and its `show`
+--       but not the VAR the choice goes into nor the TEXT BANK its lines come
+--       out of -- 186 menus branching on a register nothing wrote.  The rows
+--       are produced at import, so the fix only reaches a cache built after it.
+-- v353: two Gen 4 faults reported from play, both in the cache rather than in
+--       the engine.  (1) COLLISION.  The map grid wrote its collision flag at
+--       bit 10 and `Map.blockArray` masks the word with `% 1024`, so every one
+--       of Sinnoh's 335,165 blocked tiles -- 49.1% of the region -- arrived
+--       walkable: "still able to walk out of bounds".  Blocked cells are now
+--       the reserved value 255, and the border with them.  (2) OBJECT HIDE
+--       FLAGS.  1,566 of 3,555 object events carry a flag that makes them
+--       absent while it is set; the def never carried it, so nobody a script
+--       dismissed stayed dismissed.
+-- v354: a map's INIT SCRIPTS.  Every Gen 4 header names two members of
+--       `scr_seq` and the port read only one: `initScriptsArchiveID` is the
+--       map's own entry conditions -- what runs when you walk in, and the
+--       var-gated table the cartridge checks every idle frame.  291 of 594
+--       headers have one and none of them had ever run, which is why Mom's
+--       scene in Twinleaf never fired and the actor it would have moved stayed
+--       standing in the doorway.
+-- v355: COORDINATE TRIGGERS.  The third thing on a Gen 4 map that runs a
+--       script, extracted onto `def.coordEvents` since the maps stage was
+--       written and read by nothing.  186 of them across 76 maps, every one
+--       gated on a var and 72 of them covering a rectangle rather than a cell.
+--       Twinleaf's player house has one on its exit tile, which is why the
+--       neighbour standing there only ever spoke when pressed A on.
+-- v356: THE NEW-GAME SCRIPT.  `FieldSystem_InitNewGameState` runs one script
+--       before the first map is built, and it is 112 `setflag`s plus three
+--       `setvarfromvalue`s -- the cutscene actors whose stories have not
+--       started, hidden.  114 object events across Sinnoh are affected,
+--       including the placeholder in the player's bedroom and the one in the
+--       doorway below it.  Extracted as `constants.gen4NewGame` and applied
+--       through `boot.initialFlags`, the seam Gen 3 already uses.
+-- v357: the WAIT-AND-SCROLL control code.  0x25BC was decoded as "\r", which
+--       is not one of TextBox's markers, so it printed as a stray glyph and
+--       the box never waited for A.  It is "\v".  13,576 occurrences across
+--       7,407 of the cartridge's 46,053 strings -- every line long enough to
+--       need a second box, Mom's included.
+-- v358: the DIALOGUE WINDOW's own geometry.  `FieldMessage_AddWindow` puts the
+--       text interior at tiles (2,19), 27 x 4; the port was drawing Sinnoh's
+--       lines into the Game Boy's 20x6 box at row 12, wrapping by character
+--       count with a proportional font, on a 160x144 surface.
+-- v359: SHADOWS.  `gObjectEventGfxRenderDetailsTable` out of overlay 5 (259
+--       rows, 230 of them casting one), the `kage` texture out of fldeff
+--       member 0x11, the five sizes and the nine tile behaviours that turn it
+--       off.  Sinnoh's characters have stood on nothing until now.
+-- v360: MERGED FROM main, which had independently taken v338 for a different
+--       change: "FireRed exports its fifteen tutor moves and per-species tutor
+--       compatibility instead of overreading sTutorLearnsets as moves."
+--
+--       THE NUMBER HAD TO MOVE PAST BOTH. Platinum's chain reached v359 and
+--       main's reached v338, and the two v338s describe different work, so
+--       neither value invalidates the other side's caches. `CACHE_FORMAT` is
+--       the one gate that forces a re-import, and main's change alters what a
+--       FireRed cache CONTAINS -- so keeping v359 would let a FireRed cache
+--       built before the tutor fix pass as current. v360 invalidates both.
+local CACHE_FORMAT = "rom-cache-v360:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"

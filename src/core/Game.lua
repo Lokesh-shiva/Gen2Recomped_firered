@@ -374,10 +374,161 @@ function Game:logicSpeed()
   return GameSpeed.clamp(opts and opts.speed or GameSpeed.DEFAULT)
 end
 
+-- THE FREE CAMERA, when one owns the frame -- otherwise nil.
+--
+-- Nil on every Gen 1/2/3 map and on every Gen 4 map whose tilt ladder is not on
+-- `third` or `first`, so every control below is inert everywhere else without
+-- needing to know what else is bound.
+function Game:freeView()
+  local ow = self.overworld
+  local renderer = ow and ow.map and ow.map.renderer
+  local ground = renderer and renderer.gen4Ground
+  local view = ground and ground.view3d
+  -- ORBITAL, not merely 3D: a tilt rung is a real camera too, and the mouse
+  -- must not swing it.  `isFree` is the rendering question; this is the
+  -- control one.  The `isOrbital` test is on the METHOD as well as its answer,
+  -- so a view built before it existed still behaves.
+  if view and view.orbit and view.isOrbital and view:isOrbital() then
+    return view
+  end
+  return nil
+end
+
+-- Degrees of camera per pixel of mouse, and per second at full stick.
+--
+-- Requested: *"the orbit ... should be mouse and right analog stick
+-- controlled"*.  `Gen4View:orbit` already takes arbitrary degrees -- the four
+-- keys just hand it fixed steps -- so these are the only new numbers, and they
+-- are taste rather than measurement.  Mouse down and stick down swing the camera
+-- UP and over, looking further down; say so if you want it the other way.
+Game.LOOK_PER_PIXEL = 0.20
+Game.LOOK_RISE_PER_PIXEL = 0.12
+Game.LOOK_PER_SECOND = 150
+Game.LOOK_RISE_PER_SECOND = 80
+-- Below this the stick is treated as centred, and past it the response starts
+-- from zero rather than jumping -- otherwise a worn stick drifts the camera
+-- round on its own and a small push snaps.
+Game.STICK_DEADZONE = 0.22
+
+-- Mouse look.  Returns true when it consumed the movement.
+-- THE LARGEST TURN ONE MOUSE EVENT MAY ASK FOR, in degrees.
+--
+-- A hand cannot move the mouse this far between two frames.  At 60 Hz a fast
+-- flick of a thousand pixels a second is about sixteen pixels an event, which
+-- at `LOOK_PER_PIXEL` is 3.3 degrees; twelve is nearly four times that, so no
+-- real movement is ever refused.  What DOES produce a delta this size is the
+-- pointer being warped, and SDL emits exactly one enormous `mousemoved` when
+-- relative mode is turned on or off.
+Game.LOOK_MAX_DEGREES = 12
+
+-- How many events to ignore after relative mode is toggled.
+Game.LOOK_SETTLE_EVENTS = 2
+
+function Game:cameraLook(dx, dy)
+  local view = self:freeView()
+  if not view then return false end
+  if (dx == 0 or dx == nil) and (dy == 0 or dy == nil) then return true end
+
+  -- A WARP IS NOT A LOOK.
+  --
+  -- HONESTY FIRST: this guard was added as a proposed cause of the reported
+  -- camera flip, and that proposal was WRONG.  The flip was two maps each
+  -- owning a `Gen4View` and the frame being drawn through whichever one was
+  -- current -- see the note in `Gen4View:follow`, which measures the two
+  -- disagreeing by 84 degrees.  The guard was instrumented to say so, and the
+  -- play test that found the real cause never printed its line.
+  --
+  -- It is kept, and only for what it is: relative mouse mode is toggled every
+  -- time the overworld stops or starts being the top screen, each toggle warps
+  -- the pointer, and SDL reports a warp as one `mousemoved` carrying a delta
+  -- the width of the window.  That is a real event whether or not it was the
+  -- flip.  A hand cannot move twelve degrees between two frames -- a fast
+  -- flick of a thousand pixels a second is 3.3 degrees an event -- so this
+  -- cannot refuse a real movement.  If it ever does, delete it rather than
+  -- raise the cap: it is a net, not a feature.
+  --
+  -- DROPPED rather than clamped: a clamped warp still turns the camera twelve
+  -- degrees for no reason, and the event is not a small movement that got too
+  -- big, it is not a movement at all.
+  if (self.lookSettle or 0) > 0 then
+    self.lookSettle = self.lookSettle - 1
+    return true
+  end
+  local turn = math.abs((dx or 0) * Game.LOOK_PER_PIXEL)
+  local lift = math.abs((dy or 0) * Game.LOOK_RISE_PER_PIXEL)
+  if turn > Game.LOOK_MAX_DEGREES or lift > Game.LOOK_MAX_DEGREES then
+    -- SAID ONCE, because this is a hypothesis about a report and the next play
+    -- test is what confirms it.  If the flip stops and this line never
+    -- appears, the cause was something else and this guard is dead weight.
+    if not Game.saidLookSpike then
+      Game.saidLookSpike = true
+      Logger.info("gen4 camera: dropped a mouse look of %.1f/%.1f degrees "
+                  .. "(cap %.1f) -- a pointer warp, not a hand",
+                  turn, lift, Game.LOOK_MAX_DEGREES)
+    end
+    return true
+  end
+
+  view:orbit((dx or 0) * Game.LOOK_PER_PIXEL,
+             (dy or 0) * Game.LOOK_RISE_PER_PIXEL)
+  return true
+end
+
+local function stickAxis(pad, name, dead)
+  local ok, v = pcall(pad.getGamepadAxis, pad, name)
+  v = (ok and tonumber(v)) or 0
+  if v > dead then return (v - dead) / (1 - dead) end
+  if v < -dead then return (v + dead) / (1 - dead) end
+  return 0
+end
+
+-- The right stick, polled rather than evented.
+--
+-- `love.gamepadaxis` fires on CHANGE, so a stick held at full deflection sends
+-- nothing and the camera would stop turning while the player is still asking it
+-- to.  An analog control that means "keep going" has to be read per frame.
+function Game:updateCameraStick(dt)
+  local view = self:freeView()
+  if not view then
+    if self.lookRelative and love.mouse and love.mouse.setRelativeMode then
+      pcall(love.mouse.setRelativeMode, false)
+      self.lookRelative = false
+      self.lookSettle = Game.LOOK_SETTLE_EVENTS
+    end
+    return
+  end
+  -- RELATIVE MODE, or the pointer hits the edge of the window and the look
+  -- stops dead.  Only while the overworld itself is on top: a menu over a free
+  -- camera still wants a real cursor.
+  local wantRelative = (self.stack and self.stack:top()) == self.overworld
+  if love.mouse and love.mouse.setRelativeMode and self.lookRelative ~= wantRelative then
+    pcall(love.mouse.setRelativeMode, wantRelative)
+    self.lookRelative = wantRelative
+    -- ...and ignore what the warp this causes is about to report.
+    self.lookSettle = Game.LOOK_SETTLE_EVENTS
+  end
+  if not (love.joystick and love.joystick.getJoysticks) then return end
+  local ok, pads = pcall(love.joystick.getJoysticks)
+  if not ok then return end
+  for _, pad in ipairs(pads or {}) do
+    local isPad = pad.isGamepad and select(2, pcall(pad.isGamepad, pad))
+    if isPad then
+      local rx = stickAxis(pad, "rightx", Game.STICK_DEADZONE)
+      local ry = stickAxis(pad, "righty", Game.STICK_DEADZONE)
+      if rx ~= 0 or ry ~= 0 then
+        view:orbit(rx * Game.LOOK_PER_SECOND * (dt or 0),
+                   ry * Game.LOOK_RISE_PER_SECOND * (dt or 0))
+        return
+      end
+    end
+  end
+end
+
 function Game:update(dt)
   -- Fast-forward scales only the logic clock (see src/core/GameSpeed.lua).
   -- Give the accumulator room for one full frame at the current speed,
   -- or the anti-spiral clamp quietly caps every level above ~15X.
+  self:updateCameraStick(dt)
   local speed = self:logicSpeed()
   FixedStep.maxAccum = math.max(0.25, speed * FixedStep.STEP * 1.5)
   do
@@ -894,6 +1045,19 @@ function Game:zoomStep(delta)
 end
 
 function Game:wheelmoved(_, dy)
+  -- THE WHEEL ZOOMS THE FREE CAMERA when one owns the frame, and the
+  -- window otherwise.
+  --
+  -- Requested: *"add the zoom in and out feature to the third person"*.
+  -- `Game:freeView` is nil on every other map and camera, so the display
+  -- zoom below keeps every case it had -- and in third person the wheel
+  -- means the thing the player is looking at rather than the size of the
+  -- window it is in, which is what a wheel means in every 3D game.
+  local view = self:freeView()
+  if view and view.zoomBy then
+    view:zoomBy(dy > 0 and -1 or 1)
+    return
+  end
   if dy > 0 then
     self:zoomStep(1)
   elseif dy < 0 then
@@ -1057,8 +1221,60 @@ function Game:keypressed(key)
     -- cycle TILT OFF → 15 → 35 → 50 → OFF (mnemonic: 3D), free-roam only
     local Tilt = require("src.render.Tilt")
     if Tilt.gateOK(self.stack:top(), self.overworld) then
-      self.save.options.tilt = Tilt.cycle()
+      -- ON A SINNOH MAP THIS KEY MOVES THE GEN 4 CAMERA INSTEAD.
+      --
+      -- There are two tilts in this engine and they are not alternatives: the
+      -- one above is the Gen 1/2 warp applied to a finished flat picture, and
+      -- `Gen4Camera` is the actual field camera the cartridge's own header
+      -- names.  Pressing "3" in Sinnoh used to run the first, which warped a
+      -- world that had already been projected and dragged the ground out from
+      -- under the sprites -- reported as *"messes up the placement of sprites
+      -- and isnt changing the in game camera tilt/angle"*.  Both complaints,
+      -- one cause.
+      local ow = self.overworld
+      local renderer = ow and ow.map and ow.map.renderer
+      if renderer and renderer.gen4Ground then
+        local Gen4Camera = require("src.render.Gen4Camera")
+        -- not `next`: that is a Lua global and shadowing it inside a handler
+        -- this long is a trap for whoever edits the block after me
+        local nextIndex = (Gen4Camera.chosen % #Gen4Camera.TILTS) + 1
+        local _, index = Gen4Camera.setTilt(nextIndex)
+        self.save.options.gen4CameraTilt = index
+        -- ...and the other one goes to OFF and stays there, so a save that
+        -- carried a tilt level in from a Johto session cannot warp Sinnoh.
+        if Tilt.level > 0 then
+          Tilt.setLevel(0)
+          self.save.options.tilt = 0
+        end
+      else
+        self.save.options.tilt = Tilt.cycle()
+      end
       self:writeOptions()
+    end
+    return
+  elseif key == "," or key == "." or key == ";" or key == "'" then
+    -- THE ORBIT CONTROLS, and they exist only where there is a camera to orbit.
+    --
+    -- Reported from play: *"theres no free movement or orbital camera"*.  The
+    -- free camera was pinned to the player's own facing, so it could only ever
+    -- look the way they were walking -- never AT them, never round a building.
+    --
+    -- Four keys rather than a modifier because the arrows already move the
+    -- player, and these two pairs sit together under the right hand.  They do
+    -- NOTHING unless the tilt ladder is on `third` or `first`, so they stay free
+    -- for everything else in the engine and on every other cartridge.
+    local ow = self.overworld
+    local renderer = ow and ow.map and ow.map.renderer
+    local ground = renderer and renderer.gen4Ground
+    local view = ground and ground.view3d
+    if view and view.isFree and view:isFree() and view.orbit then
+      local Gen4View = require("src.render.Gen4View")
+      if key == "," then view:orbit(-Gen4View.ORBIT_YAW_STEP, 0)
+      elseif key == "." then view:orbit(Gen4View.ORBIT_YAW_STEP, 0)
+      elseif key == ";" then view:orbit(0, Gen4View.ORBIT_RISE_STEP)
+      else view:orbit(0, -Gen4View.ORBIT_RISE_STEP) end
+      -- The ground places the camera from the player every frame, so nothing
+      -- has to be redrawn here -- the next `follow` reads the new angles.
     end
     return
   elseif key == "4" then
@@ -1417,6 +1633,18 @@ function Game:restoreSave(loaded, recovered)
   -- SaveData.load and skip on the format guard
   local activeMods = self.modStatus and self.modStatus.loaded
   SaveData.runMigrations(loaded, self.mods and self.mods.migrations, activeMods)
+  -- PR #60 taught future FireRed League wins to keep the cartridge-native
+  -- FLAG_DEFEATED_* bits and the older port EVENT_BEAT_* names in sync.  Saves
+  -- already partway through the Elite Four predate that bridge and may have
+  -- only one side, leaving the next room sealed after an update.  Reconcile
+  -- those run-scoped flags before the room's ON_LOAD script evaluates them.
+  if require("src.core.GameVersion").get() == "firered" then
+    local okG3, G3 = pcall(require, "src.script.Gen3Commands")
+    if okG3 and G3 and G3.repairFireRedLeagueFlags
+       and G3.repairFireRedLeagueFlags(loaded) then
+      Logger.info("FireRed save repair: synchronized in-progress Elite Four flags")
+    end
+  end
   -- Pre-fix FireRed port saves could already own a TM/HM without ITEM_TM_CASE.
   -- Repair that impossible-on-cartridge state before validation/UI adoption.
   local okBag, Bag = pcall(require, "src.inventory.Bag")
@@ -1424,6 +1652,11 @@ function Game:restoreSave(loaded, recovered)
      and Bag.repairFireRedTMCase(loaded, self.data) then
     Logger.info("FireRed save repair: restored missing TM CASE for existing machines")
   end
+  -- ...AND SINNOH'S OPENING FLAGS, for a save written while they were not
+  -- reaching the engine.  Only the ones this save has never recorded a value
+  -- for are restored, so a story already advanced past is left alone; see
+  -- SaveData.repairOpeningFlags for why that test is the whole of it.
+  SaveData.repairOpeningFlags(loaded, self:bootConfig())
   -- Issue #103: 0.1.11 softlocks left CONTINUE in HALL_OF_FAME with
   -- lastOutdoor on Indigo.  One-shot relocate + heal before validate.
   if SaveData.needsPostGameRescue(loaded) then
