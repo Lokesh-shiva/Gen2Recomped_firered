@@ -189,8 +189,23 @@ local warnedTypes = {}
 -- Gen 1 splits physical from special by TYPE: the move's own category
 -- field wins, then the merged type record's, then physical (with one
 -- warning per unknown type).
+--
+-- AND GENERATION 4 IS THE ONE THAT ABOLISHED THE TYPE RULE, which is the whole
+-- point of Platinum's move data and was being thrown away here.  The Gen 4
+-- extractor writes the split as `class`; this asked only for `category`, so
+-- every Platinum move fell through to `TypeChart.category(move.type)` -- the
+-- pre-Gen-4 rule.
+--
+-- MEASURED against this cartridge's own 471 moves: 92 of the 301 damaging ones
+-- disagree with the type rule -- 31%.  Fire Punch, Ice Punch and ThunderPunch
+-- computed as SPECIAL; Hyper Beam, Gust and SonicBoom as PHYSICAL; Bite and
+-- Razor Leaf on the wrong stat each way.  A battle would have run to the end
+-- and simply been wrong, in a way that reads as bad luck rather than a bug.
+--
+-- Read here rather than renamed in the extractor on purpose: this needs no
+-- re-import, and `class` is what the cartridge's own move record calls it.
 local function categoryOf(move)
-  local category = move.category or TypeChart.category(move.type)
+  local category = move.category or move.class or TypeChart.category(move.type)
   if category == nil then
     if move.type ~= nil and not warnedTypes[move.type] then
       warnedTypes[move.type] = true
@@ -215,7 +230,12 @@ end
 function Damage.compute(ruleset, attacker, defender, move, opts)
   opts = opts or {}
   local rng = opts.rng or love.math.random
-  if move.power == 0 or move.category == "status" then
+  -- ...and the same field again, because a STATUS move must not roll damage.
+  -- Platinum has 170 of them and every one of them carries its class under the
+  -- other name; asking only for `category` here would have sent each one into
+  -- the formula to be saved by `power == 0`, which is true today and is not the
+  -- thing being asserted.
+  if move.power == 0 or move.category == "status" or move.class == "status" then
     return 0, { crit = false, typeMult = 10 }
   end
 
