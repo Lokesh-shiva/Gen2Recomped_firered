@@ -348,6 +348,7 @@ public class SecondDisplayHost extends ContentProvider {
   private long lastRejectLog = 0;
 
   private int lastVisibleReject = -1;
+  private boolean haveAcceptedFrame = false;
 
   private void rejectLog(final PanelPresentation panel, final int code, String reason) {
     long now = android.os.SystemClock.uptimeMillis();
@@ -355,7 +356,7 @@ public class SecondDisplayHost extends ContentProvider {
       lastRejectLog = now;
       Log.w(TAG, "FRAME REJECT: " + reason);
     }
-    if (lastVisibleReject != code && panel != null && panel.view != null) {
+    if (!haveAcceptedFrame && lastVisibleReject != code && panel != null && panel.view != null) {
       lastVisibleReject = code;
       final PanelView v = panel.view;
       ui.post(new Runnable() {
@@ -390,22 +391,15 @@ public class SecondDisplayHost extends ContentProvider {
       long want = (long) HEADER_BYTES + (long) w * h * 4L;
       boolean legacyTrailer = len == want + 6L;
       if (len != want && !legacyTrailer) {
-        if (panel != null && panel.view != null) {
-          final PanelView v = panel.view;
-          final long actualLen = len, expectedLen = want;
-          final int fw = w, fh = h, fseq = seq;
-          ui.post(new Runnable() {
-            @Override public void run() {
-              v.showSizeMismatch(actualLen, expectedLen, fw, fh, fseq);
-            }
-          });
-        }
-        // Do not replace the detailed screen with the generic two-bar screen.
+        // love.filesystem.write truncates/replaces frame.bin while this pump is
+        // polling it. A temporary length mismatch is therefore expected and
+        // must never replace the last good frame with an error screen. Leave
+        // lastSeq untouched and retry on the next pump.
         long now = android.os.SystemClock.uptimeMillis();
         if (now - lastRejectLog >= 1000) {
           lastRejectLog = now;
-          Log.w(TAG, "FRAME REJECT: size mismatch seq=" + seq + " got=" + len
-              + " want=" + want + " dimensions=" + w + "x" + h);
+          Log.w(TAG, "FRAME RETRY: transient size mismatch seq=" + seq
+              + " got=" + len + " want=" + want + " dimensions=" + w + "x" + h);
         }
         return;
       }
@@ -439,6 +433,7 @@ public class SecondDisplayHost extends ContentProvider {
       lastSeq = seq;
       frameW = w; frameH = h;
       lastVisibleReject = 5;
+      haveAcceptedFrame = true;
       panel.post(w, h, rgba);
       Log.i(TAG, "FRAME ACCEPT seq=" + seq + " size=" + w + "x" + h
           + " bytes=" + len + " path=" + f.getAbsolutePath());
