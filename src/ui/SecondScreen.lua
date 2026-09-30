@@ -361,13 +361,18 @@ function SecondScreen.flush(game)
   if last and now - last < SecondScreen.PUSH_INTERVAL then return false end
   local okData, data = pcall(canvas.newImageData, canvas)
   if not (okData and data) then return false end
-  local sent = T.push(data, W, H) and true or false
+  local okPush, pushed = pcall(T.push, data, W, H)
+  local sent = okPush and pushed and true or false
   if data.release then pcall(data.release, data) end
-  -- Cleared whether or not the push landed.  A frame the host refused is
-  -- stale by the next one anyway, and keeping the flag set would retry the
-  -- readback every frame for as long as the panel stayed unhappy.
-  game.secondScreenDirty = false
-  game.secondScreenPushedAt = now
+
+  -- Do not throw away the pending frame when Android has detected the second
+  -- display but its Presentation/file bridge is not ready yet. This is common
+  -- during startup on dual-screen Android hardware: keeping the dirty flag set
+  -- lets the same bottom-screen state retry on the next eligible frame.
+  if sent then
+    game.secondScreenDirty = false
+    game.secondScreenPushedAt = now
+  end
   return sent
 end
 
