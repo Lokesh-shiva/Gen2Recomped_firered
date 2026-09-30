@@ -184,11 +184,25 @@ function SecondScreen.filePush(imageData, w, h)
   end
   local okStr, body = pcall(imageData.getString, imageData)
   if not (okStr and type(body) == "string") then return false end
+
+  -- The file protocol is RGBA8 by definition. Never write a header claiming
+  -- 256x192x4 while attaching a differently-sized ImageData payload; that
+  -- leaves the Java side with a valid header and an unusable file forever.
+  local expected = (tonumber(w) or 0) * (tonumber(h) or 0) * 4
+  if #body ~= expected then
+    log(("refusing frame: %dx%d expects %d RGBA8 bytes, ImageData returned %d")
+      :format(tonumber(w) or 0, tonumber(h) or 0, expected, #body))
+    return false
+  end
+
   fileSeq = (fileSeq + 1) % 65536
   local header = SecondScreen.MAGIC .. u16(SecondScreen.PROTOCOL)
     .. u16(w) .. u16(h) .. u16(fileSeq)
-  local ok = pcall(f.write, SecondScreen.FRAME, header .. body)
-  return ok and true or false
+  local packet = header .. body
+  local ok, wrote = pcall(f.write, SecondScreen.FRAME, packet)
+  -- LOVE filesystem.write normally returns true. Treat an explicit false as
+  -- failure so SecondScreen.flush keeps the frame dirty and retries.
+  return ok and wrote ~= false
 end
 
 -- Everything the host has recorded since the last call, in order, and the file
