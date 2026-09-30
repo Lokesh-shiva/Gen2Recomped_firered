@@ -86,6 +86,17 @@ SecondScreen.MAGIC = "G2SD"
 -- twice its heartbeat, so one missed write is not a disconnection.
 SecondScreen.HOST_STALE = 2.0
 
+-- LOVE's clock, or nil where there is not one (a headless check). Declared
+-- here rather than beside the native probe because BOTH transports rate-limit
+-- against it now, and a local is only visible to what comes after it.
+local function clock()
+  if love and love.timer and love.timer.getTime then
+    local ok, t = pcall(love.timer.getTime)
+    if ok then return t end
+  end
+  return nil
+end
+
 local fileHost = nil       -- the last parsed host.txt, or false
 local fileSeq = 0
 
@@ -130,11 +141,37 @@ end
 -- Is a file-protocol host attached?  A host that is present but reports no
 -- second display is NOT available: the panel is what the mode needs, not the
 -- host.
+-- ...AND IT IS ASKED FAR MORE OFTEN THAN IT LOOKS. `SecondScreen.mode` calls
+-- this, and `mode` is reached from nineteen places, several of them per frame.
+-- The native branch of `available` below has been rate-limited since pass 138
+-- for exactly that reason; this branch was not, so every frame did a stat and
+-- a read of host.txt per call site -- dozens of small filesystem round trips a
+-- frame, on the one platform this whole transport exists for.
+--
+-- Cached on the same interval as the native probe. A panel that appears or
+-- goes away is noticed within PROBE_INTERVAL either way, which is what the
+-- host's once-a-second heartbeat is already paced for.
+local fileProbedAt, fileProbed = nil, false
+
 function SecondScreen.fileAvailable(now)
+  local at = tonumber(now) or clock()
+  -- `at < fileProbedAt` covers a clock that went backwards, which is what a
+  -- check that rewinds time looks like -- re-probe rather than trust a cache
+  -- stamped in the future.
+  if at and fileProbedAt and (at - fileProbedAt) < SecondScreen.PROBE_INTERVAL
+     and at >= fileProbedAt then
+    return fileProbed
+  end
   local h = SecondScreen.readHost(now)
-  if not h then return false end
-  if h.version ~= SecondScreen.PROTOCOL then return false end
-  return (h.displays or 0) >= 2
+  fileProbed = (h and h.version == SecondScreen.PROTOCOL
+                and (h.displays or 0) >= 2) and true or false
+  fileProbedAt = at or fileProbedAt or 0
+  return fileProbed
+end
+
+-- Drop the cached answer so the next ask goes back to the file.
+function SecondScreen.forgetFileProbe()
+  fileProbedAt, fileProbed = nil, false
 end
 
 -- Hand the host a frame.  `imageData` is LOVE's own, and its string is the
@@ -204,14 +241,6 @@ end
 SecondScreen.PROBE_INTERVAL = 0.5
 local probedAt, probed = nil, false
 
-local function clock()
-  if love and love.timer and love.timer.getTime then
-    local ok, t = pcall(love.timer.getTime)
-    if ok then return t end
-  end
-  return nil
-end
-
 function SecondScreen.available()
   -- The native bridge first -- it hands the host a pointer and costs nothing
   -- per frame -- then the file protocol, which needs no native code at all.
@@ -231,6 +260,7 @@ end
 -- probe interval to see the option take.
 function SecondScreen.forget()
   probedAt, probed = nil, false
+  SecondScreen.forgetFileProbe()
 end
 
 function SecondScreen.push(imageData, w, h)

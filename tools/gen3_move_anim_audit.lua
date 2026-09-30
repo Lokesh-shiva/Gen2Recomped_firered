@@ -143,6 +143,34 @@ local CLASSES = {
          or has(t, "Bounce")
     end,
     keys = { "heaves", "orbit", "affineTasks" },
+    -- ...AND THE TRACK, WHICH THIS CLASS WAS BLIND TO.
+    --
+    -- `shakeAt` in src/battle/Gen3MoveAnim.lua reads `xs`/`ys` off a shake as
+    -- a PER-FRAME OFFSET TRACK, one number an axis a frame, and the import
+    -- writes one for the two task families that move a battler smoothly --
+    -- nine moves that lean on a sine (MON_SWAY) and four that lunge across
+    -- the field and back (MON_LUNGE). That is the attacker moving, it is
+    -- extracted, and it draws.
+    --
+    -- It lands under `shakes`, so a key list could not see it without
+    -- crediting every square-wave judder in the game as a lunge. Fourteen
+    -- moves were being reported as missing their movement while having it:
+    -- ATTRACT, BRICK BREAK, BUBBLEBEAM, ENCORE, FRUSTRATION, PSYBEAM,
+    -- SCREECH, SLEEP TALK, SNATCH, SPIKE CANNON, TAKE DOWN and TICKLE. The
+    -- baseline drops from 31 to 19 on that alone. A number that overstates a
+    -- gap is not the safe direction to be wrong in: it sends somebody to fix
+    -- what already works.
+    --
+    -- CURSE and SECRET POWER are NOT among them, and the difference is why
+    -- this reads `anim.shakes` rather than searching the whole record: both
+    -- carry a track elsewhere in their animation, neither carries one on a
+    -- shake, and neither moves its attacker.
+    carries = function(anim)
+      for _, sh in ipairs(anim.shakes or {}) do
+        if sh.xs ~= nil or sh.ys ~= nil then return true end
+      end
+      return false
+    end,
     what = "the ATTACKER moving -- the lunge that makes a contact move read" },
   { name = "rotate",
     wants = function(t) return has(t, "Rotate") or has(t, "Spin") end,
@@ -186,6 +214,39 @@ for _, cls in ipairs(CLASSES) do
        .. "-- a key that common makes every move look fixed", cls.name, key,
        share * 100)
   end
+  -- A PREDICATE IS EVIDENCE TOO, and gets the same bar. Left unmeasured it
+  -- would be the easy way to smuggle in a claim every move satisfies, which
+  -- is the one fault this section exists to stop.
+  if cls.carries then
+    -- ...AND IT IS ASKED DIRECTLY, on records made here, because the aggregate
+    -- share above cannot catch the generous case: a test that credited EVERY
+    -- shake would match 56% of moves, sail under the bar, and quietly mark a
+    -- dozen square-wave judders as lunges. The ratchet cannot catch it either
+    -- -- it only bites when a count goes UP. So the distinction the predicate
+    -- exists to make is stated as two records that differ in exactly it.
+    local plain = { shakes = { { at = 0, x = 3, y = 0, count = 4, delay = 1 } } }
+    local track = { shakes = { { at = 0, xs = { 0, 2, 4, 2, 0 } } } }
+    ok(cls.carries(track),
+       "the %s class's test does not recognise a per-frame track, which is "
+       .. "the whole thing it was added to see", cls.name)
+    ok(not cls.carries(plain),
+       "the %s class's test credits a plain square-wave shake -- every "
+       .. "flinch in the game would count as the attacker lunging", cls.name)
+    ok(not cls.carries({}),
+       "the %s class's test credits a record with no shakes at all", cls.name)
+    local n, total = 0, 0
+    for _, mv in pairs(moves) do
+      total = total + 1
+      if mv.anim and cls.carries(mv.anim) then n = n + 1 end
+    end
+    local share = n / math.max(1, total)
+    ok(share <= 0.95,
+       "the %s class's own test matches %.1f%% of moves -- that common, it "
+       .. "makes every move look fixed", cls.name, share * 100)
+    ok(n > 0,
+       "the %s class's own test matches NO move, so it is not evidence of "
+       .. "anything and the class is counting on its keys alone", cls.name)
+  end
 end
 
 local report = {}
@@ -203,6 +264,7 @@ for _, cls in ipairs(CLASSES) do
       for _, key in ipairs(cls.keys) do
         if anim and anim[key] ~= nil then got = true break end
       end
+      if not got and cls.carries and anim then got = cls.carries(anim) end
       if got then have = have + 1 else miss[#miss + 1] = name end
     end
   end
@@ -247,7 +309,7 @@ section("5. the ratchet")
 -- What each count was when this tool was written, against the dataset extracted
 -- on 2026-09-29. Lower these in the same commit that fixes the moves.
 local BASELINE = {
-  shake = 21, blend = 46, scale = 2, translate = 31, rotate = 8, bg = 20,
+  shake = 21, blend = 46, scale = 2, translate = 19, rotate = 8, bg = 20,
   noEvents = 10,
 }
 for key, was in pairs(BASELINE) do

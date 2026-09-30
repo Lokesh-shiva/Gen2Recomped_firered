@@ -29253,3 +29253,590 @@ Regression: 14 argument-free tools green, 0 failing; `gen3_map_render_check`
 | bounds that cannot be cleared | the gym's 144px followed the player out |
 | the clamp's own parity fix-up dropped | an odd view, which shimmers |
 | a comment word changes | nothing - 37 checks, 0 failed |
+
+## Pass 147 - the launcher's own bottom screen, and why Platinum never used the panel it found
+
+Reported: *"its still not detecting the second screen on the ayn thor for
+platinum maybe the launcher itself has to intialize with it"*, with a brief --
+a grid of every game tile on the second screen, sortable by generation, a
+button to manage mods, all touch-friendly, initialised at launch.
+
+The guess in that report was right, and the reason is plainer than it sounds.
+
+### Nothing was ever asking
+
+`SecondScreen.flush` is what sends a frame to the panel, and its only caller
+was `Game:draw`. `love.draw` never reaches `Game:draw` while the launcher owns
+the window -- it returns four lines earlier:
+
+```lua
+if Importer then return Importer:draw() end
+```
+
+So no frame was pushed until a cartridge was running. The host was up, the
+display was found, `host.txt` said two screens -- and nothing asked for a
+picture. From the sofa that is indistinguishable from a device that was never
+detected.
+
+### ...and then Platinum did not use it either
+
+A second fault behind the first, and worse for being so small: **nothing ever
+seeded `secondScreenMode`**. A nil fell through to `swap`, so a Sinnoh session
+on a Thor opened with the bottom screen sharing the top one and the panel dark.
+The options row was right all along -- it has offered DEVICE only when a panel
+is really attached since pass 138 -- but the player had to go and find it.
+
+`mode` now defaults to `display` when the option has never been set AND a panel
+is actually attached. It is a default and not an override: `nil` is the one
+value meaning "not chosen", so the moment the player picks anything, including
+`swap`, it is written down and honoured.
+
+### A cost, found on the way
+
+`SecondScreen.mode` is reached from nineteen places, several per frame. The
+native probe has been rate-limited since pass 138; **the file transport was
+not**, so every one of those calls did a stat and a read of `host.txt` --
+dozens of filesystem round trips a frame, on the one platform this transport
+exists for. `fileAvailable` now caches on the same `PROBE_INTERVAL`, and
+`forget()` clears both probes rather than only the native one.
+
+### The shelf
+
+`src/ui/LauncherSecondScreen.lua` draws every game as a tile on the panel while
+the launcher is up: name, generation badge, dimmed with "no ROM" when that
+cartridge has not been imported. A SORT button cycles generation/name, arrows
+page the grid, and MANAGE MODS switches the launcher's own panel to its mods
+tab. Tiles are 78x40 with a 5px gutter -- about 9mm on the Thor's lower screen.
+
+Three decisions worth writing down:
+
+**It presents a host shaped like `Game` rather than branching `SecondScreen`.**
+Everything in that module is keyed on a game's options, canvas, dirty flag and
+touch handlers; the launcher has none, so it hands over a table with just those
+fields and one new opt-in flag. No second copy of the module, and the panel
+cannot drift from a Gen 4 session's because it makes the same two calls.
+
+**It draws in LOVE's default font.** At launcher time no cartridge cache is
+mounted, and every font this engine draws with is baked from ROM data that does
+not exist yet. Reaching for one would raise or draw nothing.
+
+**A tile that is not imported still selects its tab.** It cannot boot --
+`RomImporter:play` guards on the same readiness map -- but a tile that did
+nothing at all would read as broken, with no route to the Import ROM button.
+
+And a touch rule that a mouse never needs: a finger that slides off its target
+cancels. On a 78px tile a drifting tap is ordinary, and firing on release
+wherever the finger ended would boot a cartridge the player did not choose.
+
+### Changed
+
+- `main.lua` - `drawSecondPanel`, called from every branch of `love.draw` that
+  does not reach `Game:draw`; the launcher's host is dropped on the way back.
+- `src/ui/LauncherSecondScreen.lua` - new, the shelf.
+- `src/ui/SecondScreen.lua` - the `secondScreenAlways` opt-in, and the
+  attached-panel default.
+- `src/render/SecondScreen.lua` - `fileAvailable` cached; `clock` hoisted above
+  both users; `forgetFileProbe`.
+- `tools/gen4_launcher_second_screen_check.lua` - new, 121 checks.
+- `tools/gen4_platinum_panel_check.lua` - new, 27 checks.
+
+Regression: 16 argument-free tools green, 0 failing; `gen3_map_render_check`
+1,619; `gen3_gym_warp_check` 207; `gen4_item_use_check` 97;
+`gen4_player_pic_check` 23; `second_display_protocol_check` 26.
+
+### The check that was worthless, and what replaced it
+
+The first version of "every tile's rectangle maps back to its own tile" asked
+`_hit` where each tile was and then asked `_hit` whether it agreed. A grid that
+is consistently wrong passes that every time -- and it did: an off-by-one
+column sailed through. The grid now publishes its layout, the check works out
+the rectangles itself, and the same fault is caught at once.
+
+Two more faults were invisible for a related reason. Both touch guards -- the
+cancel on move and the comparison on release -- stop a slid tap, so removing
+either changed nothing while the other stood. They needed a case each: a
+release on a different tile with no move reported (only the release guard sees
+it), and the held highlight letting go as the finger leaves (only the move
+cancel does that, and it is on screen, so it is measurable).
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| column or row index off by one | the rectangles the check computes itself |
+| the gutter between tiles is clickable | 49 checks -- adjacent cartridges |
+| a scrolled-off tile is still reachable | it hits nowhere on the panel |
+| tiles shrunk below a fingertip | the 44x30 minimum |
+| the sort never changes, or is not by generation | the order the shelf returns |
+| an un-imported game is played anyway | `play` called for an absent ROM |
+| readiness read from anywhere but the launcher | 7 games disagreed |
+| MANAGE MODS boots a game | it started one |
+| a slid finger not cancelled | the held highlight stayed lit |
+| release fires wherever the finger ended | a press on tile 1 released on tile 2 |
+| scroll unclamped at either end | row -1, and row 50 of 1 |
+| the shelf drawn with no second display | a frame pushed at nothing |
+| the host opt-in removed, or widened to every generation | Gen 1/2 answered "display" |
+| the attached-panel default reverted, or made an override | the player's own choice lost |
+| the probe cache never expiring, or never used | 19 reads a frame; an unplugged panel |
+| `forget()` no longer clearing the file probe | the panel stayed "attached" |
+| a comment word changes | nothing - 148 checks, 0 failed |
+
+### Still untested on hardware
+
+Everything above is measured headlessly. The Java host compiles and its decoder
+is checked against real Lua-written frames, but no machine here can build an
+APK. What a play-test settles: whether the Thor reports its lower panel as a
+presentation display, and whether ~60fps of 192KB writes keeps up on it. If the
+shelf does not appear, `second_display/host.txt` under the app's files folder
+is still the first thing to read -- absent means the provider never
+constructed, a leading `1 1` means Android is reporting one display.
+
+## Pass 148 - Sinnoh's party icons were Kanto's, and three more modules still are
+
+Reported: *"missing pokemon party sprites from the pokemon start menu"*.
+
+They were extracted. All 540 PNGs are on disk. `gen4_species_sprites.icons`
+carries `bySpecies` for every one of them. `Data` even had a lift written to
+publish them under the name every screen asks for. **The lift never ran.**
+
+### The guard that was exactly wrong
+
+```lua
+if self.icons == nil then          -- and it never was
+  local sprites = self.gen4_species_sprites
+  local icons = sprites and sprites.icons
+  if icons and icons.bySpecies then self.icons = icons end
+end
+```
+
+`icons` used to sit in `CLASSIC_ONLY`, the list that stops a module resolving
+through the additive cache overlay. It left that list when Emerald gained an
+`icons.lua` of its own -- correctly, for Gen 3 -- and nothing put it back for
+Gen 4. So on a Sinnoh cache `icons` is not required, not blocked, merely
+OPTIONAL. Platinum writes no `icons.lua`, so
+`require("data.generated.icons")` walks through to the ROOT cache, which is
+Red's (`cachePrefix = ""`). `self.icons` came back non-nil and the guard
+declined.
+
+Measured, against the real cache: **342 of 493 species draw a Poke Ball** --
+`Gen4PartyMenu:drawIcon`'s fallback when `iconFor` finds nothing -- and the 151
+that do draw wear a Kanto icon chosen by dex number. A Sinnoh team is all Poke
+Balls.
+
+Same shape as the type chart, the abilities, the move effects and the ball
+pocket before it: one name, resolved from two places that never meet.
+
+### The fix
+
+On a Gen 4 cache the cartridge's own table wins outright. Nothing writes an
+un-prefixed `icons.lua` for Sinnoh, so there is no honest candidate for
+`self.icons` to already hold; the source says so, and says which line has to
+learn the difference when a Gen 4 extractor stage does write one.
+
+`loadModule` with an explicit dir reads that directory and nothing else, so the
+dir case was never wrong. It is the mounted-overlay path, where `require`
+cannot be scoped to one cache, that needed this.
+
+### Three more modules are still borrowing from Kanto
+
+`tools/gen4_module_sets.lua` could not have caught this and it is worth saying
+why: it compares which modules are REQUIRED. A module can be correctly optional
+and still hand Sinnoh another cartridge's data. That is a different question,
+and nothing was asking it.
+
+Asked now, from `OPTIONAL` minus what Platinum writes minus what is blocked:
+
+```
+borrowed from the root cache: icons save_layout scenes songs
+```
+
+`icons` is handled -- the module still resolves to Red's and the lift now
+replaces it. The other three are **unexamined and reported as findings**, not
+fixed:
+
+- `songs` -- a music name-to-id table. Sinnoh looking up Red's ids would play
+  the wrong music, which is a live-sounding symptom nobody has reported yet.
+- `save_layout` -- where a cartridge save's fields live. Only reachable through
+  a `.sav` import, which Gen 4 does not offer yet.
+- `scenes` -- Gen 1/2 cutscene definitions, which the Gen 4 script system does
+  not appear to consult.
+
+The set is now PINNED. A new name joining it fails, and a name leaving it fails
+too -- a pin that quietly stops measuring is worse than no pin.
+
+### Changed
+
+- `src/core/Data.lua` - the lift prefers the cartridge's own icon table.
+- `tools/gen4_party_icon_check.lua` - new, 33 checks.
+
+Regression: 16 argument-free tools green, 0 failing; `gen4_module_sets` reports
+Gen 1/2 and Gen 3 unchanged; `gen3_map_render_check` 1,619;
+`gen3_gym_warp_check` 207; `gen4_item_use_check` 100; `gen4_player_pic_check`
+23; `second_display_protocol_check` 26.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the `== nil` guard comes back | the source pin -- this is the bug itself |
+| the lift stops assigning, or is deleted | the cartridge's table is not published |
+| the lift reads another module | the source pin on `gen4_species_sprites` |
+| `.icons` taken off the wrong field | the same |
+| a module leaves CLASSIC_ONLY | it joins the borrowed set |
+| the cache stops writing one it used to | the same |
+| a name leaves the borrowed set | the pin is stale and says so |
+| a comment word changes | nothing - 33 checks, 0 failed |
+
+### One correction to this pass's own work
+
+Section 3 of the check MODELS the lift rather than running it -- `Data:load`
+needs a mounted cache and a filesystem. A model cannot notice the real code
+being pointed at a different module, and the first fault battery proved exactly
+that: renaming `gen4_species_sprites` to `gen4_trainer_sprites` sailed through.
+The module name is pinned in the source assertions instead.
+
+The on-disk art test had the same class of weakness in reverse: it reported
+"icon missing" when the assets tree simply was not reachable from the host
+running the check. Those are different facts and it now tells them apart.
+
+## Pass 149 - twelve Emerald moves were being reported broken while working
+
+Picking up #197. Pass 139 made the gap countable; this pass made the count
+honest, and it moved in the direction nobody wants a number to move in: **the
+audit was overstating the work.**
+
+### The retraction first
+
+Before any of the below, this pass produced a finding that was simply wrong and
+is withdrawn: that seven fields the extractor writes -- `monBgTimeline`,
+`affineTasks`, `splitFx`, `acidArmor`, `camouflage`, `memento`, `voltTackle` --
+were read by nothing, and ~299 move-effects were being decoded and discarded.
+
+They are all read. `src/battle/Gen3MoveAnim.lua` handles every one of them at
+lines 178-192 and 760-845. The claim came from grepping a STALE copy of `src/`
+in which that file was 903 lines instead of 4,416. Nothing was committed on it.
+
+`tools/gen3_anim_record_consumers.lua` now exists so that question is answered
+by measurement and not by a grep anyone can get wrong: it reads the 25 `anim`
+fields the dataset actually carries and asks the engine about each one.
+
+```
+25 field(s): 25 read by the engine, 0 not
+```
+
+Two things it had to get right to be worth running. The word boundary is
+load-bearing -- the dataset carries BOTH `shake` and `shakes`, so a substring
+search lets the longer name vouch for the shorter one for ever -- and nothing
+in today's data exercises that, so it is asserted on a synthetic blob. And the
+EXTRACTOR has to be excluded from the search, or it vouches for its own fields
+and the census answers yes to everything.
+
+### The audit was blind to a channel the engine has always had
+
+`shakeAt` in `Gen3MoveAnim.lua` reads `xs`/`ys` off a shake as a **per-frame
+offset track**, one number an axis a frame. The import writes one for the two
+task families that move a battler smoothly: nine moves that lean on a sine
+(`MON_SWAY`) and four that lunge across the field and back (`MON_LUNGE`).
+
+That is the attacker moving. It is extracted, and it draws.
+
+It lands under `shakes`, and the translate class's evidence was
+`{ heaves, orbit, affineTasks }`. So twelve moves were counted as missing their
+movement while having it: ATTRACT, BRICK BREAK, BUBBLEBEAM, ENCORE,
+FRUSTRATION, PSYBEAM, SCREECH, SLEEP TALK, SNATCH, SPIKE CANNON, TAKE DOWN,
+TICKLE.
+
+**translate: 31 missing -> 19.** The baseline drops by twelve with no engine
+change, because those twelve were never broken.
+
+A number that overstates a gap is not the safe direction to be wrong in. It
+sends somebody to fix what already works, which is most of an afternoon.
+
+### Why it is a predicate and not another key
+
+`shakes` cannot simply join the key list: 200 of 354 moves carry one, and the
+square-wave judder that fires when a Pokemon is hit is not a lunge. The class
+now carries its own test, which looks for a track specifically.
+
+CURSE and SECRET POWER are the reason it reads `anim.shakes` rather than
+searching the record: both carry a track elsewhere in their animation, neither
+carries one on a shake, and neither moves its attacker. A looser search
+credited them; the strict one does not, and they stay in the missing list where
+they belong.
+
+### The remaining gap, named
+
+With the correction, #197's real shortfall and the exact cartridge functions
+behind it:
+
+| missing | the function the script names | moves |
+| --- | --- | --- |
+| translate | `TranslateMonEllipticalRespectSide` | 11 |
+| translate | `TranslateMonElliptical` | 2 |
+| rotate | `RotateMonSpriteToSide` | 4 |
+| rotate | `RotateAuroraRingColors` | 1 |
+| rotate | `RotateMonToSideAndRestore` | 1 |
+| rotate | `RapinSpinMonElevation` | 1 |
+
+`SwayMon` and `WindUpLunge` are already handled -- that is what the twelve were.
+
+Rotate is genuinely 0 of 8. `RomExtractorGen3:monRotate` derives ONE shape, from
+WITHDRAW's task, and marks only moves calling that exact address; anything
+turning by a different function is invisible to it. ARM THRUST carries a track,
+but a track is an x/y offset and not a rotation, so it stays in the list.
+
+**The renderer needs nothing.** `xs`/`ys` is a general per-frame channel and
+already draws. The elliptical family is an extraction job: find each function's
+address, verify it by disassembly the way the existing families are, and emit a
+track. That needs the 16MB ROM staged and the extractor stood up headlessly,
+which is a pass of its own.
+
+### Changed
+
+- `tools/gen3_move_anim_audit.lua` - the translate class's own test; the share
+  guard extended to cover a predicate; translate baseline 31 -> 19.
+- `tools/gen3_anim_record_consumers.lua` - new, 15 checks.
+
+Regression: 16 argument-free tools green, 0 failing; `gen3_move_anim_audit`
+6,724; `gen3_map_render_check` 1,619; `gen3_gym_warp_check` 207.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the predicate credits every move | the 95% share bar |
+| the predicate credits any shake, track or none | a plain square-wave record, made in the check |
+| the predicate stops recognising a track | a track record, made in the check |
+| the predicate matches nothing | it is not evidence of anything |
+| the predicate is never consulted | translate goes back to 31 |
+| the baseline lowered without the work | the ratchet |
+| an anim field loses its only consumer | the census, with the move count |
+| the census matcher loses its word boundary | `shake` satisfied by `shakes` |
+| the extractor counted as a reader | it vouches for its own fields |
+| an empty engine tree | nothing was read |
+| a comment word changes | nothing - 6,739 checks, 0 failed |
+
+### The lesson worth keeping
+
+Both of this pass's findings came from the same place: a number that was easy to
+compute and easy to believe. The first was a stale grep; the second was a key
+list that had never been asked whether it covered every channel the engine can
+draw. In both cases the fix was to make the engine answer instead of inferring
+what it must do. `THE UPLOADS MIRROR IS NOT THE REPO` was already the rule --
+this is what it costs to forget it for twenty minutes.
+
+## Pass 150 - naming eight animation task functions in a ROM that names nothing
+
+#197's remaining gap is an EXTRACTION gap: `RomExtractorGen3` recognises a
+visual task by its ADDRESS and then verifies, by disassembling it, that it is
+the function being claimed. That is the right way round, and it leaves a
+chicken and egg -- a retail dump names nothing, so where does the first address
+come from? Today, from a move somebody already knew called it: *"BIND's first
+task is AnimTask_SwayMon"*. That does not scale to a function nobody has
+identified yet, which is exactly what the missing moves need.
+
+This pass derives them wholesale, from a fact about the cartridge rather than a
+reading of it.
+
+### The derivation
+
+pret/pokeemerald builds byte-for-byte to this ROM, so **the set of moves that
+call a named function is a fact**. The set of moves that call an ADDRESS is
+also a fact, read out of the ROM's own script table. A name whose move-set is
+covered by exactly one address's move-set, minimally, is that address.
+
+`tools/gen3_anim_task_addresses.py` does it in four steps, each one checkable:
+
+1. **Which move is which row**, from the dataset's own `index`, and the six
+   moves whose records already name a task address in their `source` string.
+2. **The table**, by walking every 4-aligned window of 355 consecutive pointers
+   to plausible scripts -- 1,260 of them survive that filter, because the table
+   sits inside a longer run -- and keeping the one where **every** recorded
+   address lands in the row of the move that recorded it. Exactly one does:
+   `0x02C8D6C`. An off-by-one base puts DIG's script in SKETCH's row, so this
+   is not a tie-break, it is the whole identification, made of answers derived
+   and disassembled somewhere else.
+3. **The call sets**, by walking all 355 scripts as the union of every branch
+   arm: 181 distinct task addresses against pret's 184 names.
+4. **The match**, by containment and minimality rather than equality -- this
+   walker follows arms the transcription flattens differently, so the ROM sets
+   are supersets, and the extras are printed because a superset that is too
+   large is what a wrong answer looks like.
+
+### It reproduces three answers it was not given
+
+The proof is not the five new addresses, it is the three already known:
+`MON_SWAY.TASK` and `MON_LUNGE.TASK` were each derived by hand and verified by
+disassembly in `RomExtractorGen3.lua`, and the dataset records RAPID SPIN's
+task address in its own `source`. All three come back out.
+
+| function | moves | address | |
+| --- | --- | --- | --- |
+| `SwayMon` | 5 | `0x0D5EB8` | = `MON_SWAY.TASK` |
+| `WindUpLunge` | 4 | `0x0D5C50` | = `MON_LUNGE.TASK` |
+| `RapinSpinMonElevation` | 1 | `0x15ADB0` | = the dataset's own RAPID SPIN |
+| `TranslateMonEllipticalRespectSide` | 12 | `0x0D5830` | **new** |
+| `TranslateMonElliptical` | 2 | `0x0D5738` | **new** |
+| `RotateMonSpriteToSide` | 4 | `0x0D6134` | **new** |
+| `RotateMonToSideAndRestore` | 1 | `0x0D622C` | **new** |
+| `RotateAuroraRingColors` | 1 | `0x107528` | **new** |
+
+The five new ones sit at `0x0D5738`, `0x0D5830`, `0x0D6134`, `0x0D622C` --
+immediately around the two proved ones at `0x0D5C50` and `0x0D5EB8`. One
+neighbourhood, which is what a battler-movement family looks like and is not
+something the method was told to expect.
+
+### What the extras say
+
+The ROM sets carry moves pret's flattening does not, and several are moves the
+audit lists as missing: `TranslateMonEllipticalRespectSide` also covers
+OUTRAGE, STRENGTH and WHIRLWIND; `TranslateMonElliptical` also covers STEEL
+WING; `RotateMonSpriteToSide` also covers DOUBLE EDGE. Those moves DO call the
+function on the cartridge -- the transcription reached them by an arm it
+flattens differently. Worth knowing before the decode is written: the reach is
+wider than the audit's 19.
+
+### Deliberately not written into the tree
+
+The tool prints; it writes JSON only with `--json <path>`. These are addresses
+read out of a cartridge, and the licence keeps cartridge data out of the repo.
+They belong in `RomExtractorGen3.lua` as named constants beside `MON_SWAY` and
+`MON_LUNGE`, put there by a person who has read them.
+
+### Changed
+
+- `tools/gen3_anim_task_addresses.py` - new, 21 checks.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| the base off by one row | 1,260 tables satisfy the recorded addresses, not one |
+| the task operand read a byte late | none satisfies them |
+| the THUMB bit not masked | none satisfies them |
+| `choosetwoturnanim` follows one arm | none satisfies them |
+| `createvisualtask` width ignores its args | none satisfies them |
+| containment relaxed to any overlap | two addresses tie |
+| minimality dropped | RAPID SPIN comes out as the wrong function |
+| an invented name allowed to resolve | it resolved |
+| `goto` not followed | **nothing** - and measured: 181 distinct addresses either way, 355/355 rows clean. In Emerald's move scripts a `goto` never reaches a task the union does not already have. Inert, not unmeasured. |
+
+### What is left for #197
+
+The addresses are the hard half. The rest is the shape of each function --
+disassemble it for its arguments and step, the way `monSway` and `monLunge`
+already do -- and then emit an `xs`/`ys` track. **The renderer needs nothing**:
+`shakeAt` has read per-frame tracks all along.
+
+## Pass 151 - the elliptical lunge, decoded and emitted
+
+Pass 150 named the addresses. This decodes the biggest of them and wires it in:
+**nineteen moves now swing their battler round an ellipse** -- QUICK ATTACK's
+nine-frame dart, AERIAL ACE, WING ATTACK, STEEL WING, SUBMISSION, AGILITY,
+COUNTER, FAINT ATTACK, OUTRAGE, PETAL DANCE, ROLLING KICK, SWORDS DANCE, TAIL
+WHIP, VITAL THROW, WHIRLWIND, WRAP, DOUBLE EDGE, SECRET POWER, STRENGTH.
+
+### Which of the two is which, proved rather than assumed
+
+The cartridge has a plain task and a wrapper that negates the x amplitude when
+the attacker is not on the player's side. `monEllipse` takes WING ATTACK's
+first task as the plain one and QUICK ATTACK's as the wrapper -- and then
+proves the pairing structurally: **the wrapper BRANCHES TO the plain one.** A
+BL at +0x1E from `0x0D5830` lands exactly on `0x0D5738`. Nothing here has to
+believe a name.
+
+That distinction is not cosmetic. Only the wrapper negates, so only its number
+is already the player's: `authoredForPlayer` is set for the wrapper and left
+nil for the plain task. Mirroring the plain one would send WING ATTACK's lunge
+backwards, away from the target.
+
+### The step
+
+```
+x2    = Sin(phase, xAmp)
+y2    = -Cos(phase, yAmp) + yAmp
+phase = (phase + (1 << speed)) & 0xFF
+```
+
+with a cycle spent every time that wrap lands back on zero. `Cos(i, a)` is
+`Sin(i + 64, a)` on this cartridge, which is why the sine table is read 64
+entries along rather than a second table being hunted for -- and why a
+256-entry copy of `gSineTable` would be read off its end. It is 320.
+
+The setup calls its own step once before returning, so the first sample belongs
+to the frame the task was created on, and the last thing the step does is put
+the Pokemon back at 0,0.
+
+Stored as offsets, one pair a frame, for the same reason the sway is: `>> 8` is
+ARITHMETIC, so it floors, and a negative product lands one lower than a
+division would. QUICK ATTACK's track is the whole shape in nine numbers:
+
+```
+xs = 0  16  24  16   0 -17 -24 -17  0
+ys = 0   2   6  11  12  11   6   2  0
+```
+
+Out 24 pixels and back through -24, arcing 12 high. The asymmetry between +16
+and -17 is the floor, and it is why this is computed once here off the
+cartridge's own table rather than again at runtime off a floating-point sine.
+
+### The renderer needed nothing
+
+The track goes into `shakes`, where `shakeAt` has read `xs`/`ys` since the sway
+was decoded. Not one line of the battle player changed.
+
+### How it is checked without a cartridge
+
+`ellipseOffsets` is pure given a shape, and a shape is a sine table and two
+addresses -- so `tools/gen3_ellipse_check.lua` exercises the extractor's own
+function directly, which matters because the import that would otherwise
+exercise it needs LOVE and a ROM and cannot run in a check.
+
+`tools/gen3_ellipse_ref.lua` holds the answer, computed from pokeemerald's own
+`AnimTask_TranslateMonElliptical_Step` and the cartridge's `gSineTable`, for the
+real arguments of all twenty calls read out of the ROM's script table.
+**940 frames compared one at a time.** Agreeing with that is agreeing with the
+hardware; recomputing the same formula beside the code would only prove the
+formula had been copied consistently.
+
+One thing fell out of it: the check feeds a sine table built with `math.sin`
+while the reference was built from the ROM's bytes, and they agree on every one
+of those 940 frames. `gSineTable` is exactly `round(sin * 256)`.
+
+### Changed
+
+- `src/import/RomExtractorGen3.lua` - `MON_ELLIPSE`, `monEllipse`,
+  `ellipseOffsets`, and the pass that marks the moves.
+- `tools/gen3_ellipse_ref.lua` - new, the generated reference.
+- `tools/gen3_ellipse_check.lua` - new, 181 checks.
+
+Regression: 17 argument-free tools green, 0 failing; `gen3_move_anim_audit`
+6,724; `gen3_map_render_check` 1,619; `gen3_gym_warp_check` 207;
+`gen3_anim_record_consumers` 15; `gen3_anim_task_addresses` 21.
+
+### Proved bites
+
+| planted fault | caught by |
+| --- | --- |
+| Cos read as Sin, no quarter turn | frame 1 is 0,6 where the cartridge gives 0,0 |
+| the y arc not lifted by its amplitude | frame 1 is 0,-4 |
+| the y arc not inverted | frame 1 is 0,12 |
+| the shift truncates instead of flooring | QUICK ATTACK frame 6 is -16, not -17 |
+| the phase advances by one, not by the wave | 257 frames where 17 are right |
+| the wave is the speed, not two to the speed | 257 frames where 65 are right |
+| the phase not kept in a byte | the decoder refuses its own arguments |
+| the speed refused instead of clamped | a call the hardware plays is dropped |
+| the Pokemon not put back at the end | 96 frames where 97 are right |
+| the battler selector ignored, or inverted | SECRET POWER and QUICK ATTACK |
+| the plain task claims the player's side | WING ATTACK's lunge would mirror |
+| a neither-side battler, a zero-width lunge, any cycle count | the guards |
+
+### What is left
+
+`RotateMonSpriteToSide` (4 moves), `RotateMonToSideAndRestore`,
+`RapinSpinMonElevation` and `RotateAuroraRingColors` still have addresses and no
+decode -- rotation, not translation, so they need a channel the tracks do not
+provide. And the extractor's own `monEllipse` has not been run against a real
+import here: the decode is proved frame-for-frame, the FINDING of the two
+addresses at import time is not, and a play-test is what settles that the
+nineteen moves now lunge on screen.

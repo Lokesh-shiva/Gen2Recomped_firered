@@ -114,6 +114,12 @@ end
 -- Whether this cartridge has a second screen at all.  One question, asked in
 -- one place, so no caller has to know how it is answered.
 function SecondScreen.available(game)
+  -- AN EXPLICIT HOST OVERRIDES THE CARTRIDGE QUESTION. The launcher's own
+  -- bottom screen (src/ui/LauncherSecondScreen.lua) runs before any cartridge
+  -- is mounted, so there is no generation to answer on -- and a shelf of games
+  -- is not a Gen 4 screen in the first place. Nothing else sets this flag, so
+  -- every existing caller reaches the same two answers it always did.
+  if game and game.secondScreenAlways then return true end
   local data = game and game.data
   if data and data.isGen4Cache then return true end
   local ok, V = pcall(require, "src.core.GameVersion")
@@ -128,6 +134,23 @@ end
 function SecondScreen.mode(game)
   if not SecondScreen.available(game) then return "off" end
   local mode = options(game).secondScreenMode
+  -- A DEVICE WITH TWO SCREENS USES BOTH, WITHOUT BEING ASKED FIRST.
+  --
+  -- Reported from play: "make sure platinum is detecting and using the second
+  -- screen properly if it exists within android". It was detecting it -- the
+  -- options row offers DEVICE only when a panel is really attached -- but
+  -- nothing ever seeded this option, so a nil fell through to `swap` and a
+  -- Sinnoh session on an AYN Thor opened with the bottom screen sharing the
+  -- top one. The panel sat dark until the player found the setting, which
+  -- reads exactly like a second screen that was never detected.
+  --
+  -- ONLY WHEN IT HAS NEVER BEEN SET. `nil` is the one value that means the
+  -- player has not chosen, so this is a default and not an override: the
+  -- moment they pick anything -- including `swap` -- it is written down and
+  -- honoured, on this machine and on one with no panel at all.
+  if mode == nil then
+    return SecondScreen.deviceReady() and "display" or "swap"
+  end
   for _, name in ipairs(SecondScreen.MODES) do
     if mode == name then
       -- see `deviceReady` above: with no panel attached this answers "swap",
