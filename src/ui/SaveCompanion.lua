@@ -373,17 +373,7 @@ local function drawBag(game)
 end
 
 local function toggleBadge(game,entry)
-  local key=Badges.itemFor(entry)
-  local on=Badges.has(game.save,entry)
-  local gen=generation()
-  if gen==2 or gen==3 then
-    game.save.flags=game.save.flags or {}
-    game.save.flags[key]=on and nil or true
-    if game.save.inventory then game.save.inventory[key]=nil end
-  else
-    game.save.inventory=game.save.inventory or {}
-    game.save.inventory[key]=on and nil or 1
-  end
+  Badges.toggle(game.save, entry, GameVersion.get())
 end
 
 local KEY_ROWS={"ABCDEFG","HIJKLMN","OPQRSTU","VWXYZ"}
