@@ -846,7 +846,31 @@ Game.centerClassicZones = centerClassicZones
 
 function Game:draw()
   local closeDraw = FrameProfile.section("draw: whole frame")
+
+  -- A specialized lower-screen state (battle menu, mining, Poketch screen)
+  -- claims the panel by calling SecondScreen.draw during _draw(). If nothing
+  -- claims it, a Gen 4 overworld still needs Platinum's always-present Poketch.
+  self.secondScreenDrawnThisFrame = false
   self:_draw()
+
+  do
+    local okSS, SS = pcall(require, "src.ui.SecondScreen")
+    if okSS and SS.mode and SS.mode(self) == "display"
+       and not self.secondScreenDrawnThisFrame then
+      local okP, Poketch = pcall(require, "src.ui.Gen4Poketch")
+      if okP and Poketch and Poketch.new then
+        if not self.secondScreenOverworldPoketch then
+          local okNew, p = pcall(Poketch.new, self, {})
+          if okNew then self.secondScreenOverworldPoketch = p end
+        end
+        local p = self.secondScreenOverworldPoketch
+        if p and p.drawWatch then
+          pcall(SS.draw, self, function() p:drawWatch() end)
+        end
+      end
+    end
+  end
+
   closeDraw()
   -- THE SECOND PANEL'S FRAME LEAVES LAST.
   --
