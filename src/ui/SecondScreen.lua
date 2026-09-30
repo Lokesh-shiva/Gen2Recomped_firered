@@ -260,6 +260,30 @@ local function surfaceSize(game)
   return W, H
 end
 
+local function logicalSize(game)
+  local w = game and tonumber(game.secondScreenLogicalWidth)
+  local h = game and tonumber(game.secondScreenLogicalHeight)
+  if w and h and w > 0 and h > 0 then
+    return math.floor(w), math.floor(h)
+  end
+  return W, H
+end
+
+function SecondScreen.panelSize()
+  local T = transport()
+  if T and T.readHost then
+    local ok, host = pcall(T.readHost)
+    if ok and host then
+      local w, h = tonumber(host.width), tonumber(host.height)
+      if w and h and w > 0 and h > 0 then
+        return math.floor(w), math.floor(h)
+      end
+    end
+  end
+  return W, H
+end
+
+
 local function surface(game)
   if not game then return nil end
   local sw, sh = surfaceSize(game)
@@ -329,7 +353,8 @@ function SecondScreen.draw(game, body)
       g.clear(0, 0, 0, 1)
       if game.secondScreenNativePanel then
         local sw, sh = surfaceSize(game)
-        g.scale(sw / W, sh / H)
+        local lw, lh = logicalSize(game)
+        g.scale(sw / lw, sh / lh)
       end
       local ok, err = pcall(body)
       g.setCanvas(previous)
@@ -480,11 +505,12 @@ end
 -- asks and none of them learns a second coordinate space.
 function SecondScreen.injectTouch(game, method, id, x, y)
   if not game or SecondScreen.mode(game) ~= "display" then return false end
+  local lw, lh = logicalSize(game)
   if game.secondScreenNativePanel and x and y then
     local sw, sh = surfaceSize(game)
-    x, y = x * W / sw, y * H / sh
+    x, y = x * lw / sw, y * lh / sh
   end
-  if not (x and y) or x < 0 or y < 0 or x >= W or y >= H then return false end
+  if not (x and y) or x < 0 or y < 0 or x >= lw or y >= lh then return false end
   local handler = game[method]
   if type(handler) ~= "function" then return false end
   local was = game.secondScreenInjecting
