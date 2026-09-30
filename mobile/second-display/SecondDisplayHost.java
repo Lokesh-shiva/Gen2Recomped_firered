@@ -359,24 +359,15 @@ public class SecondDisplayHost extends ContentProvider {
       if (hdr == null) return;
       int w = hdr[1], h = hdr[2], seq = hdr[3];
       if (seq == lastSeq) return;
-      final int TRAILER_BYTES = 6;
-      long want = (long) HEADER_BYTES + (long) w * h * 4L + TRAILER_BYTES;
+      long want = (long) HEADER_BYTES + (long) w * h * 4L;
       if (len != want) return;
 
       byte[] rgba = new byte[w * h * 4];
       raf.readFully(rgba);
 
-      // The writer commits the frame only after every RGBA byte has been
-      // written. If we raced an overwrite, this trailer is either absent,
-      // still carries the previous sequence, or changes under us.
-      byte[] tail = new byte[TRAILER_BYTES];
-      raf.readFully(tail);
-      if (tail[0] != 'G' || tail[1] != '2' || tail[2] != 'O' || tail[3] != 'K') return;
-      int tailSeq = (tail[4] & 0xff) | ((tail[5] & 0xff) << 8);
-      if (tailSeq != seq) return;
-
-      // Re-read the header after the payload too. This closes the opposite
-      // race: a new write beginning after our first header read.
+      // Re-read the header after the payload. If Lua started another write
+      // while this frame was being copied, the sequence/header changes and
+      // this sample is discarded.
       raf.seek(0);
       byte[] verifyHead = new byte[HEADER_BYTES];
       raf.readFully(verifyHead);
