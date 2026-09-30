@@ -245,6 +245,15 @@ end
 -- exactly the DS's own 256x192: the panel it goes to is some other size and
 -- scaling to it is the host's job, not a decision baked into the pixels.
 local function surfaceSize(game)
+  -- A native companion may latch a stable physical-panel size. The Android
+  -- host heartbeat is asynchronous and can briefly report protocol fallback
+  -- dimensions while Presentation reconnects; using those transient values
+  -- here reallocates the framebuffer and visibly flashes the lower display.
+  local pinnedW = game and tonumber(game.secondScreenSurfaceWidth)
+  local pinnedH = game and tonumber(game.secondScreenSurfaceHeight)
+  if pinnedW and pinnedH and pinnedW > 0 and pinnedH > 0 then
+    return math.floor(pinnedW), math.floor(pinnedH)
+  end
   if game and game.secondScreenNativePanel then
     local T = transport()
     if T and T.readHost then
