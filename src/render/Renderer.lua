@@ -1060,12 +1060,11 @@ function Renderer:endFrame(zones, worldZones)
     local ow, oh = self.worldOverride:getDimensions()
     local osx = (ow and ow > 0) and (ww / ow) or (1 / dpiX)
     local osy = (oh and oh > 0) and (wh / oh) or (1 / dpiY)
-    local loveMajor = love.getVersion()
-    if love.system and love.system.getOS and love.system.getOS() == "iOS" and loveMajor >= 12 then
-      love.graphics.draw(self.worldOverride, 0, wh, 0, osx, -osy)
-    else
-      love.graphics.draw(self.worldOverride, 0, 0, 0, osx, osy)
-    end
+    -- Canvas orientation is already normalized by current LÖVE on iOS.
+    -- An older workaround flipped worldOverride vertically on iOS/LÖVE 12+,
+    -- which now double-flips Gen 4's 3D world while leaving the UI upright.
+    -- Keep one presentation path on every platform.
+    love.graphics.draw(self.worldOverride, 0, 0, 0, osx, osy)
     love.graphics.setScissor()
     -- the screen-space overlays the flat path draws over its composite
     local fade = self.worldFadeAlpha
