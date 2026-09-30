@@ -261,6 +261,7 @@ function SecondScreen.canvas(game)
 end
 
 function SecondScreen.draw(game, body)
+  if game then game.secondScreenDrawnThisFrame = true end
   local g = love.graphics
   -- `display` is the one mode where the bottom screen is not in the window,
   -- so it cannot be a translate: the body is rendered to our own canvas and
