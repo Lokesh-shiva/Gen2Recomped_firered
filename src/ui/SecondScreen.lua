@@ -244,9 +244,34 @@ end
 -- it dies with the session rather than outliving it in a module local, at
 -- exactly the DS's own 256x192: the panel it goes to is some other size and
 -- scaling to it is the host's job, not a decision baked into the pixels.
+local function surfaceSize(game)
+  if game and game.secondScreenNativePanel then
+    local T = transport()
+    if T and T.readHost then
+      local ok, host = pcall(T.readHost)
+      if ok and host then
+        local w, h = tonumber(host.width), tonumber(host.height)
+        if w and h and w > 0 and h > 0 then
+          return math.floor(w), math.floor(h)
+        end
+      end
+    end
+  end
+  return W, H
+end
+
 local function surface(game)
   if not game then return nil end
-  if game.secondScreenCanvas then return game.secondScreenCanvas end
+  local sw, sh = surfaceSize(game)
+  if game.secondScreenCanvas
+     and game.secondScreenCanvasWidth == sw
+     and game.secondScreenCanvasHeight == sh then
+    return game.secondScreenCanvas
+  end
+  if game.secondScreenCanvas and game.secondScreenCanvas.release then
+    pcall(game.secondScreenCanvas.release, game.secondScreenCanvas)
+  end
+  game.secondScreenCanvas = nil
   local g = love.graphics
   if not (g and g.newCanvas) then return nil end
   -- Offscreen DS pixels must be device-independent. On high-DPI Android,
@@ -254,7 +279,7 @@ local function surface(game)
   -- 256x192 canvas became a 591x443 backing texture. Canvas:newImageData()
   -- then returns those physical pixels, while the transport header still said
   -- 256x192, producing scrambled rows / rejected frame sizes.
-  local ok, made = pcall(g.newCanvas, W, H, {
+  local ok, made = pcall(g.newCanvas, sw, sh, {
     format = "rgba8",
     dpiscale = 1,
     readable = true,
@@ -262,14 +287,16 @@ local function surface(game)
   -- Older LOVE builds may not know readable/dpiscale settings. Preserve
   -- compatibility, though flush() below will use the actual readback size.
   if not (ok and made) then
-    ok, made = pcall(g.newCanvas, W, H, { format = "rgba8", dpiscale = 1 })
+    ok, made = pcall(g.newCanvas, sw, sh, { format = "rgba8", dpiscale = 1 })
   end
   if not (ok and made) then
-    ok, made = pcall(g.newCanvas, W, H)
+    ok, made = pcall(g.newCanvas, sw, sh)
   end
   if not (ok and made) then return nil end
   if made.setFilter then pcall(made.setFilter, made, "nearest", "nearest") end
   game.secondScreenCanvas = made
+  game.secondScreenCanvasWidth = sw
+  game.secondScreenCanvasHeight = sh
   return made
 end
 
@@ -300,6 +327,10 @@ function SecondScreen.draw(game, body)
       g.setScissor()
       g.setColor(1, 1, 1, 1)
       g.clear(0, 0, 0, 1)
+      if game.secondScreenNativePanel then
+        local sw, sh = surfaceSize(game)
+        g.scale(sw / W, sh / H)
+      end
       local ok, err = pcall(body)
       g.setCanvas(previous)
       g.pop()
@@ -449,6 +480,10 @@ end
 -- asks and none of them learns a second coordinate space.
 function SecondScreen.injectTouch(game, method, id, x, y)
   if not game or SecondScreen.mode(game) ~= "display" then return false end
+  if game.secondScreenNativePanel and x and y then
+    local sw, sh = surfaceSize(game)
+    x, y = x * W / sw, y * H / sh
+  end
   if not (x and y) or x < 0 or y < 0 or x >= W or y >= H then return false end
   local handler = game[method]
   if type(handler) ~= "function" then return false end
