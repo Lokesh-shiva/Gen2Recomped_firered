@@ -187,12 +187,13 @@ function SecondScreen.filePush(imageData, w, h)
   fileSeq = (fileSeq + 1) % 65536
   local header = SecondScreen.MAGIC .. u16(SecondScreen.PROTOCOL)
     .. u16(w) .. u16(h) .. u16(fileSeq)
-  -- WRITTEN WHOLE, then renamed, is what a reader would want -- and LOVE's
-  -- filesystem has no rename.  The sequence number in the header is the
-  -- answer instead: a host that reads a torn frame sees a sequence it has
-  -- already drawn, or a length that does not match, and waits for the next
-  -- one rather than drawing half a picture.
-  local ok = pcall(f.write, SecondScreen.FRAME, header .. body)
+
+  -- Commit marker goes LAST. Every frame has the same final byte length, so
+  -- length alone cannot detect an in-place overwrite where Java sees the new
+  -- header while some rows still belong to the previous frame. The host only
+  -- accepts a frame when this trailing sequence matches the header sequence.
+  local trailer = "G2OK" .. u16(fileSeq)
+  local ok = pcall(f.write, SecondScreen.FRAME, header .. body .. trailer)
   return ok and true or false
 end
 
