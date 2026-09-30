@@ -106,7 +106,12 @@ local function ensureCatalog(game)
   if state.catalogData == game.data then return end
   state.catalogData=game.data
   state.moveIds=sortedKeys(game.data and game.data.moves)
-  state.itemIds=sortedKeys(game.data and game.data.items)
+  state.itemIds={}
+  for _,id in ipairs(sortedKeys(game.data and game.data.items)) do
+    if not (type(id)=="string" and Bag.isBadge and Bag.isBadge(id)) then
+      state.itemIds[#state.itemIds+1]=id
+    end
+  end
 end
 
 local function boxes(game)
@@ -429,8 +434,9 @@ local function drawMonEditor(game)
   local statX=W*.66; local statW=W*.315
   roundRect(statX,top,statW,H*.20,12,PAL.panel2); stroke(statX,top,statW,H*.20,12,PAL.line)
   local st=mon.stats or {}
-  local labels=generation()>=3 and {{"ATK","attack"},{"DEF","defense"},{"SPD","speed"},{"SPA","spatk"},{"SDF","spdef"}}
-                                  or {{"ATK","attack"},{"DEF","defense"},{"SPD","speed"},{"SPC","special"}}
+  local gen=generation()
+  local labels=gen>=2 and {{"ATK","attack"},{"DEF","defense"},{"SPD","speed"},{"SPA","spatk"},{"SDF","spdef"}}
+                       or {{"ATK","attack"},{"DEF","defense"},{"SPD","speed"},{"SPC","special"}}
   for i,row in ipairs(labels) do
     local yy=top+H*.018+(i-1)*H*.034
     text(row[1],statX+W*.015,yy,"tiny",PAL.muted)
