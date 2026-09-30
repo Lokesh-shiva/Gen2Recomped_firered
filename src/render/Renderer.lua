@@ -1060,8 +1060,17 @@ function Renderer:endFrame(zones, worldZones)
     local ow, oh = self.worldOverride:getDimensions()
     local osx = (ow and ow > 0) and (ww / ow) or (1 / dpiX)
     local osy = (oh and oh > 0) and (wh / oh) or (1 / dpiY)
+    -- iOS still needs the historical presentation flip for the older
+    -- generations. Gen 4 is the exception: its 3D worldOverride already
+    -- reaches this point in the correct orientation, so applying the same
+    -- iOS flip a second time turns Platinum upside down while its UI remains
+    -- upright.
     local loveMajor = love.getVersion()
-    if love.system and love.system.getOS and love.system.getOS() == "iOS" and loveMajor >= 12 then
+    local gen = require("src.core.GameVersion").generation()
+    if love.system and love.system.getOS
+       and love.system.getOS() == "iOS"
+       and loveMajor >= 12
+       and gen ~= 4 then
       love.graphics.draw(self.worldOverride, 0, wh, 0, osx, -osy)
     else
       love.graphics.draw(self.worldOverride, 0, 0, 0, osx, osy)

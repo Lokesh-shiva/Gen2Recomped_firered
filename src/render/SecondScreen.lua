@@ -184,16 +184,25 @@ function SecondScreen.filePush(imageData, w, h)
   end
   local okStr, body = pcall(imageData.getString, imageData)
   if not (okStr and type(body) == "string") then return false end
+
+  -- The file protocol is RGBA8 by definition. Never write a header claiming
+  -- 256x192x4 while attaching a differently-sized ImageData payload; that
+  -- leaves the Java side with a valid header and an unusable file forever.
+  local expected = (tonumber(w) or 0) * (tonumber(h) or 0) * 4
+  if #body ~= expected then
+    log(("refusing frame: %dx%d expects %d RGBA8 bytes, ImageData returned %d")
+      :format(tonumber(w) or 0, tonumber(h) or 0, expected, #body))
+    return false
+  end
+
   fileSeq = (fileSeq + 1) % 65536
   local header = SecondScreen.MAGIC .. u16(SecondScreen.PROTOCOL)
     .. u16(w) .. u16(h) .. u16(fileSeq)
-  -- WRITTEN WHOLE, then renamed, is what a reader would want -- and LOVE's
-  -- filesystem has no rename.  The sequence number in the header is the
-  -- answer instead: a host that reads a torn frame sees a sequence it has
-  -- already drawn, or a length that does not match, and waits for the next
-  -- one rather than drawing half a picture.
-  local ok = pcall(f.write, SecondScreen.FRAME, header .. body)
-  return ok and true or false
+  local packet = header .. body
+  local ok, wrote = pcall(f.write, SecondScreen.FRAME, packet)
+  -- LOVE filesystem.write normally returns true. Treat an explicit false as
+  -- failure so SecondScreen.flush keeps the frame dirty and retries.
+  return ok and wrote ~= false
 end
 
 -- Everything the host has recorded since the last call, in order, and the file
@@ -221,13 +230,17 @@ function SecondScreen.pollTouch()
 end
 
 function SecondScreen.usable()
-  return C ~= nil or SecondScreen.fileAvailable()
+  return SecondScreen.fileAvailable() or C ~= nil
 end
 
--- Which transport answered, for the log and for a check to assert on.
+-- The Java ContentProvider host owns the Android Presentation in packaged
+-- builds, so prefer its file protocol whenever its heartbeat is visible.
+-- The older FFI bridge owns a different GameActivity Presentation; choosing it
+-- merely because its symbols are linked can report "not ready" while the Java
+-- host is already displaying the physical lower panel.
 function SecondScreen.backend()
-  if C ~= nil then return "ffi" end
   if SecondScreen.fileAvailable() then return "file" end
+  if C ~= nil then return "ffi" end
   return nil
 end
 
@@ -242,9 +255,11 @@ SecondScreen.PROBE_INTERVAL = 0.5
 local probedAt, probed = nil, false
 
 function SecondScreen.available()
-  -- The native bridge first -- it hands the host a pointer and costs nothing
-  -- per frame -- then the file protocol, which needs no native code at all.
-  if not C then return SecondScreen.fileAvailable() end
+  -- Prefer the Java host. It is the component that actually owns the Android
+  -- Presentation in current APK builds. The FFI bridge remains a fallback for
+  -- builds which do not install SecondDisplayHost.
+  if SecondScreen.fileAvailable() then return true end
+  if not C then return false end
   local now = clock()
   if probedAt and now and (now - probedAt) < SecondScreen.PROBE_INTERVAL then
     return probed
@@ -265,7 +280,10 @@ end
 
 function SecondScreen.push(imageData, w, h)
   if not imageData then return false end
-  if not C then return SecondScreen.filePush(imageData, w, h) end
+  if SecondScreen.fileAvailable() then
+    return SecondScreen.filePush(imageData, w, h)
+  end
+  if not C then return false end
   return pcall(function()
     C.love_android_push_secondary(imageData:getFFIPointer(), w, h)
   end)

@@ -244,15 +244,92 @@ end
 -- it dies with the session rather than outliving it in a module local, at
 -- exactly the DS's own 256x192: the panel it goes to is some other size and
 -- scaling to it is the host's job, not a decision baked into the pixels.
+local function surfaceSize(game)
+  -- A native companion may latch a stable physical-panel size. The Android
+  -- host heartbeat is asynchronous and can briefly report protocol fallback
+  -- dimensions while Presentation reconnects; using those transient values
+  -- here reallocates the framebuffer and visibly flashes the lower display.
+  local pinnedW = game and tonumber(game.secondScreenSurfaceWidth)
+  local pinnedH = game and tonumber(game.secondScreenSurfaceHeight)
+  if pinnedW and pinnedH and pinnedW > 0 and pinnedH > 0 then
+    return math.floor(pinnedW), math.floor(pinnedH)
+  end
+  if game and game.secondScreenNativePanel then
+    local T = transport()
+    if T and T.readHost then
+      local ok, host = pcall(T.readHost)
+      if ok and host then
+        local w, h = tonumber(host.width), tonumber(host.height)
+        if w and h and w > 0 and h > 0 then
+          return math.floor(w), math.floor(h)
+        end
+      end
+    end
+  end
+  return W, H
+end
+
+local function logicalSize(game)
+  local w = game and tonumber(game.secondScreenLogicalWidth)
+  local h = game and tonumber(game.secondScreenLogicalHeight)
+  if w and h and w > 0 and h > 0 then
+    return math.floor(w), math.floor(h)
+  end
+  return W, H
+end
+
+function SecondScreen.panelSize()
+  local T = transport()
+  if T and T.readHost then
+    local ok, host = pcall(T.readHost)
+    if ok and host then
+      local w, h = tonumber(host.width), tonumber(host.height)
+      if w and h and w > 0 and h > 0 then
+        return math.floor(w), math.floor(h)
+      end
+    end
+  end
+  return W, H
+end
+
+
 local function surface(game)
   if not game then return nil end
-  if game.secondScreenCanvas then return game.secondScreenCanvas end
+  local sw, sh = surfaceSize(game)
+  if game.secondScreenCanvas
+     and game.secondScreenCanvasWidth == sw
+     and game.secondScreenCanvasHeight == sh then
+    return game.secondScreenCanvas
+  end
+  if game.secondScreenCanvas and game.secondScreenCanvas.release then
+    pcall(game.secondScreenCanvas.release, game.secondScreenCanvas)
+  end
+  game.secondScreenCanvas = nil
   local g = love.graphics
   if not (g and g.newCanvas) then return nil end
-  local ok, made = pcall(g.newCanvas, W, H)
+  -- Offscreen DS pixels must be device-independent. On high-DPI Android,
+  -- newCanvas(W,H) inherits the window DPI scale: on the AYN Thor a logical
+  -- 256x192 canvas became a 591x443 backing texture. Canvas:newImageData()
+  -- then returns those physical pixels, while the transport header still said
+  -- 256x192, producing scrambled rows / rejected frame sizes.
+  local ok, made = pcall(g.newCanvas, sw, sh, {
+    format = "rgba8",
+    dpiscale = 1,
+    readable = true,
+  })
+  -- Older LOVE builds may not know readable/dpiscale settings. Preserve
+  -- compatibility, though flush() below will use the actual readback size.
+  if not (ok and made) then
+    ok, made = pcall(g.newCanvas, sw, sh, { format = "rgba8", dpiscale = 1 })
+  end
+  if not (ok and made) then
+    ok, made = pcall(g.newCanvas, sw, sh)
+  end
   if not (ok and made) then return nil end
   if made.setFilter then pcall(made.setFilter, made, "nearest", "nearest") end
   game.secondScreenCanvas = made
+  game.secondScreenCanvasWidth = sw
+  game.secondScreenCanvasHeight = sh
   return made
 end
 
@@ -261,6 +338,7 @@ function SecondScreen.canvas(game)
 end
 
 function SecondScreen.draw(game, body)
+  if game then game.secondScreenDrawnThisFrame = true end
   local g = love.graphics
   -- `display` is the one mode where the bottom screen is not in the window,
   -- so it cannot be a translate: the body is rendered to our own canvas and
@@ -282,6 +360,11 @@ function SecondScreen.draw(game, body)
       g.setScissor()
       g.setColor(1, 1, 1, 1)
       g.clear(0, 0, 0, 1)
+      if game.secondScreenNativePanel then
+        local sw, sh = surfaceSize(game)
+        local lw, lh = logicalSize(game)
+        g.scale(sw / lw, sh / lh)
+      end
       local ok, err = pcall(body)
       g.setCanvas(previous)
       g.pop()
@@ -361,13 +444,28 @@ function SecondScreen.flush(game)
   if last and now - last < SecondScreen.PUSH_INTERVAL then return false end
   local okData, data = pcall(canvas.newImageData, canvas)
   if not (okData and data) then return false end
-  local sent = T.push(data, W, H) and true or false
+  -- newImageData reports physical pixel dimensions. Normally dpiscale=1
+  -- above makes these exactly 256x192; using the actual dimensions here also
+  -- keeps the wire header truthful on a backend which ignores that setting.
+  local pushW, pushH = W, H
+  if data.getDimensions then
+    local okDims, dw, dh = pcall(data.getDimensions, data)
+    if okDims and tonumber(dw) and tonumber(dh) and dw > 0 and dh > 0 then
+      pushW, pushH = dw, dh
+    end
+  end
+  local okPush, pushed = pcall(T.push, data, pushW, pushH)
+  local sent = okPush and pushed and true or false
   if data.release then pcall(data.release, data) end
-  -- Cleared whether or not the push landed.  A frame the host refused is
-  -- stale by the next one anyway, and keeping the flag set would retry the
-  -- readback every frame for as long as the panel stayed unhappy.
-  game.secondScreenDirty = false
-  game.secondScreenPushedAt = now
+
+  -- Do not throw away the pending frame when Android has detected the second
+  -- display but its Presentation/file bridge is not ready yet. This is common
+  -- during startup on dual-screen Android hardware: keeping the dirty flag set
+  -- lets the same bottom-screen state retry on the next eligible frame.
+  if sent then
+    game.secondScreenDirty = false
+    game.secondScreenPushedAt = now
+  end
   return sent
 end
 
@@ -416,7 +514,12 @@ end
 -- asks and none of them learns a second coordinate space.
 function SecondScreen.injectTouch(game, method, id, x, y)
   if not game or SecondScreen.mode(game) ~= "display" then return false end
-  if not (x and y) or x < 0 or y < 0 or x >= W or y >= H then return false end
+  local lw, lh = logicalSize(game)
+  if game.secondScreenNativePanel and x and y then
+    local sw, sh = surfaceSize(game)
+    x, y = x * lw / sw, y * lh / sh
+  end
+  if not (x and y) or x < 0 or y < 0 or x >= lw or y >= lh then return false end
   local handler = game[method]
   if type(handler) ~= "function" then return false end
   local was = game.secondScreenInjecting

@@ -94,9 +94,10 @@ public class SecondDisplayHost extends ContentProvider {
   private final Handler ui = new Handler(Looper.getMainLooper());
   private volatile boolean running = false;
   private Thread pump;
-  private PanelPresentation presentation;
+  private volatile Activity activeActivity;
+  private volatile PanelPresentation presentation;
   private File[] roots = new File[0];
-  private File frameFile, touchFile;
+  private volatile File frameFile, touchFile;
 
   private volatile int lastSeq = -1;
   private volatile int frameW = 0, frameH = 0;
@@ -115,10 +116,8 @@ public class SecondDisplayHost extends ContentProvider {
       Log.w(TAG, "no save directory found; second display inactive");
       return true;
     }
-    // The frame and the taps live beside each other in whichever root Lua
-    // actually chose; that is the one where frame.bin turns up.
-    frameFile = new File(roots[0], FRAME_FILE);
-    touchFile = new File(roots[0], TOUCH_FILE);
+    Log.i(TAG, "SecondDisplayHost created");
+    for (File root : roots) Log.i(TAG, "save root: " + root.getAbsolutePath());
 
     if (appContext instanceof Application) {
       ((Application) appContext).registerActivityLifecycleCallbacks(
@@ -171,12 +170,21 @@ public class SecondDisplayHost extends ContentProvider {
   private Display secondaryDisplay() {
     DisplayManager dm =
         (DisplayManager) appContext.getSystemService(Context.DISPLAY_SERVICE);
-    if (dm == null) return null;
+    if (dm == null) {
+      Log.w(TAG, "DisplayManager unavailable");
+      return null;
+    }
+    Display[] all = dm.getDisplays();
+    if (all != null) {
+      for (Display d : all) {
+        Log.d(TAG, "display id=" + d.getDisplayId()
+            + " name=" + d.getName()
+            + " flags=" + d.getFlags()
+            + " state=" + d.getState());
+      }
+    }
     Display[] ds = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
     if (ds != null && ds.length > 0) return ds[0];
-    // Some devices do not tag their built-in second panel as a presentation
-    // display. Anything that is not the default one still counts.
-    Display[] all = dm.getDisplays();
     if (all != null) {
       for (Display d : all) {
         if (d.getDisplayId() != Display.DEFAULT_DISPLAY) return d;
@@ -186,34 +194,51 @@ public class SecondDisplayHost extends ContentProvider {
   }
 
   private void attach(Activity activity) {
-    if (running) return;
+    activeActivity = activity;
+    if (!running) startPump();
+    ensurePresentation();
+  }
+
+  private void ensurePresentation() {
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      ui.post(new Runnable() {
+        @Override public void run() { ensurePresentation(); }
+      });
+      return;
+    }
+    if (!running || presentation != null) return;
+    Activity activity = activeActivity;
+    if (activity == null || activity.isFinishing()) return;
+
     Display d = secondaryDisplay();
     if (d == null) {
-      // ONE display: say so, every second, so Lua keeps the option hidden
-      // rather than offering a mode that would blank the bottom of the phone.
       writeHost(1, 0, 0);
-      startPump(null);
       return;
     }
+
     android.graphics.Point size = new android.graphics.Point();
     d.getSize(size);
-    presentation = new PanelPresentation(activity, d);
+    Log.i(TAG, "using secondary display id=" + d.getDisplayId()
+        + " name=" + d.getName() + " size=" + size.x + "x" + size.y);
+    PanelPresentation p = new PanelPresentation(activity, d);
     try {
-      presentation.show();
+      p.show();
+      presentation = p;
+      lastSeq = -1;
+      writeHost(2, size.x, size.y);
+      Log.i(TAG, "Presentation.show succeeded");
+      Log.i(TAG, "second display attached: " + size.x + "x" + size.y);
     } catch (Throwable t) {
-      Log.w(TAG, "presentation refused: " + t);
+      Log.e(TAG, "presentation refused", t);
+      try { p.dismiss(); } catch (Throwable ignored) { }
       presentation = null;
       writeHost(1, 0, 0);
-      startPump(null);
-      return;
     }
-    writeHost(2, size.x, size.y);
-    startPump(presentation);
-    Log.i(TAG, "second display attached: " + size.x + "x" + size.y);
   }
 
   private void detach() {
     running = false;
+    activeActivity = null;
     if (pump != null) { pump.interrupt(); pump = null; }
     final PanelPresentation p = presentation;
     presentation = null;
@@ -241,21 +266,31 @@ public class SecondDisplayHost extends ContentProvider {
     }
   }
 
-  private void startPump(final PanelPresentation panel) {
+  private void startPump() {
     running = true;
-    final int displays = panel == null ? 1 : 2;
     pump = new Thread(new Runnable() {
       @Override public void run() {
         long lastHost = 0;
+        long lastDiscovery = 0;
         while (running) {
           long now = android.os.SystemClock.uptimeMillis();
+          PanelPresentation panel = presentation;
+
+          if (panel == null && now - lastDiscovery >= HOST_INTERVAL_MS) {
+            lastDiscovery = now;
+            ui.post(new Runnable() {
+              @Override public void run() { ensurePresentation(); }
+            });
+          }
+
           if (now - lastHost >= HOST_INTERVAL_MS) {
             lastHost = now;
-            // Re-stated every second: its being FRESH is the heartbeat, and a
-            // Lua that keeps reading a stale file must be able to notice.
+            panel = presentation;
             if (panel == null) writeHost(1, 0, 0);
             else writeHost(2, panel.panelWidth(), panel.panelHeight());
           }
+
+          panel = presentation;
           if (panel != null) readFrameOnce(panel);
           try { Thread.sleep(FRAME_POLL_MS); }
           catch (InterruptedException e) { return; }
@@ -266,7 +301,7 @@ public class SecondDisplayHost extends ContentProvider {
     pump.start();
   }
 
-  /** The twelve bytes, or null if they are not a frame this end can draw.
+  /** The twelve bytes  /** The twelve bytes, or null if they are not a frame this end can draw.
    *  Extracted so tools/gen4_second_display_protocol_check.lua can feed it a
    *  header the LUA end actually wrote, rather than one a test made up to
    *  match. The two ends never meet anywhere else. */
@@ -295,31 +330,115 @@ public class SecondDisplayHost extends ContentProvider {
     return new int[] { x, y };
   }
 
+  private File findFrameFile() {
+    File newest = null;
+    for (File root : roots) {
+      File f = new File(root, FRAME_FILE);
+      if (!f.isFile()) continue;
+      if (newest == null || f.lastModified() > newest.lastModified()) newest = f;
+    }
+    if (newest != null && (frameFile == null || !newest.equals(frameFile))) {
+      frameFile = newest;
+      touchFile = new File(newest.getParentFile(), TOUCH_FILE);
+      Log.i(TAG, "active frame root: " + newest.getParentFile().getAbsolutePath());
+    }
+    return newest;
+  }
+
+  private long lastRejectLog = 0;
+
+  private int lastVisibleReject = -1;
+  private boolean haveAcceptedFrame = false;
+
+  private void rejectLog(final PanelPresentation panel, final int code, String reason) {
+    long now = android.os.SystemClock.uptimeMillis();
+    if (now - lastRejectLog >= 1000) {
+      lastRejectLog = now;
+      Log.w(TAG, "FRAME REJECT: " + reason);
+    }
+    if (!haveAcceptedFrame && lastVisibleReject != code && panel != null && panel.view != null) {
+      lastVisibleReject = code;
+      final PanelView v = panel.view;
+      ui.post(new Runnable() {
+        @Override public void run() { v.showTransportStatus(code); }
+      });
+    }
+  }
+
   private void readFrameOnce(PanelPresentation panel) {
-    File f = frameFile;
-    if (f == null || !f.isFile()) return;
+    File f = findFrameFile();
+    if (f == null || !f.isFile()) {
+      rejectLog(panel, 1, "no frame.bin found in save roots");
+      return;
+    }
     long len = f.length();
-    if (len < HEADER_BYTES) return;
+    if (len < HEADER_BYTES) {
+      rejectLog(panel, 2, "short file len=" + len);
+      return;
+    }
     RandomAccessFile raf = null;
     try {
       raf = new RandomAccessFile(f, "r");
       byte[] head = new byte[HEADER_BYTES];
       raf.readFully(head);
       int[] hdr = decodeHeader(head);
-      if (hdr == null) return;
+      if (hdr == null) {
+        rejectLog(panel, 3, "invalid G2SD header len=" + len);
+        return;
+      }
       int w = hdr[1], h = hdr[2], seq = hdr[3];
       if (seq == lastSeq) return;
       long want = (long) HEADER_BYTES + (long) w * h * 4L;
-      // A TORN FRAME IS SKIPPED, NOT DRAWN. There is no rename on LOVE's
-      // filesystem, so a read can land mid-write; a short file is exactly
-      // what that looks like, and the next sequence will be whole.
-      if (len < want) return;
+      boolean legacyTrailer = len == want + 6L;
+      if (len != want && !legacyTrailer) {
+        // love.filesystem.write truncates/replaces frame.bin while this pump is
+        // polling it. A temporary length mismatch is therefore expected and
+        // must never replace the last good frame with an error screen. Leave
+        // lastSeq untouched and retry on the next pump.
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastRejectLog >= 1000) {
+          lastRejectLog = now;
+          Log.w(TAG, "FRAME RETRY: transient size mismatch seq=" + seq
+              + " got=" + len + " want=" + want + " dimensions=" + w + "x" + h);
+        }
+        return;
+      }
+
       byte[] rgba = new byte[w * h * 4];
       raf.readFully(rgba);
+
+      // One diagnostic build appended "G2OK" + sequence. Accept those files
+      // too so an old frame left in the save directory cannot permanently
+      // block a newer APK from reaching the renderer.
+      if (legacyTrailer) {
+        byte[] tail = new byte[6];
+        raf.readFully(tail);
+        int tailSeq = (tail[4] & 0xff) | ((tail[5] & 0xff) << 8);
+        if (tail[0] != 'G' || tail[1] != '2' || tail[2] != 'O' || tail[3] != 'K'
+            || tailSeq != seq) {
+          rejectLog(panel, 2, "invalid legacy trailer seq=" + seq);
+          return;
+        }
+      }
+
+      raf.seek(0);
+      byte[] verifyHead = new byte[HEADER_BYTES];
+      raf.readFully(verifyHead);
+      int[] verify = decodeHeader(verifyHead);
+      if (verify == null || verify[3] != seq || verify[1] != w || verify[2] != h) {
+        rejectLog(panel, 4, "header changed during read seq=" + seq);
+        return;
+      }
+
       lastSeq = seq;
       frameW = w; frameH = h;
+      lastVisibleReject = 5;
+      haveAcceptedFrame = true;
       panel.post(w, h, rgba);
-    } catch (Throwable ignored) {
+      Log.i(TAG, "FRAME ACCEPT seq=" + seq + " size=" + w + "x" + h
+          + " bytes=" + len + " path=" + f.getAbsolutePath());
+    } catch (Throwable t) {
+      Log.e(TAG, "readFrameOnce failed", t);
     } finally {
       if (raf != null) try { raf.close(); } catch (Throwable ignored) { }
     }
@@ -352,6 +471,7 @@ public class SecondDisplayHost extends ContentProvider {
       super.onCreate(state);
       view = new PanelView(getContext());
       setContentView(view);
+      view.showDiagnosticPattern();
     }
 
     int panelWidth() { return view == null ? 0 : Math.max(view.getWidth(), 1); }
@@ -377,15 +497,108 @@ public class SecondDisplayHost extends ContentProvider {
       setBackgroundColor(Color.BLACK);
     }
 
+    void showSizeMismatch(final long actual, final long expected,
+                          final int frameWidth, final int frameHeight, final int seq) {
+      final int w = 512, h = 384;
+      Bitmap status = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      Canvas cc = new Canvas(status);
+      cc.drawColor(0xffffff00);
+      Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+      tp.setColor(0xff000000);
+      tp.setTextSize(38f);
+      tp.setTypeface(android.graphics.Typeface.MONOSPACE);
+      cc.drawText("FRAME SIZE MISMATCH", 22, 55, tp);
+      tp.setTextSize(32f);
+      cc.drawText("FILE     = " + actual, 22, 115, tp);
+      cc.drawText("EXPECTED = " + expected, 22, 160, tp);
+      cc.drawText("DIFF     = " + (actual - expected), 22, 205, tp);
+      cc.drawText("W x H    = " + frameWidth + " x " + frameHeight, 22, 250, tp);
+      cc.drawText("SEQ      = " + seq, 22, 295, tp);
+      tp.setTextSize(22f);
+      cc.drawText("Send a photo of these numbers", 22, 350, tp);
+      if (bitmap != null) bitmap.recycle();
+      bitmap = status;
+      srcW = w; srcH = h;
+      invalidate();
+    }
+
+    void showTransportStatus(final int code) {
+      // Visible debugger for devices where logcat is unavailable:
+      // 1=red no frame, 2=yellow short/size, 3=magenta bad header,
+      // 4=cyan frame changed during read, 5=green valid frame accepted.
+      final int w = 256, h = 192;
+      int color;
+      switch (code) {
+        case 1: color = 0xffff0000; break;
+        case 2: color = 0xffffff00; break;
+        case 3: color = 0xffff00ff; break;
+        case 4: color = 0xff00ffff; break;
+        case 5: color = 0xff00ff00; break;
+        default: color = 0xff202020; break;
+      }
+      int[] pixels = new int[w * h];
+      java.util.Arrays.fill(pixels, color);
+      // Black border plus code bars: count the vertical white bars if color
+      // reproduction itself is questionable.
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          if (x < 4 || x >= w - 4 || y < 4 || y >= h - 4)
+            pixels[y * w + x] = 0xff000000;
+        }
+      }
+      for (int n = 0; n < code; n++) {
+        int x0 = 18 + n * 28;
+        for (int y = 70; y < 122; y++)
+          for (int x = x0; x < x0 + 12; x++)
+            pixels[y * w + x] = 0xffffffff;
+      }
+      if (bitmap != null) bitmap.recycle();
+      bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      bitmap.setPixels(pixels, 0, w, 0, 0, w, h);
+      srcW = w; srcH = h;
+      invalidate();
+    }
+
+    void showDiagnosticPattern() {
+      final int w = 256, h = 192;
+      int[] pixels = new int[w * h];
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          int color;
+          if (y < h / 2) color = x < w / 2 ? 0xffff0000 : 0xff00ff00;
+          else color = x < w / 2 ? 0xff0000ff : 0xffffffff;
+          if (x == 0 || x == w - 1 || y == 0 || y == h - 1
+              || x == w / 2 || y == h / 2) color = 0xff000000;
+          pixels[y * w + x] = color;
+        }
+      }
+      if (bitmap != null) bitmap.recycle();
+      bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      bitmap.setPixels(pixels, 0, w, 0, 0, w, h);
+      srcW = w; srcH = h;
+      invalidate();
+      Log.i(TAG, "DIAG: Java color-quadrant pattern posted");
+    }
+
     void accept(int w, int h, byte[] rgba) {
       if (bitmap == null || srcW != w || srcH != h) {
         if (bitmap != null) bitmap.recycle();
         bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         srcW = w; srcH = h;
       }
-      // ARGB_8888 is RGBA in memory order, which is what LOVE's ImageData
-      // hands over, so the bytes go straight in with no per-pixel work.
-      bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgba));
+
+      // LOVE's ImageData string is packed RGBA. Convert explicitly instead of
+      // relying on Bitmap's native raw-buffer byte order.
+      int count = w * h;
+      int[] pixels = new int[count];
+      for (int p = 0, off = 0; p < count; p++, off += 4) {
+        int r = rgba[off] & 0xff;
+        int g = rgba[off + 1] & 0xff;
+        int bl = rgba[off + 2] & 0xff;
+        int alpha = rgba[off + 3] & 0xff;
+        pixels[p] = (alpha << 24) | (r << 16) | (g << 8) | bl;
+      }
+      bitmap.setPixels(pixels, 0, w, 0, 0, w, h);
       invalidate();
     }
 
