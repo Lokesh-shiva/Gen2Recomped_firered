@@ -347,23 +347,32 @@ public class SecondDisplayHost extends ContentProvider {
 
   private long lastRejectLog = 0;
 
-  private void rejectLog(String reason) {
+  private int lastVisibleReject = -1;
+
+  private void rejectLog(final PanelPresentation panel, final int code, String reason) {
     long now = android.os.SystemClock.uptimeMillis();
     if (now - lastRejectLog >= 1000) {
       lastRejectLog = now;
       Log.w(TAG, "FRAME REJECT: " + reason);
+    }
+    if (lastVisibleReject != code && panel != null && panel.view != null) {
+      lastVisibleReject = code;
+      final PanelView v = panel.view;
+      ui.post(new Runnable() {
+        @Override public void run() { v.showTransportStatus(code); }
+      });
     }
   }
 
   private void readFrameOnce(PanelPresentation panel) {
     File f = findFrameFile();
     if (f == null || !f.isFile()) {
-      rejectLog("no frame.bin found in save roots");
+      rejectLog(panel, 1, "no frame.bin found in save roots");
       return;
     }
     long len = f.length();
     if (len < HEADER_BYTES) {
-      rejectLog("short file len=" + len);
+      rejectLog(panel, 2, "short file len=" + len);
       return;
     }
     RandomAccessFile raf = null;
@@ -373,14 +382,14 @@ public class SecondDisplayHost extends ContentProvider {
       raf.readFully(head);
       int[] hdr = decodeHeader(head);
       if (hdr == null) {
-        rejectLog("invalid G2SD header len=" + len);
+        rejectLog(panel, 3, "invalid G2SD header len=" + len);
         return;
       }
       int w = hdr[1], h = hdr[2], seq = hdr[3];
       if (seq == lastSeq) return;
       long want = (long) HEADER_BYTES + (long) w * h * 4L;
       if (len != want) {
-        rejectLog("size mismatch seq=" + seq + " got=" + len + " want=" + want
+        rejectLog(panel, 2, "size mismatch seq=" + seq + " got=" + len + " want=" + want
             + " dimensions=" + w + "x" + h);
         return;
       }
@@ -393,12 +402,13 @@ public class SecondDisplayHost extends ContentProvider {
       raf.readFully(verifyHead);
       int[] verify = decodeHeader(verifyHead);
       if (verify == null || verify[3] != seq || verify[1] != w || verify[2] != h) {
-        rejectLog("header changed during read seq=" + seq);
+        rejectLog(panel, 4, "header changed during read seq=" + seq);
         return;
       }
 
       lastSeq = seq;
       frameW = w; frameH = h;
+      lastVisibleReject = 5;
       panel.post(w, h, rgba);
       Log.i(TAG, "FRAME ACCEPT seq=" + seq + " size=" + w + "x" + h
           + " bytes=" + len + " path=" + f.getAbsolutePath());
@@ -460,6 +470,43 @@ public class SecondDisplayHost extends ContentProvider {
     PanelView(Context c) {
       super(c);
       setBackgroundColor(Color.BLACK);
+    }
+
+    void showTransportStatus(final int code) {
+      // Visible debugger for devices where logcat is unavailable:
+      // 1=red no frame, 2=yellow short/size, 3=magenta bad header,
+      // 4=cyan frame changed during read, 5=green valid frame accepted.
+      final int w = 256, h = 192;
+      int color;
+      switch (code) {
+        case 1: color = 0xffff0000; break;
+        case 2: color = 0xffffff00; break;
+        case 3: color = 0xffff00ff; break;
+        case 4: color = 0xff00ffff; break;
+        case 5: color = 0xff00ff00; break;
+        default: color = 0xff202020; break;
+      }
+      int[] pixels = new int[w * h];
+      java.util.Arrays.fill(pixels, color);
+      // Black border plus code bars: count the vertical white bars if color
+      // reproduction itself is questionable.
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          if (x < 4 || x >= w - 4 || y < 4 || y >= h - 4)
+            pixels[y * w + x] = 0xff000000;
+        }
+      }
+      for (int n = 0; n < code; n++) {
+        int x0 = 18 + n * 28;
+        for (int y = 70; y < 122; y++)
+          for (int x = x0; x < x0 + 12; x++)
+            pixels[y * w + x] = 0xffffffff;
+      }
+      if (bitmap != null) bitmap.recycle();
+      bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      bitmap.setPixels(pixels, 0, w, 0, 0, w, h);
+      srcW = w; srcH = h;
+      invalidate();
     }
 
     void showDiagnosticPattern() {
