@@ -165,7 +165,7 @@ function BattleState:isWideBattleLayout()
   -- Emerald's own healthboxes on the surface's own edges and Emerald's own
   -- bottom strip spanning it.  This function is the Game Boy layout's
   -- question and keeps the Game Boy layout's answer.
-  if GameVersion.isGen3() then return false end
+  if GameVersion.isGen3() or GameVersion.isGen4() then return false end
   local options = self.game and self.game.save and self.game.save.options
   return options and options.battleLayout == "wide" or false
 end
@@ -242,7 +242,35 @@ function BattleState:gen3SurfaceWidth()
   return self._gen3SurfaceW
 end
 
--- A WIDENED EMERALD BATTLE OWNS THE SURFACE UNTIL IT LEAVES THE STACK.
+-- BATTLE LAYOUT = WIDE, IN SINNOH'S OWN TERMS. Platinum keeps its DS battle
+-- compositor; only its surface grows horizontally.
+function BattleState:gen4WideLayout()
+  if not self:gen4Layout() then return false end
+  local options = self.game and self.game.save and self.game.save.options
+  return options and options.battleLayout == "wide" or false
+end
+
+function BattleState:gen4SurfaceWidth()
+  if not self:gen4WideLayout() then return Gen4Battle.WIDTH end
+  local Renderer = require("src.render.Renderer")
+  local pw, ph = 0, 0
+  if Renderer.pixelSize then
+    local ok, a, b = pcall(Renderer.pixelSize, Renderer)
+    if ok and type(a) == "number" and type(b) == "number" then pw, ph = a, b end
+  end
+  local fill = self:wantsFillScale()
+  local key = pw .. "x" .. ph .. (fill and "/fill" or "/fixed")
+  if self._gen4SurfaceKey ~= key then
+    self._gen4SurfaceKey = key
+    self._gen4SurfaceW = Gen4Battle.surfaceWidth(pw, ph, fill,
+                                                 math.min(Renderer.MAX_UI_WIDTH or 512, 512))
+  end
+  return self._gen4SurfaceW
+end
+
+-- A WIDENED EMERALD OR SINNOH BATTLE OWNS THE SURFACE UNTIL IT LEAVES
+-- the stack, so menus pushed over it cannot collapse the framebuffer.
+
 --
 -- Same rule, and the same reason, as the Game Boy wide layout's
 -- (Game.wideBattleInStack): the party menu, the bag and the dialogue boxes a
@@ -253,6 +281,9 @@ end
 -- redrawing its wider composition into a surface 240 wide, clipped at the
 -- right edge, and snapping back out again when the menu closed.
 function BattleState:holdsUISurface()
+  if self:gen4Layout() then
+    return self:gen4SurfaceWidth() > Gen4Battle.WIDTH
+  end
   return self:gen3SurfaceWidth() > Gen3Battle.WIDTH
 end
 
@@ -471,7 +502,7 @@ function BattleState:uiSize()
   -- 512x256 with the visible half 256x192, and the platform and battler
   -- positions are absolute pixels on that.
   if self:gen4Layout() then
-    return Gen4Battle.WIDTH, Gen4Battle.HEIGHT
+    return self:gen4SurfaceWidth(), Gen4Battle.HEIGHT
   end
   return 160, 144
 end
