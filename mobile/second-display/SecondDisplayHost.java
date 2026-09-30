@@ -390,8 +390,23 @@ public class SecondDisplayHost extends ContentProvider {
       long want = (long) HEADER_BYTES + (long) w * h * 4L;
       boolean legacyTrailer = len == want + 6L;
       if (len != want && !legacyTrailer) {
-        rejectLog(panel, 2, "size mismatch seq=" + seq + " got=" + len + " want=" + want
-            + " dimensions=" + w + "x" + h);
+        if (panel != null && panel.view != null) {
+          final PanelView v = panel.view;
+          final long actualLen = len, expectedLen = want;
+          final int fw = w, fh = h, fseq = seq;
+          ui.post(new Runnable() {
+            @Override public void run() {
+              v.showSizeMismatch(actualLen, expectedLen, fw, fh, fseq);
+            }
+          });
+        }
+        // Do not replace the detailed screen with the generic two-bar screen.
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastRejectLog >= 1000) {
+          lastRejectLog = now;
+          Log.w(TAG, "FRAME REJECT: size mismatch seq=" + seq + " got=" + len
+              + " want=" + want + " dimensions=" + w + "x" + h);
+        }
         return;
       }
 
@@ -485,6 +500,31 @@ public class SecondDisplayHost extends ContentProvider {
     PanelView(Context c) {
       super(c);
       setBackgroundColor(Color.BLACK);
+    }
+
+    void showSizeMismatch(final long actual, final long expected,
+                          final int frameWidth, final int frameHeight, final int seq) {
+      final int w = 512, h = 384;
+      Bitmap status = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      Canvas cc = new Canvas(status);
+      cc.drawColor(0xffffff00);
+      Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+      tp.setColor(0xff000000);
+      tp.setTextSize(38f);
+      tp.setTypeface(android.graphics.Typeface.MONOSPACE);
+      cc.drawText("FRAME SIZE MISMATCH", 22, 55, tp);
+      tp.setTextSize(32f);
+      cc.drawText("FILE     = " + actual, 22, 115, tp);
+      cc.drawText("EXPECTED = " + expected, 22, 160, tp);
+      cc.drawText("DIFF     = " + (actual - expected), 22, 205, tp);
+      cc.drawText("W x H    = " + frameWidth + " x " + frameHeight, 22, 250, tp);
+      cc.drawText("SEQ      = " + seq, 22, 295, tp);
+      tp.setTextSize(22f);
+      cc.drawText("Send a photo of these numbers", 22, 350, tp);
+      if (bitmap != null) bitmap.recycle();
+      bitmap = status;
+      srcW = w; srcH = h;
+      invalidate();
     }
 
     void showTransportStatus(final int code) {
