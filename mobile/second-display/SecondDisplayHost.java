@@ -345,39 +345,62 @@ public class SecondDisplayHost extends ContentProvider {
     return newest;
   }
 
+  private long lastRejectLog = 0;
+
+  private void rejectLog(String reason) {
+    long now = android.os.SystemClock.uptimeMillis();
+    if (now - lastRejectLog >= 1000) {
+      lastRejectLog = now;
+      Log.w(TAG, "FRAME REJECT: " + reason);
+    }
+  }
+
   private void readFrameOnce(PanelPresentation panel) {
     File f = findFrameFile();
-    if (f == null || !f.isFile()) return;
+    if (f == null || !f.isFile()) {
+      rejectLog("no frame.bin found in save roots");
+      return;
+    }
     long len = f.length();
-    if (len < HEADER_BYTES) return;
+    if (len < HEADER_BYTES) {
+      rejectLog("short file len=" + len);
+      return;
+    }
     RandomAccessFile raf = null;
     try {
       raf = new RandomAccessFile(f, "r");
       byte[] head = new byte[HEADER_BYTES];
       raf.readFully(head);
       int[] hdr = decodeHeader(head);
-      if (hdr == null) return;
+      if (hdr == null) {
+        rejectLog("invalid G2SD header len=" + len);
+        return;
+      }
       int w = hdr[1], h = hdr[2], seq = hdr[3];
       if (seq == lastSeq) return;
       long want = (long) HEADER_BYTES + (long) w * h * 4L;
-      if (len != want) return;
+      if (len != want) {
+        rejectLog("size mismatch seq=" + seq + " got=" + len + " want=" + want
+            + " dimensions=" + w + "x" + h);
+        return;
+      }
 
       byte[] rgba = new byte[w * h * 4];
       raf.readFully(rgba);
 
-      // Re-read the header after the payload. If Lua started another write
-      // while this frame was being copied, the sequence/header changes and
-      // this sample is discarded.
       raf.seek(0);
       byte[] verifyHead = new byte[HEADER_BYTES];
       raf.readFully(verifyHead);
       int[] verify = decodeHeader(verifyHead);
-      if (verify == null || verify[3] != seq || verify[1] != w || verify[2] != h) return;
+      if (verify == null || verify[3] != seq || verify[1] != w || verify[2] != h) {
+        rejectLog("header changed during read seq=" + seq);
+        return;
+      }
 
       lastSeq = seq;
       frameW = w; frameH = h;
       panel.post(w, h, rgba);
-      Log.d(TAG, "frame seq=" + seq + " size=" + w + "x" + h
+      Log.i(TAG, "FRAME ACCEPT seq=" + seq + " size=" + w + "x" + h
           + " bytes=" + len + " path=" + f.getAbsolutePath());
     } catch (Throwable t) {
       Log.e(TAG, "readFrameOnce failed", t);
@@ -413,6 +436,7 @@ public class SecondDisplayHost extends ContentProvider {
       super.onCreate(state);
       view = new PanelView(getContext());
       setContentView(view);
+      view.showDiagnosticPattern();
     }
 
     int panelWidth() { return view == null ? 0 : Math.max(view.getWidth(), 1); }
@@ -436,6 +460,27 @@ public class SecondDisplayHost extends ContentProvider {
     PanelView(Context c) {
       super(c);
       setBackgroundColor(Color.BLACK);
+    }
+
+    void showDiagnosticPattern() {
+      final int w = 256, h = 192;
+      int[] pixels = new int[w * h];
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          int color;
+          if (y < h / 2) color = x < w / 2 ? 0xffff0000 : 0xff00ff00;
+          else color = x < w / 2 ? 0xff0000ff : 0xffffffff;
+          if (x == 0 || x == w - 1 || y == 0 || y == h - 1
+              || x == w / 2 || y == h / 2) color = 0xff000000;
+          pixels[y * w + x] = color;
+        }
+      }
+      if (bitmap != null) bitmap.recycle();
+      bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      bitmap.setPixels(pixels, 0, w, 0, 0, w, h);
+      srcW = w; srcH = h;
+      invalidate();
+      Log.i(TAG, "DIAG: Java color-quadrant pattern posted");
     }
 
     void accept(int w, int h, byte[] rgba) {
