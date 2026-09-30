@@ -853,6 +853,13 @@ function Game:draw()
   self.secondScreenDrawnThisFrame = false
   self:_draw()
 
+  -- Single-screen generations use the physical Android lower panel as a live
+  -- save companion without changing the game's own screen mode.
+  do
+    local okC, Companion = pcall(require, "src.ui.SaveCompanion")
+    if okC and Companion and Companion.tick then pcall(Companion.tick, self) end
+  end
+
   do
     local okSS, SS = pcall(require, "src.ui.SecondScreen")
     if okSS and SS.mode and SS.mode(self) == "display"
