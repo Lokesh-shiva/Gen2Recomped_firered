@@ -199,6 +199,11 @@ local function hostFor(importer)
   if not host then
     host = {
       secondScreenAlways = true,
+      -- The launcher is not a Nintendo DS framebuffer. Use the Android host's
+      -- actual lower-panel resolution; SecondScreen scales this module's
+      -- 256x192 logical layout to it and maps touches back to logical space.
+      -- A running Gen 4 Game does not set this flag and remains true 256x192.
+      secondScreenNativePanel = true,
       data = {},
       save = { options = { secondScreenMode = "display" } },
     }
