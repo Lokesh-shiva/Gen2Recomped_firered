@@ -436,9 +436,19 @@ public class SecondDisplayHost extends ContentProvider {
         bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         srcW = w; srcH = h;
       }
-      // ARGB_8888 is RGBA in memory order, which is what LOVE's ImageData
-      // hands over, so the bytes go straight in with no per-pixel work.
-      bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgba));
+
+      // LOVE's ImageData string is packed RGBA. Convert explicitly instead of
+      // relying on Bitmap's native raw-buffer byte order.
+      int count = w * h;
+      int[] pixels = new int[count];
+      for (int p = 0, off = 0; p < count; p++, off += 4) {
+        int r = rgba[off] & 0xff;
+        int g = rgba[off + 1] & 0xff;
+        int bl = rgba[off + 2] & 0xff;
+        int alpha = rgba[off + 3] & 0xff;
+        pixels[p] = (alpha << 24) | (r << 16) | (g << 8) | bl;
+      }
+      bitmap.setPixels(pixels, 0, w, 0, 0, w, h);
       invalidate();
     }
 
