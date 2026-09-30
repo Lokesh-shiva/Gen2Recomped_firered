@@ -94,9 +94,10 @@ public class SecondDisplayHost extends ContentProvider {
   private final Handler ui = new Handler(Looper.getMainLooper());
   private volatile boolean running = false;
   private Thread pump;
-  private PanelPresentation presentation;
+  private volatile Activity activeActivity;
+  private volatile PanelPresentation presentation;
   private File[] roots = new File[0];
-  private File frameFile, touchFile;
+  private volatile File frameFile, touchFile;
 
   private volatile int lastSeq = -1;
   private volatile int frameW = 0, frameH = 0;
@@ -115,10 +116,8 @@ public class SecondDisplayHost extends ContentProvider {
       Log.w(TAG, "no save directory found; second display inactive");
       return true;
     }
-    // The frame and the taps live beside each other in whichever root Lua
-    // actually chose; that is the one where frame.bin turns up.
-    frameFile = new File(roots[0], FRAME_FILE);
-    touchFile = new File(roots[0], TOUCH_FILE);
+    Log.i(TAG, "SecondDisplayHost created");
+    for (File root : roots) Log.i(TAG, "save root: " + root.getAbsolutePath());
 
     if (appContext instanceof Application) {
       ((Application) appContext).registerActivityLifecycleCallbacks(
@@ -171,12 +170,26 @@ public class SecondDisplayHost extends ContentProvider {
   private Display secondaryDisplay() {
     DisplayManager dm =
         (DisplayManager) appContext.getSystemService(Context.DISPLAY_SERVICE);
-    if (dm == null) return null;
+    if (dm == null) {
+      Log.w(TAG, "DisplayManager unavailable");
+      return null;
+    }
+
+    Display[] all = dm.getDisplays();
+    if (all != null) {
+      for (Display d : all) {
+        Log.d(TAG, "display id=" + d.getDisplayId()
+            + " name=" + d.getName()
+            + " flags=" + d.getFlags()
+            + " state=" + d.getState());
+      }
+    }
+
     Display[] ds = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
     if (ds != null && ds.length > 0) return ds[0];
-    // Some devices do not tag their built-in second panel as a presentation
-    // display. Anything that is not the default one still counts.
-    Display[] all = dm.getDisplays();
+
+    // Some dual-screen devices do not mark their built-in lower panel as a
+    // presentation display. Any non-default Android Display is usable.
     if (all != null) {
       for (Display d : all) {
         if (d.getDisplayId() != Display.DEFAULT_DISPLAY) return d;
@@ -186,34 +199,54 @@ public class SecondDisplayHost extends ContentProvider {
   }
 
   private void attach(Activity activity) {
-    if (running) return;
+    activeActivity = activity;
+    if (!running) startPump();
+    ensurePresentation();
+  }
+
+  /** Runs on the UI thread. Safe to call repeatedly while the pump waits for
+   * Android to expose a late/hot-plugged secondary display. */
+  private void ensurePresentation() {
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      ui.post(new Runnable() {
+        @Override public void run() { ensurePresentation(); }
+      });
+      return;
+    }
+    if (!running || presentation != null) return;
+    Activity activity = activeActivity;
+    if (activity == null || activity.isFinishing()) return;
+
     Display d = secondaryDisplay();
     if (d == null) {
-      // ONE display: say so, every second, so Lua keeps the option hidden
-      // rather than offering a mode that would blank the bottom of the phone.
       writeHost(1, 0, 0);
-      startPump(null);
       return;
     }
+
     android.graphics.Point size = new android.graphics.Point();
     d.getSize(size);
-    presentation = new PanelPresentation(activity, d);
+    Log.i(TAG, "using secondary display id=" + d.getDisplayId()
+        + " name=" + d.getName() + " size=" + size.x + "x" + size.y);
+
+    PanelPresentation p = new PanelPresentation(activity, d);
     try {
-      presentation.show();
+      p.show();
+      presentation = p;
+      lastSeq = -1;
+      writeHost(2, size.x, size.y);
+      Log.i(TAG, "Presentation.show succeeded");
+      Log.i(TAG, "second display attached: " + size.x + "x" + size.y);
     } catch (Throwable t) {
-      Log.w(TAG, "presentation refused: " + t);
+      Log.e(TAG, "presentation refused", t);
+      try { p.dismiss(); } catch (Throwable ignored) { }
       presentation = null;
       writeHost(1, 0, 0);
-      startPump(null);
-      return;
     }
-    writeHost(2, size.x, size.y);
-    startPump(presentation);
-    Log.i(TAG, "second display attached: " + size.x + "x" + size.y);
   }
 
   private void detach() {
     running = false;
+    activeActivity = null;
     if (pump != null) { pump.interrupt(); pump = null; }
     final PanelPresentation p = presentation;
     presentation = null;
@@ -222,40 +255,34 @@ public class SecondDisplayHost extends ContentProvider {
     });
   }
 
-  /* ------------------------------------------------------------------ *
-   * The handshake, and the frames.
-   * ------------------------------------------------------------------ */
-
-  private void writeHost(int displays, int w, int h) {
-    byte[] line = (PROTOCOL + " " + displays + " " + w + " " + h + "\n")
-        .getBytes(Charset.forName("UTF-8"));
-    for (File dir : roots) {
-      FileOutputStream os = null;
-      try {
-        os = new FileOutputStream(new File(dir, HOST_FILE), false);
-        os.write(line);
-      } catch (Throwable ignored) {
-      } finally {
-        if (os != null) try { os.close(); } catch (Throwable ignored) { }
-      }
-    }
-  }
-
-  private void startPump(final PanelPresentation panel) {
+  private void startPump() {
     running = true;
-    final int displays = panel == null ? 1 : 2;
     pump = new Thread(new Runnable() {
       @Override public void run() {
         long lastHost = 0;
+        long lastDiscovery = 0;
         while (running) {
           long now = android.os.SystemClock.uptimeMillis();
+          PanelPresentation panel = presentation;
+
+          // AYN and other dual-screen firmware can publish the lower Display
+          // after the Activity has already resumed. Keep looking instead of
+          // permanently settling into the one-display state.
+          if (panel == null && now - lastDiscovery >= HOST_INTERVAL_MS) {
+            lastDiscovery = now;
+            ui.post(new Runnable() {
+              @Override public void run() { ensurePresentation(); }
+            });
+          }
+
           if (now - lastHost >= HOST_INTERVAL_MS) {
             lastHost = now;
-            // Re-stated every second: its being FRESH is the heartbeat, and a
-            // Lua that keeps reading a stale file must be able to notice.
+            panel = presentation;
             if (panel == null) writeHost(1, 0, 0);
             else writeHost(2, panel.panelWidth(), panel.panelHeight());
           }
+
+          panel = presentation;
           if (panel != null) readFrameOnce(panel);
           try { Thread.sleep(FRAME_POLL_MS); }
           catch (InterruptedException e) { return; }
@@ -266,174 +293,4 @@ public class SecondDisplayHost extends ContentProvider {
     pump.start();
   }
 
-  /** The twelve bytes, or null if they are not a frame this end can draw.
-   *  Extracted so tools/gen4_second_display_protocol_check.lua can feed it a
-   *  header the LUA end actually wrote, rather than one a test made up to
-   *  match. The two ends never meet anywhere else. */
-  public static int[] decodeHeader(byte[] head) {
-    if (head == null || head.length < HEADER_BYTES) return null;
-    if (head[0] != 'G' || head[1] != '2' || head[2] != 'S' || head[3] != 'D') {
-      return null;
-    }
-    ByteBuffer hb = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN);
-    int version = hb.getShort(4) & 0xFFFF;
-    int w = hb.getShort(6) & 0xFFFF;
-    int h = hb.getShort(8) & 0xFFFF;
-    int seq = hb.getShort(10) & 0xFFFF;
-    if (version != PROTOCOL || w <= 0 || h <= 0) return null;
-    return new int[] { version, w, h, seq };
-  }
 
-  /** A point on the panel, in the bottom screen's own pixels -- or null when
-   *  it landed in the letterbox, which is not a tap on anything. */
-  public static int[] mapPoint(float px, float py, int dl, int dt, int dw, int dh,
-                        int sw, int sh) {
-    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return null;
-    int x = (int) Math.floor((px - dl) / (float) dw * sw);
-    int y = (int) Math.floor((py - dt) / (float) dh * sh);
-    if (x < 0 || y < 0 || x >= sw || y >= sh) return null;
-    return new int[] { x, y };
-  }
-
-  private void readFrameOnce(PanelPresentation panel) {
-    File f = frameFile;
-    if (f == null || !f.isFile()) return;
-    long len = f.length();
-    if (len < HEADER_BYTES) return;
-    RandomAccessFile raf = null;
-    try {
-      raf = new RandomAccessFile(f, "r");
-      byte[] head = new byte[HEADER_BYTES];
-      raf.readFully(head);
-      int[] hdr = decodeHeader(head);
-      if (hdr == null) return;
-      int w = hdr[1], h = hdr[2], seq = hdr[3];
-      if (seq == lastSeq) return;
-      long want = (long) HEADER_BYTES + (long) w * h * 4L;
-      // A TORN FRAME IS SKIPPED, NOT DRAWN. There is no rename on LOVE's
-      // filesystem, so a read can land mid-write; a short file is exactly
-      // what that looks like, and the next sequence will be whole.
-      if (len < want) return;
-      byte[] rgba = new byte[w * h * 4];
-      raf.readFully(rgba);
-      lastSeq = seq;
-      frameW = w; frameH = h;
-      panel.post(w, h, rgba);
-    } catch (Throwable ignored) {
-    } finally {
-      if (raf != null) try { raf.close(); } catch (Throwable ignored) { }
-    }
-  }
-
-  private void appendTouch(String kind, int id, int x, int y) {
-    File f = touchFile;
-    if (f == null) return;
-    FileOutputStream os = null;
-    try {
-      os = new FileOutputStream(f, true);
-      os.write((kind + " " + id + " " + x + " " + y + "\n")
-          .getBytes(Charset.forName("UTF-8")));
-    } catch (Throwable ignored) {
-    } finally {
-      if (os != null) try { os.close(); } catch (Throwable ignored) { }
-    }
-  }
-
-  /* ------------------------------------------------------------------ *
-   * The panel itself.
-   * ------------------------------------------------------------------ */
-
-  private final class PanelPresentation extends Presentation {
-    private PanelView view;
-
-    PanelPresentation(Context outer, Display display) { super(outer, display); }
-
-    @Override protected void onCreate(Bundle state) {
-      super.onCreate(state);
-      view = new PanelView(getContext());
-      setContentView(view);
-    }
-
-    int panelWidth() { return view == null ? 0 : Math.max(view.getWidth(), 1); }
-    int panelHeight() { return view == null ? 0 : Math.max(view.getHeight(), 1); }
-
-    void post(final int w, final int h, final byte[] rgba) {
-      final PanelView v = view;
-      if (v == null) return;
-      ui.post(new Runnable() {
-        @Override public void run() { v.accept(w, h, rgba); }
-      });
-    }
-  }
-
-  private final class PanelView extends View {
-    private Bitmap bitmap;
-    private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-    private final Rect dst = new Rect();
-    private int srcW = 0, srcH = 0;
-
-    PanelView(Context c) {
-      super(c);
-      setBackgroundColor(Color.BLACK);
-    }
-
-    void accept(int w, int h, byte[] rgba) {
-      if (bitmap == null || srcW != w || srcH != h) {
-        if (bitmap != null) bitmap.recycle();
-        bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        srcW = w; srcH = h;
-      }
-      // ARGB_8888 is RGBA in memory order, which is what LOVE's ImageData
-      // hands over, so the bytes go straight in with no per-pixel work.
-      bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgba));
-      invalidate();
-    }
-
-    @Override protected void onDraw(Canvas canvas) {
-      canvas.drawColor(Color.BLACK);
-      Bitmap b = bitmap;
-      if (b == null || b.isRecycled()) return;
-      // Letterboxed, integer-agnostic: the panel is rarely 4:3, and stretching
-      // a 256x192 bottom screen to fill it would skew every Poketch dial.
-      int vw = getWidth(), vh = getHeight();
-      if (vw <= 0 || vh <= 0) return;
-      float s = Math.min((float) vw / srcW, (float) vh / srcH);
-      int dw = Math.max(1, Math.round(srcW * s));
-      int dh = Math.max(1, Math.round(srcH * s));
-      dst.set((vw - dw) / 2, (vh - dh) / 2, (vw - dw) / 2 + dw, (vh - dh) / 2 + dh);
-      canvas.drawBitmap(b, null, dst, paint);
-    }
-
-    @Override public boolean onTouchEvent(MotionEvent e) {
-      if (srcW <= 0 || srcH <= 0 || dst.width() <= 0) return false;
-      int action = e.getActionMasked();
-      String kind;
-      switch (action) {
-        case MotionEvent.ACTION_DOWN:
-        case MotionEvent.ACTION_POINTER_DOWN: kind = "down"; break;
-        case MotionEvent.ACTION_MOVE:         kind = "move"; break;
-        case MotionEvent.ACTION_UP:
-        case MotionEvent.ACTION_POINTER_UP:
-        case MotionEvent.ACTION_CANCEL:       kind = "up";   break;
-        default: return false;
-      }
-      if ("move".equals(kind)) {
-        for (int i = 0; i < e.getPointerCount(); i++) emit(kind, e, i);
-      } else {
-        emit(kind, e, e.getActionIndex());
-      }
-      return true;
-    }
-
-    private void emit(String kind, MotionEvent e, int index) {
-      // MAPPED INTO THE BOTTOM SCREEN'S OWN COORDINATES, not the panel's.
-      // Lua rejects anything outside 0..w/0..h, so a tap in the letterbox
-      // must land outside that range rather than being clamped onto the edge
-      // -- a clamped tap is a button press the player did not make.
-      int[] p = mapPoint(e.getX(index), e.getY(index), dst.left, dst.top,
-                         dst.width(), dst.height(), srcW, srcH);
-      if (p == null) return;
-      appendTouch(kind, e.getPointerId(index), p[0], p[1]);
-    }
-  }
-}
