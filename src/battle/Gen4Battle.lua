@@ -47,6 +47,56 @@ local Gen4Battle = {}
 -- Platinum fights on the DS's own screen, not the Game Boy's 160x144.
 Gen4Battle.WIDTH, Gen4Battle.HEIGHT = 256, 192
 
+-- Widescreen keeps Platinum's 192-pixel-tall composition and only grows the
+-- horizontal surface. The extractor's battle backdrop is already 512 pixels
+-- wide, so this reveals real cartridge art instead of stretching 256 pixels.
+function Gen4Battle.surfaceWidth(pw, ph, fill, maxWidth)
+  local least = Gen4Battle.WIDTH
+  local most = math.floor(tonumber(maxWidth) or 512)
+  if most < least then most = least end
+  pw, ph = tonumber(pw), tonumber(ph)
+  if not (pw and ph and pw > 0 and ph > 0) then return least end
+  local want
+  if fill then
+    want = math.floor(Gen4Battle.HEIGHT * pw / ph / 8 + 0.5) * 8
+  else
+    local s = math.max(1, math.floor(ph / Gen4Battle.HEIGHT))
+    want = math.floor(pw / s / 8) * 8
+  end
+  return math.max(least, math.min(most, want))
+end
+
+function Gen4Battle.width(battle)
+  local fn = battle and battle.gen4SurfaceWidth
+  if type(fn) ~= "function" then return Gen4Battle.WIDTH end
+  local ok, w = pcall(fn, battle)
+  if not (ok and type(w) == "number" and w >= Gen4Battle.WIDTH) then
+    return Gen4Battle.WIDTH
+  end
+  return math.floor(w / 8) * 8
+end
+
+function Gen4Battle.extra(battle)
+  return Gen4Battle.width(battle) - Gen4Battle.WIDTH
+end
+
+-- Player-side field objects stay attached to the left half; enemy-side ones
+-- stay attached to the right. At 256px this returns the cartridge coordinates
+-- byte-for-byte.
+function Gen4Battle.battlerPos(battle, slot)
+  local p = Gen4Battle.BATTLER_POS[slot]
+  if not p then return nil end
+  local shift = (slot == 1 or slot == 3 or slot == 5) and Gen4Battle.extra(battle) or 0
+  return { x = p.x + shift, y = p.y }
+end
+
+function Gen4Battle.healthboxPos(battle, slot)
+  local p = Gen4Battle.HEALTHBOX_POS[slot]
+  if not p then return nil end
+  local shift = (slot == 0 or slot == 2 or slot == 4) and Gen4Battle.extra(battle) or 0
+  return { x = p.x + shift, y = p.y }
+end
+
 -- ---------------------------------------------------------------------------
 -- The two enumerations, 0-based, from generated/battle_backgrounds.txt and
 -- generated/battle_terrains.txt. They are NOT the same list and do not line up
@@ -531,7 +581,7 @@ function Gen4Battle.drawField(battle)
       local ox, oy = -(sx % gw), -(sy % gh)
       for _, dx in ipairs({ 0, gw }) do
         for _, dy in ipairs({ 0, gh }) do
-          if ox + dx < Gen4Battle.WIDTH and oy + dy < Gen4Battle.HEIGHT then
+          if ox + dx < Gen4Battle.width(battle) and oy + dy < Gen4Battle.HEIGHT then
             g.draw(ground, ox + dx, oy + dy)
           end
         end
@@ -542,7 +592,7 @@ function Gen4Battle.drawField(battle)
     -- because every piece of Gen 4 art on top of it is drawn for a dark field
     -- and white would show as a bright border round each platform.
     g.setColor(0, 0, 0, 1)
-    g.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+    g.rectangle("fill", 0, 0, Gen4Battle.width(battle), Gen4Battle.HEIGHT)
     g.setColor(1, 1, 1, 1)
   end
 
@@ -555,6 +605,7 @@ function Gen4Battle.drawField(battle)
   if enemy then
     local ex, ey = Gen4Battle.platformAt(
       "enemy", Gen4Battle.platformSlideElapsed(battle, "enemy"))
+    ex = ex + Gen4Battle.extra(battle)
     g.draw(enemy, corner(ex, ey, enemy))
   end
   if player then
@@ -672,7 +723,7 @@ function Gen4Battle.drawTrainerBack(battle)
   local img = battle.picImage and battle:picImage(battle.playerBackPic)
              or battle.playerBackPic
   if not (img and img.getWidth) then return false end
-  local pos = Gen4Battle.BATTLER_POS and Gen4Battle.BATTLER_POS[0]
+  local pos = Gen4Battle.battlerPos(battle, 0)
   if not pos then return false end
   local g = love.graphics
   local x, y = corner(pos.x, pos.y, img)
@@ -687,8 +738,8 @@ function Gen4Battle.drawBattlers(battle)
   -- The foe first, so where the two overlap the player's Pokemon is in front --
   -- which is what standing nearer the camera means.
   local pairs_ = {
-    { battler = battle.enemy,  pos = Gen4Battle.BATTLER_POS[1] },
-    { battler = battle.player, pos = Gen4Battle.BATTLER_POS[0] },
+    { battler = battle.enemy,  pos = Gen4Battle.battlerPos(battle, 1) },
+    { battler = battle.player, pos = Gen4Battle.battlerPos(battle, 0) },
   }
   for _, row in ipairs(pairs_) do
     local battler = row.battler
@@ -706,7 +757,7 @@ function Gen4Battle.drawBattlers(battle)
           -- for its own reasons must not have it cleared out from under it by a
           -- battler draw, and this runs inside whatever the caller had set.
           local sx, sy, sw, sh = g.getScissor()
-          g.setScissor(0, 0, Gen4Battle.WIDTH, math.max(0, math.floor(clip)))
+          g.setScissor(0, 0, Gen4Battle.width(battle), math.max(0, math.floor(clip)))
           local drew, err = pcall(battle.drawBattlerPic, battle,
                                   battler, x, y, 1)
           if sx then g.setScissor(sx, sy, sw, sh) else g.setScissor() end
@@ -764,7 +815,7 @@ function Gen4Battle.drawBackgroundFade(battle)
   if not (got and a and a > 0) then return false end
   local gfx = love.graphics
   gfx.setColor(r or 0, g or 0, b or 0, a)
-  gfx.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+  gfx.rectangle("fill", 0, 0, Gen4Battle.width(battle), Gen4Battle.HEIGHT)
   gfx.setColor(1, 1, 1, 1)
   return true
 end
@@ -825,7 +876,7 @@ function Gen4Battle.drawEffectBackground(battle)
   -- The cross-fade's half: the field dimmed to its coefficient.
   if st.blend and (st.base or 1) < 1 then
     g.setColor(0, 0, 0, 1 - st.base)
-    g.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+    g.rectangle("fill", 0, 0, Gen4Battle.width(battle), Gen4Battle.HEIGHT)
     g.setColor(1, 1, 1, 1)
     drew = true
   end
@@ -857,7 +908,7 @@ function Gen4Battle.drawEffectBackground(battle)
   -- the 81 is 256 or 512 wide by 256 tall.
   for _, dx in ipairs({ 0, w }) do
     for _, dy in ipairs({ 0, h }) do
-      if ox + dx < Gen4Battle.WIDTH and oy + dy < Gen4Battle.HEIGHT then
+      if ox + dx < Gen4Battle.width(battle) and oy + dy < Gen4Battle.HEIGHT then
         g.draw(art, ox + dx, oy + dy)
       end
     end
@@ -870,7 +921,7 @@ function Gen4Battle.drawEffectBackground(battle)
   local tint = st.tint
   if tint and tint[4] and tint[4] > 0 and row and row.opaque then
     g.setColor(tint[1] or 0, tint[2] or 0, tint[3] or 0, tint[4])
-    g.rectangle("fill", 0, 0, Gen4Battle.WIDTH, Gen4Battle.HEIGHT)
+    g.rectangle("fill", 0, 0, Gen4Battle.width(battle), Gen4Battle.HEIGHT)
     g.setColor(1, 1, 1, 1)
   end
   return true
@@ -949,8 +1000,8 @@ end
 -- resource's own stored position, which is expressed relative to the middle of
 -- the field. Those two agreeing is a coincidence of this layout, not one fact.
 function Gen4Battle.particleOrigin(battle, name, attackerIsPlayer)
-  local me = Gen4Battle.BATTLER_POS[0]
-  local foe = Gen4Battle.BATTLER_POS[1]
+  local me = Gen4Battle.battlerPos(battle, 0)
+  local foe = Gen4Battle.battlerPos(battle, 1)
   if name == "player" then return me.x, me.y end
   if name == "enemy" then return foe.x, foe.y end
   local attacker = attackerIsPlayer and me or foe
@@ -1423,7 +1474,7 @@ function Gen4Battle.drawHealthboxes(battle)
   for _, row in ipairs(sides) do
     local art = Gen4Battle.HEALTHBOX_ART[row.side]
     local img = art and healthboxImage(battle, art.key)
-    local centre = Gen4Battle.HEALTHBOX_POS[row.slot]
+    local centre = Gen4Battle.healthboxPos(battle, row.slot)
     if img and centre and row.battler and row.battler.mon then
       local x, y = centre.x + art.ox, centre.y + art.oy
       g.setColor(1, 1, 1, 1)
@@ -1777,6 +1828,13 @@ function Gen4Battle.drawTextArea(battle)
   local T, ROWS = Gen4Battle.MESSAGE_TEXT, Gen4Battle.MESSAGE_ROWS
   local LINE_H, GAP = Gen4Battle.MESSAGE_LINE_H, Gen4Battle.MENU_GAP
   local B = Gen4Battle.MESSAGE_BOX
+  if Gen4Battle.extra(battle) > 0 then
+    local copy = {}
+    for k,v in pairs(B) do copy[k] = v end
+    copy.tw = (copy.tw or 0) + Gen4Battle.extra(battle) / 8
+    copy.w = (copy.w or 0) + Gen4Battle.extra(battle)
+    B = copy
+  end
   local phase = battle.phase
 
   -- WHICH PRESENTATION, DECIDED BEFORE ANYTHING IS DRAWN -- because the answer
@@ -1845,7 +1903,7 @@ function Gen4Battle.drawTextArea(battle)
     -- which is where every other version in the launcher puts it.
     if (battle.msgWaiting or battle.msgPrompt)
        and (battle.frame or 0) % 60 < 30 then
-      Font.drawCode(Theme.moreArrow, T.x + T.w - 10, ROWS[2] + 4)
+      Font.drawCode(Theme.moreArrow, T.x + T.w + Gen4Battle.extra(battle) - 10, ROWS[2] + 4)
     end
    end
     return
