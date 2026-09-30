@@ -6645,7 +6645,8 @@ function BattleState:gen4SendOut(battler)
   -- Already throwing something: a second ball in the air is worse than none.
   if self.gen4Ball then return false end
 
-  local pos = Gen4Battle.BATTLER_POS and Gen4Battle.BATTLER_POS[0]
+  local pos = Gen4Battle.battlerPos and Gen4Battle.battlerPos(self, 0)
+              or (Gen4Battle.BATTLER_POS and Gen4Battle.BATTLER_POS[0])
   if not pos then return false end
 
   -- WHICH BALL THIS POKEMON LIVES IN.  `MON_DATA_POKEBALL` is an item id and
@@ -9170,7 +9171,8 @@ function BattleState:gen4BallChain(caught, shakes, ball)
 
   -- WHERE IT IS THROWN TO: the foe's own slot, from the cartridge's position
   -- table, rather than a number typed here.
-  local pos = Gen4Battle.BATTLER_POS and Gen4Battle.BATTLER_POS[1]
+  local pos = Gen4Battle.battlerPos and Gen4Battle.battlerPos(self, 1)
+              or (Gen4Battle.BATTLER_POS and Gen4Battle.BATTLER_POS[1])
   local anim = Gen4BallAnim.new({
     ball = name,
     to = pos and { x = pos.x, y = pos.y } or nil,
