@@ -333,6 +333,9 @@ function Gen4Poketch:drawWatch()
   -- after the shell used to cover the cartridge's bezel and buttons entirely.
   local face = app and app.art and self:img(app.art)
   if face then
+    -- App tilemaps are composed as full 256x192 screens. Only the LCD hole
+    -- belongs to the app; pixels outside it must never cover the device shell.
+    g.setScissor(FACE.x, FACE.y, FACE.w, FACE.h)
     g.setColor(1, 1, 1, 1)
     g.draw(face, 0, 0)
   else
@@ -362,6 +365,8 @@ function Gen4Poketch:drawWatch()
       Font.draw(Strings("NOT BUILT YET"), FACE.x + 8, FACE.y + 24)
     end
   end
+
+  g.setScissor()
 
   -- SHELL LAST. Platinum composes the Poketch device around the LCD; this
   -- extracted full-screen border contains the bezel and physical app-change
