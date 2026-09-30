@@ -221,13 +221,17 @@ function SecondScreen.pollTouch()
 end
 
 function SecondScreen.usable()
-  return C ~= nil or SecondScreen.fileAvailable()
+  return SecondScreen.fileAvailable() or C ~= nil
 end
 
--- Which transport answered, for the log and for a check to assert on.
+-- The Java ContentProvider host owns the Android Presentation in packaged
+-- builds, so prefer its file protocol whenever its heartbeat is visible.
+-- The older FFI bridge owns a different GameActivity Presentation; choosing it
+-- merely because its symbols are linked can report "not ready" while the Java
+-- host is already displaying the physical lower panel.
 function SecondScreen.backend()
-  if C ~= nil then return "ffi" end
   if SecondScreen.fileAvailable() then return "file" end
+  if C ~= nil then return "ffi" end
   return nil
 end
 
@@ -242,9 +246,11 @@ SecondScreen.PROBE_INTERVAL = 0.5
 local probedAt, probed = nil, false
 
 function SecondScreen.available()
-  -- The native bridge first -- it hands the host a pointer and costs nothing
-  -- per frame -- then the file protocol, which needs no native code at all.
-  if not C then return SecondScreen.fileAvailable() end
+  -- Prefer the Java host. It is the component that actually owns the Android
+  -- Presentation in current APK builds. The FFI bridge remains a fallback for
+  -- builds which do not install SecondDisplayHost.
+  if SecondScreen.fileAvailable() then return true end
+  if not C then return false end
   local now = clock()
   if probedAt and now and (now - probedAt) < SecondScreen.PROBE_INTERVAL then
     return probed
@@ -265,7 +271,10 @@ end
 
 function SecondScreen.push(imageData, w, h)
   if not imageData then return false end
-  if not C then return SecondScreen.filePush(imageData, w, h) end
+  if SecondScreen.fileAvailable() then
+    return SecondScreen.filePush(imageData, w, h)
+  end
+  if not C then return false end
   return pcall(function()
     C.love_android_push_secondary(imageData:getFFIPointer(), w, h)
   end)
