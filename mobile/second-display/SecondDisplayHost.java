@@ -388,7 +388,8 @@ public class SecondDisplayHost extends ContentProvider {
       int w = hdr[1], h = hdr[2], seq = hdr[3];
       if (seq == lastSeq) return;
       long want = (long) HEADER_BYTES + (long) w * h * 4L;
-      if (len != want) {
+      boolean legacyTrailer = len == want + 6L;
+      if (len != want && !legacyTrailer) {
         rejectLog(panel, 2, "size mismatch seq=" + seq + " got=" + len + " want=" + want
             + " dimensions=" + w + "x" + h);
         return;
@@ -396,6 +397,20 @@ public class SecondDisplayHost extends ContentProvider {
 
       byte[] rgba = new byte[w * h * 4];
       raf.readFully(rgba);
+
+      // One diagnostic build appended "G2OK" + sequence. Accept those files
+      // too so an old frame left in the save directory cannot permanently
+      // block a newer APK from reaching the renderer.
+      if (legacyTrailer) {
+        byte[] tail = new byte[6];
+        raf.readFully(tail);
+        int tailSeq = (tail[4] & 0xff) | ((tail[5] & 0xff) << 8);
+        if (tail[0] != 'G' || tail[1] != '2' || tail[2] != 'O' || tail[3] != 'K'
+            || tailSeq != seq) {
+          rejectLog(panel, 2, "invalid legacy trailer seq=" + seq);
+          return;
+        }
+      }
 
       raf.seek(0);
       byte[] verifyHead = new byte[HEADER_BYTES];
