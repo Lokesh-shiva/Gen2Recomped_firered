@@ -249,7 +249,24 @@ local function surface(game)
   if game.secondScreenCanvas then return game.secondScreenCanvas end
   local g = love.graphics
   if not (g and g.newCanvas) then return nil end
-  local ok, made = pcall(g.newCanvas, W, H)
+  -- Offscreen DS pixels must be device-independent. On high-DPI Android,
+  -- newCanvas(W,H) inherits the window DPI scale: on the AYN Thor a logical
+  -- 256x192 canvas became a 591x443 backing texture. Canvas:newImageData()
+  -- then returns those physical pixels, while the transport header still said
+  -- 256x192, producing scrambled rows / rejected frame sizes.
+  local ok, made = pcall(g.newCanvas, W, H, {
+    format = "rgba8",
+    dpiscale = 1,
+    readable = true,
+  })
+  -- Older LOVE builds may not know readable/dpiscale settings. Preserve
+  -- compatibility, though flush() below will use the actual readback size.
+  if not (ok and made) then
+    ok, made = pcall(g.newCanvas, W, H, { format = "rgba8", dpiscale = 1 })
+  end
+  if not (ok and made) then
+    ok, made = pcall(g.newCanvas, W, H)
+  end
   if not (ok and made) then return nil end
   if made.setFilter then pcall(made.setFilter, made, "nearest", "nearest") end
   game.secondScreenCanvas = made
@@ -362,7 +379,17 @@ function SecondScreen.flush(game)
   if last and now - last < SecondScreen.PUSH_INTERVAL then return false end
   local okData, data = pcall(canvas.newImageData, canvas)
   if not (okData and data) then return false end
-  local okPush, pushed = pcall(T.push, data, W, H)
+  -- newImageData reports physical pixel dimensions. Normally dpiscale=1
+  -- above makes these exactly 256x192; using the actual dimensions here also
+  -- keeps the wire header truthful on a backend which ignores that setting.
+  local pushW, pushH = W, H
+  if data.getDimensions then
+    local okDims, dw, dh = pcall(data.getDimensions, data)
+    if okDims and tonumber(dw) and tonumber(dh) and dw > 0 and dh > 0 then
+      pushW, pushH = dw, dh
+    end
+  end
+  local okPush, pushed = pcall(T.push, data, pushW, pushH)
   local sent = okPush and pushed and true or false
   if data.release then pcall(data.release, data) end
 
