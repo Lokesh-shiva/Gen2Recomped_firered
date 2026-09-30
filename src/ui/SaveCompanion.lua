@@ -665,6 +665,8 @@ local function hostFor(game)
   local useH = state.panelH or H
   state.host.secondScreenLogicalWidth=useW
   state.host.secondScreenLogicalHeight=useH
+  state.host.secondScreenSurfaceWidth=useW
+  state.host.secondScreenSurfaceHeight=useH
   W,H=useW,useH
   return state.host
 end
