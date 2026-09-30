@@ -7,6 +7,7 @@ local SecondScreen = require("src.ui.SecondScreen")
 local Boxes = require("src.pokemon.Boxes")
 local Bag = require("src.inventory.Bag")
 local Party = require("src.pokemon.Party")
+local Pokemon = require("src.pokemon.Pokemon")
 local Stats = require("src.pokemon.Stats")
 local Growth = require("src.pokemon.Growth")
 local Badges = require("src.inventory.Badges")
@@ -17,7 +18,10 @@ local state = {
   tab = 1, box = 1, bagPage = 1, itemPage = 1, itemQty = 1,
   host = nil, hits = {}, editor = nil, itemPicker = false,
   nameEditor = false, nameDraft = "", fonts = {}, fontKey = nil,
-  catalogData = nil, moveIds = nil, itemIds = nil,
+  catalogData = nil, moveIds = nil, itemIds = nil, speciesIds = nil,
+  speciesPicker = nil, speciesPage = 1,
+  panelW = nil, panelH = nil, panelCandidateW = nil, panelCandidateH = nil,
+  panelCandidateCount = 0,
 }
 local TABS = { "PARTY", "BOXES", "BAG", "PLAYER" }
 
@@ -106,6 +110,13 @@ local function ensureCatalog(game)
   if state.catalogData == game.data then return end
   state.catalogData=game.data
   state.moveIds=sortedKeys(game.data and game.data.moves)
+  state.speciesIds={}
+  for _,id in ipairs(sortedKeys(game.data and game.data.pokemon)) do
+    local def=game.data.pokemon[id]
+    if type(def)=="table" and type(def.baseStats)=="table" then
+      state.speciesIds[#state.speciesIds+1]=id
+    end
+  end
   state.itemIds={}
   for _,id in ipairs(sortedKeys(game.data and game.data.items)) do
     if not (type(id)=="string" and Bag.isBadge and Bag.isBadge(id)) then
@@ -172,6 +183,55 @@ local function openMon(mon,origin,index,box)
   state.editor={mon=mon,origin=origin,index=index,box=box}
 end
 
+local function openSpeciesPicker(mode, origin, index, box, mon)
+  state.speciesPicker={
+    mode=mode, origin=origin, index=index, box=box, mon=mon,
+  }
+  state.speciesPage=1
+end
+
+local function createMon(game,id,level)
+  local ok, mon=pcall(Pokemon.new,game.data,id,level or 5)
+  if not (ok and mon) then return nil end
+  game.save.player=game.save.player or {}
+  mon.ot=game.save.player.name or game.save.playerName
+  mon.otId=game.save.player.id
+  return mon
+end
+
+local function applySpecies(game, picker, id)
+  if not (picker and id) then return end
+  if picker.mode=="change" and picker.mon then
+    local mon=picker.mon
+    local def=game.data.pokemon[id]
+    if not def then return end
+    mon.species=id
+    mon.exp=Growth.expForLevel(def.growthRate,mon.level or 1)
+    recalc(game,mon)
+    state.speciesPicker=nil
+    return
+  end
+
+  local mon=createMon(game,id,5)
+  if not mon then return end
+  if picker.origin=="party" then
+    game.save.party=game.save.party or {}
+    if #game.save.party < Party.MAX then
+      table.insert(game.save.party,mon)
+      state.editor={mon=mon,origin="party",index=#game.save.party}
+      state.speciesPicker=nil
+    end
+  elseif picker.origin=="box" then
+    local bs=boxes(game); local box=bs[picker.box or state.box]
+    local slot=picker.index or Boxes.firstFree(box)
+    if slot and slot<=Boxes.capacity() and not box[slot] then
+      box[slot]=mon
+      state.editor={mon=mon,origin="box",index=slot,box=picker.box or state.box}
+      state.speciesPicker=nil
+    end
+  end
+end
+
 local function drawHeader()
   local hh=H*.13
   roundRect(0,0,W,hh,0,{0.04,0.07,0.12,1})
@@ -191,6 +251,11 @@ local function drawParty(game)
   local top=H*.16; local pad=W*.025; local gap=W*.018
   text("Party",pad,top,"large")
   text(#party.."/"..Party.MAX,pad+W*.16,top+H*.018,"medium",PAL.muted)
+  if #party < Party.MAX then
+    button("+ ADD POKEMON",W*.72,top,W*.255,H*.085,function()
+      openSpeciesPicker("add","party")
+    end,{color=PAL.green,font="small"})
+  end
   local y0=top+H*.105
   local cols=2; local rows=3
   local cw=(W-2*pad-gap)/2; local ch=(H-y0-H*.045-gap*2)/3
@@ -206,9 +271,11 @@ local function drawParty(game)
       local hp=(mon.hp or 0); local mx=(mon.stats and mon.stats.hp) or math.max(hp,1)
       textRight("HP "..hp.."/"..mx,x,y+ch*.53,cw-cw*.05,"small",
                 hp<=mx*.2 and PAL.red or PAL.green)
+      textRight("EDIT",x,y+ch*.12,cw-cw*.05,"tiny",PAL.blue2)
       hit(x,y,cw,ch,function() openMon(mon,"party",i) end)
     else
-      textCenter("EMPTY",x,y+ch*.40,cw,"small",PAL.faint)
+      textCenter("EMPTY",x,y+ch*.31,cw,"small",PAL.faint)
+      textCenter("tap ADD above",x,y+ch*.57,cw,"tiny",PAL.faint)
     end
   end
 end
@@ -221,7 +288,12 @@ local function drawBoxes(game)
   button("<",pad,top,W*.07,H*.09,function() state.box=state.box==1 and count or state.box-1 end)
   textCenter("BOX "..state.box.." / "..count,pad+W*.08,top+H*.015,W*.28,"large")
   button(">",pad+W*.37,top,W*.07,H*.09,function() state.box=state.box==count and 1 or state.box+1 end)
-  textRight(Boxes.used(box).."/"..cap,W*.55,top+H*.025,W*.40,"medium",PAL.muted)
+  textRight(Boxes.used(box).."/"..cap,W*.55,top+H*.025,W*.18,"medium",PAL.muted)
+  if Boxes.used(box)<cap then
+    button("+ ADD",W*.78,top,W*.19,H*.085,function()
+      openSpeciesPicker("add","box",Boxes.firstFree(box),state.box)
+    end,{color=PAL.green})
+  end
   local gridY=top+H*.12; local cols=(cap>20) and 6 or 5
   local rows=math.ceil(cap/cols); local gap=W*.008
   local cw=(W-2*pad-gap*(cols-1))/cols
@@ -237,7 +309,8 @@ local function drawBoxes(game)
       textCenter("Lv"..tostring(mon.level or "?"),x,y+ch*.55,cw,"tiny",PAL.muted)
       hit(x,y,cw,ch,function() openMon(mon,"box",i,state.box) end)
     else
-      textCenter(tostring(i),x,y+ch*.38,cw,"tiny",PAL.faint)
+      textCenter("+ "..tostring(i),x,y+ch*.38,cw,"tiny",PAL.faint)
+      hit(x,y,cw,ch,function() openSpeciesPicker("add","box",i,state.box) end)
     end
   end
 end
@@ -392,6 +465,19 @@ local function drawMonEditor(game)
   button("< BACK",pad,H*.025,W*.13,H*.075,function() state.editor=nil end)
   text(speciesName(game,mon),pad+W*.16,H*.03,"large")
   text("Lv "..tostring(mon.level or 1),pad+W*.16,H*.09,"medium",PAL.gold)
+  button("CHANGE SPECIES",W*.43,H*.025,W*.20,H*.075,function()
+    openSpeciesPicker("change",e.origin,e.index,e.box,mon)
+  end,{color=PAL.blue,font="tiny"})
+  button("DELETE",W*.64,H*.025,W*.085,H*.075,function()
+    if e.origin=="party" then
+      local party=game.save.party or {}
+      if party[e.index]==mon then table.remove(party,e.index) end
+    else
+      local bs=boxes(game); local box=bs[e.box]
+      if box and box[e.index]==mon then box[e.index]=nil end
+    end
+    state.editor=nil
+  end,{color=PAL.red,font="tiny"})
 
   local actionLabel=e.origin=="party" and "DEPOSIT TO BOX" or "WITHDRAW TO PARTY"
   button(actionLabel,W*.73,H*.025,W*.245,H*.075,function()
@@ -475,11 +561,52 @@ local function drawMonEditor(game)
   end
 end
 
+local function drawSpeciesPicker(game)
+  ensureCatalog(game)
+  local p=state.speciesPicker
+  if not p then return end
+  local ids=state.speciesIds or {}
+  local pad=W*.025
+  text(p.mode=="change" and "Change Pokemon species" or "Add Pokemon",pad,H*.055,"large")
+  button("CANCEL",W*.82,H*.045,W*.155,H*.08,function() state.speciesPicker=nil end)
+
+  local pageSize=12
+  local pages=math.max(1,math.ceil(#ids/pageSize))
+  state.speciesPage=clamp(state.speciesPage,1,pages)
+  local cols=3
+  local gap=W*.012
+  local cw=(W-2*pad-gap*(cols-1))/cols
+  local y0=H*.17
+  local ch=H*.155
+  for n=1,pageSize do
+    local idx=(state.speciesPage-1)*pageSize+n
+    local id=ids[idx]
+    if not id then break end
+    local col=(n-1)%cols
+    local row=math.floor((n-1)/cols)
+    local x=pad+col*(cw+gap)
+    local y=y0+row*(ch+H*.018)
+    local def=game.data.pokemon[id]
+    local label=(def and (def.name or def.displayName)) or tostring(id)
+    button(label,x,y,cw,ch,function() applySpecies(game,p,id) end,
+      {color=PAL.panel2,border=PAL.line,font="small"})
+  end
+
+  button("< PAGE",pad,H*.89,W*.16,H*.075,function()
+    state.speciesPage=math.max(1,state.speciesPage-1)
+  end)
+  textCenter(state.speciesPage.." / "..pages,W*.40,H*.905,W*.20,"medium",PAL.muted)
+  button("PAGE >",W*.79,H*.89,W*.185,H*.075,function()
+    state.speciesPage=math.min(pages,state.speciesPage+1)
+  end)
+end
+
 local function draw(game)
   ensureFonts(); state.hits={}
   setColor(PAL.bg); love.graphics.rectangle("fill",0,0,W,H)
   -- subtle launcher-like panel wash
   setColor({0.04,0.12,0.22,0.28}); love.graphics.rectangle("fill",0,0,W,H*.42)
+  if state.speciesPicker then return drawSpeciesPicker(game) end
   if state.editor then return drawMonEditor(game) end
   drawHeader()
   if state.tab==1 then drawParty(game)
@@ -510,9 +637,35 @@ local function hostFor(game)
   end
   state.host.game=game
   local pw,ph=SecondScreen.panelSize()
-  state.host.secondScreenLogicalWidth=pw
-  state.host.secondScreenLogicalHeight=ph
-  W,H=pw,ph
+
+  -- The Java heartbeat is asynchronous. During reconnect / Presentation
+  -- discovery it can briefly fall back to the DS protocol size (256x192).
+  -- Reallocating a native companion canvas on every heartbeat made the lower
+  -- panel visibly flash between sizes. Require repeated identical dimensions
+  -- before accepting a change, and ignore the known fallback once a native
+  -- size has been latched.
+  local plausible = pw and ph and pw >= 256 and ph >= 192
+  local fallback = pw == 256 and ph == 192
+  if plausible and not (state.panelW and fallback) then
+    if pw == state.panelCandidateW and ph == state.panelCandidateH then
+      state.panelCandidateCount = state.panelCandidateCount + 1
+    else
+      state.panelCandidateW, state.panelCandidateH = pw, ph
+      state.panelCandidateCount = 1
+    end
+    local need = state.panelW and 20 or 3
+    if state.panelCandidateCount >= need
+       and (pw ~= state.panelW or ph ~= state.panelH) then
+      state.panelW, state.panelH = pw, ph
+      state.fontKey = nil
+    end
+  end
+
+  local useW = state.panelW or W
+  local useH = state.panelH or H
+  state.host.secondScreenLogicalWidth=useW
+  state.host.secondScreenLogicalHeight=useH
+  W,H=useW,useH
   return state.host
 end
 
