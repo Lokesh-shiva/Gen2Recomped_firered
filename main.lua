@@ -947,7 +947,7 @@ function love.mousepressed(x, y, button, istouch)
   if editorMode and EditorApp.mousepressed then
     return EditorApp.mousepressed(x, y, button)
   end
-  if mouseTouch and Game and button == 1 then
+  if Game and (mouseTouch or Game:hasPointerScreen()) and button == 1 and not istouch then
     Game:touchpressed("mouse", x, y)
   end
 end
@@ -961,7 +961,7 @@ function love.mousereleased(x, y, button)
   if editorMode and EditorApp.mousereleased then
     return EditorApp.mousereleased(x, y, button)
   end
-  if mouseTouch and Game and button == 1 then
+  if Game and (mouseTouch or Game:hasPointerScreen()) and button == 1 then
     Game:touchreleased("mouse", x, y)
   end
 end
@@ -971,6 +971,7 @@ function love.mousemoved(x, y, dx, dy)
   -- answers false on every other map and camera, so the touch path below
   -- keeps every case it had.
   if Game and not (editorMode or Importer or TouchEditor)
+     and not Game:hasPointerScreen()
      and Game.cameraLook and Game:cameraLook(dx, dy) then
     return
   end
@@ -979,7 +980,7 @@ function love.mousemoved(x, y, dx, dy)
     return TouchEditor.mousemoved(x, y)
   end
   if editorMode or Importer then return end
-  if mouseTouch and Game and love.mouse.isDown(1) then
+  if Game and (mouseTouch or Game:hasPointerScreen()) and love.mouse.isDown(1) then
     Game:touchmoved("mouse", x, y)
   end
 end
