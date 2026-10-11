@@ -517,7 +517,7 @@ function D.battle(ctx)
   data.trainers[Fr.TRAINER_KEY] = { id = Fr.TRAINER_KEY, name = name or "TRAINER", pic = pic, class = class,
     className = className, party = slots, parties = { slots }, baseMoney = 0 }
   Commands.start_battle(ctx, "trainer", Fr.TRAINER_KEY, 1,
-    { double = (modeOf(ctx) == Fr.DOUBLES) or nil, canLose = true, noExp = true, forfeit = true, noItems = true })
+    { frontier = true, double = (modeOf(ctx) == Fr.DOUBLES) or nil, canLose = true, noExp = true, forfeit = true, noItems = true })
   s.lastOutcome = (ctx.lastBattleResult == "win") and 1 or 2
   setVar(ctx, 0x800D, s.lastOutcome)
 end

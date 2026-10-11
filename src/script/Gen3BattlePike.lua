@@ -479,7 +479,7 @@ function P.doubleBattle(ctx)
     keys[i] = key
   end
   Commands.start_battle(ctx, "trainer", keys[1], 1,
-    { double = true, trainerBKey = keys[2], canLose = true, noExp = true, forfeit = true, noItems = true })
+    { frontier = true, double = true, trainerBKey = keys[2], canLose = true, noExp = true, forfeit = true, noItems = true })
   s.lastOutcome = (ctx.lastBattleResult == "win") and 1 or 2
   setVar(ctx, 0x800D, s.lastOutcome)
 end

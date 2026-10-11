@@ -104,6 +104,8 @@ local function resetRanks(save, t) for k = 0, 2 do B.setRank(save, t, k, 1) end 
 function B.receiveCP(save, t, n)
   local r = B.record(save)
   r.cp[t] = math.min(B.CP_MAX, (r.cp[t] or 0) + n)
+  local R = require("src.pokemon.Gen4GameRecords")
+  R.add(save, R.ID.CASTLE_POINTS_RECEIVED, n)
 end
 -- BattleCastle_SpendCastlePoints: the total spent, capped too
 function B.spendCP(save, t, n)

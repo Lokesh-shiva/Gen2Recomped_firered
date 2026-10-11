@@ -615,7 +615,7 @@ function P.trainerBattle(ctx)
     Logger.warn("gen3 battle pyramid: no Pokemon for trainer %s -- passed over", tostring(id))
     return
   end
-  Commands.start_battle(ctx, "trainer", Fr.TRAINER_KEY, 1, { canLose = true, noExp = true })
+  Commands.start_battle(ctx, "trainer", Fr.TRAINER_KEY, 1, { canLose = true, frontier = true, noExp = true })
   s.lastOutcome = (ctx.lastBattleResult == "win") and 1 or 2
   s.lastOutcomeKind = "trainer"
   P.afterBattle(ctx.game, ctx.overworld)

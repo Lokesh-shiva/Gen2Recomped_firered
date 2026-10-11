@@ -132,7 +132,13 @@ function BT.setIfBetter(r, i, v) if v > (r.stats[i] or 0) then r.stats[i] = math
 -- WifiBattleTowerRecord_UpdateBattlePoints
 function BT.addBP(save, n)
   local r = BT.record(save)
-  r.bp = math.max(0, math.min(9999, (r.bp or 0) + (tonumber(n) or 0)))
+  n = tonumber(n) or 0
+  r.bp = math.max(0, math.min(9999, (r.bp or 0) + n))
+  -- RECORD_BATTLE_POINTS_RECEIVED / _SPENT: every route that gives or takes
+  -- BP on the cartridge adds to one of the two
+  local R = require("src.pokemon.Gen4GameRecords")
+  if n > 0 then R.add(save, R.ID.BATTLE_POINTS_RECEIVED, n)
+  elseif n < 0 then R.add(save, R.ID.BATTLE_POINTS_SPENT, -n) end
   return r.bp
 end
 function BT.bp(save) return BT.record(save).bp or 0 end
@@ -471,6 +477,9 @@ function BT.endStreak(bt)
   r.victories = (r.victories or 0) + bt.defeated
   BT.room(r, bt.mode, 2)
   r.challenges = (r.challenges or 0) + 1
+  local R = require("src.pokemon.Gen4GameRecords")
+  R.add(bt.save, R.ID.BATTLE_TOWER_VICTORIES, bt.defeated)
+  R.add(bt.save, R.ID.BATTLE_TOWER_CHALLENGES, 1)
   if bt.mode ~= BT.SINGLE and BT.streak(bt) >= 50 then bt.ribbonEarned = true end
 end
 
@@ -485,6 +494,9 @@ function BT.winRound(bt)
   r.victories = (r.victories or 0) + 7
   BT.room(r, bt.mode, 3)
   r.challenges = (r.challenges or 0) + 1
+  local R = require("src.pokemon.Gen4GameRecords")
+  R.add(bt.save, R.ID.BATTLE_TOWER_VICTORIES, 7)
+  R.add(bt.save, R.ID.BATTLE_TOWER_CHALLENGES, 1)
   if bt.mode ~= BT.SINGLE and BT.streak(bt) >= 50 then bt.ribbonEarned = true end
 end
 

@@ -363,6 +363,12 @@ function love.load()
           require("src.pokemon.Gen4BattleTower").bp(Game.save), tostring(rec.latest[hallType]), tostring(rec.records[hallType]),
           tostring(rec.streakActive[hallType]), tostring(Game.save.party[3].species), Game.save.party[3].level, tostring(Game.save.party[1].item)))
       end
+      if done then
+        local R = require("src.pokemon.Gen4GameRecords")
+        print(("[t%d] records: castle victories %d, CP received %d, BP received %d, score %d"):format(i,
+          R.get(Game.save, R.ID.BATTLE_CASTLE_VICTORIES), R.get(Game.save, R.ID.CASTLE_POINTS_RECEIVED),
+          R.get(Game.save, R.ID.BATTLE_POINTS_RECEIVED), R.trainerScore(Game.save)))
+      end
       if done and os.getenv("CASTLE") then
         local BC = require("src.script.Gen4BattleCastle")
         local rec = BC.record(Game.save)

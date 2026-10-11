@@ -445,7 +445,7 @@ F.battlearcade_waitforcommresponses = function() end
 -- the board's own sprites (FrontierScrCmd_2A-2D, 31) and a sound stopped
 for _, n in ipairs({ "2a", "2b", "2c", "2d", "31", "stopsoundeffect" }) do F[n] = function() end end
 F.bufferitemname = function(ins, s) emit(s, { "fr_buffer_kind", ins.args[1], "item", ins.args[2] }) end
-F.addtorecordvalue = function(ins, s) emit(s, { "fr_record", ins.args[1] }) end
+F.addtorecordvalue = function(ins, s) emit(s, { "fr_record", ins.args[1], ins.args[2] }) end
 
 local function arcade(ctx) return ctx.game.gen4BattleArcade end
 

@@ -340,6 +340,10 @@ function love.load()
     local lv = {}
     for _, m in ipairs(Game.save.party) do lv[#lv + 1] = tostring(m.level) end
     print("party levels after: " .. table.concat(lv, ","))
+    local R = require("src.pokemon.Gen4GameRecords")
+    print(("records: steps %d, castle victories %d, CP received %d, BP received %d, trainer score %d"):format(
+      R.get(Game.save, R.ID.STEPS), R.get(Game.save, R.ID.BATTLE_CASTLE_VICTORIES),
+      R.get(Game.save, R.ID.CASTLE_POINTS_RECEIVED), R.get(Game.save, R.ID.BATTLE_POINTS_RECEIVED), R.trainerScore(Game.save)))
   end, debug.traceback)
   if not ok then print(err) end
   if not _G.__btHarness then love.event.quit() end

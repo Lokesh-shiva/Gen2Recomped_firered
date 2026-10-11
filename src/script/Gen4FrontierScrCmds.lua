@@ -97,9 +97,12 @@ function Commands.fr_random(ctx, dest, bound)
   store(ctx, dest, love.math.random(0, 65535) % n)
 end
 
-function Commands.fr_record(ctx, record)
-  local ok, Rec = pcall(require, "src.pokemon.Gen4GameRecords")
-  if ok and Rec and Rec.increment then pcall(Rec.increment, ctx.save, tonumber(record)) end
+-- IncrementRecordValue <record> / AddToRecordValue <record> <operand>
+function Commands.fr_record(ctx, record, amount)
+  local R = require("src.pokemon.Gen4GameRecords")
+  local id = tonumber(record)
+  if not id then return end
+  if amount ~= nil then R.add(ctx.save, id, value(ctx, amount)) else R.increment(ctx.save, id) end
 end
 
 -- SaveData_SaveStateInit: the save, and whether it went

@@ -1530,8 +1530,13 @@ L.capitalizefirstletter = function(ins, s)
 end
 -- `GameRecords_IncrementTrainerScore` -- the trainer-card score counters,
 -- which this port keeps none of.
-L.incrementtrainerscore = function(_, s) emit(s, { "g4_noop", "trainer score records" }) end
-L.incrementtrainerscore2 = function(_, s) emit(s, { "g4_noop", "trainer score records" }) end
+-- `checkmetfurniturerequirements <furniture + 1> <destVar>`: the Villa's
+-- seven pieces that need something done first (Gen4GameRecords.villa)
+L.checkmetfurniturerequirements = function(ins, s)
+  emit(s, { "g4_villa_requirements", ins.args[1], ins.args[2] })
+end
+L.incrementtrainerscore = function(ins, s) emit(s, { "g4_trainer_score", ins.args[1] }) end
+L.incrementtrainerscore2 = function(ins, s) emit(s, { "g4_trainer_score", ins.args[1] }) end
 -- `ScrCmd_Dummy1F9` reads a var and returns.  It is a no-op ON THE CARTRIDGE,
 -- so this is not a stand-in for anything.
 L.dummy1f9 = function(_, s) emit(s, { "g4_noop", "a cartridge no-op (dummy1f9)" }) end

@@ -113,6 +113,8 @@ end
 function Shop:pay(n)
   if self.frontier then require('src.pokemon.Gen4BattleTower').addBP(self.game.save, -n); return end
   self.game.save.money = (self.game.save.money or 0) - n
+  -- RECORD_MONEY_SPENT (the BP side is counted by addBP itself)
+  pcall(function() require('src.pokemon.Gen4GameRecords').add(self.game.save, 35, n) end)
 end
 function Shop:poorLine()
   if self.frontier then return self:line(37, "I'm sorry.\nYou don't have enough BP.") end

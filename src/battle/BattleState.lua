@@ -1082,6 +1082,9 @@ local function markOwned(game, species)
     if not dex.owned[species] then
       -- new dex page registered (SFX_DEX_PAGE_ADDED)
       require("src.core.Sound").play(game.data, "Dex_Page_Added")
+      if require("src.core.GameVersion").isGen4() then
+        pcall(function() require("src.pokemon.Gen4GameRecords").newSpecies(game.save) end)
+      end
     end
     dex.owned[species] = true
   end

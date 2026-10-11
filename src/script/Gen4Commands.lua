@@ -3042,6 +3042,21 @@ function Commands.g4_add_game_record(ctx, recordId, amount, literal)
   records[id] = math.min(limit, ((tonumber(records[id]) or 0) + value) % 4294967296)
 end
 
+-- `checkmetfurniturerequirements <piece> <destVar>`
+function Commands.g4_villa_requirements(ctx, piece, destVar)
+  local R = require("src.pokemon.Gen4GameRecords")
+  local ok = R.villa(ctx.save, valueOf(ctx, piece), function(v) return getVar(ctx.save, v) end)
+  local d = tonumber(destVar)
+  if d then setVar(ctx.save, d, ok and 1 or 0) end
+end
+
+-- `incrementtrainerscore <event>` -- GameRecords_IncrementTrainerScore
+-- (src/pokemon/Gen4GameRecords.lua: sTrainerScoreIncrements, capped)
+function Commands.g4_trainer_score(ctx, event)
+  if not ctx.save then return end
+  require("src.pokemon.Gen4GameRecords").score(ctx.save, tonumber(event))
+end
+
 -- `checkistrainerdoublebattle <destVar>` -- `battleType != BATTLE_TYPE_SINGLES`
 -- on the trainer this script belongs to.
 function Commands.g4_check_trainer_double(ctx, destVar)
@@ -3311,11 +3326,17 @@ function Commands.g4_berry(ctx,operation,operand)
     local item=valueOf(ctx,operand)
     if patch and patch.stage==0 and item>=95 and item<=98 then patch.mulch=item end
     return
-  elseif operation=='plantberry' then B.plant(ctx.game,patch,valueOf(ctx,operand)); return
+  elseif operation=='plantberry' then
+    B.plant(ctx.game,patch,valueOf(ctx,operand))
+    require('src.pokemon.Gen4GameRecords').increment(ctx.save,4) -- RECORD_BERRIES_PLANTED
+    return
   elseif operation=='setberrywateringstate' then
     if patch and patch.stage>0 and patch.stage<5 then patch.moisture=100 end
     return
-  elseif operation=='harvestberry' then ctx.lastCheck=B.harvest(ctx.game,patch); return
+  elseif operation=='harvestberry' then
+    ctx.lastCheck=B.harvest(ctx.game,patch)
+    require('src.pokemon.Gen4GameRecords').score(ctx.save,0) -- TRAINER_SCORE_EVENT_BERRY_HARVESTED
+    return
   else return end
   setVar(ctx.save,operand,value)
 end
@@ -7005,6 +7026,8 @@ Commands.meta.g4_mystery_gift_offer = { foreground = true, blocking = true }
 --      and the script never resumes
 function Commands.g4_clear_game(ctx)
   local game, save, runner = ctx.game, ctx.save, ctx.runner
+  -- clear_game.c: RECORD_TIMES_ENTERED_HALL_OF_FAME
+  require("src.pokemon.Gen4GameRecords").increment(save, 73)
   local flag = (save.flags or {})[Gen4Commands.GAME_COMPLETED_FLAG]
   local clearedBefore = flag == true or #((save and save.hallOfFame) or {}) > 0
   Commands.g4_prepare_hall_of_fame(ctx)

@@ -35,9 +35,18 @@
 -- opponents, 239 arm 4 for its battle -- fought under Palace rules
 -- (src/battle/Gen3Palace.lua) -- and Spenser where the tower has Anabel.
 --
--- NOT HERE: multi battles and their partners, link play, the e-Reader and
--- record-mixed trainers (ChooseSpecialBattleTowerTrainer finds none without
--- record mixing), the results windows and battle recording.
+-- THE MULTI BATTLE ROOMS (FRONTIER_MODE_MULTIS): the partner room's six
+-- candidates (LoadMultiPartnerCandidatesData, arm 10), what each says when
+-- talked to (ShowPartnerCandidateMessage, arm 11, in the class's own five
+-- lines out of sPartnerTrainerTextTables), the fourteen opponents drawn when
+-- one is chosen, two at a time with their own sprites (SetNextFacilityOpponent's
+-- multi branch), and the battle: your two, the partner's two beside them, two
+-- trainers of two across (BATTLE_TYPE_INGAME_PARTNER | TWO_OPPONENTS).
+--
+-- NOT HERE: link play, the e-Reader and record-mixed trainers and apprentices
+-- (ChooseSpecialBattleTowerTrainer finds none without record mixing, and the
+-- partner room's two extra candidates never appear), the results windows and
+-- battle recording.
 
 local Commands = require("src.script.Commands")
 local Logger = require("src.core.Logger")
@@ -55,6 +64,10 @@ F.MAX_STREAK = 9999
 F.BRAIN = "brain"
 F.FLAG_TOWER_SILVER = 0x860 + 0x64        -- FLAG_SYS_TOWER_SILVER; gold is + 1
 F.TRAINER_KEY = "TRAINER_G3_FRONTIER"
+F.TRAINER_KEY_B = "TRAINER_G3_FRONTIER_B"
+F.PARTNER_KEY = "TRAINER_G3_FRONTIER_PARTNER"
+F.VAR_GFX_E = 0x401E                      -- VAR_OBJ_GFX_ID_E: the chosen partner's sprite
+F.PARTNER_INTRO, F.PARTNER_MON1, F.PARTNER_MON2_ASK, F.PARTNER_ACCEPT, F.PARTNER_REJECT = 0, 1, 2, 3, 4
 
 -- sFrontierTrainerIdRanges / sFrontierTrainerIdRangesHard (0-based ids)
 F.RANGES = { { 0, 99 }, { 80, 119 }, { 100, 139 }, { 120, 159 }, { 140, 179 }, { 160, 199 },
@@ -365,7 +378,7 @@ end
 
 -- FillTrainerParty: `count` of the trainer's set, no species or held item
 -- twice, the high tier left out at level 50
-function F.trainerParty(data, id, count, level, rand)
+function F.trainerParty(data, id, count, level, rand, avoid)
   rand = rand or love.math.random
   local p = F.parties(data)
   local tr = F.trainerRecord(data, id)
@@ -374,6 +387,12 @@ function F.trainerParty(data, id, count, level, rand)
   local ivs = F.ivsFor(id)
   local otId = rand(0, 65535) * 65536 + rand(0, 65535)
   local chosen, species, items, out = {}, {}, {}, {}
+  -- the second multi trainer fills slots 3-4 behind the first: none of the
+  -- first's species or items either
+  for _, mon in ipairs(avoid or {}) do
+    species[mon.species] = true
+    if mon.item then items[mon.item] = true end
+  end
   local guard = 0
   while #out < count and guard < 5000 do
     guard = guard + 1
@@ -434,6 +453,12 @@ function F.towerFunc(ctx, arg)
     if a5 == 1 then F.setStreak(s, mode, lvl, a6)
     elseif a5 == 2 then s.streakActive[key(mode, lvl)] = (a6 ~= 0) or nil
     elseif a5 == 3 then s.towerLvlMode = lvl end
+  elseif arg == 3 and mode == F.MULTIS then
+    -- SetNextFacilityOpponent's multi branch: the pair drawn on accepting
+    local battleNum = math.floor(tonumber(s.data[2]) or 0)
+    s.opponent, s.opponentB = s.trainerIds[battleNum * 2], s.trainerIds[battleNum * 2 + 1]
+    setVar(ctx, F.VAR_GFX0, F.trainerGfx(data, s.opponent))
+    setVar(ctx, F.VAR_GFX0 + 1, F.trainerGfx(data, s.opponentB))
   elseif arg == 3 then          -- SetNextFacilityOpponent
     local battleNum = math.floor(tonumber(s.data[2]) or 0)
     local fac = F.facility(ctx)
@@ -459,15 +484,169 @@ function F.towerFunc(ctx, arg)
     setVar(ctx, F.VAR_STATUS, 0)
     s.data[3] = 1
     F.saveFrontier(ctx)
-  elseif arg == 7 then          -- GetOpponentIntroSpeech
-    F.bufferSpeech(ctx, s.opponent, "before")
+  elseif arg == 7 then          -- GetOpponentIntroSpeech (0x8005: the second of a pair)
+    F.bufferSpeech(ctx, (a5 ~= 0) and s.opponentB or s.opponent, "before")
+  elseif arg == 10 then         -- LoadMultiPartnerCandidatesData
+    F.loadPartners(ctx, s, mode, lvl)
+  elseif arg == 11 then         -- ShowPartnerCandidateMessage
+    F.partnerMessage(ctx, s, mode, lvl, a5)
+  elseif arg == 14 then         -- SetMultiPartnerGfx
+    setVar(ctx, F.VAR_GFX_E, F.trainerGfx(data, s.trainerIds[17]))
   elseif arg == 12 then         -- LoadLinkMultiOpponentsData: not linked, done
     setVar(ctx, F.VAR_RESULT, 6)
   else
-    -- 8, 9 are nops on the cartridge; 10, 11, 13, 14 the multi partners and
-    -- link; 15 the TV interview
+    -- 8, 9 are nops on the cartridge; 13 the link; 15 the TV interview
     Logger.debug("gen3 battle tower: function %d has nothing to do here", arg)
   end
+end
+
+-- GetRandomFrontierMonFromSet: any of the trainer's set, the high tier only at open level
+function F.randomSetMon(data, id, lvl, rand)
+  rand = rand or love.math.random
+  local tr = F.trainerRecord(data, id)
+  local set = tr and tr.set
+  if not (set and #set > 0) then return nil end
+  for _ = 1, 1000 do
+    local monId = set[rand(1, #set)]
+    if not (lvl == F.LVL_50 and (monId - 1) > F.HIGH_TIER) then return monId end
+  end
+  return set[1]
+end
+
+-- LoadMultiPartnerCandidatesData: six candidates, none twice and no two of
+-- one class (trainerIds 0-5), two Pokemon each (8-19). A second Pokemon
+-- never holds its first's item, and none is a species already drawn or one
+-- of your two -- except the very first, which the cartridge's loop (k from
+-- 8 to r10, empty when r10 is 8) never checks at all.
+function F.loadPartners(ctx, s, mode, lvl, rand)
+  rand = rand or love.math.random
+  local data = ctx.game.data
+  local p = F.parties(data)
+  local challengeNum = math.floor(F.streak(s, mode, lvl) / F.STAGES)
+  local party = ctx.save.party or {}
+  local sp1, sp2 = party[1] and party[1].species, party[2] and party[2].species
+  s.trainerIds = s.trainerIds or {}
+  local ids = s.trainerIds
+  for j = 0, 5 do
+    local id
+    for _ = 1, 1000 do
+      id = F.trainerFor(challengeNum, 0, rand)
+      local clash = false
+      for i = 0, j - 1 do
+        local a, b = F.trainerRecord(data, ids[i]), F.trainerRecord(data, id)
+        if ids[i] == id or (a and b and a.facilityClass == b.facilityClass) then clash = true break end
+      end
+      if not clash then break end
+    end
+    ids[j] = id
+  end
+  local r10 = 8
+  for i = 0, 5 do
+    setVar(ctx, F.VAR_GFX0 + i, F.trainerGfx(data, ids[i]))
+    for j = 0, 1 do
+      local monId
+      for _ = 1, 1000 do
+        monId = F.randomSetMon(data, ids[i], lvl, rand)
+        local row = p and p.mons[monId]
+        local ok = row ~= nil
+        if ok and j % 2 ~= 0 then
+          local prev = p.mons[ids[r10 - 1]]
+          if prev and prev.item == row.item then ok = false end
+        end
+        if ok then
+          for k = 8, r10 - 1 do
+            local other = p.mons[ids[k]]
+            if (other and other.species == row.species) or sp1 == row.species or sp2 == row.species then
+              ok = false
+              break
+            end
+          end
+        end
+        if ok then break end
+      end
+      ids[r10] = monId
+      r10 = r10 + 1
+    end
+  end
+end
+
+-- the class's five lines (sPartnerTrainerTextTables)
+function F.partnerLine(data, id, msg)
+  local speech = data.gen3_frontier_speech
+  local tr = F.trainerRecord(data, id)
+  local lines = speech and speech.partnerTexts and tr and speech.partnerTexts[tonumber(tr.facilityClass) or -1]
+  return lines and lines[msg]
+end
+
+-- ShowPartnerCandidateMessage: k = VAR_LAST_TALKED - 2 (the six are local ids 2-7)
+function F.partnerMessage(ctx, s, mode, lvl, msg, rand)
+  rand = rand or love.math.random
+  local data = ctx.game.data
+  local game = ctx.game
+  local p = F.parties(data)
+  local k = getVar(ctx, 0x800F) - 2
+  local ids = s.trainerIds or {}
+  local id = ids[k]
+  if id == nil then return end
+  local var1, var2
+  if msg == F.PARTNER_INTRO then
+    local tr = F.trainerRecord(data, id)
+    var1 = tr and tr.name or ""
+  elseif msg == F.PARTNER_MON1 or msg == F.PARTNER_MON2_ASK then
+    -- GetPotentialPartnerMoveAndSpecies: its first move, its species
+    local row = p and p.mons[ids[8 + k * 2 + (msg == F.PARTNER_MON2_ASK and 1 or 0)]]
+    local move = row and row.moves and row.moves[1]
+    local md = move and data.moves and data.moves[move]
+    local def = row and data.pokemon and data.pokemon[row.species]
+    var1 = md and md.name or tostring(move or "")
+    var2 = def and def.name or tostring(row and row.species or "")
+  elseif msg == F.PARTNER_ACCEPT then
+    -- the partner and their two kept (17, 18-19), and fourteen opponents
+    -- drawn two to a battle, the partner never among them
+    ids[18], ids[19] = ids[8 + k * 2], ids[9 + k * 2]
+    local challengeNum = math.floor(F.streak(s, mode, lvl) / F.STAGES)
+    for kk = 0, F.STAGES * 2 - 1 do
+      local i
+      for _ = 1, 1000 do
+        i = F.trainerFor(challengeNum, math.floor(kk / 2), rand)
+        local ok = i ~= id
+        for j = 0, kk - 1 do if ids[j] == i then ok = false break end end
+        if ok then break end
+      end
+      ids[kk] = i
+    end
+    ids[17] = id
+  end
+  game.stringBuffers = game.stringBuffers or {}
+  if var1 then game.stringBuffers[1] = var1 end
+  if var2 then game.stringBuffers[2] = var2 end
+  local line = F.partnerLine(data, id, msg)
+  if not line then return end
+  line = line:gsub("{VAR1}", function() return game.stringBuffers[1] or "" end)
+             :gsub("{VAR2}", function() return game.stringBuffers[2] or "" end)
+  game.stringBuffers[4] = line
+  Commands.show_text(ctx, "{RAM:wStringBuffer4}")
+end
+
+-- FillPartnerParty: the chosen partner's two, at the challenge's level
+-- with the partner's fixed IVs and full friendship (none with Frustration)
+function F.partnerParty(data, s, level, rand)
+  rand = rand or love.math.random
+  local p = F.parties(data)
+  local id = s.trainerIds[17]
+  if not (p and id) then return {} end
+  local ivs = F.ivsFor(id)
+  local otId = rand(0, 65535) * 65536 + rand(0, 65535)
+  local out = {}
+  for i = 0, 1 do
+    local row = p.mons[s.trainerIds[18 + i]]
+    if row then
+      local mon = F.makeMon(data, row.species, level, row.nature or 0, ivs, F.spread(row.ev or 0),
+        row.item, row.moves, otId, rand)
+      if mon then out[#out + 1] = mon end
+    end
+  end
+  return out
 end
 
 -- FrontierSpeechToString into gStringVar4
@@ -721,7 +900,7 @@ function F.battle(ctx)
   local fac = F.facility(ctx)
   local level = F.enemyLevel(ctx.save, lvl)
   -- the tower's doubles bring four; the palace brings three either way
-  local count = (mode == F.DOUBLES and fac == F.TOWER) and 4 or 3
+  local count = (mode == F.DOUBLES and fac == F.TOWER) and 4 or ((mode == F.MULTIS) and 2 or 3)
   local party, name, pic, class, className
   if s.opponent == F.BRAIN then
     party = F.brainParty(data, F.brainTeam(ctx), level, nil, fac)
@@ -744,9 +923,31 @@ function F.battle(ctx)
     id = F.TRAINER_KEY, name = name or "TRAINER", pic = pic, class = class, className = className,
     party = slots, parties = { slots }, baseMoney = 0,
   }
+  -- the multi rooms: the second trainer's two (none of the first's species
+  -- or items) and the partner's two beside yours
+  local keyB, ally
+  if mode == F.MULTIS and s.opponentB then
+    local partyB = F.trainerParty(data, s.opponentB, 2, level, nil, party)
+    local trB = F.trainerRecord(data, s.opponentB) or {}
+    local slotsB = {}
+    for i, mon in ipairs(partyB) do slotsB[i] = { species = mon.species, level = level, prebuilt = mon } end
+    if slotsB[1] then
+      data.trainers[F.TRAINER_KEY_B] = {
+        id = F.TRAINER_KEY_B, name = trB.name or "TRAINER", pic = trB.pic, class = trB.class,
+        className = trB.className, party = slotsB, parties = { slotsB }, baseMoney = 0,
+      }
+      keyB = F.TRAINER_KEY_B
+    end
+    local pt = F.trainerRecord(data, s.trainerIds[17]) or {}
+    local partnerMons = F.partnerParty(data, s, level)
+    if partnerMons[1] then
+      ally = { party = partnerMons, name = pt.name, pic = pt.pic, trainer = F.PARTNER_KEY }
+    end
+  end
   -- the held items as they are now, for frontier_restorehelditems
   Commands.start_battle(ctx, "trainer", F.TRAINER_KEY, 1,
-    { double = (mode == F.DOUBLES) or nil, canLose = true, noExp = true,
+    { double = (mode == F.DOUBLES or mode == F.MULTIS) or nil, ally = ally, trainerBKey = keyB,
+      canLose = true, frontier = true, noExp = true,
       palace = (fac == F.PALACE) or nil, arena = (fac == F.ARENA) or nil, forfeit = true,
       noItems = (fac ~= F.PYRAMID) or nil })
   -- gBattleOutcome: B_OUTCOME_WON 1, B_OUTCOME_LOST 2 -- and, as every

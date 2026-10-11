@@ -94,8 +94,8 @@
 --     tile-major over 24x8 tiles, eight bytes a tile, one byte a row, bit n =
 --     pixel n from the left.
 --
--- WHAT THE PORT CANNOT FILL IN, named rather than faked: SCORE (no
--- `GameRecords_GetTrainerScore`) prints 0; ADVENTURE STARTED and the whole
+-- SCORE is `GameRecords_GetTrainerScore` (src/pokemon/Gen4GameRecords.lua).
+-- WHAT THE PORT CANNOT FILL IN, named rather than faked: ADVENTURE STARTED and the whole
 -- back are records the save does not keep, so they print the cartridge's own
 -- blanks and zeroes; nothing writes a signature yet (the cartridge's signing
 -- screen is src/applications/signature.c, not this one), so the box is empty
@@ -781,7 +781,9 @@ function Gen4TrainerCard:frontRows()
     rows[#rows + 1] = { Strings("POKéDEX"), tostring(seen),
                         FRONT_Y.dex, PARTIAL_RIGHT }
   end
-  rows[#rows + 1] = { Strings("SCORE"), "0", FRONT_Y.score, PARTIAL_RIGHT }
+  -- GameRecords_GetTrainerScore (src/pokemon/Gen4GameRecords.lua)
+  local score = require("src.pokemon.Gen4GameRecords").trainerScore(save)
+  rows[#rows + 1] = { Strings("SCORE"), tostring(score), FRONT_Y.score, PARTIAL_RIGHT }
   -- hours padded to three, TWO spaces where the blinking colon goes
   rows[#rows + 1] = {
     Strings("TIME"),

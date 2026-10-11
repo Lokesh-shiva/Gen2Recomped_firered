@@ -38185,3 +38185,68 @@ Battle Points.
   - `ARCADESTREAK=n` carries on a streak.
   - `LOSE=n` loses the n-th battle.
 - `tools/gen4_battle_tower_harness` with `ARCADE=1` starts from the lobby.
+
+## Game records, the trainer score, and the Villa's furniture
+
+**Before this:**
+- Scripts could add to `save.gen4GameRecords`, but nothing else ever did.
+- The Frontier scenes' `IncrementRecordValue` called a module that did not
+  exist.
+- `incrementtrainerscore` was a no-op, and the Trainer Card printed SCORE 0.
+- `checkmetfurniturerequirements` (the Villa, 7 sites) was not lowered.
+
+**Now** (`src/pokemon/Gen4GameRecords.lua`, from `game_records.c`):
+- **The records:** 148 counters, with ids and limits generated from
+  pokeplatinum: 999,999,999 or 999,999 for the 71 u32s, 65,535 or 9,999 for
+  the u16s, by `sUsesHighLimit`.
+  - Add, increment and set are capped.
+  - `SetAndLimitRecordValue` only goes up.
+- **The trainer score** is record 1, raised by the 51 score events of
+  `sTrainerScoreIncrements` and capped at 99,999,999. The Trainer Card shows
+  it.
+- **Who writes them**, at the cartridge's moments:
+  - **After a battle** (`encounter.c`), never for a Frontier or link battle:
+    - wild and trainer battles fought
+    - 2 points for a wild win, 3 for a trainer win
+    - a capture: 2 points if the species is in the Sinnoh dex, 3 if not (the
+      first enemy slot is read, as the cartridge does), plus `CAUGHT_POKEMON`
+    - a hooked fish counts as caught or not (`fishing.c`)
+  - **Elsewhere in the engine:**
+    - a new Pokédex page at a catch: 20
+    - every evolution: 20 plus `POKEMON_EVOLVED`, new species or not
+    - a hatch: `EGGS_HATCHED` and 7
+    - each step
+    - money spent at a Mart
+    - BP received and spent, wherever BP moves
+    - the Hall of Fame entry
+    - berries planted, and a berry harvested (1)
+  - **The Frontier:**
+    - the Tower's victories and challenges
+    - the scenes' `IncrementRecordValue` / `AddToRecordValue` (Factory, Hall,
+      Castle and Arcade victories)
+    - CP received
+    - Factory trades
+  - **Scripts:** `incrementgamerecord` / `addtogamerecord` (as before), and
+    `incrementtrainerscore`.
+- **The Villa** (`ScrCmd_CheckMetFurnitureRequirements`):
+  - **Pokémon Bust:** a win in all five facilities.
+  - **Silver Bust:** any facility's silver print (the print-state vars
+    0x404F–0x4053).
+  - **Piano:** 10 Hall of Fame entries.
+  - **Guest Set:** 50 Battleground battles.
+  - **Wall Clock:** 50 berries planted.
+  - **Masterpiece:** 30 hatched.
+  - **Chandelier:** 300,000 steps.
+  - The other pieces need nothing.
+
+**Not ported:**
+- the in-battle counters (fainted, ally attacked, failed escapes)
+- the Underground's score events
+- the records' save encoding
+
+**Checks:**
+- `tools/gen4_game_records_check.lua`: 27 checks, or 29 with the
+  pokeplatinum checkout, which compares the id lists, `sUsesHighLimit` and
+  `sTrainerScoreIncrements`.
+- Both Frontier harnesses print the records at the end. A Castle lobby run
+  shows victories, CP received and the round-completion score adding up.

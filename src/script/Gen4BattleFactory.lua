@@ -263,6 +263,8 @@ function B.applyTrade(f)
   f.playerEntries[give + 1] = f.opponentParty[take + 1]
   f.playerSets[give + 1] = (f.beatenSets or {})[take + 1]
   if f.tradeCount < 9999 then f.tradeCount = f.tradeCount + 1 end
+  local R = require("src.pokemon.Gen4GameRecords")
+  R.increment(f.save, R.ID.BATTLE_FACTORY_TRADES)
   return true
 end
 

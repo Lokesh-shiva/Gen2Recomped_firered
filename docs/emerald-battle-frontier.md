@@ -58,8 +58,9 @@ tent code.
   The Record choices aren't offered at all, rather than offered and then
   failing.
 
-**Not here yet:** multi battles and their partners, link play, the e-Reader
-and record-mixed trainers, the results windows, and the other six facilities.
+**Not here yet:** link play, the e-Reader and record-mixed trainers, and the
+results windows. The multi rooms are below; the other six facilities have
+sections of their own.
 
 ## Fixes this needed, which help more than the tower
 
@@ -456,3 +457,61 @@ scripts.
   `DOME=1 DOME_MENU_A=73 DOME_MENU_B=107 MAP=MAP_G26_N18 X=5 Y=11`. At each
   round's menu it opens the opponent card, then the tree, then continues.
 - `STREAK=4 STREAKFAC=1` meets Tucker in the final.
+
+## The Battle Tower's Multi Battle Rooms
+
+The multis counter (`MAP_G26_N05`, attendant at (14,5)) now leads all the
+way through. The partner room (`MAP_G26_N15`) has its candidates, one can be
+chosen, and the seven battles are two against two with an AI partner. This
+follows `battle_tower.c`.
+
+- **The candidates** (`LoadMultiPartnerCandidatesData`, special 235 arm 10):
+  - Six frontier trainers from the current challenge's range, none twice and
+    no two of one facility class. Their sprites go in `VAR_OBJ_GFX_ID_0`–`5`.
+  - Each has two Pokémon from its set, with the high tier only at Open Level.
+    A second Pokémon never holds its first's item. None is a species already
+    drawn or one of your two.
+  - A quirk is kept: the very first candidate Pokémon is never checked
+    against your two, because the cartridge's loop starts at the slot it is
+    filling.
+- **Talking to one** (`ShowPartnerCandidateMessage`, arm 11): their class's
+  five lines from `sPartnerTrainerTextTables`, read out of the ROM.
+  - The intro gives their name.
+  - Two lines give each Pokémon's species and first move; the second ends
+    "…be my tag team partner?"
+  - Then yes or no.
+- **Accepting:**
+  - The partner and their two are kept.
+  - Fourteen opponents are drawn, two per battle (the seventh pair from the
+    hard range), never the partner.
+  - Their slots overwrite the candidates', as on the cartridge.
+- **Each battle:**
+  - `SetNextFacilityOpponent` sets up the pair, each on their own sprite.
+  - Both say their intro; `0x8005` picks the second.
+  - `SetMultiPartnerGfx` (arm 14) dresses the partner (`VAR_OBJ_GFX_ID_E`).
+- **The battle:**
+  - Your two are on the left, and the partner's two beside them
+    (`FillPartnerParty`: the challenge's level, the partner's fixed IVs).
+  - The partner picks its own moves (`AllyAI`).
+  - Across are the two trainers' two each. The second avoids the first's
+    species and items, as `FillTrainerParty` does over the shared enemy
+    party.
+- **Battle Points:** the tower's table. Seven wins pay 3 BP.
+- **The extractor** (`RomExtractorGen3:multiPartnerTexts`) finds the table from
+  the LASS's intro and writes `partnerTexts` into `gen3_frontier_speech`
+  (found at `5DD500`). Re-run `tools/gen3_frontier_speech_extract.lua` on an
+  existing cache.
+
+**Not ported:**
+- the two extra candidates (a record-mixed apprentice and a friend's
+  record)
+- link multis
+
+**Checks:**
+- `tools/emerald_battle_tower_multi_check.lua`: 21 checks, or 22 with a
+  pokeemerald checkout, which also checks every class in the table has
+  lines.
+- `tools/gen3_battle_tower_harness` with `MULTI=1 X=14 Y=6` plays the
+  challenge: it talks to the candidate at (6,9), says yes, and plays seven
+  pairs.
+

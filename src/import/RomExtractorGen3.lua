@@ -18504,6 +18504,8 @@ function RomExtractorGen3:extractFrontierSpeech()
   for i = 0, 41 do out.pikeNpc[i] = words(0x6123E4 + i * 12) end
   -- ...and the Battle Pyramid's post-battle hints (sPostBattleTexts)
   out.pyramidHints = self:pyramidHintTexts()
+  -- ...and the Battle Tower's multi partners' five lines by facility class
+  out.partnerTexts = self:multiPartnerTexts()
   self:write("gen3_frontier_speech", out)
   Logger.info("Gen3 Frontier speech: %d trainers' three phrases", #out)
 end
@@ -18601,6 +18603,70 @@ function RomExtractorGen3:pyramidHintTexts()
   end
   Logger.info("Gen3 Frontier speech: the Pyramid's hints at %06X", top)
   return hints
+end
+
+-- THE BATTLE TOWER'S MULTI PARTNERS' LINES (battle_tower.c
+-- sPartnerTrainerTextTables): fifty { u32 facilityClass, const u8 *const
+-- strings[5] } rows -- intro, the first Pokemon, the second and the
+-- question, yes, no. Found from the LASS's intro ("...m a LASS!"): the
+-- pointers to it are the head of her five-string list, and the row holding
+-- that list with FACILITY_CLASS_LASS (0x47) in front is the table's first.
+-- Returns [facilityClass] = { [0] = intro, mon1, mon2Ask, accept, reject }.
+function RomExtractorGen3:multiPartnerTexts()
+  local rom = self.rom
+  local data = rom.data
+  if type(data) ~= "string" then return nil end
+  local rev = self:charmapReverse()
+  local needle = {}
+  for ch in ("m a LASS!"):gmatch(".") do
+    local code = (ch == " ") and 0x00 or rev[ch]
+    if not code then return nil end
+    needle[#needle + 1] = string.char(code)
+  end
+  needle = table.concat(needle)
+  local function ptrTo(addr)
+    local v = 0x08000000 + addr
+    return string.char(v % 256, math.floor(v / 256) % 256, math.floor(v / 65536) % 256, math.floor(v / 16777216) % 256)
+  end
+  local function pointersTo(addr)
+    local found, from, p = {}, 1, ptrTo(addr)
+    while true do
+      local at = data:find(p, from, true)
+      if not at then break end
+      if (at - 1) % 4 == 0 then found[#found + 1] = at - 1 end
+      from = at + 1
+    end
+    return found
+  end
+  local function deref(at)
+    local v = rom:u32(at)
+    return (v >= 0x08000000 and v < 0x0A000000) and (v - 0x08000000) or nil
+  end
+  local at = data:find(needle, 1, true)
+  if not at then return nil end
+  local start = at - 1
+  while start > 0 and data:byte(start) ~= 0xFF do start = start - 1 end
+  local top
+  for _, list in ipairs(pointersTo(start)) do
+    for _, row in ipairs(pointersTo(list)) do
+      if row >= 4 and rom:u32(row - 4) == 0x47 then top = row - 4 end
+    end
+  end
+  if not top then return nil end
+  local out = {}
+  for i = 0, 49 do
+    local class = rom:u32(top + i * 8)
+    local list = deref(top + i * 8 + 4)
+    if not list or class > 0xFF then break end
+    local lines = {}
+    for k = 0, 4 do
+      local sp = deref(list + k * 4)
+      lines[k] = sp and self:readText(sp, 512) or ""
+    end
+    out[class] = lines
+  end
+  Logger.info("Gen3 Frontier speech: the multi partners' lines at %06X", top)
+  return out
 end
 
 function RomExtractorGen3:extractFrontierParties()

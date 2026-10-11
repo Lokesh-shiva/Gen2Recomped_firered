@@ -5279,6 +5279,9 @@ function OverworldState:startLedgeHop(dir, fx, fy, tiles, silent)
   if not Collision.occupied(self.entities, lx, ly, p)
      and self.map:isWalkableCell(lx, ly) then
     if not silent then require("src.core.Sound").play(Game.data, "Ledge") end
+    if GameVersion.isGen3() and Game.save then
+      require("src.pokemon.Gen3GameStats").increment(Game.save, 43)    -- GAME_STAT_JUMPED_DOWN_LEDGES
+    end
     -- jump arc (cosmetic), sixteen frames a tile
     p.hopFrames, p.hopTotal = 16 * tiles, 16 * tiles
     self:scriptMove(p, dir, tiles)
@@ -11832,6 +11835,11 @@ end
 
 function OverworldState:hatchEgg(hatched)
   if not hatched then return false end
+  if GameVersion.isGen4() and Game.save then
+    pcall(function() require("src.pokemon.Gen4GameRecords").hatched(Game.save) end)
+  elseif GameVersion.isGen3() and Game.save then
+    require("src.pokemon.Gen3GameStats").increment(Game.save, 13)      -- GAME_STAT_HATCHED_EGGS
+  end
   local Pokemon = require("src.pokemon.Pokemon")
   local def = Game.data.pokemon[hatched.species]
   hatched.isEgg = nil
@@ -12115,6 +12123,15 @@ function OverworldState:onStepComplete()
   -- here made the next idle check treat the same switch as a second visit.
   self:noteCellChange()
   self:gen4BankStep()
+  -- THE STEP COUNTS: Platinum's RECORD_STEPS, Emerald's GAME_STAT_STEPS
+  pcall(function()
+    if not (Game and Game.save) then return end
+    if GameVersion.isGen4() then
+      require("src.pokemon.Gen4GameRecords").increment(Game.save, 0)
+    elseif GameVersion.isGen3() then
+      require("src.pokemon.Gen3GameStats").increment(Game.save, 5)
+    end
+  end)
   -- THE POKETCH'S PEDOMETER, which is a step counter and has to be counted
   -- where steps are.  Gated on the cartridge having a second screen at all, so
   -- no Gen 1-3 step pays for it, and kept on the save because closing the watch
@@ -13332,6 +13349,23 @@ end
 
 function OverworldState:afterBattle(result, battle)
   self.gen4EncounterAttempts = 0
+  -- THE GAME RECORDS: battles fought, the score for a win or a catch, a
+  -- Pokemon caught, a fish hooked (src/pokemon/Gen4GameRecords.lua)
+  if GameVersion.isGen4() and battle and Game.save then
+    pcall(function()
+      local R = require("src.pokemon.Gen4GameRecords")
+      R.afterBattle(Game.data, Game.save, battle, result)
+    end)
+  end
+  -- EMERALD'S AND FIRERED'S GAME STATS: the battle counts (and the Gym
+  -- Leader rematch roll they carry) and a capture (src/pokemon/Gen3GameStats.lua)
+  if GameVersion.isGen3() and battle and Game.save then
+    pcall(function()
+      local S = require("src.pokemon.Gen3GameStats")
+      S.battleBegun(Game.data, Game.save, battle)
+      S.afterBattle(Game.save, battle, result)
+    end)
+  end
   -- encounter.c: with a partner, a battle not lost ends with the party healed
   if battle and battle.gen4Escorted and result ~= "lose" then
     require("src.script.Gen4Commands").healParty(Game.save)

@@ -351,6 +351,11 @@ end
 function Evolution.apply(game, mon, newSpecies, via, evo)
   local newDef = game.data.pokemon[newSpecies]
   assert(newDef, "evolve into unknown species " .. tostring(newSpecies))
+  if require("src.core.GameVersion").isGen4() and game.save then
+    pcall(function() require("src.pokemon.Gen4GameRecords").evolved(game.save) end)
+  elseif require("src.core.GameVersion").isGen3() and game.save then
+    require("src.pokemon.Gen3GameStats").increment(game.save, 14)      -- GAME_STAT_EVOLVED_POKEMON
+  end
   -- `xor a / ld [wTempMonItem], a` (evolve.asm:164): an item-gated TRADE
   -- evolution eats the item it needed.  A KING'S ROCK is not returned to the
   -- bag and is not still on the POLITOED afterwards.

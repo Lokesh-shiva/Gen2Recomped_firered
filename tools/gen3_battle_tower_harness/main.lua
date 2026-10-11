@@ -11,7 +11,9 @@
 --   POKEPORT_ASSET_ROOT=<emerald cache> love tools/gen3_battle_tower_harness
 --
 -- Env: TICKS (default 120000), TRACE, STREAK (start the streak there, to
---      meet Anabel: 34 -> the 35th battle is hers)
+--      meet Anabel: 34 -> the 35th battle is hers), MULTI=1 with X=14 Y=6
+--      (the multi counter: in the partner room, talk to the candidate at
+--      (6,9) and say yes)
 
 function love.load()
   local ok, err = xpcall(function()
@@ -243,6 +245,11 @@ function love.load()
           print(("[t%d] battle vs %s %s%s, levels %s -- battle no. %s"):format(i, tostring(top.trainer.className),
             tostring(top.trainer.name), top.trainerB and (" and " .. tostring(top.trainerB.name)) or "",
             tostring(top.enemy.mon and top.enemy.mon.level), tostring((s.data or {})[2])))
+          if top.ally then
+            local ap = {}
+            for k, m in ipairs(top.ally.party or {}) do ap[k] = tostring(m.species) end
+            print(("   partner %s with %s"):format(tostring(top.ally.name), table.concat(ap, " ")))
+          end
           if os.getenv("PYRAMID") then
             local _, r3 = require("src.script.Gen3BattlePyramid").state(Game.save)
             local ps = {}
@@ -514,6 +521,18 @@ function love.load()
             ow:gen3RunFieldScript(ev[1].script, "harness exit")
           end
         end
+      elseif os.getenv("MULTI") and mapId == "MAP_G26_N15" and top == ow and not _G.__multiTalked
+             and not (ow.runner and ow.runner:isRunning()) and i % 30 == 0 and ow.player then
+        -- the partner room: below the candidate at (6,9), facing up, and talk
+        ow.player.cellX, ow.player.cellY, ow.player.facing = 6, 10, "up"
+        if ow.player.syncPosition then pcall(ow.player.syncPosition, ow.player) end
+        pressed.a = true
+        _G.__multiTalked = true
+        print(("[t%d] talking to the candidate at (6,9)"):format(i))
+      elseif os.getenv("MULTI") and mapId == "MAP_G26_N15" and type(top) == "table" and top ~= ow
+             and top.items and top.index and #top.items == 2 then
+        -- "form a tag team?": YES (the default is NO)
+        if i % 3 == 0 then top.index = 1; pressed.a = true end
       elseif top == ow and not talked and i > 30 then
         pressed.a = true; talked = true
       elseif i % 3 == 0 then
@@ -563,6 +582,12 @@ function love.load()
       end
     end
     local s = Game.save.gen3Frontier or {}
+    do
+      local GS = require("src.pokemon.Gen3GameStats")
+      print(("game stats: steps %d, battles %d (wild %d, trainer %d), frontier battles %s, saved %d"):format(
+        GS.get(Game.save, GS.STEPS), GS.get(Game.save, GS.TOTAL_BATTLES), GS.get(Game.save, GS.WILD_BATTLES),
+        GS.get(Game.save, GS.TRAINER_BATTLES), tostring(Game.save.gen3FrontierBattles), GS.get(Game.save, GS.SAVED_GAME)))
+    end
     print(("record: status %s, BP %s, streak %s, active %s, symbols silver=%s gold=%s"):format(
       tostring((s.data or {})[0]), tostring(Game.save.gen3BattlePoints),
       tostring((s.towerStreaks or {})["0:0"]), tostring((s.streakActive or {})["0:0"]),

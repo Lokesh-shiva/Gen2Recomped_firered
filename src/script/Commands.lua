@@ -638,6 +638,8 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     if opts and opts.forfeit then battle.forfeitable = true end
     -- ...and the bag stays shut (BattleScript_ActionSelectionItemsCantBeUsed)
     if opts and opts.noItems then battle.noItems = true end
+    -- a Frontier battle: frontier.battlesCount rather than the game stats
+    if opts and opts.frontier then battle.gen3Frontier = true end
     if battle.trainer and battle.trainer.doubleBattle then battle.double = true end
     -- AND WHO THE OTHER ONE IS, when two walked up together.  The battle
     -- fills its second opponent slot from this trainer's own party rather
