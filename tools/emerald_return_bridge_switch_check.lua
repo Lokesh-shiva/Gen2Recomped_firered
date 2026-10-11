@@ -6,7 +6,11 @@ local Map=require('src.world.Map')
 local SB=require('src.world.Gen3SecretBase')
 local map=setmetatable({def={width=4,elevationCells={1,15,0,3}},widthCells=4,heightCells=1},{__index=Map})
 local z=1
-for _,x in ipairs({1,2})do z=map:elevationAfter(z,x,0);T.eq(z,1,'surfer height survives wildcard '..x)end
+-- ObjectEventUpdateElevation keeps the height when the tile stepped ONTO or
+-- the one just LEFT is 15: the surfer crossing the bridge column stays at 1
+for _,x in ipairs({1,2})do z=map:elevationAfter(z,x,0,x-1,0);T.eq(z,1,'surfer height survives wildcard '..x)end
+-- ...but a 0 tile reached from ordinary ground is a transition: the mover is AT 0
+T.eq(map:elevationAfter(4,2,0,3,0),0,'stairs (0) from ordinary ground put the mover at 0, which matches anything')
 T.check(map:elevationBlocks(z,3,0),'upper bridge bank blocks the surfer')
 T.check(not map:elevationBlocks(3,3,0),'upper approach still works')
 local Collision=require('src.world.Collision')

@@ -792,7 +792,10 @@ function Gen4Graphics.compose(map, sheet, palette, firstTile)
   -- arithmetic, and ten are the odd sizes above.
   local cols = floor(w / 8)
   local blockCols = nil
-  if (w == 256 or w == 512) and (h == 256 or h == 512)
+  -- ...AND NOT AN AFFINE ONE. An extended rotation/scaling background (BG
+  -- mode 5's bg2/bg3 -- the Battle Frontier's scenes) is one linear grid at
+  -- any size; the caller that knows its BG mode says so with `map.linear`.
+  if not map.linear and (w == 256 or w == 512) and (h == 256 or h == 512)
      and (w > 256 or h > 256) then
     blockCols = floor(w / 256)
   end

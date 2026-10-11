@@ -206,8 +206,13 @@ function Game:bootConfig()
     if type(items) == "table" then
       local id = items.POTION and "POTION" or nil
       if not id then
+        -- STRING KEYS ONLY: Gen 4's table carries every item under ITEM_nnn
+        -- AND its bare number, and a bag is keyed by the string.  Taking the
+        -- number (whenever `pairs` met it first) was dropped by newGame's
+        -- copy, which fell back to the literal "POTION" -- an id Platinum does
+        -- not have, quarantined off the first Continue.
         for key, def in pairs(items) do
-          if type(def) == "table"
+          if type(key) == "string" and type(def) == "table"
              and tostring(def.name or ""):upper():gsub("[^%a]", "") == "POTION" then
             id = key
             break
@@ -228,6 +233,7 @@ function Game:makeTitleState()
   local title = factory.new(self, {
     onNewGame = function()
       while self.stack:top() do self.stack:pop() end
+      if self.overworld then self.overworld.fadeOverlay = nil end
       -- New Game keeps the standalone options.lua preferences
       self.save = SaveData.newGame(self:bootConfig())
       -- no bucket carry-over: mod state from an abandoned session must
@@ -287,6 +293,12 @@ end
 function Game:returnToTitle()
   require("src.core.Music").stop()
   while self.stack:top() do self.stack:pop() end
+  -- THE OVERWORLD OUTLIVES THE STACK, and a fade it had up is popped with
+  -- everything else while `fadeOverlay` still names it. The next script fade
+  -- then found an overlay, did not push it, and waited on a screen that never
+  -- updates -- Platinum's Battle Tower "Rest" (fade, save, OS_ResetSystem)
+  -- froze the resumed challenge's first fade that way.
+  if self.overworld then self.overworld.fadeOverlay = nil end
   self.stack:push(self:makeTitleState())
 end
 
@@ -1880,10 +1892,35 @@ function Game:restoreSave(loaded, recovered)
   for _, box in ipairs(loaded.boxes or {}) do
     for _, mon in ipairs(box) do stamp(loaded, mon) end
   end
-  -- rebuild the state stack from the save
+  -- A SAVE MADE INSIDE A BATTLE TOWER CHALLENGE ("Rest") continues from the
+  -- lobby spot BT_FUNC_SET_COMMUNICATION_CLUB_ACCESSIBLE marked
+  -- (FieldTask_LoadSavedGameMap's special location)
+  if require("src.core.GameVersion").get() == "platinum" then
+    require("src.script.Gen4BattleTowerCommands").applySpecialLocation(loaded)
+  end
+  -- ...and Emerald's: a SaveGameFrontier save continues in the lobby
+  if require("src.core.GameVersion").get() == "emerald" then
+    require("src.script.Gen3BattleFrontier").applyContinue(loaded)
+  end
+  -- rebuild the state stack from the save (and drop a fade the overworld
+  -- still names from before -- see returnToTitle)
   while self.stack:top() do self.stack:pop() end
+  if self.overworld then self.overworld.fadeOverlay = nil end
   self.stack:push(self.overworld, loaded.player.map,
                   loaded.player.x, loaded.player.y, loaded.player.facing)
+  -- Platinum's Journal (FieldTask_LoadSavedGameMap): opened first when two
+  -- days or more have gone by, then today's page is taken and titled here
+  if require("src.core.GameVersion").get() == "platinum" then
+    local J = require("src.pokemon.Gen4Journal")
+    if J.openOnContinue(loaded) then
+      -- the pages as they were: today's is not added until after it closes
+      local pages = {}
+      for i, p in ipairs(J.state(loaded).pages) do pages[i] = p end
+      self.stack:push(require("src.ui.Gen4Journal").new(self, { save = loaded, pages = pages }))
+    end
+    local def = self.data and self.data.maps and self.data.maps[loaded.player.map]
+    J.title(loaded, def and def.header)
+  end
   self.saveReport = report
   if not SaveData.emptyReport(report) then
     -- the report screen is a Screens id so mods (or the ui milestone) own

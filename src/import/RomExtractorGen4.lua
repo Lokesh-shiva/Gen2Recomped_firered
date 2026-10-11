@@ -5621,7 +5621,11 @@ function RomExtractorGen4:extractTerrain(names)
   self:berryFlavors()
   self:trainerMusic()
   self:contestData()
-  self:contestArt()
+  self:contestArt() self:dressUpArt()
+  self:journalArt()
+  self:battleTowerData()
+  self:frontierScripts()
+  self:frontierArt()
   self:poffinArt()
   self:optionsArt()
   self:miningArt()
@@ -5839,6 +5843,51 @@ function RomExtractorGen4:contestArt()
     index[key] = self:saveImage("contest/" .. key, image, { originX = image.originX, originY = image.originY })
   end
   self:write("gen4_contest_art", index)
+end
+
+-- THE DRESS-UP'S ACCESSORIES AND DRESSING ROOM -- see src/import/Gen4DressUp.lua.
+function RomExtractorGen4:dressUpArt()
+  local images, record = nil, nil
+  if self.rom then images, record = require("src.import.Gen4DressUp").images(self.rom) end
+  if not images then return end
+  local paths = {}
+  for key, image in pairs(images) do
+    local e = self:saveImage("dressup/" .. key, image)
+    paths[key] = e and e.path
+  end
+  for _, acc in pairs(record.accessories) do acc.path = paths[acc.key] end
+  if record.room then record.room = { path = paths.room } end
+  self:write("gen4_dressup", record)
+end
+
+-- THE BATTLE TOWER'S TRAINERS AND SETS -- see src/import/Gen4BattleTowerData.lua.
+function RomExtractorGen4:battleTowerData()
+  local rec = self.rom and require("src.import.Gen4BattleTowerData").read(self.rom)
+  if rec then self:write("gen4_battle_tower", rec) end
+end
+
+-- THE BATTLE FRONTIER'S SCENE SCRIPTS -- see src/import/Gen4FrontierScripts.lua.
+function RomExtractorGen4:frontierScripts()
+  local rec = self.rom and require("src.import.Gen4FrontierScripts").read(self.rom)
+  if rec then self:write("gen4_frontier_scripts", rec) end
+end
+
+-- ...AND THEIR BACKDROPS -- see src/import/Gen4FrontierArt.lua.
+function RomExtractorGen4:frontierArt()
+  local images = self.rom and require("src.import.Gen4FrontierArt").images(self.rom)
+  if not images then return end
+  local index = {}
+  for key, image in pairs(images) do index[key] = self:saveImage("frontier/" .. key, image) end
+  self:write("gen4_frontier_art", index)
+end
+
+-- THE JOURNAL'S NOTEBOOK, ONE PAPER A PAGE -- see src/import/Gen4JournalArt.lua.
+function RomExtractorGen4:journalArt()
+  local images = self.rom and require("src.import.Gen4JournalArt").images(self.rom)
+  if not images then return end
+  local index = {}
+  for key, image in pairs(images) do index[key] = self:saveImage("journal/" .. key, image) end
+  self:write("gen4_journal_art", index)
 end
 
 -- THE HALL OF FAME AND THE CREDITS -- see src/import/Gen4EndingArt.lua.

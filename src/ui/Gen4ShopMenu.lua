@@ -78,8 +78,13 @@ function Shop:bagLine(n, fallback, ...)
   return text or fallback
 end
 
-function Shop.new(game, stock, onQuit, goods)
+-- `opts.frontier`: MART_TYPE_FRONTIER, the Battle Frontier's Exchange Service
+-- Corner -- priced and paid in Battle Points (Shop_GetItemBPPrice,
+-- Shop_GetCurrentMoney, Shop_TakeMoney), YES / NO for BUY / SEE YA!, and
+-- bank 543's BP lines (32-38) where the money ones were
+function Shop.new(game, stock, onQuit, goods, opts)
   local self = setmetatable({ game = game, stock = stock or {}, onQuit = onQuit, goods = goods,
+    frontier = opts and opts.frontier or nil,
     mode = 'menu', cursor = 1, scroll = 0, camStep = 0, camAcc = 0, yesNo = 1 }, Shop)
   self.message = self:line(0, 'Welcome!\nHow may I serve you?')
   -- Shop_GetCameraPosDest: ten steps, eight when the player faces west
@@ -91,7 +96,27 @@ end
 
 function Shop:def(id)
   if self.goods then return id and self.goods.def(id) end
-  return id and self.game.data.items[id]
+  local def = id and self.game.data.items[id]
+  if def and self.frontier then
+    -- the item, at its BP price
+    local priced = setmetatable({ price = self.frontier.price(id) }, { __index = def })
+    return priced
+  end
+  return def
+end
+
+-- what the player has to spend, and spending it
+function Shop:funds()
+  if self.frontier then return require('src.pokemon.Gen4BattleTower').bp(self.game.save) end
+  return self.game.save.money or 0
+end
+function Shop:pay(n)
+  if self.frontier then require('src.pokemon.Gen4BattleTower').addBP(self.game.save, -n); return end
+  self.game.save.money = (self.game.save.money or 0) - n
+end
+function Shop:poorLine()
+  if self.frontier then return self:line(37, "I'm sorry.\nYou don't have enough BP.") end
+  return self:line(3, "You don't have enough money.")
 end
 
 function Shop:owned(id)
@@ -105,7 +130,25 @@ function Shop:close()
   self.message = self:line(1, 'Please come again!')
 end
 
+-- itemPurchaseCount / itemSoldCount: a transaction of several items counts
+-- as 2, of one item adds 1 (shop_menu.c, bag/main.c)
+local function bump(n, qty) if (tonumber(qty) or 1) > 1 then return 2 end return math.min(255, (n or 0) + 1) end
+
 function Shop:finish()
+  -- THE JOURNAL (shop_menu.c): an ordinary mart writes what was done there,
+  -- except the Veilstone Store, the Eterna Herb Shop and Celestic's house
+  if not self.goods then
+    pcall(function()
+      local J = require("src.pokemon.Gen4Journal")
+      local ow = self.game.overworld
+      local header = ow and ow.map and ow.map.def and tonumber(ow.map.def.header)
+      local popup = self.game.data.gen4_area_popup
+      local row = popup and popup.headers and header and popup.headers[header]
+      if not J.SHOP_EXCLUDED_HEADERS[header or -1] and not (row and row.text == J.SHOP_EXCLUDED_LABEL) then
+        J.onShopClosed(self.game.save, self.purchases, self.sales)
+      end
+    end)
+  end
   self.camStep = 0
   self:applyCamera()
   self.game.stack:pop()
@@ -135,6 +178,7 @@ end
 
 function Shop:rows()
   if self.mode == 'menu' then
+    if self.frontier then return { self:line(29, 'YES'), self:line(30, 'NO') } end
     local buy, sell, bye = self:line(15, 'BUY'), self:line(16, 'SELL'), self:line(17, 'SEE YA!')
     if self.goods then return { buy, bye } end
     return { buy, sell, bye }
@@ -201,7 +245,18 @@ function Shop:choose()
   if self.mode == 'quantity' then
     self.mode, self.yesNo = 'confirm', 1
     local def = self:def(self.item)
-    if self.transaction == 'buy' then
+    if self.transaction == 'buy' and self.frontier then
+      local name = def and def.name or ''
+      local n = tonumber(self.item)
+      local move = def and def.machine and self.game.data.moves and self.game.data.moves[def.machine.move]
+      if n and n >= Shop.TM01 and n <= Shop.HM01 and move then
+        self.message = self:line(36, ('%s %s will be\n%d BP for %d. Is that OK?'):format(name, move.name or '', self.qty * self.unit, self.qty),
+          name, tostring(self.qty), tostring(self.qty * self.unit), move.name or '')
+      else
+        self.message = self:line(35, ('%s will be %d BP\nfor %d. Is that OK?'):format(name, self.qty * self.unit, self.qty),
+          name, tostring(self.qty), tostring(self.qty * self.unit))
+      end
+    elseif self.transaction == 'buy' then
       local name = def and def.name or ''
       self.message = self:line(5, ('%s, and you want %d.\nThat will be $%d. OK?'):format(name, self.qty, self.qty * self.unit),
         name, tostring(self.qty), tostring(self.qty * self.unit))
@@ -215,23 +270,28 @@ function Shop:choose()
   if not def then return self:back() end
   local price = tonumber(def.price) or 0
   self.unit = price
-  self.max = math.min(99, price > 0 and math.floor((self.game.save.money or 0) / price) or 99)
-  if self.max < 1 then self.message = self:line(3, "You don't have enough money."); return end
+  self.max = math.min(99, price > 0 and math.floor(self:funds() / price) or 99)
+  if self.max < 1 then self.message = self:poorLine(); return end
   self.item, self.transaction, self.qty, self.mode = id, 'buy', 1, 'quantity'
-  self.message = self:line(4, (def.name or '') .. '? Certainly.\nHow many would you like?', def.name)
+  if self.frontier then
+    self.message = self:line(33, (def.name or '') .. '? OK.\nHow many would you like?', def.name)
+  else
+    self.message = self:line(4, (def.name or '') .. '? Certainly.\nHow many would you like?', def.name)
+  end
 end
 
 function Shop:transact()
   local save, cost = self.game.save, self.qty * self.unit
   if self.transaction == 'buy' then
-    if (save.money or 0) < cost then self.message = self:line(3, "You don't have enough money.")
+    if self:funds() < cost then self.message = self:poorLine()
     elseif self.goods and not self.goods.canAdd(self.item, self.qty) then
       self.message = self.goods.fullMessage or 'There is no more room.'
     elseif self.goods then
       self.goods.add(self.item, self.qty)
-      save.money = (save.money or 0) - cost; self.message = 'Thank you!'
+      self:pay(cost); self.message = 'Thank you!'
     elseif not Bag.add(save, self.item, self.qty, self.game.data) then self.message = self:line(7, 'Your Bag is full.')
-    else save.money = (save.money or 0) - cost
+    else self:pay(cost)
+      self.purchases = bump(self.purchases, self.qty)
       local def = self:def(self.item) or {}
       local pockets = ((self.game.data.gen4_menus or {}).bag or {}).pockets or {}
       local pocket = pockets[(tonumber(def.fieldPocket) or 0) + 1] or ''
@@ -245,6 +305,7 @@ function Shop:transact()
   else
     if (save.inventory[self.item] or 0) >= self.qty then
       Bag.remove(save, self.item, self.qty); save.money = math.min(999999, (save.money or 0) + cost)
+      self.sales = bump(self.sales, self.qty)
       local def = self:def(self.item) or {}
       self.message = self:bagLine(77, 'Thank you!', def.name or '', tostring(cost))
     end
@@ -420,6 +481,14 @@ end
 
 -- the money window (Shop_PrintCurrentMoney): (1, 1) 9 x 4
 function Shop:drawMoney()
+  if self.frontier then
+    -- sShop_FrontierCurrMoneyWindowTemplate: (1, 1) 9 x 2, bank 543's 38
+    local text = self:line(38, tostring(self:funds()) .. ' BP', ('%6d'):format(self:funds()))
+    Font.drawBox(0, 0, 11, 4)
+    love.graphics.setColor(1, 1, 1, 1)
+    Font.draw(text, 8 + 72 - 8 - Font.width(text), 8)
+    return
+  end
   require('src.ui.Gen4MoneyWindow').draw({ left = 1, top = 1, tilesW = 9, tilesH = 4,
     label = self:line(18, 'Money'), amount = self:line(19, '$' .. tostring(self.game.save.money or 0),
       tostring(self.game.save.money or 0)) })
@@ -445,7 +514,8 @@ function Shop:drawQuantity()
   Font.drawBox(18, 12, 14, 6)
   g.setColor(1, 1, 1, 1)
   Font.draw(self:line(21, 'x' .. pad(self.qty, 2, true), pad(self.qty, 2, true)), 152, 112)
-  local total = self:line(22, '$' .. tostring(self.qty * self.unit), pad(self.qty * self.unit, 6))
+  local total = self.frontier and self:line(34, tostring(self.qty * self.unit) .. ' BP', pad(self.qty * self.unit, 6))
+    or self:line(22, '$' .. tostring(self.qty * self.unit), pad(self.qty * self.unit, 6))
   Font.draw(total, 248 - Font.width(total), 112)
   self:drawSprite('scroll_up', 162, 108, 'shop/scroll_00')
   self:drawSprite('scroll_down', 162, 132, 'shop/scroll_01')
@@ -502,7 +572,8 @@ function Shop:drawList()
           for k = 1, #num do tile(tonumber(num:sub(k, k)), 1, LIST_X + 16 + (k - 1) * 8) end
         end
       end
-      local right = def and (self:line(9, '$' .. tostring(def.price or 0), pad(tonumber(def.price) or 0, 4)))
+      local right = def and (self.frontier and self:line(32, tostring(def.price or 0) .. ' BP', pad(tonumber(def.price) or 0, 4))
+        or self:line(9, '$' .. tostring(def.price or 0), pad(tonumber(def.price) or 0, 4)))
       Font.draw(Font.fit(label, right and 152 - (textX - LIST_X) - Font.width(right) or 152), textX, y)
       if right then Font.draw(right, 248 - Font.width(right), y) end
     end

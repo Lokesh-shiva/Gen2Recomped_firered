@@ -347,6 +347,12 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
                               game.save.player.name) })
       return
     end
+    -- BattleBag's hasTwoOpponents: no ball while two wild Pokemon stand
+    if battle.kind == "wild" and battle.wildFoesStanding and battle:wildFoesStanding() > 1 then
+      showMessages(game, { (game.data.text and game.data.text.TEXT_B0002_00044)
+        or Strings("It's no good! It's impossible to aim\nwhen there are two POKéMON!") })
+      return
+    end
     consume(game, id)
     list:close()
     -- Catching/AnimPlayer key off the Gen1 ball ids
@@ -405,6 +411,15 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
         stack:pop(); guard = guard + 1
       end
     end)
+    return
+  end
+
+  -- PLATINUM'S JOURNAL, over the Bag (src/ui/Gen4Journal.lua)
+  if result == "journal" then
+    local ok = pcall(function()
+      game.stack:push(require("src.ui.Gen4Journal").new(game, { save = game.save }))
+    end)
+    if not ok then showMessages(game, { Strings("Can't use that here.") }) end
     return
   end
 

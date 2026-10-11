@@ -779,10 +779,19 @@ function Map:isUnderBridgeCell(cx, cy)
   return self:cellElevation(cx, cy) == ELEVATION_UNDER_BRIDGE
 end
 
--- what a mover's elevation becomes after landing on (cx,cy)
-function Map:elevationAfter(at, cx, cy)
+-- what a mover's elevation becomes after stepping from (px,py) onto (cx,cy)
+--
+-- ObjectEventUpdateElevation: the new tile's elevation, whatever it is --
+-- INCLUDING 0 -- unless the new tile or the one just left is 15 (multi-level),
+-- which leaves it alone.  0 is not "keep what you had": a mover standing on
+-- 0 is AT 0, and 0 matches anything (IsElevationMismatchAt), which is what
+-- carries you between levels.  Reported from play: "unable to walk down the
+-- stairs into the beach's low water" -- Mossdeep's stairs are 0 and the
+-- shallow water 3; keeping the upper ground's 4 on the stairs walled it off.
+function Map:elevationAfter(at, cx, cy, px, py)
   local there = self:cellElevation(cx, cy)
-  if there == nil or there == ELEVATION_ANY or there == ELEVATION_UNDER_BRIDGE then return at end
+  if there == nil or there == ELEVATION_UNDER_BRIDGE then return at end
+  if px and py and self:cellElevation(px, py) == ELEVATION_UNDER_BRIDGE then return at end
   return there
 end
 

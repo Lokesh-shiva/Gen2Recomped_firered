@@ -197,6 +197,15 @@ end
 Commands.gen4Markup = gen4Markup
 
 function Commands.show_text(ctx, textId, subs, extraOpts)
+  -- `msgbox gStringVarN` on a buffer nothing filled (a Frontier function that
+  -- is not ported) is no box at all, not an empty one
+  if type(textId) == "string" and require("src.core.GameVersion").isGen3() then
+    local n = textId:match("^{RAM:wStringBuffer(%d)}$")
+    if n then
+      local b = ctx.game and ctx.game.stringBuffers and ctx.game.stringBuffers[tonumber(n)]
+      if b == nil or b == "" then return end
+    end
+  end
   -- The ROM has no "text id" at the point a YES/NO or phone prompt opens: the
   -- menu simply rides the box that is already on screen.  Recording the last
   -- id shown lets those prompts reproduce it when the writetext that printed
@@ -617,6 +626,18 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- was decided.
     if opts and opts.double then battle.double = true end
     if opts and opts.canLose then battle.canLose = true end
+    -- A TAG BATTLE'S PARTNER (src/battle/AllyAI.lua)
+    if opts and opts.ally then battle:setAlly(opts.ally) end
+    -- BATTLE_TYPE_FRONTIER: no experience (Emerald's Battle Tower)
+    if opts and opts.noExp then battle.noExp = true end
+    -- BATTLE_TYPE_PALACE: natures choose the moves (src/battle/Gen3Palace.lua)
+    if opts and opts.palace then battle.palace = true end
+    -- BATTLE_TYPE_ARENA: three turns, then the referee (src/battle/Gen3Arena.lua)
+    if opts and opts.arena then require("src.battle.Gen3Arena").install(battle) end
+    -- BATTLE_TYPE_FRONTIER: RUN asks whether to forfeit
+    if opts and opts.forfeit then battle.forfeitable = true end
+    -- ...and the bag stays shut (BattleScript_ActionSelectionItemsCantBeUsed)
+    if opts and opts.noItems then battle.noItems = true end
     if battle.trainer and battle.trainer.doubleBattle then battle.double = true end
     -- AND WHO THE OTHER ONE IS, when two walked up together.  The battle
     -- fills its second opponent slot from this trainer's own party rather
@@ -640,6 +661,11 @@ function Commands.start_battle(ctx, kind, a, b, opts)
   end
   battle.onFinish = function(result)
     ctx.lastBattleResult = result
+    -- PLATINUM'S ESCORTS: a battle not lost with the partner beside you ends
+    -- with the party healed (encounter.c, Party_HealAllMembers)
+    if battle.ally and battle.ally.escort and result ~= "lose" then
+      require("src.script.Gen4Commands").healParty(ctx.save)
+    end
     if before then
       local Gen3 = require("src.script.Gen3Commands")
       ctx.lastBattleFacts = Gen3.battleFacts(ctx.save, before,

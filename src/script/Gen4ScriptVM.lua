@@ -1538,11 +1538,88 @@ L.dummy1f9 = function(_, s) emit(s, { "g4_noop", "a cartridge no-op (dummy1f9)" 
 L.playdefaultmusic = function(_, s) emit(s, { "play_default_music" }) end
 L.stopmusic = function(_, s) emit(s, { "stop_music" }) end
 
--- The journal is Platinum's own diary screen and this port has none.  A noop
--- rather than a gap: the scripts that write entries must keep running, and
--- what they write has nowhere to go.
-L.givejournal = function(_, s) emit(s, { "g4_noop", "journal" }) end
-L.createjournalevent = function(_, s) emit(s, { "g4_noop", "journal entry" }) end
+-- THE JOURNAL: src/pokemon/Gen4Journal.lua. `createjournalevent` reads five
+-- vars (type, parameter, three unused).
+L.givejournal = function(_, s) emit(s, { "g4_give_journal" }) end
+L.createjournalevent = function(ins, s) emit(s, { "g4_journal_event", ins.args[1], ins.args[2] }) end
+
+-- THE BATTLE TOWER AND BATTLE POINTS: src/script/Gen4BattleTowerCommands.lua.
+-- `callbattletowerfunction <fn> <arg> <dest>` is one row; behind
+-- BT_FUNC_UPDATE_GAME_RECORDS_AND_JOURNAL (38) the frontier battle room's
+-- Battle Points follow, which the field room's script (Diamond and Pearl's)
+-- never had.
+L.initbattletower = function(ins, s) emit(s, { "g4_bt_init", ins.args[1], ins.args[2] }) end
+L.setbattletowernull = function(_, s) emit(s, { "g4_bt_null" }) end
+L.freebattletower = function(_, s) emit(s, { "g4_bt_free" }) end
+L.callbattletowerfunction = function(ins, s)
+  emit(s, { "g4_bt_call", ins.args[1], ins.args[2], ins.args[3] })
+  if tonumber(ins.args[1]) == 38 then emit(s, { "g4_bt_reward" }) end
+end
+L.printbattletowerintromessage = function(ins, s) emit(s, { "g4_bt_intro", ins.args[1] }) end
+L.getbattletowerpartnerspeciesandmove = function(ins, s)
+  emit(s, { "g4_bt_partner_species_move", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+-- `bufferspeciesnamewitharticle <slot> <var> ...`: bank 413, "a TURTWIG"
+L.bufferspeciesnamewitharticle = function(ins, s)
+  emit(s, { "g4_buffer", ins.args[1], "speciesArticle", ins.args[2] })
+end
+-- `getcurnetid <var>`: the link player number; alone, always player 0
+L.getcurnetid = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 0 }) end
+-- `movecamera <x> <y> <z>` (ScrCmd_MoveCamera): the hidden player's sprite
+-- and the camera nudged by x/y/z world units -- 8 is half a tile, centring
+-- the multi rooms between their two doors.  Within a tile of the same view.
+L.movecamera = function(_, s) emit(s, { "g4_noop", "half-tile camera nudge" }) end
+-- `clearreceivedtempdataallplayers`: link-play bookkeeping, nothing alone
+L.clearreceivedtempdataallplayers = function(_, s) emit(s, { "g4_noop", "link play" }) end
+-- THE BATTLE HALL'S LOBBY: src/script/Gen4BattleHallLobby.lua
+L.callbattlehalllobbyfunction = function(ins, s)
+  emit(s, { "g4_hall_lobby", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getbattlehallselectedslots = function(ins, s) emit(s, { "g4_hall_selected_slots", ins.args[1], ins.args[2] }) end
+L.deleteactivebattlehallstreak = function(ins, s) emit(s, { "g4_hall_delete_streak", ins.args[1] }) end
+L.checkifbattlehallstreakis50 = function(ins, s) emit(s, { "g4_hall_streak50", ins.args[1] }) end
+L.getnumspecieswithbattlehallrecords = function(ins, s) emit(s, { "g4_hall_num_species", ins.args[1] }) end
+L.getbattlehalltotalsinglesrecord = function(ins, s) emit(s, { "g4_hall_total_singles", ins.args[1] }) end
+L.getbattlehallrecordkeeperstats = function(ins, s)
+  emit(s, { "g4_hall_record_keeper", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5], ins.args[6] })
+end
+-- THE BATTLE FACTORY'S LOBBY: the one command of its own
+L.deleteactivebattlefactorystreak = function(ins, s)
+  emit(s, { "g4_bf_delete_streak", ins.args[1], ins.args[2] })
+end
+-- the multi challenge's species check with the link partner: alone, nobody to differ from
+L.checkbattlehallpartnerusesdifferentspecies = function(ins, s) emit(s, { "g4_set_var", ins.args[2], 0 }) end
+-- THE BATTLE CASTLE'S LOBBY: src/script/Gen4BattleHallLobby.lua
+L.callbattlecastlelobbyfunction = function(ins, s)
+  emit(s, { "g4_castle_lobby", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getbattlecastleselectedslots = function(ins, s)
+  emit(s, { "g4_castle_selected_slots", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.deleteactivebattlecastlestreak = function(ins, s) emit(s, { "g4_castle_delete_streak", ins.args[1] }) end
+L.checkbattlecastlepartnerusesdifferentspecies = function(ins, s) emit(s, { "g4_set_var", ins.args[3], 0 }) end
+-- THE BATTLE ARCADE'S LOBBY: the Castle's party pick, its own records
+L.callbattlearcadelobbyfunction = function(ins, s)
+  emit(s, { "g4_arcade_lobby", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getbattlearcadeselectedslots = L.getbattlecastleselectedslots
+L.deleteactivebattlearcadestreak = function(ins, s) emit(s, { "g4_arcade_delete_streak", ins.args[1] }) end
+L.checkbattlearcadepartnerusesdifferentspecies = L.checkbattlecastlepartnerusesdifferentspecies
+L.messageseenbanlistspecies = function(ins, s) emit(s, { "g4_bt_banlist_message", ins.args[1], ins.args[2] }) end
+L["1df"] = function(ins, s) emit(s, { "g4_bt_trophy", ins.args[1] }) end
+L["1e0"] = function(ins, s) emit(s, { "g4_bt_teala", ins.args[1] }) end
+L.launchbattlefrontierscene = function(ins, s) emit(s, { "g4_frontier_scene", ins.args[1] }) end
+L.showbattlepoints = function(ins, s) emit(s, { "g4_bp_window", "show", ins.args[1], ins.args[2] }) end
+L.hidebattlepoints = function(_, s) emit(s, { "g4_bp_window", "hide" }) end
+L.updatebpdisplay = function(_, s) emit(s, { "g4_bp_window", "update" }) end
+L.getbattlepoints = function(ins, s) emit(s, { "g4_get_bp", ins.args[1] }) end
+L.givebattlepoints = function(ins, s) emit(s, { "g4_give_bp", ins.args[1] }) end
+L.removebattlepoints = function(ins, s) emit(s, { "g4_remove_bp", ins.args[1] }) end
+L.checkbattlepoints = function(ins, s) emit(s, { "g4_check_bp", ins.args[1], ins.args[2] }) end
+L.pokemartfrontier = function(ins, s) emit(s, { "g4_pokemart_frontier", ins.args[1] }) end
+L.getexchangeservicecorneritemandcost = function(ins, s)
+  emit(s, { "g4_exchange_item", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
 
 
 -- ---------------------------------------------------------------------------

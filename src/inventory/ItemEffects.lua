@@ -1399,6 +1399,14 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     end
     return "explorer_kit"
   end
+  -- PLATINUM'S JOURNAL (fieldUseFunc 5, ITEM_USE_FUNC_JOURNAL: UseJournalFromMenu
+  -- and UseJournalInField both open the journal app, sub_0203D30C)
+  if itemDef and itemDef.fieldUseFunc == 5 and (itemDef.translationSourceName or itemDef.name) == "Journal" then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+    end
+    return "journal"
+  end
   -- THE POKE RADAR (fieldUseFunc 11, ITEM_USE_FUNC_POKE_RADAR)
   if itemDef and itemDef.fieldUseFunc == 11 and (itemDef.translationSourceName or itemDef.name) == "Poké Radar" then
     if battle then

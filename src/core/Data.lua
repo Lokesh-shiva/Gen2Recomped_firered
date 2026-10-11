@@ -228,7 +228,13 @@ local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         -- each trainer class's eyes-meet theme (Gen4TrainerMusic).
                         "gen4_trainer_music",
                         -- contest_data.narc: contestants, judges, dress-ups, themes.
-                        "gen4_contest", "gen4_contest_art",
+                        "gen4_contest", "gen4_contest_art", "gen4_dressup", "gen4_journal_art",
+                        -- the Battle Tower's trainers and Pokemon sets (Gen4BattleTowerData).
+                        "gen4_battle_tower",
+                        -- the Battle Frontier's scene scripts (Gen4FrontierScripts).
+                        "gen4_frontier_scripts",
+                        -- ...and their backdrops (Gen4FrontierArt).
+                        "gen4_frontier_art",
                         -- the Poffin cooking, case and icon art (Gen4PoffinArt).
                         "gen4_poffin_art",
                         -- the Options screen's backdrop and cursor (Gen4OptionsArt).
@@ -332,7 +338,9 @@ local GEN3_BORROWED = {}
 local OPTIONAL = { "audio", "palettes", "icons", "unown_puzzle", "unown_dex",
                    "trainer_headers", "font", "sprites", "field",
                    "battle_anims", "map_layouts", "map_tilesets",
-                   "map_scripts", "scenes", "save_layout", "songs" }
+                   "map_scripts", "scenes", "save_layout", "songs",
+                   -- the Battle Frontier trainers' easy chat lines (Emerald)
+                   "gen3_frontier_speech" }
 
 -- Vanilla defaults for rules exposed through the constants registry.  A
 -- value has to exist before a mod can patch it; each one matches the
@@ -1697,7 +1705,11 @@ function Data:seedDefaults()
     then
       local defByHeader, keyByHeader = {}, {}
       for key, def in pairs(self.maps or {}) do
-        if type(def) == "table" and def.header then
+        -- the cartridge's spelling over an `aliasMap` copy (which carries
+        -- `sourceId` and the same header), or the lifts land on whichever
+        -- of the two `pairs` reached last
+        if type(def) == "table" and def.header
+           and not (def.sourceId and defByHeader[def.header]) then
           defByHeader[def.header] = def
           keyByHeader[def.header] = key
         end

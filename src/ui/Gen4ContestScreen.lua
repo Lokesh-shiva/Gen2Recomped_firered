@@ -9,7 +9,9 @@
 -- competition (src/ui/Gen4ContestDance.lua, danced to the song), the Acting
 -- competition (src/ui/Gen4ContestActing.lua, played turn by turn), and the
 -- final scoring's bars and placement.
--- NOT YET BUILT: the player's dress-up screen (the player enters undressed).
+-- Before the Visual round, the player's sixty seconds of dress-up
+-- (src/ui/Gen4ContestDressUp.lua, overlay022) -- what ends up ON the Pokemon
+-- is what the dress-up score counts, and it is worn on stage.
 --
 -- THE PICTURES ARE THE CARTRIDGE'S (src/import/Gen4ContestArt.lua): the
 -- Visual round on its stage (contest_bg 23/22, ov17_0223CB1C) with each entry
@@ -50,7 +52,9 @@ function Screen.new(game, contest, onDone)
   self.rounds = { visual = visual, dance = dance, acting = acting }
   self.pages = {}
   if visual then
-    C.scoreVisual(contest, game.data)
+    -- the dress-up first, when the cache has its art; the Visual round is
+    -- scored on arrival, once the player's Accessories are known
+    if (game.data.gen4_dressup or {}).accessories then self.pages[#self.pages + 1] = "dressup" end
     self.pages[#self.pages + 1] = "visual"
   end
   for id = 0, 3 do
@@ -88,7 +92,12 @@ function Screen:enter()
   local page = self.pages[self.page]
   local c, data = self.c, self.game.data
   self.queue, self.stage, self.revealed, self.final = {}, nil, 0, false
-  if page == "visual" then
+  if page == "dressup" then
+    self.dressup = require("src.ui.Gen4ContestDressUp").new(self.game, c, {
+      onDone = function() self.dressupDone = true end,
+    })
+  elseif page == "visual" then
+    C.scoreVisual(c, data)
     -- ov17_0223CB1C: the MC's welcome, then each entry in entry order
     -- (entry n is contestant 3 - n), then the next round's call
     self:say(Screen.VISUAL_TEXT, C.isPractice(c.competition) and 17 or 0)
@@ -135,6 +144,13 @@ end
 
 function Screen:update(dt)
   local input = self.game.input
+  if self.pages[self.page] == "dressup" and self.dressup then
+    if self.dressupDone then
+      self.dressup = nil
+      return self:advance()
+    end
+    return self.dressup:update(dt)
+  end
   if self.pages[self.page] == "dance" and self.dance then
     if self.danceDone then
       self.dance = nil
@@ -199,6 +215,16 @@ function Screen:drawVisual(item)
     if img then
       local w, h = img:getDimensions()
       g.draw(img, 128, 96, 0, 1, 1, w / 2, h / 2)
+    end
+    -- what the player put on it, where they put it
+    if id == 0 then
+      local D = require("src.ui.Gen4ContestDressUp")
+      local d = self.wornArt or setmetatable({ data = game.data, images = {} }, D)
+      self.wornArt = d
+      for _, a in ipairs(c.contestants[0].accessories or {}) do
+        local art = d:image(a.accessory)
+        if art and a.x then g.draw(art, 128 + a.x, 96 + a.y) end
+      end
     end
   end
   if item and item.rate then
@@ -276,9 +302,24 @@ function Screen:drawPlain(page)
   Font.popStyle()
 end
 
+-- the dress-up takes the touch screen / mouse
+function Screen:touchpressed(id, x, y)
+  if self.dressup then return self.dressup:touchpressed(id, x, y) end
+  return false
+end
+function Screen:touchmoved(id, x, y)
+  if self.dressup then return self.dressup:touchmoved(id, x, y) end
+  return false
+end
+function Screen:touchreleased(id, x, y)
+  if self.dressup then return self.dressup:touchreleased(id, x, y) end
+  return false
+end
+
 function Screen:draw()
   local g = love.graphics
   local page = self.pages[self.page]
+  if page == "dressup" and self.dressup then return self.dressup:draw() end
   if page == "acting" and self.acting then return self.acting:draw() end
   if page == "dance" and self.dance then return self.dance:draw() end
   g.setColor(0, 0, 0, 1)

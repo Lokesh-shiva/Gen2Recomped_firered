@@ -873,9 +873,18 @@ local function mapForHeader(data, header)
   if not maps then return nil end
   local index = headerToMap[maps]
   if not index then
+    -- ...AND THE CARTRIDGE'S OWN SPELLING OF IT.  Data.lua adds an alias copy
+    -- of every map under a respelled id (`D31R0207` -> `D_31R_0207`, see
+    -- `aliasMap`), and the copy carries the same header.  Taken in `pairs`
+    -- order, a warp landed on whichever of the two came last -- a different
+    -- one from one boot to the next -- and the alias's id is the one no Gen 4
+    -- index knows.  A def with a `sourceId` is the alias; it answers only a
+    -- header nothing else does.
     index = {}
     for id, def in pairs(maps) do
-      if type(def) == "table" and def.header then index[def.header] = id end
+      if type(def) == "table" and def.header and not (def.sourceId and index[def.header]) then
+        index[def.header] = id
+      end
     end
     headerToMap[maps] = index
   end
@@ -2873,6 +2882,8 @@ function Commands.g4_start_battle(ctx, enemy1, enemy2, extra)
   local opts = { double = (other ~= 0) or rec.doubleBattle or nil }
   if other ~= 0 and trainers[other] then opts.trainerBKey = other end
   if extra and extra.canLose then opts.canLose = true end
+  local ally = (extra and extra.ally) or Gen4Commands.escortAlly(ctx)
+  if ally then opts.ally, opts.double = ally, true end
   Commands.start_battle(ctx, "trainer", id, 1, opts)
 end
 
@@ -3911,30 +3922,70 @@ end
 -- is the whole point of the command: the ALLY is named by an operand instead
 -- of being read from FLAG_HAS_PARTNER.
 --
--- WHAT THIS PORT ACTUALLY FIELDS, stated plainly because it is not the
--- cartridge's fight: the two foes are real and the battle is a real double,
--- but the ally trainer is NOT on the field -- both of the player's flanks come
--- from the player's own party, because an AI-driven battler on the player's
--- side is a battle-engine feature this port does not have. The fight is
--- therefore harder than Sinnoh's, and winnable, which is the trade that keeps
--- the scene finishable. Losing it runs the script's own blackout branch, as it
--- does on the cartridge.
+-- THE PARTNER FIGHTS. Their trainer record's own team stands in the
+-- player's right-hand slot and picks its moves for itself (src/battle/
+-- AllyAI.lua); the player chooses for the left one only. Their Pokemon are
+-- theirs -- no experience, nothing written back -- and the fight is lost only
+-- when neither side has anybody left, which is the cartridge's multi battle.
+--
+-- An ally this cache has no team for falls back to the old fight: both of
+-- the player's flanks from their own party.
 --
 -- The alternative was a `pending()` stub, and that is strictly worse: the
 -- Jubilife scene reads `CheckWonBattle` immediately afterwards and branches to
 -- its blackout on FALSE, so an unlowered battle does not merely skip a fight,
 -- it blacks the player out in the middle of a cutscene.
-function Commands.g4_start_tag_battle(ctx, partner, enemy1, enemy2)
-  local ally = math.floor(valueOf(ctx, partner) or 0)
-  if ally ~= 0 and not Gen4Commands._saidTagBattle then
-    Gen4Commands._saidTagBattle = true
-    Logger.info("gen4 battle: a tag battle names trainer %d as the player's "
-                .. "ally; this port has no ally-trainer battler, so both of "
-                .. "the player's flanks are their own party", ally)
+-- the partner trainer's team as an ally record, or nil
+function Gen4Commands.allyFor(ctx, allyId)
+  local game = ctx.game
+  local trainers = game and game.data and game.data.trainers
+  local rec = allyId ~= 0 and trainers and trainers[allyId]
+  if not (rec and type(rec.parties) == "table" and type(rec.parties[1]) == "table" and rec.parties[1][1]) then
+    return nil
   end
+  local BattleState = require("src.battle.BattleState")
+  local ok, party = pcall(BattleState.buildTrainerParty, game, allyId, 1, rec.parties[1])
+  if not (ok and type(party) == "table" and party[1]) then return nil end
+  return { party = party, name = rec.name, trainer = allyId, pic = rec.pic }
+end
+
+-- ScrCmd_StartTrainerBattle: with FLAG_HAS_PARTNER set (an escort -- Cheryl
+-- in Eterna Forest, Riley on Iron Island, Mira in Wayward Cave, Marley on
+-- Victory Road, Buck on Stark Mountain), VAR_PARTNER_TRAINER_ID fights at the
+-- player's side
+Gen4Commands.VAR_PARTNER_TRAINER_ID = 0x403F
+function Gen4Commands.escortAlly(ctx)
+  local Follower = require("src.world.Gen4Follower")
+  if not (Follower.hasPartner and Follower.hasPartner(ctx.save)) then return nil end
+  local id = math.floor(tonumber(getVar(ctx.save, Gen4Commands.VAR_PARTNER_TRAINER_ID)) or 0)
+  if id == 0 then return nil end
+  local ally = Gen4Commands.allyFor(ctx, id)
+  if ally then ally.escort = true end
+  return ally
+end
+
+-- Party_HealAllMembers, which FieldTask_Encounter runs after any battle not
+-- lost while a partner walks with the player
+function Gen4Commands.healParty(save)
+  local Pokemon = require("src.pokemon.Pokemon")
+  local Party = require("src.pokemon.Party")
+  for _, mon in ipairs(save and save.party or {}) do
+    if type(mon) == "table" and mon.stats and not Party.isEgg(mon) then pcall(Pokemon.heal, mon) end
+  end
+end
+
+function Commands.g4_start_tag_battle(ctx, partner, enemy1, enemy2)
+  local allyId = math.floor(valueOf(ctx, partner) or 0)
   local a, b = math.floor(valueOf(ctx, enemy1) or 0),
                math.floor(valueOf(ctx, enemy2) or 0)
-  return Commands.g4_start_battle(ctx, a, b)
+  local ally = Gen4Commands.allyFor(ctx, allyId)
+  if not ally and allyId ~= 0 and not Gen4Commands._saidTagBattle then
+    Gen4Commands._saidTagBattle = true
+    Logger.info("gen4 battle: tag partner %d has no team in this cache -- both of "
+                .. "the player's flanks are their own party", allyId)
+  end
+  if not ally then return Commands.g4_start_battle(ctx, a, b) end
+  return Commands.g4_start_battle(ctx, a, b, { ally = ally })
 end
 
 Commands.meta = Commands.meta or {}
@@ -4266,11 +4317,15 @@ end
 -- script wraps `SaveData_Save`.
 
 -- `checksavetype <destVar>`.  Four answers, all of them in Gen4Save.
+-- !! A COMMAND MUST NOT RETURN ITS ANSWER. ScriptRunner:exec reads a number
+-- a command returns as the ROW TO JUMP TO, so `return kind` sent every
+-- `Common_SaveGame` back to row `kind` of its script -- the Battle Tower's
+-- attendant greeted the player again instead of saving, for ever. The answer
+-- goes in the var; the function returns nothing.
 function Commands.g4_check_save_type(ctx, destVar)
   local Gen4Save = require("src.script.Gen4Save")
   local kind = Gen4Save.typeFor(ctx.save)
   if destVar then setVar(ctx.save, destVar, kind) end
-  return kind
 end
 
 -- `trysavegame <destVar>` -- 1 when the bytes landed, 0 otherwise, which is
@@ -4290,7 +4345,6 @@ function Commands.g4_try_save_game(ctx, destVar)
   local answer = wrote and 1 or 0
   if destVar then setVar(ctx.save, destVar, answer) end
   Logger.info("gen4 save: script save %s", wrote and "written" or "declined")
-  return answer
 end
 
 -- `storesaveresult <var>` -- hand the result back to whatever started the
@@ -4312,7 +4366,6 @@ function Commands.g4_store_save_result(ctx, var)
       Logger.warn("gen4 save: the save-result sink raised (%s)", tostring(err))
     end
   end
-  return value
 end
 
 -- `showsavingicon` / `hidesavingicon` -- `Window_AddWaitDial` and
@@ -4407,7 +4460,6 @@ function Commands.g4_misc_save_init(ctx, destVar)
   local init = require("src.script.Gen4Save").miscSaveInit(ctx.save)
   local value = init and 1 or 0
   if destVar then setVar(ctx.save, destVar, value) end
-  return value
 end
 
 -- ---------------------------------------------------------------------------
@@ -4433,7 +4485,6 @@ end
 function Commands.g4_hall_of_fame_corrupted(ctx, destVar)
   if destVar then setVar(ctx.save, destVar, 0) end
   setResult(ctx, 0)
-  return 0
 end
 
 -- `openpchalloffamescreen` -- the post-game browser for recorded Hall of Fame
@@ -6591,6 +6642,23 @@ end
 
 -- `playtrainerencounterbgm <trainer>` -- Sound_SwapBGM(FieldBGM_GetEyesMeetForTrainer):
 -- the trainer's class theme, at once.
+-- THE JOURNAL (src/pokemon/Gen4Journal.lua). `givejournal` sets the
+-- acquired flag, takes today's page and writes its title from where the
+-- player stands (ScrCmd_GiveJournal + sub_02053494); `createjournalevent`
+-- writes the Game Corner / Safari / item / field move / Frontier rows.
+function Commands.g4_give_journal(ctx)
+  local J = require("src.pokemon.Gen4Journal")
+  local s = J.state(ctx.save)
+  if not s then return end
+  s.acquired = true
+  local ow = ctx.overworld
+  J.title(ctx.save, ow and ow.map and ow.map.def and ow.map.def.header)
+end
+
+function Commands.g4_journal_event(ctx, eventType, param)
+  require("src.pokemon.Gen4Journal").fromScript(ctx.save, valueOf(ctx, eventType), valueOf(ctx, param))
+end
+
 function Commands.g4_trainer_encounter_bgm(ctx, trainer)
   local data = ctx.game and ctx.game.data
   local seq = require("src.import.Gen4TrainerMusic").forTrainer(data, math.floor(valueOf(ctx, trainer)))
@@ -6990,5 +7058,10 @@ function Commands.g4_clear_game(ctx)
 end
 Commands.meta = Commands.meta or {}
 Commands.meta.g4_clear_game = { foreground = true, blocking = true }
+
+-- the Battle Tower and Battle Points (src/script/Gen4BattleTowerCommands.lua)
+package.loaded["src.script.Gen4Commands"] = Gen4Commands
+require("src.script.Gen4BattleTowerCommands")
+require("src.script.Gen4BattleHallLobby")
 
 return Gen4Commands

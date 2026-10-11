@@ -37517,3 +37517,671 @@ The Mining/Menu hook writes its two modules by literal name, so the cache
 wiring check sees them written. `gen4_map_matrices` and
 `gen4_trainer_sprites` have readers now, so they have left the
 write-only-dump list.
+
+## Super Contest: the dress-up
+
+Before the Visual round the player now dresses their Pokémon. This is
+overlay 22, `ov22_02255D44`, and the screen is `src/ui/Gen4ContestDressUp.lua`.
+
+**The art** comes from `/graphic/imageclip.narc` (`src/import/Gen4DressUp.lua`),
+cached as `gen4_dressup`:
+- Accessory k's picture is member k + 1, a 4bpp NCGR stored as a bitmap
+  rather than tiles.
+- Member 0 is the palette (16 rows). Member 235 holds one byte per accessory
+  saying which row it uses.
+- Members 224/225/226 are the dressing room's background.
+
+For an existing cache, run `love tools/gen4_dressup_extract <rom> <asset root> <cache dir>`.
+
+**The rules:**
+- You have 60 seconds, or press DONE and confirm "Is your Pokémon all
+  dressed up?".
+- At most 5/10/15/20 accessories can be out at once, by rank (20 in a link
+  contest).
+- Only accessories ON the Pokémon count (`ov22_0225768C`):
+  - An accessory is attached when its opaque pixels cover one of 16 points
+    of an attached thing's trimmed box: the 4×4 grid of its edges and thirds.
+  - It starts from the Pokémon, so accessories can chain off each other.
+  - At most 20 are kept.
+- The score is each worn accessory's worth in the theme's table.
+- Accessories are not used up.
+- The worn accessories show on the Pokémon on the Visual stage.
+
+**Controls:**
+- Drag with the touch screen or the mouse.
+- With buttons: arrows choose in the case, A takes one out; arrows move it,
+  A puts it down, B puts it back.
+- SELECT picks up accessories already out; START is DONE.
+
+**Checks:**
+- `tools/gen4_contest_dressup_check.lua` (16).
+- `tools/gen4_contest_harness` now dresses Pikachu in Red Barrette, Top Hat
+  and Gold Pedestal (6 points, 3 hearts) before the Visual round.
+
+**Not drawn:**
+- the accessories' layer order (a pedestal still draws over the Pokémon);
+- the NPCs' accessories on stage. Their positions use a coordinate frame
+  this screen doesn't read yet.
+
+## The Journal
+
+`src/pokemon/Gen4Journal.lua` keeps the pages; `src/ui/Gen4Journal.lua` shows
+them. Both follow `journal.c`, `journal_printer.c` and `journal_controller.c`.
+
+**The pages:**
+- `givejournal` turns the Journal on and titles today's page with the map
+  the player is on.
+- One page per real-world day, newest first, ten kept. The page that's open
+  moves down when a new day starts (`Journal_GetSavedPage`).
+- A page holds the date and starting map, four location events, a Pokémon,
+  a trainer, and two online rows. Online rows are link-only, so a single
+  player never fills them.
+- Saved in `save.gen4Journal`.
+
+**What gets written, and from where:**
+- **Map changes** (`OverworldController:setMap`):
+  - Arriving somewhere for the first time, before its fly spot opens.
+  - Leaving a cave, a listed building, home or the lab.
+  - Entering a gym whose badge you don't have ("too tough").
+- **Battles** (`afterBattle`):
+  - A catch, or the fifth or later wild win since the last map load. The
+    wording is picked by the play-time minutes.
+  - An ordinary trainer win.
+  - A gym leader, Elite Four member or champion win is a location event
+    instead.
+- **Field moves:** Fly, Dig, Teleport, Sweet Scent, Milk Drink and
+  Softboiled from the party menu.
+- **Scripts:** the other field moves, the Game Corner, the Safari Game,
+  items and the Frontier, through `createjournalevent`.
+- **Marts:** the summary of a visit, except the Veilstone Store, the Herb
+  Shop and Celestic's house.
+- **The PC:** a change to the party or boxes.
+- **No repeats:** each kind of event has its own rule against writing the
+  same thing twice in a row. A gym win replaces that gym's "too tough".
+
+**Opening it:**
+- **On Continue:** if the newest page is two or more days old, the Journal
+  opens first, showing the pages as they were. Today's page is added after.
+- **The Journal key item** (`fieldUseFunc` 5) opens it from the Bag.
+
+**The screen:**
+- The notebook comes from `f_note_gra.narc`, the boy's or the girl's. Each
+  page is painted in palette `page`, so each page has its own paper.
+  `src/import/Gen4JournalArt.lua` writes 20 images to `gen4_journal_art`;
+  for an existing cache, run `tools/gen4_journal_extract`.
+- Text is in bank 366, at the printer's window positions (16 px rows).
+- **Controls:**
+  - LEFT: newer page.
+  - A or RIGHT: older page.
+  - B: back a page; on the first page, close.
+  - START: close.
+- **Page turns** use the cartridge's nine-step column table
+  (`Unk_ov81_021D33E8`) with `SEQ_SE_DP_MEKURU3`.
+
+**Checks:**
+- `tools/gen4_journal_check.lua` (42).
+- `tools/gen4_journal_harness` renders two days' pages and two page turns.
+- `gen4_declined_census_check` no longer lists the Journal.
+
+## The Battle Tower and Battle Points
+
+Single and Double Battle Rooms now work from start to finish, along with
+Battle Points (BP) and the Exchange Service Corner.
+
+- **Core logic:** `src/pokemon/Gen4BattleTower.lua`.
+- **Script commands:** `src/script/Gen4BattleTowerCommands.lua`.
+- **ROM data:** `src/import/Gen4BattleTowerData.lua`.
+
+**The challenge:**
+- The lobby's own field scripts run the whole challenge through
+  `callbattletowerfunction`. Both of the cartridge's switches are handled:
+  the field one and overlay104's frontier one.
+- **Team choice:** a new select mode in the party menu (see below).
+- **The battle room:**
+  - On the cartridge, the elevator hands over to overlay104's frontier scene.
+    Platinum still ships Diamond and Pearl's field battle-room script, which
+    is complete: opponents, the heal, Keep going / Rest / Retire, and Palmer.
+  - So `LaunchBattleFrontierScene FRONTIER_SCENE_TOWER_CORRIDOR` warps into
+    that room (header 330, (7, 6)) and the room's OnFrame script takes over.
+  - **Battle Points:** after `BT_FUNC_UPDATE_GAME_RECORDS_AND_JOURNAL`, the
+    frontier script's BP award is added: "cleared your seventh match" (or the
+    Tycoon line), then "received N BP!" with `SEQ_PL_POINTGET3`.
+  - **Not shown:** the corridor walk, which has no field script in Platinum.
+- **Opponents:**
+  - Trainers and sets come from `pl_btdtr` / `pl_btdpm` (315 trainers,
+    951 sets).
+  - They're drawn by room from the cartridge's ranges, with no trainer twice.
+    Palmer is the 21st and 49th opponent in singles.
+  - The struct's own LCG drives every roll: `* 48828125 + 1`, then
+    `/ 65535` as u16. It's seeded from the record as the cartridge does.
+- **Teams:** level 50.
+  - Each set's nature comes from a non-shiny personality.
+  - IVs are 31 / 8 * k by trainer id; 510 EVs are shared across the
+    flagged stats.
+  - If the item rule fails 50 times, the reserved items are used.
+- **Your team:** level-50 copies of the chosen members. Your own party is
+  never touched (no EXP, PP or HP changes carry over).
+- **Records** (`save.gen4Frontier`):
+  - the current and best streaks, room number and "streak alive" flag;
+  - Battle Points (to 9,999), victories and challenges;
+  - Teala's three trophies (`ScrCmd_1DF` / `1E0`);
+  - the Ability and Great Ability ribbons for beating Palmer.
+- **Rest:** saves the challenge, then soft-resets to the title. Continue puts
+  you back at the lobby spot that `BT_FUNC_SET_COMMUNICATION_CLUB_ACCESSIBLE`
+  marked, and the same seven opponents carry on.
+- **Not here:** Wi-Fi, link, and the multi battles with partners.
+
+**Party menu, choosing a team** (`Gen4PartyMenu`, `select`):
+- Members show ENTER / NO ENTRY, and their panels read FIRST..SIXTH,
+  NOT ENTERED or BANNED (bank 453's 154/155, 167-174).
+- The frontier banlist applies, plus a level cap.
+- CONFIRM checks the count ("Three Pokémon are needed.") and repeated
+  species or items (182/183).
+
+**Battle Points and the exchange corner:**
+- `show/hide/updatebpdisplay` share the coin window (bank 361's 230).
+- `get/give/remove/checkbattlepoints` are supported.
+- `getexchangeservicecorneritemandcost` uses the cartridge's prize list.
+- `pokemartfrontier` opens the shop in frontier mode:
+  - YES / NO in place of BUY / SEE YA!;
+  - bank 543's BP lines (32-38);
+  - priced and paid in BP.
+
+**Two engine bugs this found:**
+- **Commands returning numbers:**
+  - `ScriptRunner` reads a number a command returns as the row to jump to.
+  - `g4_check_save_type`, `g4_try_save_game`, `g4_store_save_result`,
+    `g4_misc_save_init` and `g4_hall_of_fame_corrupted` returned their
+    answers, so every `Common_SaveGame` jumped back near the start of its
+    script.
+  - The tower's attendant greeted you again instead of saving, but the bug
+    affected every Platinum script that saves this way.
+  - They now only write their var.
+- **Stale fade after a soft reset:**
+  - The overworld outlives the state stack. A fade it had up was popped by
+    `returnToTitle` while `fadeOverlay` still pointed at it, so the next
+    script fade waited forever.
+  - It's now cleared on title, new game and load.
+
+**Checks:**
+- `tools/gen4_battle_tower_check.lua` (89).
+- `tools/gen4_battle_tower_harness` plays a whole challenge on the real
+  engine. With `REST=3`, it chooses Rest before opponent 3 and Continues.
+- For an existing cache, run `tools/gen4_battle_tower_extract.lua`.
+- The census's unlowered sites dropped from 610 to 439.
+
+## Tag battles: the partner fights
+
+The partner is now a real battler, played by its own AI:
+`src/battle/AllyAI.lua`, plus `BattleState`'s `ally` and Gen4Commands'
+`allyFor` / `escortAlly`.
+
+**Before this:** a tag battle put two of the player's own Pokémon on the
+field.
+
+**Where partners now fight beside you:**
+- **`starttagbattle`:** Jubilife and Veilstone (the Galactic Grunts), Spear
+  Pillar (Mars and Jupiter), and the Fight Area (Volkner and Flint).
+- **Escorts:** `starttrainerbattle` while `FLAG_HAS_PARTNER` is set, with
+  `VAR_PARTNER_TRAINER_ID` (0x403F) as the partner. That covers Cheryl in
+  Eterna Forest, Riley on Iron Island, Mira in Wayward Cave, Marley on Victory
+  Road and Buck on Stark Mountain.
+
+**How it fights:**
+- The partner's team is built from their trainer record (the same
+  `buildTrainerParty` every trainer uses) and stands in the player's
+  right-hand slot.
+- The battle menu asks only about the player's own Pokémon.
+- **Move choice:**
+  - Each usable damaging move is scored against each standing foe:
+    power × type effectiveness × same-type bonus × accuracy. The best move
+    and target are taken.
+  - With nothing that can hurt, it uses something usable; with no PP, it
+    uses Struggle.
+  - **Not the cartridge's:** the cartridge runs the partner through its
+    trainer AI with the trainer's flags. This port's trainer AI only knows
+    how to aim at the player.
+- **Replacements and defeat:**
+  - A fainted partner Pokémon is replaced from the partner's own party.
+  - The side keeps fighting while either the player or the partner has
+    anyone left. If only the partner is left, turns run without a menu.
+- **The partner's Pokémon are theirs:** they get no experience and nothing
+  is written back.
+
+**Not here yet:** wild encounters with an escort (the cartridge makes those
+doubles too).
+
+**Checks:**
+- `tools/gen4_tag_battle_check.lua` (13).
+- `tools/gen4_tag_battle_harness` plays Jubilife's grunts with Lucas.
+  `ESCORT=608` plays an escort battle with Cheryl.
+
+## The Battle Tower's Multi Battle Rooms
+
+**Before this:** the multi attendant's challenge got as far as the Battle
+Salon and stopped. Nobody there could be asked to team up, and the multi
+battle room had no opponents.
+
+**The flow, as the cartridge's scripts run it:**
+- The multi attendant asks whether to link with a friend. Answering no gives
+  `BATTLE_TOWER_MODE_MULTI`.
+- The player picks two Pokémon, the game saves, and the elevator goes down to
+  the Battle Salon.
+- On entering the Salon (`BT_FUNC_UNK_56`, `sub_0204A97C`), each of the five
+  partners gets a team of two: Cheryl, Mira, Riley, Marley and Buck,
+  `pl_btdtr` 300–304.
+  - Their sets avoid the species the player chose, and their items too
+    (while there are fewer than 50 item rejections), exactly as
+    `sub_0204B470` does.
+  - Their IVs are 31.
+- A partner is shown in the Salon only once the story has put them in the
+  player's path (`FLAG_TRAVELED_WITH_CHERYL` and the rest).
+- Talking to a partner:
+  - They name what they bring: `getbattletowerpartnerspeciesandmove` gives
+    the species and first move of each Pokémon, and
+    `bufferspeciesnamewitharticle` writes "a GARCHOMP".
+  - Agreeing sets `BT_FUNC_SET_PARTNER_ID`.
+- **The multi corridor scene** (`FRONTIER_SCENE_TOWER_MULTI_CORRIDOR`, 6) is
+  the field multi battle room, entered at (7,5). This works like the single
+  corridor. The room's OnTransition script dresses the leader and the partner
+  through `BT_PARAM_PLAYER_GRAPHICS_ID` / `BT_PARAM_PARTNER_GRAPHICS_ID`.
+- **The trainers:**
+  - `sub_0204A4C8` draws fourteen trainers, two for each opponent number.
+  - `BattleTower_CreateOpponentParties` builds each pair. The second
+    trainer's team avoids the first trainer's species and items.
+  - Both trainers say their intro line (`printbattletowerintromessage 0` and
+    `1`), and both walk in on their own sprites.
+- **The battle:**
+  - The player's two Pokémon are on the left.
+  - The partner's two are on the right, choosing their own moves
+    (`src/battle/AllyAI.lua`, see "Tag battles" above).
+  - The two trainers stand across.
+  - This is `BATTLE_TYPE_FRONTIER_WITH_AI_PARTNER`.
+- Battle Points come from the solo table. Seven wins in room 1 pay 3 BP.
+- **Rest** saves the partner and the team they drew (WifiBattleTowerSave
+  fields 6, 7 and 9). Continue brings back the same partner with the same two
+  Pokémon, plus all fourteen trainers.
+
+**Not here:** the linked (wireless) multi mode, which needs a second DS.
+
+**Found along the way:**
+- **Warps landed on a random copy of the map.** `Data.lua` keeps an alias
+  copy of every Gen 4 map under a respelled id (`D31R0207` →
+  `D_31R_0207`), and the copy carries the same header.
+  - `mapForHeader` indexed headers in `pairs` order, so a script warp landed
+    on whichever copy came last, and that changed from one boot to the next.
+    The alias's id is the one no Gen 4 index knows.
+  - It now prefers the cartridge's spelling.
+  - The Distortion World's lift wiring builds the same index and is fixed the
+    same way.
+- **A new game lost its PC Potion.** The lookup for the new game's PC Potion
+  could match Platinum's bare item number (17) instead of `ITEM_017`. The
+  copy into the save dropped the number, the save fell back to the literal
+  `"POTION"`, and the first Continue quarantined it.
+
+**Checks:**
+- `tools/gen4_battle_tower_multi_check.lua` (44).
+- `tools/gen4_battle_tower_harness` with `MODE=multi` plays the challenge
+  with Cheryl through seven pairs. `REST=n` rests before pair n and
+  continues. `MODE=double` now really chooses Double.
+
+## Wild battles with an escort
+
+**Before this:** walking with Cheryl, Riley, Mira, Marley or Buck, a wild
+Pokémon met you alone, as if nobody was there.
+
+**Now, as `WildEncounters_TryWildEncounter`'s `withPartner` arm does it:**
+- **In the grass or a cave:** a double battle. The partner's team stands
+  beside you (`BATTLE_TYPE_AI_PARTNER`), choosing its own moves.
+- **Two wild Pokémon:** each is drawn the way a single one is, with the
+  same slot and lead-ability rules (`TryGenerateGrassEncounter_DoubleBattle`).
+  - If the second draw is turned away (an Intimidate or Keen Eye lead), the
+    whole encounter is off.
+- **On the water:** the partner joins, but only one wild Pokémon appears.
+- **No roamers:** `TryEncounterRoamer` is only asked when there's no partner.
+- **No catching two at once:** while two wild Pokémon are standing, a Poké
+  Ball is refused with the cartridge's own line: "It's impossible to aim when
+  there are two Pokémon!"
+- **Healing:** after any battle not lost with a partner beside you, wild or
+  trainer, the party is healed (`Party_HealAllMembers` in
+  `FieldTask_Encounter`).
+
+**The machinery:**
+- `BattleState:makeWildDouble` puts both wild Pokémon in a wild battle's
+  party.
+- The double-battle code already in place does the rest: the replacements,
+  the side check, and experience for each foe that falls.
+
+**Checks:**
+- `tools/gen4_tag_battle_check.lua` (19).
+- `tools/gen4_tag_battle_harness` with `WILD=1 MAP=D03R0101` walks Eterna
+  Forest with Cheryl until something appears. Note that Eterna Forest's wild
+  table hangs off `D03R0101`, not `D03`.
+
+## The Battle Frontier's scene engine and the Battle Hall
+
+**Why it's needed:** the Battle Hall, Castle, Arcade and Factory don't run on
+field scripts. Each facility hands off to overlay104's own script engine with
+its own scene: a backdrop, a cast of objects, movements and messages. Their
+scripts are in `/frontier/script/fr_script.narc`. This round builds that
+engine; the facilities come next.
+
+**The pieces:**
+- **`src/import/Gen4FrontierCommands.lua`, the command table:**
+  - Generated by `tools/gen4_frontier_commands_gen.py` from pokeplatinum's
+    `frscrcmd.h` (the opcode order) and `frscrcmd.inc` (each opcode's
+    operand widths, carried across the macros' `.if/.else`).
+  - It has 204 opcodes and 42 movement codes.
+  - It's a table of facts about the cartridge's encoding, so the port never
+    needs the decomp at runtime.
+- **`src/import/Gen4FrontierScripts.lua`, the decoder:**
+  - It decodes all eleven members from their entry points and jump targets,
+    plus the data four commands point at: sprite resource lists, the scene's
+    object lists, sprite placements, and the movement lists.
+  - It's written to the cache as `gen4_frontier_scripts`. Every real member
+    decodes with no unknown opcode.
+  - With the decomp present, every block of the Hall's script is checked
+    command for command against the source.
+- **`src/import/Gen4FrontierArt.lua`, the scene backdrops** (from
+  `frontier_bg.narc`, with member numbers from `frontier_backgrounds.order`):
+  - These are extended affine backgrounds (BG mode 5), whose maps run
+    straight across instead of in 256-pixel blocks.
+  - `Gen4Graphics.compose` now takes `map.linear` for them. Without it the
+    Hall's 512×512 battle room composed as stripes.
+- **`src/script/Gen4FrontierVM.lua`, the lowering:**
+  - Frontier scripts are lowered to ScriptRunner rows.
+  - Messages, menus, buffers, fanfares and the like go through the field
+    VM's own lowering, with the scene's text bank standing in for the map's.
+  - Control flow, variables, scene objects, movements, fades and system
+    variables are the frontier engine's own.
+  - **Variables:** a frontier operand below 0x8000 is always a literal (the
+    field reads 0x4000 and up as variables).
+- **`src/ui/Gen4FrontierScene.lua`, the scene state:**
+  - It holds the backdrop, the objects (overworld sprites), their movement
+    queues, the Pokémon picture, the scene's own fades, and its own runner.
+  - `launchbattlefrontierscene` pushes it and waits until the scene exits.
+  - **The 0xEEEE object is the camera's:** it sits in the reserved slot 31
+    and is never drawn. The player you see is the `0x800A` object.
+
+**The Battle Hall (`src/script/Gen4BattleHall.lua`):** single and double
+challenges play from the first type to the round's Battle Points.
+- **Bookkeeping:**
+  - challenge type, party slots, streak and round
+  - the 18 type ranks, saved two to a byte as `BattleHall_SaveTypeRank` packs
+    them
+  - Battle Points per round, and the `BH_FUNC_*` switch in the header's order
+- **The type grid (`src/ui/Gen4HallTypeScreen.lua`):**
+  - The cartridge's 4×5 grid: the seventeen types, each with its next rank;
+    your Pokémon; and ???.
+  - A type at rank 10 can't be chosen.
+  - "Will you battle the {type}-type, Rank {n} Pokémon?"
+  - Before the 50th and 170th singles battles, the attendant breaks in and
+    ??? (Argenta) becomes the only choice.
+- **The opponent (`BattleHall_SetupNextOpponent`):**
+  - A trainer class is drawn from the rank's eight or the type's four. Then a
+    frontier trainer of that class who hasn't been met this round; a full lap
+    with none redraws the class.
+  - The Pokémon comes from the rank's group of `sBattleHallPotentialOpponents`.
+    It is of the chosen type and never your species. It is fresh until the
+    group's matches run out, and after that only never the previous one.
+  - Its set is the ROM's `pl_bsdpm` member, now extracted into
+    `gen4_battle_tower.hallSets` (all 477 line up with the source's list).
+  - Its level is `BattleHall_CalcOpponentsLevel`: your level, minus three
+    times its root, plus a rank term and half a level per other type beaten,
+    rounded up, and never above yours. IVs are the rank's (8 to 26).
+  - In doubles the foe is the same set twice, with the personality
+    25 × 10001 apart (the cartridge initialises one slot for both).
+  - Argenta is the silver/gold battle. Her Pokémon comes from your species'
+    group (group 4 for gold), at your level with 31 IVs.
+- **The battle:** the party is healed, then the chosen slot(s) are copied in
+  at their own level. There's no experience, and a loss runs the script's
+  save-on-loss branch.
+- **The lobby (`src/script/Gen4BattleHallLobby.lua`):** all eight of the
+  Hall's field commands are lowered.
+  - Entry needs level 30+ and no banned species. Doubles needs two of the
+    *same* species ("You must use the same kind of Pokémon."). The party menu
+    gained a level floor and that rule.
+  - An active streak can be carried on, or deleted when a different species
+    enters.
+  - A streak's end writes the species' best (`BattleHallWinRecords`, capped
+    at 9999). As on the cartridge, this is on the loss/retire path only.
+  - The record keeper pays `sBattleHallRecordMilestones`' BP. Serena and
+    Winston step closer as more species hold records.
+  - The reporter appears on a 50-win streak.
+  - The multi partner's species check answers "not different" (link play).
+- **Tables:** generated from the source by
+  `tools/gen4_battle_hall_tables_gen.py` into
+  `src/import/Gen4BattleHallTables.lua`.
+- **Not ported:** the multi challenges (link play), and the Pokémon summary
+  that the grid's portrait cells open (they buzz).
+- **Plays on the real engine:**
+  - from the field: `tools/gen4_battle_tower_harness` with `HALL=1` talks to
+    the lobby attendant, enters one Pokémon, plays the round, and carries
+    the streak on
+  - `tools/gen4_frontier_harness`: a full round of ten, then BP, the save,
+    and back to the field
+  - doubles (`HALLTYPE=1`)
+  - a loss (`LOSE=n`)
+  - Argenta (`HALLSTREAK=40`)
+  - low levels (`LEVEL=n`)
+
+**Checks:**
+- `tools/gen4_frontier_engine_check.lua` (31). Pass the pokeplatinum checkout
+  as the second argument to compare the Hall's script against its source.
+- `tools/gen4_battle_hall_check.lua` (39). With the checkout, it also
+  regenerates the tables and compares them.
+- `tools/gen4_frontier_harness` (`SCENE=9`, `SNAP=n` for a screenshot).
+
+**Extract into an existing cache:**
+- `tools/gen4_frontier_scripts_extract.lua`
+- `tools/gen4_frontier_art_extract`
+- `tools/gen4_battle_tower_extract.lua` (now with the Hall's `pl_bsdpm` sets)
+
+A fresh import runs both as stages.
+
+## The Battle Factory (`src/script/Gen4BattleFactory.lua`)
+
+The Factory's frontier scene script (`fr_script` member 1, scenes 3 and 4)
+plays on the frontier engine, from the lobby (`D32R0301`) to the round's
+Battle Points.
+
+- **Rentals:**
+  - Six are offered from the Battle Tower's sets (`pl_btdpm`), drawn from the
+    round's pool (`sLevel50Pools` / `sOpenLevelPlayerPools`).
+  - Past 6, 13, 20, 27 and 34 trades, one more of the six comes from the next
+    pool up. The cartridge counts the first rental as a trade too.
+  - Slots 5 and 6 are shuffled in among the rest (`SwapMonIndices`).
+  - Three are taken in the rental screen (the Emerald Factory's,
+    `src/ui/Gen3FactoryScreen.lua`).
+- **Opponents:**
+  - Fourteen trainers a round, none twice, from
+    `sBattleFactoryOpponentPools`: the round's normal range, and the final
+    range for the seventh.
+  - Thorton is the 21st and 49th battle in singles.
+  - Each team comes from the pool the trainer's id falls in, sharing no
+    species or item with either side.
+- **Before each battle:** the attendant's research, as on the cartridge:
+  - the three species in round 1
+  - two in round 2
+  - a move and a species in round 3
+  - the first move in round 4
+  - the most common type after that
+- **The trade:** after a win, one of yours for one of the beaten team's. The
+  set id goes with it, so a quick save rebuilds the right Pokémon.
+- **Levels and battles:** everything is level 50, or 100 at Open Level. Both
+  sides are healed before each battle, and there's no experience.
+- **Battle Points:** 5, 5, 5, 5, 7, 7, 8, 9 by round, or 20 for Thorton's
+  battles.
+- **Records:** the streak and trade count are kept per level × challenge
+  type. A completed round carries the streak on; a loss records it.
+- **Lowering:** the frontier engine gained `GetRandom`, `BufferMoveName` and
+  `BufferTypeName`, plus a silent `4C` (a screen effect). The lobby's
+  `DeleteActiveBattleFactoryStreak` is lowered too.
+- **Backdrops:** `battle_factory_corridor` (with its floor layer) and
+  `battle_factory_battle_room`, extracted from `frontier_bg`.
+
+**Not ported:** the multi challenges (link play), and the Factory app's own
+screen (conveyor and summaries); the rental list stands in for it.
+
+**Checks:**
+- `tools/gen4_battle_factory_check.lua`: 24 checks, or 28 with the
+  pokeplatinum checkout, which also compares the pool tables against
+  `battle_factory_helpers.c`.
+- `tools/gen4_frontier_harness` with `FACTORY=1`:
+  - `FSWAP=1` makes a trade after every battle.
+  - `OPENLEVEL=1` plays at Open Level.
+- `tools/gen4_battle_tower_harness` with `FACTORY=1` starts from the lobby.
+
+## The Battle Castle (`src/script/Gen4BattleCastle.lua`)
+
+The Castle's frontier scene script (`fr_script` member 0, scenes 11, 12 and
+13) plays on the frontier engine, from the lobby (`D32R0501`) to the round's
+Battle Points.
+
+- **Your team:** the three you choose, as copies. Held items are taken
+  (the party keeps its own), and anyone above level 50 is brought down to 50.
+  HP, PP and status carry from battle to battle. Between battles the fainted
+  are revived at 1 HP and every status is cleared
+  (`BattleCastle_RevivePokemon`).
+- **Opponents:**
+  - Fourteen trainers a round, none twice, from
+    `sBattleCastleOpponentPools` (the same ranges as the Factory's): the
+    round's normal range, and the final range for the seventh.
+  - Darach is the 21st and 49th battle in singles. His scenes place object
+    217 themselves, since `sTrainerClassToObjectID` has no row for him.
+  - Each team is three of the trainer's Battle Tower sets, no species or item
+    twice, at level 50 with the trainer's IVs.
+- **Castle Points:**
+  - 10 on entering.
+  - After each win (`BattleCastle_CalcCPEarnedFromBattle`):
+    - 3 for each Pokémon standing, plus 3 more at full HP (2 above half, 1
+      below)
+    - 1 for each with no status
+    - 8 / 6 / 4 for spending at most 5 / 10 / 15 PP
+    - 7 for each opponent raised five levels
+    - never less than 1
+  - Capped at 9999. The win message follows the sum: 40+, 25+, 15+, or less.
+  - A Pass skips a battle for 50 CP (from round 4). The streak still counts it.
+- **The self app** (`self_app.c`), one Pokémon at a time:
+  - Restore HP (10 CP), PP (8) or both (12), unlocked by healing rank 1 / 2
+    / 3. Refused when there's no benefit.
+  - Rent a Berry (2 or 5 CP) or, from rental rank 2, an item (5–20 CP), from
+    `sBerriesForRent` / `sItemsForRent`: 8 Berries and 12 items at the lower
+    ranks, all 32 and 27 at rank 3. A rental replaces whatever was held.
+  - Rank up healing (100, 100) or rentals (100, 150).
+  - The summary and the moves, free.
+- **The opponent app** (`opponent_app.c`):
+  - Identity: 1 CP.
+  - Level +5 (1 CP) or −5 (15 CP). The other direction returns to 50.
+  - Stats: 2 CP. Moves: 5 CP, from information rank 2 (50 CP).
+  - Everything bought here is forgotten by the next battle.
+- **The ranks:** three per challenge type, each starting at 1. They reset on
+  a new streak and on a loss.
+- **Battle Points:** 3, 3, 4, 4, 5, 5, 7, 7 by round, or 20 for Darach.
+- **Records:** the streak, CP, CP spent and ranks are kept per challenge
+  type, along with the record streak and the CP held at it. A completed
+  round carries everything on; a loss records the streak and ends it.
+- **Lowering:** every row of the Castle's script is a command. The lobby's
+  `CallBattleCastleLobbyFunction`, `GetBattleCastleSelectedSlots` and
+  `DeleteActiveBattleCastleStreak` are lowered, and its link species check
+  answers "no conflict".
+- **Backdrops:** `battle_castle_corridor`, `battle_castle_battle_room`
+  (with its curtains layer) and `battle_castle_unknown` (the Pass's way
+  round), extracted from `frontier_bg`. The scene draws the CP window beside
+  the menu.
+
+**Not ported:**
+- the multi challenges (link play)
+- the apps' own screens: `src/ui/Gen4CastleScreen.lua` asks the same
+  questions as text menus in the apps' own words (banks 199 and 201)
+- the AI mask by round: none for rounds 1–2, basic for 3–4, expert after and
+  against Darach. It's recorded on the trainer, but nothing reads it yet.
+- the emblem frame and the particle twinkles
+
+**Checks:**
+- `tools/gen4_battle_castle_check.lua`: 50 checks, or 55 with the
+  pokeplatinum checkout, which also compares the pools, Darach's ids, the
+  rental lists and prices, and the healing costs against the source.
+- `tools/gen4_frontier_harness` with `CASTLE=1`: the self and opponent apps
+  each make a purchase before every battle.
+  - `CASTLESTREAK=n` carries on a streak.
+  - `PASS=n` passes the n-th battle.
+  - `LOSE=n` loses it.
+- `tools/gen4_battle_tower_harness` with `CASTLE=1` starts from the lobby.
+
+## The Battle Arcade (`src/script/Gen4BattleArcade.lua`)
+
+The Arcade's frontier scene script (`fr_script` member 2, scenes 15 and 16)
+plays on the frontier engine, from the lobby (`D32R0601`) to the round's
+Battle Points.
+
+- **Your team:** three of your own as copies, items taken, brought down to
+  level 50 (the Castle's rules). Everyone is healed before each battle.
+- **Opponents:** the Factory's and Castle's ranges, with Dahlia as the 21st
+  and 49th in singles. Their teams come from the Tower's sets at level 50,
+  without items.
+- **The Game Board** (`main.c`), before every battle:
+  - Sixteen panels are dealt (`AssignEffectsToGrid`). Each panel draws a
+    category (foe / ally / field / bonus) by `sCategoryWeights`, then an
+    event of that category. The weights' tier follows the last battle's
+    performance: 21+, 16+, 10+, 5+ or less. A strong last battle deals more
+    field and bonus events.
+  - Which events can appear depends on the round
+    (`sEffectAvailabilityByRound`, with round 7 used for every later round).
+    Swap, the board's speed and the BP panels also depend on the battle of
+    the round (`sEffectAvailabilityByBattle`).
+  - The cursor steps every `sCursorMoveFrames[speed]` frames, or to a random
+    panel after **Randomize**. The board's speed is 3, 4 from round 5, and 5
+    from round 8. A stops it, or it stops after thirty seconds.
+- **Performance** (for the next board):
+  - 8 / 6 / 4 / 0 for 0–3 Pokémon with a status, plus 6 / 4 / 2 / 0 for
+    0–3 fainted, both counted on the battle's player side.
+  - Plus 10 / 6 / 4 / 2 for fewer than 3 / 5 / 7 / 9 turns.
+- **Effects** (`BattleArcade_ApplyEffect`):
+  - **HP cut:** to `maxHP − ((u32)(maxHP × 1.2) − maxHP)`.
+  - **Poison / paralysis / burn:** everyone except the immune (Poison and
+    Steel types or Immunity; Ground or Limber; Fire or Water Veil).
+  - **Sleep (2–5 turns) / freeze:** one Pokémon, starting from the board's
+    random index, skipping the immune.
+  - When every Pokémon is immune, the script says so
+    (`CHECK_IMMUNE_TO_EFFECT`).
+  - **Berry / item:** the same one for all three, from the pool for the round
+    (rounds 1–3, 4–6, 7+).
+  - **Level +3:** lasts this battle only; your team gets its stats back
+    afterwards.
+  - **Field:** sun, rain, sand and hail last the whole battle. Deep fog
+    multiplies every hit rate by 6/10, unless Cloud Nine or Air Lock is out.
+    Trick Room lasts five turns.
+  - **The board:** faster or slower, or a randomized cursor next time.
+  - **Swap:** you fight with their team, and they fight with yours.
+  - **Bonus:** 1 BP, 3 BP, no battle, or no event.
+  - An item given or won in battle is kept; HP, status and levels are not.
+- **The battle engine** gained Trick Room in `TurnOrder.firstMover` (the
+  slower moves first within a priority bracket, counting down at the end of
+  the turn) and deep fog in `Damage.accuracyRoll`.
+- **Battle Points:** 2, 2, 2, 2, 4, 4, 5, 6 by round, or 20 for Dahlia.
+- **Lowering:**
+  - The board's sprite commands (`2A`–`2D`, `31`) and `StopSoundEffect` are
+    silent.
+  - `BufferItemName` and `AddToRecordValue` are lowered.
+  - The lobby's `CallBattleArcadeLobbyFunction` shares the Castle's party pick.
+- **Backdrops:** `battle_arcade_corridor` and `battle_arcade_battle_room`.
+
+**Not ported:**
+- the multi challenges (link play)
+- the board's own art: `src/ui/Gen4ArcadeScreen.lua` is a 4 × 4 text grid
+- the effect backgrounds, sprites and particles
+- the AI mask by round
+- the battle's opening "fog is deep" / "dimensions became distorted" lines
+
+**Checks:**
+- `tools/gen4_battle_arcade_check.lua`: 38 checks, or 41 with the
+  pokeplatinum checkout, which also compares `sEffectAvailabilityByRound`,
+  `sCategoryWeights` and Dahlia's ids against the source.
+- `tools/gen4_frontier_harness` with `ARCADE=1`:
+  - `ARCADEFX=27,29,...` makes the board land on given events, battle by
+    battle.
+  - `ARCADEWIN=1` skips the fights as wins.
+  - `ARCADESTREAK=n` carries on a streak.
+  - `LOSE=n` loses the n-th battle.
+- `tools/gen4_battle_tower_harness` with `ARCADE=1` starts from the lobby.
