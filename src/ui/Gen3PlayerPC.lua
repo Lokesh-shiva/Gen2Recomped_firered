@@ -55,6 +55,14 @@ local FRLG_FALLBACK = {
   mailbox = { "READ", "MOVE TO BAG", "GIVE", "EXIT" },
 }
 
+-- sStandardTextBox_WindowTemplates[0] in new_menu_helpers.c.  Both the static
+-- top-menu prompt and the highlighted Item Storage description are printed in
+-- this same field-dialogue window on FireRed.
+local FRLG_DIALOGUE_BOX = {
+  tx = 2, ty = 15, tw = 26, th = 4,
+  gbaWindow = true, textX = 0, textY = 1,
+}
+
 function Gen3PlayerPC.words(game, menu)
   local c = game and game.data and game.data.constants or {}
   local r = record(game)
@@ -389,6 +397,7 @@ local function itemStorage(game, onCancel)
         or nil
       rows[#rows + 1] = {
         label = Strings(label),
+        describe = describe[i],
         keepOpen = flow ~= nil,
         onSelect = flow and function() flow(game) end or nil,
       }
@@ -404,6 +413,7 @@ local function itemStorage(game, onCancel)
   end
   -- sWindowTemplate_ItemStorageSubmenu: (1,1), 14 wide inside its frame
   local sub = Menu.new(game, rows, { noSound = true, tx = 0, ty = 0, tw = 16,
+                                     describeBox = fireRed and FRLG_DIALOGUE_BOX or nil,
                                      onCancel = onCancel })
   -- placed on the GBA's own 240x160, not the Game Boy's centred 160x144
   function sub:uiSize() return 240, 160 end
@@ -475,6 +485,13 @@ function Gen3PlayerPC.new(game, opts)
   opts = opts or {}
   game.save.pcItems = game.save.pcItems or {}
   local words = Gen3PlayerPC.words(game, "main")
+  local constants = (game.data or {}).constants or {}
+  local bagScreen = constants.gen3BagScreen
+  local fireRed = constants.gen3FRLGItemPc ~= nil
+                  or (type(bagScreen) == "table" and bagScreen.layout == "frlg")
+  local pcRecord = record(game) or {}
+  local topPrompt = pcRecord.topPrompt
+                    or (fireRed and "What would you like to do?" or nil)
   local menu
   local function close()
     local done = opts.onDone
@@ -484,7 +501,7 @@ function Gen3PlayerPC.new(game, opts)
   local rows = {}
   for _, i in ipairs(Gen3PlayerPC.order(game, opts.order, #words)) do
     local label = words[i]
-    local row = { label = Strings(label or "") }
+    local row = { label = Strings(label or ""), describe = topPrompt }
     local word = tostring(label or ""):upper()
     if word:find("ITEM STORAGE", 1, true) then
       row.keepOpen = true
@@ -512,6 +529,7 @@ function Gen3PlayerPC.new(game, opts)
     noSound = true,
     -- sWindowTemplate_TopMenu_*: (1,1), 13 wide inside its frame
     tx = 0, ty = 0, tw = 15,
+    describeBox = fireRed and FRLG_DIALOGUE_BOX or nil,
     onCancel = close,
   })
   function menu:uiSize() return 240, 160 end

@@ -7,6 +7,7 @@
 -- the text is exhausted and A is pressed, then calls onDone.
 
 local Logger = require("src.core.Logger")
+local Assets = require("src.render.Assets")
 local Font = require("src.render.Font")
 local Theme = require("src.ui.Theme")
 local Timing = require("src.core.Timing")
@@ -89,6 +90,9 @@ function TextBox.new(game, text, onDone, opts)
   self.drawFrame = opts.drawFrame ~= false
   self.fillColor = opts.fillColor
   self.textStyle = opts.style
+  self.promptArrow = opts.promptArrow or box.promptArrow
+  self.promptArrowAtPen = opts.promptArrowAtPen == true or box.promptArrowAtPen == true
+  self.promptArrowImage = nil
   self.clipToBox = opts.clipToBox == true
   self.uiWidth, self.uiHeight = opts.uiWidth, opts.uiHeight
   -- WHERE THE TWO LINES SIT, which stopped being a constant when the font
@@ -652,6 +656,7 @@ function TextBox:draw()
   -- and a line the wrapper measured as fitting runs off the end of the box.
   -- The wrapper already measures with Font.advanceOf, so this is what makes
   -- the drawing agree with the measuring rather than merely look better.
+  local lastPen, lastY
   for i, line in ipairs(self.shown) do
     local y = (ys[i] or self.line2Y) + (i == 1 and off or 0)
     local pen = self.textX
@@ -659,10 +664,29 @@ function TextBox:draw()
       Font.drawCode(code, pen, y)
       pen = pen + Font.advanceOf(code) + self.letterSpacing
     end
+    lastPen, lastY = pen, y
   end
-  if (self.waiting or (self.done and not self.choice and not self.auto
-                       and not self.stay))
-     and self.blink < 30 then
+  local prompt = self.waiting or (self.done and not self.choice and not self.auto
+                                  and not self.stay)
+  if prompt and self.promptArrowAtPen and type(self.promptArrow) == "table"
+     and type(self.promptArrow.path) == "string" and lastPen and lastY then
+    if self.promptArrowImage == nil then
+      local ok, img = pcall(Assets.image, self.promptArrow.path)
+      self.promptArrowImage = ok and img or false
+      if self.promptArrowImage then self.promptArrowImage:setFilter("nearest", "nearest") end
+    end
+    if self.promptArrowImage then
+      local fw = tonumber(self.promptArrow.width) or 10
+      local fh = tonumber(self.promptArrow.height) or 12
+      local frames = tonumber(self.promptArrow.frames) or 3
+      local seq = { 0, 1, 2, 1 }
+      local frame = math.min(frames - 1, seq[math.floor(self.blink / 9) % 4 + 1])
+      local iw, ih = self.promptArrowImage:getDimensions()
+      local quad = love.graphics.newQuad(frame * fw, 0, fw, fh, iw, ih)
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.draw(self.promptArrowImage, quad, lastPen, lastY)
+    end
+  elseif prompt and self.blink < 30 then
     -- page-advance cursor: glyph $EE by default, the blinking down arrow
     -- the original prints via `ld a, "▼"` (home/text.asm)
     Font.drawCode(Theme.moreArrow or 0xEE,

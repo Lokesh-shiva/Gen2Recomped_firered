@@ -259,11 +259,24 @@ function Menu:drawDescription()
   local bw = box.tw or cols
   local bx = box.tx or 0
   local by = box.ty or (rowsTall - bh)
-  Font.drawBox(bx, by, bw, bh)
+  local frameX, frameY, frameW, frameH = bx, by, bw, bh
+  -- A Gen 3 WindowTemplate describes the CONTENT rectangle.  Field dialogue
+  -- window 0, for example, is (2,15) 26x4 and DrawDialogueFrame adds one tile
+  -- around it.  PC descriptions use that exact window, so let callers opt the
+  -- description strip into the same convention instead of approximating it as
+  -- a full-width outer box.
+  if box.gbaWindow then
+    frameX, frameY = bx - 1, by - 1
+    frameW, frameH = bw + 2, bh + 2
+  end
+  Font.drawBox(frameX, frameY, frameW, frameH, box.frameIndex)
   love.graphics.setColor(0, 0, 0, 1)
-  local y = (by + 1) * 8
+  local textX = box.gbaWindow and (bx * 8 + (box.textX or 0))
+                or ((bx + 1) * 8 + (box.textX or 0))
+  local y = box.gbaWindow and (by * 8 + (box.textY or 0))
+            or ((by + 1) * 8 + (box.textY or 0))
   for line in text:gmatch("[^\n]+") do
-    Font.draw(line, (bx + 1) * 8, y)
+    Font.draw(line, textX, y)
     y = y + 16
   end
 end
