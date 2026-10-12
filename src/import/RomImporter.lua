@@ -1227,7 +1227,7 @@ end
 --       files/fields, so without a format bump an updated runtime would keep
 --       drawing the pre-fix handmade help icons and static selection cursor
 --       until the user happened to force a ROM re-import manually.
-local CACHE_FORMAT = "rom-cache-v362:"
+local CACHE_FORMAT = "rom-cache-v365:"
 -- The completion marker is written under each version's cache prefix
 -- (rom-cache.complete for Red, blue/rom-cache.complete for Blue).
 local MARKER_PATH = "rom-cache.complete"

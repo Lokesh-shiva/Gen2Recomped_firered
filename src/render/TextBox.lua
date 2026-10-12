@@ -47,6 +47,9 @@ function TextBox.new(game, text, onDone, opts)
   local self = setmetatable({}, TextBox)
   self.game = game
   self.onDone = onDone
+  self.textFace = opts.face
+  local facePushed = self.textFace and Font.hasFace and Font.hasFace(self.textFace)
+                     and Font.pushFace(self.textFace)
   self.choice = opts.choice
   self.defaultNo = opts.defaultNo
   self.choiceNoSound = opts.noSound
@@ -88,10 +91,14 @@ function TextBox.new(game, text, onDone, opts)
   self.scrollHoldFrames = tonumber(opts.scrollHoldFrames)
   self.textX = opts.textX or (self.boxTx + 1) * 8
   self.drawFrame = opts.drawFrame ~= false
+  self.signpost = opts.signpost == true
   self.fillColor = opts.fillColor
   self.textStyle = opts.style
   self.promptArrow = opts.promptArrow or box.promptArrow
   self.promptArrowAtPen = opts.promptArrowAtPen == true or box.promptArrowAtPen == true
+  -- GBA field text only draws the pen arrow for explicit page/scroll prompt
+  -- control codes; reaching the final terminator waits silently for A/B.
+  self.promptOnlyWhenWaiting = opts.promptOnlyWhenWaiting == true
   self.promptArrowImage = nil
   self.clipToBox = opts.clipToBox == true
   self.uiWidth, self.uiHeight = opts.uiWidth, opts.uiHeight
@@ -133,6 +140,7 @@ function TextBox.new(game, text, onDone, opts)
   self.done = false
   self.blink = 0
   self:beginLine()
+  if facePushed then Font.popFace() end
   return self
 end
 
@@ -620,7 +628,11 @@ function TextBox:draw()
                   self.boxTw * 8, self.boxTh * 8, "bottom")
   end
   if self.drawFrame then
-    Font.drawDialogueBox(self.boxTx, self.boxTy, self.boxTw, self.boxTh)
+    if self.signpost and Font.drawSignpostBox then
+      Font.drawSignpostBox(self.boxTx, self.boxTy, self.boxTw, self.boxTh)
+    else
+      Font.drawDialogueBox(self.boxTx, self.boxTy, self.boxTw, self.boxTh)
+    end
   elseif self.fillColor then
     local c = self.fillColor
     love.graphics.setColor(c[1] or 0, c[2] or 0, c[3] or 0, c[4] or 1)
@@ -634,6 +646,8 @@ function TextBox:draw()
                              self.boxTw * 8, self.boxTh * 8)
   end
   love.graphics.setColor(0, 0, 0, 1)
+  local facePushed = self.textFace and Font.hasFace and Font.hasFace(self.textFace)
+                     and Font.pushFace(self.textFace)
   if self.textStyle then Font.pushStyle(self.textStyle) end
   if self.scrollPx and self.scrollPx > 0 then
     self.scrollPx = self.scrollPx - (self.scrollStep or 2)
@@ -666,8 +680,8 @@ function TextBox:draw()
     end
     lastPen, lastY = pen, y
   end
-  local prompt = self.waiting or (self.done and not self.choice and not self.auto
-                                  and not self.stay)
+  local prompt = self.waiting or (self.done and not self.promptOnlyWhenWaiting
+                                  and not self.choice and not self.auto and not self.stay)
   if prompt and self.promptArrowAtPen and type(self.promptArrow) == "table"
      and type(self.promptArrow.path) == "string" and lastPen and lastY then
     if self.promptArrowImage == nil then
@@ -694,6 +708,7 @@ function TextBox:draw()
                   (self.boxTy + self.boxTh - 1) * 8 - 4)
   end
   if self.textStyle then Font.popStyle() end
+  if facePushed then Font.popFace() end
   if self.clipToBox then
     if oldScissor and oldScissor[1] ~= nil then
       love.graphics.setScissor(oldScissor[1], oldScissor[2],

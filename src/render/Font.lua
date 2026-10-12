@@ -1031,8 +1031,7 @@ function Font.hasDialogueFrame()
   return not FALLBACK.enabled and def ~= nil and def.dialogueFrame ~= nil
 end
 
-function Font.drawDialogueBox(tx, ty, tw, th)
-  local rec = Font.hasDialogueFrame() and state.def.dialogueFrame
+local function prepareFrameStrip(rec)
   if rec and dialogueSheet.path ~= rec.image then
     local ok, img = pcall(Assets.image, rec.image)
     dialogueSheet.path, dialogueSheet.image = rec.image, ok and img or nil
@@ -1052,6 +1051,11 @@ function Font.drawDialogueBox(tx, ty, tw, th)
       dialogueSheet.quads = quads
     end
   end
+  return rec and dialogueSheet.quads ~= nil
+end
+
+local function drawDialogueRecord(rec, tx, ty, tw, th)
+  prepareFrameStrip(rec)
   if not (rec and dialogueSheet.quads) then
     return Font.drawBox(tx, ty, tw, th)
   end
@@ -1076,6 +1080,12 @@ function Font.drawDialogueBox(tx, ty, tw, th)
   for row = 0, th - 1 do
     local flip = row >= half
     local depth = flip and (th - 1 - row) or row
+    -- WindowFunc_DrawDialogueFrame uses a different lower-half set order for
+    -- MSGBOX_SIGN: set1, set2, set0 instead of set2, set1, set0.
+    if flip and rec.layout == "frlg_signpost" then
+      local signDepth = { [0] = 0, [1] = 2, [2] = 1 }
+      depth = signDepth[depth] or depth
+    end
     local set = SETS[math.min(depth, 2) + 1]
     local y = (ty + row) * 8
     for col = 0, cols - 1 do
@@ -1087,6 +1097,52 @@ function Font.drawDialogueBox(tx, ty, tw, th)
         if flip then love.graphics.draw(img, q[tile], x, y + 8, 0, 1, -1)
         else love.graphics.draw(img, q[tile], x, y) end
       end
+    end
+  end
+end
+
+function Font.drawDialogueBox(tx, ty, tw, th)
+  local rec = Font.hasDialogueFrame() and state.def.dialogueFrame
+  return drawDialogueRecord(rec, tx, ty, tw, th)
+end
+
+function Font.hasSignpostFrame()
+  local def = state and state.def
+  return not FALLBACK.enabled and def ~= nil and def.signpostFrame ~= nil
+end
+
+function Font.drawSignpostBox(tx, ty, tw, th)
+  local rec = Font.hasSignpostFrame() and state.def.signpostFrame
+  if not rec then return Font.drawDialogueBox(tx, ty, tw, th) end
+  return drawDialogueRecord(rec, tx, ty, tw, th)
+end
+
+function Font.drawStandardBox(tx, ty, tw, th)
+  local def = state and state.def
+  local rec = not FALLBACK.enabled and def and def.standardFrame or nil
+  if not (rec and prepareFrameStrip(rec) and dialogueSheet.quads) then
+    return Font.drawBox(tx, ty, tw, th, 1)
+  end
+  if tw < 2 or th < 2 then return Font.drawBox(tx, ty, tw, th, 1) end
+  local img, q = dialogueSheet.image, dialogueSheet.quads
+  local fill = rec.fill or { 1, 1, 1 }
+  love.graphics.setColor(fill[1], fill[2], fill[3], 1)
+  love.graphics.rectangle("fill", (tx + 1) * 8, (ty + 1) * 8,
+                          math.max(0, tw - 2) * 8, math.max(0, th - 2) * 8)
+  love.graphics.setColor(1, 1, 1, 1)
+  for row = 0, th - 1 do
+    for col = 0, tw - 1 do
+      local tile
+      if row == 0 then
+        tile = col == 0 and 0 or (col == tw - 1 and 2 or 1)
+      elseif row == th - 1 then
+        tile = col == 0 and 6 or (col == tw - 1 and 8 or 7)
+      elseif col == 0 then
+        tile = 3
+      elseif col == tw - 1 then
+        tile = 5
+      end
+      if tile then love.graphics.draw(img, q[tile], (tx + col) * 8, (ty + row) * 8) end
     end
   end
 end

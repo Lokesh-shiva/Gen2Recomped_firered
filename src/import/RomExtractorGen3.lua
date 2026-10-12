@@ -6994,28 +6994,107 @@ function RomExtractorGen3:extractFont()
   -- rounded caps) in sTextWindowPalettes[0]; the user frames only border
   -- menus.  Baked as one 18-tile strip for Font.drawDialogueBox.
   local dialogueRecord = nil
+  local signpostRecord = nil
+  local standardFrameRecord = nil
+  local fieldTextStyles = nil
+  local uiTextStyles = nil
   if (self.manifest or {}).frlgItemMenu ~= nil then
     local ok, err = pcall(function()
-      local GFX, PAL, N = 0x41F1C8, 0x471DEC, 18
-      local colors = RomGba.palette(self.rom:bytes(PAL, 32))
-      local raw = self.rom:bytes(GFX, N * 32)
-      local px = RomGba.tiles4bpp(raw, N, 1)
-      local image = ImageWriter.blank(N * 8, 8)
+      local MSG_GFX = self:symbol("gMenuMessageWindow_Gfx") or 0x41F1C8
+      local SIGN_GFX = self:symbol("gSignpostWindow_Gfx") or 0x470B0C
+      local PAL = self:symbol("gTextWindowPalettes") or 0x471DEC
+
+      local function bakeFrame(gfx, paletteId, count, name)
+        local colors = RomGba.palette(self.rom:bytes(PAL + paletteId * 32, 32))
+        local raw = self.rom:bytes(gfx, count * 32)
+        local px = RomGba.tiles4bpp(raw, count, 1)
+        local image = ImageWriter.blank(count * 8, 8)
+        for y = 1, 8 do
+          for x = 1, count * 8 do
+            local v = px[y][x]
+            -- Colour zero is transparent on the BG layer.  Preserve that in
+            -- the baked strip so the sign/message frame can sit over the field
+            -- exactly like the cartridge rather than painting its transparent
+            -- holes with palette entry zero.
+            local c = v ~= 0 and colors[v + 1]
+            if c then
+              image:setPixel(x - 1, y - 1,
+                             c[1] / 255, c[2] / 255, c[3] / 255, 1)
+            end
+          end
+        end
+        self:saveImage(image, "fonts/" .. name .. ".png")
+        local fill = colors[2]
+        return {
+          image = "assets/generated/fonts/" .. name .. ".png",
+          tile = 8, tiles = count,
+          fill = { fill[1] / 255, fill[2] / 255, fill[3] / 255 },
+          source = ("ROM:gfx %07X, gTextWindowPalettes[%d] %07X")
+                   :format(gfx, paletteId, PAL + paletteId * 32),
+        }, colors
+      end
+
+      local colors
+      dialogueRecord, colors = bakeFrame(MSG_GFX, 0, 18, "frlg_dialogue")
+      -- MSGBOX_SIGN uses the exact same tile placement as a field dialogue
+      -- frame, but loads gSignpostWindow_Gfx and text-window palette 1 first.
+      -- The asset is 0x260 bytes = 19 tiles; the nineteenth tile is retained
+      -- even though the common frame path addresses the first eighteen.
+      signpostRecord = bakeFrame(SIGN_GFX, 1, 19, "frlg_signpost")
+      signpostRecord.layout = "frlg_signpost"
+
+      -- DrawStdFrameWithCustomTileAndPalette is the 9-tile fixed frame used by
+      -- the bag DEPOSIT ITEM tab and the Item-PC transient message/question
+      -- windows.  It is NOT the configurable user frame and therefore must not
+      -- follow the player's Options -> Frame Type setting.
+      local STD_GFX = self:symbol("gStdTextWindow_Gfx") or 0x471A4C
+      -- LoadStdWindowGfx pairs these tiles with GetTextWindowPalette(3).
+      -- Item-PC and bag calls merely choose the destination palette bank.
+      local STD_PAL = PAL + 3 * 32
+      local stdColors = RomGba.palette(self.rom:bytes(STD_PAL, 32))
+      local stdRaw = self.rom:bytes(STD_GFX, 9 * 32)
+      local stdPx = RomGba.tiles4bpp(stdRaw, 9, 1)
+      local stdImage = ImageWriter.blank(9 * 8, 8)
       for y = 1, 8 do
-        for x = 1, N * 8 do
-          local v = px[y][x]
-          local c = v ~= 0 and colors[v + 1]
+        for x = 1, 9 * 8 do
+          local v = stdPx[y][x]
+          local c = v ~= 0 and stdColors[v + 1]
           if c then
-            image:setPixel(x - 1, y - 1, c[1] / 255, c[2] / 255, c[3] / 255, 1)
+            stdImage:setPixel(x - 1, y - 1,
+                              c[1] / 255, c[2] / 255, c[3] / 255, 1)
           end
         end
       end
-      self:saveImage(image, "fonts/frlg_dialogue.png")
-      local fill = colors[2]
-      dialogueRecord = {
-        image = "assets/generated/fonts/frlg_dialogue.png", tile = 8, tiles = N,
-        fill = { fill[1] / 255, fill[2] / 255, fill[3] / 255 },
-        source = ("ROM:gMenuMessageWindow_Gfx %07X, sTextWindowPalettes %07X"):format(GFX, PAL),
+      self:saveImage(stdImage, "fonts/frlg_standard_frame.png")
+      local stdFill = stdColors[2]
+      standardFrameRecord = {
+        image = "assets/generated/fonts/frlg_standard_frame.png",
+        tile = 8, tiles = 9,
+        fill = { stdFill[1] / 255, stdFill[2] / 255, stdFill[3] / 255 },
+        source = ("ROM:gStdTextWindow_Gfx %07X, gTextWindowPalettes[3] %07X")
+                 :format(STD_GFX, STD_PAL),
+      }
+
+      local function rgb(i)
+        local c = colors[i + 1]
+        return { c[1] / 255, c[2] / 255, c[3] / 255, 1 }
+      end
+      -- AddTextPrinterDiffStyle: female NPCs are red, male NPCs blue, and
+      -- objects/system text dark gray; all three use the light-gray shadow.
+      -- These are palette indices, not invented RGB values, so the runtime can
+      -- reproduce ContextNpcGetTextColor without baking another font page.
+      fieldTextStyles = {
+        female = { text = rgb(4), shadow = rgb(3) },
+        male = { text = rgb(8), shadow = rgb(3) },
+        neutral = { text = rgb(2), shadow = rgb(3) },
+        mon = { text = rgb(2), shadow = rgb(3) },
+      }
+      -- bag.c/item_pc.c both use the same first ten standard text colours.
+      -- Their lower description strips deliberately switch to white text over
+      -- the blue background, while lists/submenus use dark gray on light paper.
+      uiTextStyles = {
+        white = { text = rgb(1), shadow = rgb(2) },
+        dark = { text = rgb(2), shadow = rgb(3) },
       }
     end)
     if not ok then Logger.warn("gen3 frlg dialogue frame: %s", tostring(err)) end
@@ -7025,6 +7104,9 @@ function RomExtractorGen3:extractFont()
   local perRow = 16
   local cellW = math.floor(tonumber(font.cellWidth) or 8)
   local cellH = math.floor(tonumber(font.cellHeight) or 11)
+  -- gFontInfos gives FireRed FONT_NORMAL a 14px runtime height.
+  local frlg = (self.manifest or {}).frlgItemMenu ~= nil
+  if frlg and tonumber(font.fontId) == 1 then cellH = 14 end
   local top = math.floor(tonumber(font.inkTop) or 0)
   local rows = math.ceil(count / perRow)
 
@@ -7265,7 +7347,58 @@ function RomExtractorGen3:extractFont()
   -- Each is a page of its own -- own cell, own widths, own picture -- and they
   -- are keyed by the ROLE the font id gives them, not by address.
   local faces = {}
-  for _, face in ipairs(font.faces or {}) do
+  local faceDefs = {}
+  for _, face in ipairs(font.faces or {}) do faceDefs[#faceDefs + 1] = face end
+  -- FireRed's field dialogue has two extra Latin faces.  They are not colour
+  -- aliases of FONT_NORMAL: text.c decompresses dedicated Male/Female glyph
+  -- sheets with their own width tables, then AddTextPrinterDiffStyle paints
+  -- them blue/red.  The generic font discovery only needs normal/small for
+  -- menus, so append these exact named cartridge sheets for field dialogue.
+  if (self.manifest or {}).frlgItemMenu ~= nil then
+    -- FireRed keeps NormalCopy1, Normal, Male and Female Latin width tables as
+    -- byte-identical 512-byte runs. The retail manifest only names Normal, so
+    -- locate the next two identical runs after it; each corresponding full
+    -- glyph sheet starts exactly 0x8000 bytes before its width table. This is
+    -- the same relationship used by text.c, but remains relocation-safe.
+    local function nextMatchingWidths(from)
+      local n = math.min(count, 512)
+      local first = self.rom:u32(widths)
+      for at = math.max(0, math.floor(from or 0)), self.rom.size - n do
+        if self.rom:u32(at) == first then
+          local same = true
+          for i = 0, n - 1 do
+            if self.rom:u8(at + i) ~= self.rom:u8(widths + i) then
+              same = false; break
+            end
+          end
+          if same then return at end
+        end
+      end
+      return nil
+    end
+    local maleWidths = self:symbol("sFontMaleLatinGlyphWidths")
+                       or nextMatchingWidths(widths + 1)
+    local femaleWidths = self:symbol("sFontFemaleLatinGlyphWidths")
+                         or (maleWidths and nextMatchingWidths(maleWidths + 1))
+    local extra = {
+      { role = "male", fontId = 4,
+        glyphs = self:symbol("sFontMaleLatinGlyphs")
+                 or (maleWidths and maleWidths - 0x8000),
+        widths = maleWidths },
+      { role = "female", fontId = 5,
+        glyphs = self:symbol("sFontFemaleLatinGlyphs")
+                 or (femaleWidths and femaleWidths - 0x8000),
+        widths = femaleWidths },
+    }
+    for _, face in ipairs(extra) do
+      if face.glyphs and face.widths then
+        face.cellWidth, face.cellHeight = 8, 14
+        face.glyphBytes, face.tilesAcross = 0x40, 2
+        faceDefs[#faceDefs + 1] = face
+      end
+    end
+  end
+  for _, face in ipairs(faceDefs) do
     local role = face.role
     if role and face.glyphs ~= glyphs then
       local fw = math.floor(tonumber(face.cellWidth) or cellW)
@@ -7388,6 +7521,10 @@ function RomExtractorGen3:extractFont()
     -- the twenty border sets the OPTION screen's FRAME row picks between
     frames = frameRecord,
     dialogueFrame = dialogueRecord,
+    signpostFrame = signpostRecord,
+    standardFrame = standardFrameRecord,
+    fieldTextStyles = fieldTextStyles,
+    uiTextStyles = uiTextStyles,
     -- the cursor and the more-below marker, which are drawn shapes in cells
     -- the cartridge leaves blank; see the note above extractFont's page pass
     symbols = { cursor = SYMBOLS.cursor,
@@ -43869,9 +44006,12 @@ function RomExtractorGen3:extractFireRedItemPc()
       local cell = ty * S.COLS + tx
       local e = map[cell * 2 + 1] + map[cell * 2 + 2] * 256
       local tid = e % 1024
+      local flipX = math.floor(e / 1024) % 2 == 1
+      local flipY = math.floor(e / 2048) % 2 == 1
       local bank = math.floor(e / 4096) % 16
       if tid < tileCount and bank < S.PALETTE_BANKS then
-        RomExtractorGen3.partyTile(image, tiles, colors, tid, bank, tx * 8, ty * 8)
+        RomExtractorGen3.partyTile(image, tiles, colors, tid, bank,
+                                   tx * 8, ty * 8, flipX, flipY)
       end
     end
   end
