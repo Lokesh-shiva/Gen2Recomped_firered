@@ -33,6 +33,21 @@ local E = {}
 local function u8(s, o) return s:byte(o + 1) or 0 end
 local function u16(s, o) return u8(s, o) + u8(s, o + 1) * 256 end
 local function u32(s, o) return u16(s, o) + u16(s, o + 2) * 65536 end
+local function s16(s, o) local v = u16(s, o) return v >= 0x8000 and v - 0x10000 or v end
+
+-- RAIL POSITIONS. On a rail map (Castelia, Skyarrow ...) a record whose flag
+-- halfword is 1 is placed not by tile but by <line, along, across>: the rail
+-- line's index, the step along it from its first point (a line's own step
+-- count is its record's sixth word), and the tiles to its side. Every kind
+-- carries the same three, only at its own offset -- a warp's flag at +6, a
+-- sign's at +6, a trigger's at +8, each followed by the three; an NPC's flag
+-- at +24 and the three at +28 (where its tile x / y otherwise sit).
+-- Gen5Field turns them into tiles once the rails are read (E.placeOnRails).
+local function railAt(d, o, flag, at)
+  if u16(d, o + flag) ~= 1 then return nil end
+  at = o + (at or flag + 2)
+  return { line = u16(d, at), along = u16(d, at + 2), across = s16(d, at + 4) }
+end
 
 function E.parse(d)
   if type(d) ~= "string" or #d < 8 then return nil end
@@ -42,35 +57,36 @@ function E.parse(d)
   local at = 8
   for i = 0, nf - 1 do
     local o = at + i * 20
-    out.signs[i + 1] = { index = i, script = u16(d, o), kind = u16(d, o + 2), x = u32(d, o + 8), y = u32(d, o + 12) }
+    out.signs[i + 1] = { index = i, script = u16(d, o), kind = u16(d, o + 2), x = u32(d, o + 8), y = u32(d, o + 12),
+      rail = railAt(d, o, 6) }
   end
   at = at + nf * 20
   for i = 0, nn - 1 do
     local o = at + i * 36
     out.npcs[i + 1] = { index = i, localId = u16(d, o), sprite = u16(d, o + 2), movementType = u16(d, o + 4),
       trainerType = u16(d, o + 6), flag = u16(d, o + 8), script = u16(d, o + 10), direction = u16(d, o + 12),
-      x = u16(d, o + 28), y = u16(d, o + 30), paramA = u16(d, o + 14), paramB = u16(d, o + 16) }
+      x = u16(d, o + 28), y = u16(d, o + 30), paramA = u16(d, o + 14), paramB = u16(d, o + 16),
+      rail = railAt(d, o, 24, 28) }
   end
   at = at + nn * 36
   for i = 0, nw - 1 do
     local o = at + i * 20
     out.warps[i + 1] = { index = i, destZone = u16(d, o), destWarp = u16(d, o + 2),
       kind = d:byte(o + 5), x = math.floor(u16(d, o + 8) / 16), y = math.floor(u16(d, o + 12) / 16),
-      width = math.max(u16(d, o + 14), 1), height = math.max(u16(d, o + 16), 1) }
+      width = math.max(u16(d, o + 14), 1), height = math.max(u16(d, o + 16), 1), rail = railAt(d, o, 6) }
   end
   at = at + nw * 20
   for i = 0, nt - 1 do
     local o = at + i * 22
     out.triggers[i + 1] = { index = i, script = u16(d, o), var = u16(d, o + 4), value = u16(d, o + 2),
       x = u16(d, o + 10), y = u16(d, o + 12), width = u16(d, o + 14), height = u16(d, o + 16) }
-    -- THE OTHER SHAPE: halfword +8 is 1 on nine triggers (Castelia's, Route
-    -- 4's ...), and then an ELEVATION sits between the position and the
-    -- extent -- x, y, a signed z, width, height. Read as the first shape,
-    -- Castelia's 1 x 8 strip at (4, 24) was 65531 tiles wide.
+    -- THE RAIL SHAPE: halfword +8 is 1 on nine triggers (Castelia's, Route
+    -- 4's ...), and then a rail position <line, along, across> sits before
+    -- the extent. Read as the first shape, Castelia's 1 x 8 strip on line
+    -- 4 was 65531 tiles wide.
     if u16(d, o + 8) == 1 then
       local t = out.triggers[i + 1]
-      local z = u16(d, o + 14)
-      t.elevation = z >= 0x8000 and z - 0x10000 or z
+      t.rail = railAt(d, o, 8)
       t.width, t.height = u16(d, o + 16), u16(d, o + 18)
     end
   end
@@ -91,8 +107,14 @@ function E.attach(def, ev, spriteFor)
       -- the same flag namespace the script engine's setflag/clearflag write
       -- (Gen4ScriptVM.flagName), so a script hiding an NPC hides THIS one
       flag = n.flag, eventFlag = n.flag ~= 0 and ("FLAG_G4_%04X"):format(n.flag) or nil,
-      script = n.script, elevation = 0, gen5 = true }
+      script = n.script, elevation = 0, gen5 = true, rail = n.rail }
     local obj = def.objects[#def.objects]
+    if n.sprite == 0 then
+      -- SPRITE 0 IS A GYM GIMMICK, drawn by the gym's own overlay rather
+      -- than as a character: Castelia's seven honey walls, Driftveil's
+      -- lifts, Icirrus's and Dragonspiral's pieces (24 objects on 6 maps)
+      obj.gen5Gimmick = true
+    end
     if n.sprite == E.BLOCKER_SPRITE then
       -- never drawn, always in the way: the state `buried` already means
       -- (OverworldController seeds it from the def). Striaton's gym curtains
@@ -117,7 +139,7 @@ function E.attach(def, ev, spriteFor)
   for _, w in ipairs(ev.warps) do
     def.warps[#def.warps + 1] = { index = w.index + 1, x = w.x - ox, y = w.y - oy,
       destMap = ("Z%03d"):format(w.destZone), destHeader = w.destZone, destWarp = w.destWarp + 1,
-      kind = w.kind, width = w.width, height = w.height }
+      kind = w.kind, width = w.width, height = w.height, rail = w.rail }
   end
   -- (`destWarp` is 1-based, as the engine indexes `warps[destWarp]` and the
   -- Gen 4 importer writes it; the cartridge's number is 0-based.)
@@ -131,19 +153,55 @@ function E.attach(def, ev, spriteFor)
         if dx > 0 or dy > 0 then
           def.warps[#def.warps + 1] = { index = #def.warps + 1, extentOf = w.index + 1,
             x = w.x - ox + dx, y = w.y - oy + dy, destMap = ("Z%03d"):format(w.destZone),
-            destHeader = w.destZone, destWarp = w.destWarp + 1, kind = w.kind }
+            destHeader = w.destZone, destWarp = w.destWarp + 1, kind = w.kind,
+            rail = w.rail, railDX = dx, railDY = dy }
         end
       end
     end
   end
   for _, s in ipairs(ev.signs) do
     def.signs[#def.signs + 1] = { index = s.index + 1, x = s.x - ox, y = s.y - oy, script = s.script,
-      kind = s.kind, elevation = 0 }
+      kind = s.kind, elevation = 0, rail = s.rail }
   end
   for _, t in ipairs(ev.triggers) do
     def.coordEvents[#def.coordEvents + 1] = { index = t.index + 1, x = t.x - ox, y = t.y - oy,
-      width = t.width, height = t.height, script = t.script, var = t.var, value = t.value, elevation = 0 }
+      width = t.width, height = t.height, script = t.script, var = t.var, value = t.value, elevation = 0,
+      rail = t.rail }
   end
+end
+
+-- placeOnRails(def, toTile) -- gives every rail-placed entry its tile:
+-- toTile(line, along, across) -> map tile x, y (or nil off the data).
+-- A RAIL EXTENT IS IN THE RAIL'S AXES: width is steps ALONG the line,
+-- height tiles ACROSS it -- Z030's exits are 1 x 8, a strip across the
+-- street's whole width, and Castelia's gate to the bridge 1 x 4. So a
+-- warp's extra cells are each placed through the rail (attach's dx is the
+-- step along, dy the tile across), and a trigger's rectangle is the box of
+-- its two far corners.
+function E.placeOnRails(def, toTile)
+  local placed = 0
+  for _, list in ipairs({ def.objects or {}, def.warps or {}, def.signs or {} }) do
+    for _, e in ipairs(list) do
+      local r = e.rail
+      if r then
+        local x, y = toTile(r.line, r.along + (e.railDX or 0), r.across + (e.railDY or 0))
+        if x then e.x, e.y = x, y; placed = placed + 1 end
+      end
+    end
+  end
+  for _, e in ipairs(def.coordEvents or {}) do
+    local r = e.rail
+    if r then
+      local x0, y0 = toTile(r.line, r.along, r.across)
+      local x1, y1 = toTile(r.line, r.along + math.max((e.width or 1) - 1, 0), r.across + math.max((e.height or 1) - 1, 0))
+      if x0 and x1 then
+        e.x, e.y = math.min(x0, x1), math.min(y0, y1)
+        e.width, e.height = math.abs(x1 - x0) + 1, math.abs(y1 - y0) + 1
+        placed = placed + 1
+      end
+    end
+  end
+  return placed
 end
 
 return E

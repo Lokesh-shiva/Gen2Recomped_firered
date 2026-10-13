@@ -520,6 +520,16 @@ function F.build(x, save)
     end
   end
   report.sprites, report.npcs, report.npcsWithSprite = spriteCount, npcs, placed
+  -- CASTELIA GYM'S HONEY WALLS (zone 29's seven sprite-0 objects, script
+  -- 2000): the player pushes straight through them -- overlay 38 animates
+  -- the wax, nothing stops the step -- so they are made passable. (The
+  -- floor switches beside them are coord events; 0x18C pops the hidden
+  -- trainer out.)
+  for _, def in pairs(maps) do
+    if def.header == 29 then
+      for _, o in ipairs(def.objects or {}) do if o.gen5Gimmick then o.passable = true end end
+    end
+  end
 
   -- ONE MAP, SEVERAL TEXTURE SETS. A zone cut out of a shared matrix keeps
   -- the bounding box of its cells, and the box takes in its neighbours' chunks
@@ -611,21 +621,91 @@ function F.build(x, save)
   -- the way Gen 4's are (RomExtractorGen4.linkRegions: `connections` keyed
   -- north/south/west/east, offset = the difference of their origins), so
   -- Route 1's north edge hands the player to Accumula without a warp.
-  -- A RAIL MAP'S GRID. NG chunks carry no permissions, and their models (and
-  -- the rails on them) reach two or three chunks past the matrix's own few
-  -- cells -- Skyarrow Bridge's points run to z 4,641 on a 3-chunk (1,536)
-  -- matrix. So the grid is sized to the rails, every cell blocked, and each
+  -- A RAIL MAP'S GRID. NG chunks carry no permissions and are 2,048 units
+  -- square (Gen4Ground: a node translation places each in its cell), so a
+  -- 2 x 3 matrix is 4,096 x 6,144 -- Skyarrow's rails run to z 4,852 inside
+  -- it. The grid is sized to that, every cell blocked, and each
   -- rail line is RASTERISED in as walkable ground: a straight run between its
   -- points, or an arc about its curve record's centre (type 1), as wide as
   -- the points' widths for that line (taken as half-widths in world units --
   -- Castelia's ring is 144, the bridge 16). An approximation of BW's rail
   -- walking on the engine's grid: the corridor is right, the analogue
   -- movement along it is not modelled.
+  --
+  -- ENTITIES ON THE RAILS, on every map that has rail data -- the no-grid
+  -- rail maps and the ordinary ones that still place some events by rail
+  -- (Castelia's Z030, Icirrus, Opelucid, the League, Village Bridge,
+  -- Celestial Tower): <line, along, across> to a tile of the map. A line's
+  -- sixth word is its step count (Castelia's arc from point 2 to 3 is
+  -- ~477 units over 30), `along` the step from its first point, and
+  -- `across` whole tiles to the side -- positive to the RIGHT of the
+  -- line's direction, as a door at +7 on one side and -6 on the other
+  -- both stand inside the ring street's 9-tile half-width.
+  local function railTile(data, def)
+    local ox, oy = def.originX or 0, def.originY or 0
+    local toTile = function(li, along, across)
+      local line = data.lines[li]
+      local a, b = line and data.points[line.a], line and data.points[line.b]
+      if not (a and b) then return nil end
+      local n = math.max(line.raw[6] or 1, 1)
+      local t = math.min(math.max((along + 0.5) / n, 0), 1)
+      local x, z, tx, tz
+      local curve = data.curves[li]
+      if curve and curve.kind == 1 then
+        local ra = math.sqrt((a.x - curve.cx) ^ 2 + (a.z - curve.cz) ^ 2)
+        local rb = math.sqrt((b.x - curve.cx) ^ 2 + (b.z - curve.cz) ^ 2)
+        local ta = math.atan2(a.z - curve.cz, a.x - curve.cx)
+        local tb = math.atan2(b.z - curve.cz, b.x - curve.cx)
+        local d = tb - ta
+        if d > math.pi then d = d - 2 * math.pi elseif d < -math.pi then d = d + 2 * math.pi end
+        local th = ta + d * t
+        local r = ra + (rb - ra) * t
+        x, z = curve.cx + r * math.cos(th), curve.cz + r * math.sin(th)
+        local sg = d >= 0 and 1 or -1
+        tx, tz = -math.sin(th) * sg, math.cos(th) * sg
+      else
+        x, z = a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t
+        local len = math.max(math.sqrt((b.x - a.x) ^ 2 + (b.z - a.z) ^ 2), 1e-6)
+        tx, tz = (b.x - a.x) / len, (b.z - a.z) / len
+      end
+      -- right of travel, x east and z south: (-tz, tx)
+      x, z = x - tz * across * 16, z + tx * across * 16
+      return math.floor(x / 16), math.floor(z / 16)
+    end
+    return function(li, along, across)
+      local x, y = toTile(li, along, across)
+      if x then return x - ox, y - oy end
+    end
+  end
+  -- HYBRID MAPS: an ordinary grid map whose rails run on past its
+  -- permissions -- Castelia's central plaza Z030 is one 32 x 32 chunk with
+  -- the plaza's grid in the north, and its rails start at the plaza's south
+  -- edge (row 18.5) and carry on to row 44 over the chunk's own model. Its
+  -- grid is grown to take the rails, keeping every cell the cartridge gave,
+  -- and the rail corridors are opened the same way. (Only maps cut at the
+  -- matrix's corner, whose rail frame is the map's.)
   for id, def in pairs(maps) do
-    local rail = def.gen5NoGrid and rails[def.header]
-    if def.gen5NoGrid then
+    local rail = rails[def.header]
+    local hybrid = not def.gen5NoGrid and rail and rail.data and def.blocks
+                   and (def.originX or 0) == 0 and (def.originY or 0) == 0
+    if not (def.gen5NoGrid or hybrid) then rail = nil end
+    if def.gen5NoGrid or hybrid then
       local data = rail and rail.data
-      local maxX, maxZ = def.width * 16, def.height * 16
+      -- THE CHUNK SIZE IS NOT THE SAME ON EVERY RAIL MAP. Castelia's ring
+      -- (x 382-1,156, z 479-1,216) lies on chunk 636's street at the normal
+      -- 512 units; Skyarrow's rails run to z 4,852 on a 2 x 3 matrix, which
+      -- only fits chunks of 2,048 (four of a WB chunk's). No header field
+      -- has been found that says which, so the rails decide: a map whose
+      -- rails reach past twice the matrix's normal size takes the large
+      -- chunk (gen5ChunkScale, read by Gen4Ground).
+      local baseX, baseZ = def.width * 16, def.height * 16
+      local reach = 0
+      for _, pt in pairs(data and data.points or {}) do
+        reach = math.max(reach, pt.x / baseX, pt.z / baseZ)
+      end
+      local k = reach > 2 and 4 or 1
+      if hybrid then k = 1 else def.gen5ChunkScale = k end
+      local maxX, maxZ = baseX * k, baseZ * k
       for _, pt in pairs(data and data.points or {}) do
         if pt.x + 256 > maxX then maxX = pt.x + 256 end
         if pt.z + 256 > maxZ then maxZ = pt.z + 256 end
@@ -680,13 +760,26 @@ function F.build(x, save)
         end
       end
       local blocks, behav = {}, {}
+      local oldW, oldH, oldBlocks, oldBehav = def.width, def.height, def.blocks, def.behaviorCells
+      if hybrid then w, h = math.max(w, oldW), math.max(h, oldH) end
       for i = 0, w * h - 1 do
+        local tx, ty = i % w, math.floor(i / w)
         if open[i] then blocks[#blocks + 1] = "\0\0"; behav[#behav + 1] = "\0"
+        elseif hybrid and tx < oldW and ty < oldH then
+          local j = ty * oldW + tx
+          blocks[#blocks + 1] = oldBlocks:sub(j * 2 + 1, j * 2 + 2)
+          behav[#behav + 1] = oldBehav and oldBehav:sub(j + 1, j + 1) or "\0"
         else blocks[#blocks + 1] = "\255\0"; behav[#behav + 1] = "\255" end
       end
       def.width, def.height = w, h
       def.blocks, def.behaviorCells = table.concat(blocks), table.concat(behav)
-      def.gen4HeightEdits = next(heights) and heights or nil
+      if next(heights) or not hybrid then def.gen4HeightEdits = next(heights) and heights or nil end
+    end
+  end
+  for _, def in pairs(maps) do
+    local rail = rails[def.header]
+    if rail and rail.data then
+      report.railPlaced = (report.railPlaced or 0) + Events.placeOnRails(def, railTile(rail.data, def))
     end
   end
   local linker = { }

@@ -12502,6 +12502,17 @@ function OverworldState:onStepComplete()
   -- matrix's zone table names for that chunk
   if not warpFirst and self.map.def and self.map.def.gen5 and self:gen5ChunkHandoff() then return end
 
+  -- BLACK / WHITE'S RAIL MAPS (Castelia, Skyarrow): the walkable corridor is
+  -- rasterised from the rail widths, so a door's warp cell (placed by rail
+  -- position, Gen5Events.placeOnRails) is open ground at the street's edge
+  -- rather than a solid tile to press into. The step onto it takes it.
+  if not warpFirst and self.map.def and self.map.def.gen5NoGrid and self.map.warpAtCell then
+    local w = self.map:warpAtCell(p.cellX, p.cellY)
+    local arrived = self.gen5ArrivalMap == self.map.id and self.gen5ArrivalX == p.cellX
+                    and self.gen5ArrivalY == p.cellY
+    if w and not arrived then self:takeWarp(w.def) return end
+  end
+
   -- A MAP'S OWN STEP RULE (HGSS: a button on Clair's platforms), which
   -- FieldSystem_ProcessStep asks before anything else
   local stepHook = not warpFirst and self.map.def and self.map.def.gen4StepHook

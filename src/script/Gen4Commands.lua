@@ -1022,6 +1022,36 @@ function Commands.g4_gender_message(ctx, male, female, bank)
   return Commands.g4_message(ctx, entry)
 end
 
+-- BLACK / WHITE'S ELEVATORS: the building's floors (Gen5ScriptLink reads the
+-- table out of the script file), the menu of every floor but this one, the
+-- choice, and the ride -- a warp to the floor's zone at its car's tile.
+function Commands.g4_bw_elevator(ctx, floors)
+  ctx.bwElevator, ctx.bwElevatorPick = floors or {}, nil
+end
+function Commands.g4_bw_elevator_floors(ctx)
+  local def = ctx.overworld and ctx.overworld.map and ctx.overworld.map.def
+  local here = def and tonumber(def.header)
+  for i, f in ipairs(ctx.bwElevator or {}) do
+    if f.zone ~= here then Commands.g4_menu_entry(ctx, f.label, i - 1) end
+  end
+end
+function Commands.g4_bw_elevator_pick(ctx, var)
+  local i = tonumber(valueOf(ctx, var))
+  ctx.bwElevatorPick = i and (ctx.bwElevator or {})[i + 1] or nil
+end
+function Commands.g4_bw_elevator_warp(ctx)
+  local f = ctx.bwElevatorPick
+  if not f then return end
+  return Commands.g4_warp(ctx, f.zone, f.x, f.y, 1)
+end
+
+-- BLACK / WHITE 0x049: Black's entry, or White's
+function Commands.g4_bw_version_message(ctx, black, white, bank)
+  local entry = require("src.core.GameVersion").get() == "white" and white or black
+  if bank then return Commands.g4_message_bank(ctx, bank, entry) end
+  return Commands.g4_message(ctx, entry)
+end
+
 function Commands.g4_message_var(ctx, id, bank)
   if bank then return Commands.g4_message_bank(ctx, bank, getVar(ctx.save, id)) end
   return Commands.g4_message(ctx, getVar(ctx.save, id))
@@ -1316,6 +1346,8 @@ function Commands.g4_hide_object(ctx, id)
   local e = objectById(ctx, id)
   if not e then return end
   e.hidden = true
+  -- a Black / White temporary (g4_bw_spawn_object) is gone for good
+  if e.def and e.def.gen5Temp then e.def.hidden = true end
   setObjectFlag(ctx, e, true)
 end
 
@@ -3466,6 +3498,52 @@ function Commands.g4_bw_trainer_after(ctx, trainer, destVar)
   if rec and rec.healer then value = 1 elseif rec and (tonumber(rec.prizeItem) or 0) > 0 then value = 2 end
   setVar(ctx.save, destVar, value)
 end
+-- BLACK / WHITE 0x069 <x, y, dir, object, sprite, script>: a TEMPORARY
+-- object, built on the spot rather than taken from the map's events. Made a
+-- def record (the same path `addobject` spawns through) at the matrix tile
+-- given, its picture the sheet any map's object of that sprite id uses. A
+-- second spawn under the same id replaces the first (Castelia's gym door
+-- runs 0xFB as Cheren, then as Burgh); `removeobject` retires it for good,
+-- as the cartridge forgets these on the next map load.
+local BW_DIR = { [0] = 0, [1] = 1, [2] = 2, [3] = 3 }
+local function bwSheetFor(ctx, sprite)
+  local data = ctx.game and ctx.game.data or (_G.Game and _G.Game.data)
+  local here = ctx.overworld and ctx.overworld.map and ctx.overworld.map.def
+  for _, o in ipairs(here and here.objects or {}) do
+    if o.graphicsId == sprite and o.sprite then return o.sprite, o.spriteName end
+  end
+  for _, def in pairs(data and data.maps or {}) do
+    for _, o in ipairs(type(def) == "table" and def.objects or {}) do
+      if o.graphicsId == sprite and o.sprite then return o.sprite, o.spriteName end
+    end
+  end
+  return nil
+end
+function Commands.g4_bw_spawn_object(ctx, x, y, dir, object, sprite, script)
+  local ow = ctx.overworld
+  local def = ow and ow.map and ow.map.def
+  if not (def and def.objects) then return end
+  local id, gfx = tonumber(valueOf(ctx, object)), tonumber(valueOf(ctx, sprite))
+  if not (id and gfx) then return end
+  local maxIndex = 0
+  for _, o in ipairs(def.objects) do
+    maxIndex = math.max(maxIndex, tonumber(o.index) or 0)
+    if o.localId == id and o.gen5Temp and not o.hidden then
+      o.hidden = true
+      if ow.syncObjectVisibility then pcall(function() ow:syncObjectVisibility(o) end) end
+    end
+  end
+  local ox, oy = mapOrigin(ctx)
+  local key, name = bwSheetFor(ctx, gfx)
+  local obj = { index = maxIndex + 1, localId = id, graphicsId = gfx, sprite = key, spriteName = name,
+    x = (tonumber(valueOf(ctx, x)) or 0) - ox, y = (tonumber(valueOf(ctx, y)) or 0) - oy,
+    direction = BW_DIR[tonumber(valueOf(ctx, dir)) or 1] or 1, movementType = 0,
+    movementRangeX = 0, movementRangeY = 0, script = tonumber(valueOf(ctx, script)) or 0,
+    elevation = 0, gen5 = true, gen5Temp = true }
+  def.objects[#def.objects + 1] = obj
+  if ow.syncObjectVisibility then pcall(function() ow:syncObjectVisibility(obj) end) end
+end
+
 function Commands.g4_bw_object_movement(ctx, destVar, object)
   local e = objectById(ctx, object)
   local mt = e and e.def and tonumber(e.def.movementType) or 0

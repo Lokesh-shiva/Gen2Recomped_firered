@@ -1,6 +1,7 @@
 """Offline desktop translation worker. Downloads models, never uploads text."""
 import argparse, json, os, re, shutil, sys, tempfile, urllib.request, zipfile
-import ctypes, hashlib
+import ctypes, hashlib, threading
+GPU_WARMUP_SECONDS = 60
 from pathlib import Path
 INDEX = "https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json"
 if hasattr(sys.stdout, "reconfigure"):
@@ -15,7 +16,18 @@ def prepare_cuda(request):
         return
     root = Path(request["models"]) / "cuda"
     names = ["cublasLt64_12.dll", "cublas64_12.dll"]
-    if request.get("hardware") == "gpu" and not all((root / name).is_file() for name in names):
+    if not all((root / name).is_file() for name in names):
+        # a CUDA 12 install on the system already has it: no download
+        try:
+            CUDA_HANDLES.extend(ctypes.WinDLL(name) for name in names)
+            return
+        except OSError:
+            pass
+    # "auto" fetches it too: an NVIDIA card is the whole reason the GPU path
+    # was chosen, and without cuBLAS that card cannot run a single batch --
+    # auto used to announce the GPU and then hang on the first one
+    if request.get("hardware", "auto") in ("gpu", "auto") and not all((root / name).is_file() for name in names):
+        root.mkdir(parents=True, exist_ok=True)
         emit(kind="status", phase="download", message="Finding NVIDIA GPU support (one-time download)")
         with urllib.request.urlopen("https://pypi.org/pypi/nvidia-cublas-cu12/12.6.4.1/json", timeout=30) as response:
             metadata = json.load(response)
@@ -43,12 +55,51 @@ def prepare_cuda(request):
         os.environ["PATH"] = str(root.resolve()) + os.pathsep + os.environ.get("PATH", "")
         CUDA_HANDLES.extend(ctypes.WinDLL(str((root / name).resolve())) for name in names)
 
+def cublas_loadable(request):
+    """True when cuBLAS can actually be loaded -- ours or the system's.
+
+    A CUDA device being present is not enough: ctranslate2 loads cuBLAS lazily
+    on the FIRST BATCH, and when it is missing the native library aborts or
+    hangs there, after "Using NVIDIA GPU" has already been reported -- the
+    launcher then sits on that line forever.  Asked up front, a missing
+    library is a quiet fall back to the CPU instead."""
+    if os.name != "nt":
+        return True
+    root = Path(request["models"]) / "cuda"
+    for name in ("cublasLt64_12.dll", "cublas64_12.dll"):
+        candidate = root / name
+        try:
+            CUDA_HANDLES.append(ctypes.WinDLL(str(candidate.resolve()) if candidate.is_file() else name))
+        except OSError:
+            return False
+    return True
+
 def make_engine(ctranslate2, path, request, force_cpu=False):
-    if not force_cpu and request.get("hardware", "auto") != "cpu":
+    hardware = request.get("hardware", "auto")
+    if not force_cpu and hardware != "cpu":
         try:
             if ctranslate2.get_cuda_device_count() > 0:
                 prepare_cuda(request)
+                if not cublas_loadable(request):
+                    raise RuntimeError("NVIDIA cuBLAS could not be installed or loaded")
                 engine = ctranslate2.Translator(str(path), device="cuda", compute_type="int8_float16")
+                # prove it before announcing it: one tiny batch on the GPU, on a
+                # watchdog -- a native hang inside CUDA cannot be caught, and
+                # it left the launcher on "Using NVIDIA GPU" indefinitely
+                outcome = {}
+                def warm():
+                    try:
+                        engine.translate_batch([["▁a"]], beam_size=1, max_decoding_length=4)
+                        outcome["ok"] = True
+                    except Exception as warm_error:
+                        outcome["error"] = warm_error
+                probe = threading.Thread(target=warm, daemon=True)
+                probe.start()
+                probe.join(GPU_WARMUP_SECONDS)
+                if "error" in outcome:
+                    raise outcome["error"]
+                if not outcome.get("ok"):
+                    raise RuntimeError("GPU did not respond within %d seconds" % GPU_WARMUP_SECONDS)
                 emit(kind="status", phase="load", message="Using NVIDIA GPU for translation")
                 return engine, "cuda"
         except Exception as error:
@@ -161,6 +212,7 @@ def translate(request):
         prefix = metadata.get("target_prefix", "")
         result = []
         batch_size = 128 if device == "cuda" else 32
+        emit(kind="progress", phase="translate", message="Translating game text", done=stage * len(texts), total=len(stages) * len(texts), unit="segments")
         for start in range(0, len(texts), batch_size):
             batch = texts[start:start + batch_size]
             tokens = [processor.encode(text, out_type=str) for text in batch]
@@ -199,4 +251,8 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    sys.stdout.flush()
+    # exit hard: a GPU probe that hung is still parked in native code, and an
+    # ordinary exit would wait on it (or on CUDA teardown) forever
+    os._exit(code)

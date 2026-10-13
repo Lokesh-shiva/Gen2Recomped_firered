@@ -257,6 +257,19 @@ function Gen4Ground.forMap(map, data)
   end
 
   local self = setmetatable({}, Gen4Ground)
+  -- BLACK / WHITE'S RAIL MAPS (Gen5Field's gen5NoGrid) are built from NG
+  -- chunks (Skyarrow's 2,048 units square -- four of a normal chunk --
+  -- Castelia's the normal 512: def.gen5ChunkScale), each placed at its
+  -- cell's centre with its node translation applied (Skyarrow's chunk 641 is
+  -- moved (1024, 0, -2048), which lands its deck on x 1,824 where the rails
+  -- run at 1,823). The map sees a terrain record with that chunk size, and
+  -- everything that reads chunkUnits / chunkTiles through self.terrain then
+  -- places the chunks right.
+  if def and def.gen5NoGrid then
+    local k = def.gen5ChunkScale or 4
+    terrain = setmetatable({ chunkUnits = (terrain.chunkUnits or 512) * k,
+                             chunkTiles = (terrain.chunkTiles or 32) * k }, { __index = terrain })
+  end
   self.terrain = terrain
   -- THE PERMISSION GRIDS, TAKEN FROM `data` RATHER THAN A GLOBAL.
   --

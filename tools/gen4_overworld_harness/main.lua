@@ -403,8 +403,23 @@ function love.load()
     -- once guarded its presses behind `if Game.input then` with a nil input
     -- and reported a stall as though presses had been tried.
     local pressEvery = tonumber(os.getenv("PRESS") or "0")
+    -- WALKSEQ="up:5,left:3,...": hold each direction until the player has
+    -- moved that many cells (the map's cell changes, so a script's pause
+    -- just waits), then the next; WALK applies after the last
+    local seq = {}
+    for dir, n in (os.getenv("WALKSEQ") or ""):gmatch("(%a+):(%d+)") do seq[#seq + 1] = { dir, tonumber(n) } end
+    local seqAt, seqMoved, seqCell = 1, 0, nil
+    local finalHeld = held
     for i = 1, ticks do
       pressA = pressEvery > 0 and (i % pressEvery == 0)
+      if seq[seqAt] then
+        local p = OW.player
+        local cell = p and (tostring(OW.map and OW.map.id) .. ":" .. tostring(p.cellX) .. "," .. tostring(p.cellY))
+        if seqCell and cell ~= seqCell then seqMoved = seqMoved + 1 end
+        seqCell = cell
+        if seqMoved >= seq[seqAt][2] then seqAt, seqMoved = seqAt + 1, 0 end
+        held = seq[seqAt] and seq[seqAt][1] or finalHeld
+      end
       if thenMap and i == thenAt then
         local okM, errM = pcall(OW.setMap, OW, thenMap,
                                 tonumber(os.getenv("THEN_X") or "10"),
@@ -551,6 +566,12 @@ function love.load()
     -- step inside that and paints into a surface nobody had set up.  A
     -- harness that skips it is not testing what the player sees.
     print("party after:  " .. partyHp())
+    -- SHOW_VARS=0x40D7,0x40D9: the story vars a scene was meant to set
+    for v in (os.getenv("SHOW_VARS") or ""):gmatch("[^,]+") do
+      local G4 = require("src.script.Gen4Commands")
+      local id = tonumber(v)
+      print(("var %s = %s"):format(v, tostring(id and G4.getVar and G4.getVar(Game.save, id))))
+    end
     -- DUMPNPCS=1: every object on the map and whether it stands there
     if os.getenv("GIFT") then
       local MG = require("src.pokemon.Gen4MysteryGift")

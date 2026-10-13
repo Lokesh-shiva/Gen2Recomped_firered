@@ -252,6 +252,56 @@ L.ALIASES = {
   -- (8010 == 6) { "This tree looks like it can be cut down!" }` --
   -- Platinum's findpartyslotwithmove
   [0x116] = { "findpartyslotwithmove", "ww" },
+  -- 0x069 <x, y, dir, object, sprite, script>: a TEMPORARY object made on the
+  -- spot (Castelia's gym door: Cheren as 0xFB, removed by 0x6C, then 0xFB
+  -- again as Burgh, sprite 0x57); 0x048 <style, male, female, object, ...>:
+  -- the message by the player's gender (Burgh's "your name is..." 3 / 4)
+  [0x069] = { "bwspawnobject", "wwwwww" },
+  [0x048] = { "gendermsgbox", "bbwwwww", { 3, 4 } },
+  -- Castelia Gym (overlay 38): 0x18C <gate var> animates one wall or
+  -- trainer pop-out, 0x18F <eight vars> lays the walls out from the switch
+  -- vars on entry. Both are presentation only -- the switch scripts set
+  -- their own vars and the walls are walked through (Gen5Field).
+  [0x18C] = { "noop", "w" }, [0x18F] = { "noop", "wwwwwwww" },
+  -- (0x18D / 0x18E <gate var>: the same overlay's other two animations)
+  [0x18D] = { "noop", "w" }, [0x18E] = { "noop", "w" },
+  -- 0x11E <badge>: the party recorded against the badge just won (its
+  -- handler copies six slots) -- the trainer card's history, nothing the
+  -- story reads; 0x01D closes a common script's work just before its end
+  [0x11E] = { "noop", "w" }, [0x01D] = { "noop", "" },
+  -- 0x098 <sequence> / 0x09E: a cutscene's own music and the return to the
+  -- map's (Z038's Plasma theft: `98 0443` as Iris runs in, `9E` once she
+  -- has gone). BW's sequence ids are not the engine's music keys, so the
+  -- map's music plays on -- presentation only.
+  [0x098] = { "noop", "w" }, [0x09E] = { "noop", "" },
+  -- 0x06B <object>: addobject, 0x6C's partner -- Z031 clears flag 797 and
+  -- then 6B's objects 6 and 7, Iris and Bianca, who carry that flag (139
+  -- sites)
+  [0x06B] = { "addobject", "w" },
+  -- 0x049 <style, black, white, object, ...>: the line by VERSION, as 0x048
+  -- is by gender -- the Sages' hideout (Z056) has Iris name "the white
+  -- Dragon-type Pokemon" (#4) in Black and "the black" (#5) in White;
+  -- 0x248 <sequence, frames>: a cutscene's music with a fade (see 0x098)
+  [0x049] = { "bwversionmsgbox", "bbwwwww", { 3, 4 } },
+  [0x248] = { "noop", "ww" },
+  -- 0x0AB <species, form> / 0x0AC: a cry and the wait for it (Munna, 517,
+  -- when Iris hands it back in the Sages' hideout)
+  [0x0AB] = { "playcry", "ww" }, [0x0AC] = { "waitcry", "" },
+  -- MENUS AND CASTELIA'S ELEVATORS (band 10405, bank 261: "Which floor
+  -- would you like to go to?"):
+  --   0xB2 <x, y, cursor, B cancels, result var>  opens a menu (7 bytes, see
+  --        Gen5ScriptOps), 0xAF <text, -, value> adds a line, 0xB0 shows it
+  --   0x1CB <u32>  the building's floor table, an offset from the script
+  --        pointer into the script file itself: 10-byte records <label,
+  --        zone, x, y, z> to a 0xFFFF label (read at link time, `floors`)
+  --   0x1CC  every floor but this one into the menu; 0x1CD <var> picks
+  --        the chosen floor; 0xA7 rides there; 0x1AE / 0x1AD / 0x1B1 are
+  --        the doors' and the car's animations and their wait
+  [0x0B2] = { "bwmenuopen", "bbwbw" }, [0x0AF] = { "addmenuentry", "www", { 1, 3 } },
+  [0x0B0] = { "showmenu", "" },
+  [0x1CB] = { "bwelevator", "d" }, [0x1CC] = { "bwelevatorfloors", "" },
+  [0x1CD] = { "bwelevatorpick", "w" }, [0x0A7] = { "bwelevatorwarp", "" },
+  [0x1AE] = { "noop", "" }, [0x1AD] = { "noop", "" }, [0x1B1] = { "noop", "" },
   -- THE SHARED TRAINER SCRIPT (band 3000, member 863, every trainer):
   --   0x084 <var>  the trainer's id (Platinum's gettrainerid)
   --   0x097 <trainer, dest>  beaten?   0x092 <trainer, dest>  healer / prize
@@ -691,6 +741,19 @@ function L.pool(arc, widths, zones, maps, bandRows)
           if not ins.name:match("^bw_") then named = named + 1 end
           if ins.name == "gotoif" and ins.args[1] == 0xFF then ins.name = "bw_01F" end
           if shared[m] and ins.name == "end" then ins.name = "return" end
+          if ins.op == 0x1CB and ins.operands and #ins.operands >= 4 and ins.at then
+            -- the elevator's floor table, in this file after the code
+            local o = ins.operands
+            local rel = o:byte(1) + o:byte(2) * 256 + o:byte(3) * 65536 + o:byte(4) * 16777216
+            local t = (ins.at - 1) + 6 + rel
+            local function h(p) return (d:byte(p + 1) or 0) + (d:byte(p + 2) or 0) * 256 end
+            ins.floors = {}
+            for k = 0, 7 do
+              local p = t + k * 10
+              if p + 10 > #d or h(p) == 0xFFFF then break end
+              ins.floors[#ins.floors + 1] = { label = h(p), zone = h(p + 2), x = h(p + 4), y = h(p + 6), z = h(p + 8) }
+            end
+          end
           if ins.name == "applymovement" then
             local address = Movement.addressOf(ins, 8)
             ins.movement = address and Movement.decode(d, address) or nil

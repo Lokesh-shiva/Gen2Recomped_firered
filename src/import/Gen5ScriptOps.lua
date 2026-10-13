@@ -262,6 +262,15 @@ function Ops.derive(rom, scriptArchive)
   end
   local widths = {}
   for i, w in pairs(slots) do if i - bestK >= 0 then widths[i - bestK] = w end end
+  -- MEASURED BY HAND where the rule above cannot see: 0xB2 (the menu
+  -- opener -- Castelia's elevators, `B2 1F 01 0000 01 8010`) loads and
+  -- stores the script pointer itself, so it is taken for a READER and its
+  -- two calls are never followed: two u8s, a var-or-value through
+  -- 0x2159B10, a u8, and the result var through 0x2011330 -- seven bytes,
+  -- not the six its own loads add up to. Six read the elevator askew from
+  -- the next op on (`80 CC` for 0x1CC).
+  local HAND = { [0xB2] = 7 }
+  for op, w in pairs(HAND) do widths[op] = w end
   return { widths = widths, offset = bestK,
            table = { segment = tbl.seg.name, at = tbl.at, slots = tbl.n },
            report = { clean = bestS, entries = total, secondBest = second } }

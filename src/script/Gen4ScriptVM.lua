@@ -1521,6 +1521,21 @@ L.bwflagtovar = function(ins, s) emit(s, { "g4_bw_flag_to_var", ins.args[1], ins
 L.bwtrainerbeaten = function(ins, s) emit(s, { "g4_bw_trainer_beaten", ins.args[1], ins.args[2] }) end
 L.bwtrainerafter = function(ins, s) emit(s, { "g4_bw_trainer_after", ins.args[1], ins.args[2] }) end
 L.bwobjectmovement = function(ins, s) emit(s, { "g4_bw_object_movement", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE MENUS AND ELEVATORS (Gen5ScriptLink 0xB2, 0x1CB..0x1CD, 0xA7)
+L.bwmenuopen = function(ins, s)
+  emit(s, { "g4_menu_init", ins.args[5], ins.args[4], ins.args[3], s.bankFor and s.bankFor(s.member) or nil })
+end
+L.bwelevator = function(ins, s) emit(s, { "g4_bw_elevator", ins.floors or {} }) end
+L.bwelevatorfloors = function(_, s) emit(s, { "g4_bw_elevator_floors" }) end
+L.bwelevatorpick = function(ins, s) emit(s, { "g4_bw_elevator_pick", ins.args[1] }) end
+L.bwelevatorwarp = function(_, s) emit(s, { "g4_bw_elevator_warp" }) end
+-- BLACK / WHITE 0x049: one of two entries of the script's bank by version
+L.bwversionmsgbox = function(ins, s)
+  emit(s, { "g4_bw_version_message", ins.args[1], ins.args[2], s.bankFor and s.bankFor(s.member) })
+end
+L.bwspawnobject = function(ins, s)
+  emit(s, { "g4_bw_spawn_object", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5], ins.args[6] })
+end
 -- `givepokemon <species> <level> <heldItem> <destVar>` -- the first three are
 -- var-or-literal, which matters because the starter arrives as a var.
 L.givepokemon = function(ins, s)

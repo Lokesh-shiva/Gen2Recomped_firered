@@ -161,6 +161,9 @@ if b then
     ('%s of %s script entries decode to an end; the alignment is unambiguous'):format(tostring(rep.clean), tostring(rep.entries)))
   check(sc.widths and sc.widths[0x38] == 3 and sc.widths[0x2E] == 0 and (rep.clean or 0) >= 3340,
     ('tail-jump stubs followed: 0x38 is 3 bytes, lockall still 0; %s clean entries'):format(tostring(rep.clean)))
+  check(sc.widths and sc.widths[0xB2] == 7,
+    ('the menu opener 0xB2 is 7 bytes (a reader-shaped handler whose two calls also read) -- got %s')
+      :format(tostring(sc.widths and sc.widths[0xB2])))
   -- the script pool the Gen 4 engine runs (Gen5ScriptLink)
   local lr = b._x and b._x.linkReport or {}
   local ms = b.map_scripts or {}
@@ -396,8 +399,18 @@ if b then
     "Platinum's hidden paths leave Black and White's maps alone")
   local cas = b.maps and b.maps.Z028
   local ct = cas and cas.coordEvents and cas.coordEvents[1]
-  check(ct and ct.x == 4 and ct.y == 24 and ct.width == 1 and ct.height == 8,
-    "a trigger's second shape (+8 = 1: x, y, z, width, height): Castelia's 1 x 8 strip at (4, 24)")
+  check(ct and ct.rail and ct.rail.line == 4 and ct.rail.along == 24 and ct.rail.across == -5
+      and ct.width == 1 and ct.height == 8 and ct.x == 17 and ct.y == 36,
+    ("a trigger's rail shape (+8 = 1: line, along, across, width, height): Castelia's 1 x 8 strip on line 4, step 24, placed at (%s, %s)")
+      :format(tostring(ct and ct.x), tostring(ct and ct.y)))
+  -- rail-placed warps, and the NG chunk size per rail map
+  local gate
+  for _, w in ipairs(cas and cas.warps or {}) do if w.index == 10 then gate = w end end
+  check(gate and gate.destMap == 'Z252' and gate.x == 71 and gate.y == 31 and gate.rail and gate.rail.line == 1,
+    ("rail warps: Castelia's warp 10 (line 1) to the bridge gate Z252 at (71, 31) -- got (%s, %s)")
+      :format(tostring(gate and gate.x), tostring(gate and gate.y)))
+  check(cas and cas.gen5ChunkScale == 1 and b.maps.Z249 and b.maps.Z249.gen5ChunkScale == 4,
+    "NG chunk size per rail map: Castelia the normal 512 units, Skyarrow 2,048")
   -- the cameras: /a/0/6/0 records by the zone header's +0x1C bits 9..15
   local cam = b.maps and b.maps.Z006 and b.maps.Z006.gen5Camera
   local pc = b.maps and b.maps.Z398 and b.maps.Z398.gen5Camera

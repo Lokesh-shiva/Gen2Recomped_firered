@@ -108,7 +108,10 @@ Collision.entityAbsent = entityAbsent
 
 function Collision.occupied(entities, cx, cy, ignore)
   for _, e in ipairs(entities) do
+    -- (`def.passable`: an object its map's data says is walked through --
+    -- Castelia Gym's honey walls, Gen5Field)
     if e ~= ignore and e.of ~= ignore and not e.passable and not entityAbsent(e)
+       and not (e.def and e.def.passable)
        and Collision.sameElevation(e, ignore) then
       if entityBlocks(e, cx, cy) then
         return e
