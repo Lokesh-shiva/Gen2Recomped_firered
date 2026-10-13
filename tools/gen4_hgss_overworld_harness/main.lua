@@ -270,7 +270,7 @@ end
 -- SET_VARS="0x4108=1,0x4030=152", SET_FLAGS / CLEAR_FLAGS="0x6A,0x73", APRICORNS: story state
 -- before the first frame, through the engine's own setters, so a later
 -- scene can be tested without playing up to it
-if os.getenv("SET_VARS") or os.getenv("SET_FLAGS") or os.getenv("CLEAR_FLAGS") or os.getenv("APRICORNS") or os.getenv("KURT") then
+if os.getenv("SET_VARS") or os.getenv("SET_FLAGS") or os.getenv("CLEAR_FLAGS") or os.getenv("APRICORNS") or os.getenv("KURT") or os.getenv("BADGES") or os.getenv("STRENGTH") then
   -- applied as the overworld is pushed: that is after the new save exists
   -- and before the first tick (this harness ticks inside love.load)
   local StateStack = require("src.core.StateStack")
@@ -282,6 +282,20 @@ if os.getenv("SET_VARS") or os.getenv("SET_FLAGS") or os.getenv("CLEAR_FLAGS") o
       local G4 = require("src.script.Gen4Commands")
       local Commands = require("src.script.Commands")
       local ctx = { save = G and G.save, game = G }
+      -- STRENGTH=1: Strength already active, as the field-move script leaves it
+      if os.getenv("STRENGTH") and ctx.save then
+        ctx.save.gen4FieldMoveFlags = ctx.save.gen4FieldMoveFlags or {}
+        ctx.save.gen4FieldMoveFlags.strength = true
+        _G.__harnessStrength = true
+      end
+      -- BADGES=all (or a count): field-move tests need the badge checks to pass
+      if os.getenv("BADGES") and ctx.save then
+        local Badges = require("src.inventory.Badges")
+        local list = Badges.list(G and G.data) or {}
+        local n = tonumber(os.getenv("BADGES")) or #list
+        for i = 1, math.min(n, #list) do Badges.set(ctx.save, list[i], true) end
+        print(("[state] %d badge(s) given"):format(math.min(n, #list)))
+      end
       for id, value in tostring(os.getenv("SET_VARS") or ""):gmatch("(%w+)=(%w+)") do
         G4.setVar(ctx.save, tonumber(id), tonumber(value))
         print(("[state] var %s = %s"):format(id, value))

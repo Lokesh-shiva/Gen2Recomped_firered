@@ -58,7 +58,7 @@ function E.parse(d)
   for i = 0, nf - 1 do
     local o = at + i * 20
     out.signs[i + 1] = { index = i, script = u16(d, o), kind = u16(d, o + 2), x = u32(d, o + 8), y = u32(d, o + 12),
-      rail = railAt(d, o, 6) }
+      rail = railAt(d, o, 6), height = s16(d, o + 16) }
   end
   at = at + nf * 20
   for i = 0, nn - 1 do
@@ -66,6 +66,7 @@ function E.parse(d)
     out.npcs[i + 1] = { index = i, localId = u16(d, o), sprite = u16(d, o + 2), movementType = u16(d, o + 4),
       trainerType = u16(d, o + 6), flag = u16(d, o + 8), script = u16(d, o + 10), direction = u16(d, o + 12),
       x = u16(d, o + 28), y = u16(d, o + 30), paramA = u16(d, o + 14), paramB = u16(d, o + 16),
+      level = s16(d, o + 34),
       rail = railAt(d, o, 24, 28) }
   end
   at = at + nn * 36
@@ -107,13 +108,15 @@ function E.attach(def, ev, spriteFor)
       -- the same flag namespace the script engine's setflag/clearflag write
       -- (Gen4ScriptVM.flagName), so a script hiding an NPC hides THIS one
       flag = n.flag, eventFlag = n.flag ~= 0 and ("FLAG_G4_%04X"):format(n.flag) or nil,
-      script = n.script, elevation = 0, gen5 = true, rail = n.rail }
+      script = n.script, elevation = 0, gen5 = true, rail = n.rail, gen5Level = n.level }
     local obj = def.objects[#def.objects]
     if n.sprite == 0 then
       -- SPRITE 0 IS A GYM GIMMICK, drawn by the gym's own overlay rather
       -- than as a character: Castelia's seven honey walls, Driftveil's
-      -- lifts, Icirrus's and Dragonspiral's pieces (24 objects on 6 maps)
-      obj.gen5Gimmick = true
+      -- lifts, Icirrus's and Dragonspiral's pieces (24 objects on 6 maps).
+      -- Their picture is the overlay's model, not a sprite sheet -- member 0
+      -- drew a placeholder box -- so they are BURIED: not drawn, still there
+      obj.gen5Gimmick, obj.buried = true, true
     end
     if n.sprite == E.BLOCKER_SPRITE then
       -- never drawn, always in the way: the state `buried` already means
@@ -161,7 +164,10 @@ function E.attach(def, ev, spriteFor)
   end
   for _, s in ipairs(ev.signs) do
     def.signs[#def.signs + 1] = { index = s.index + 1, x = s.x - ox, y = s.y - oy, script = s.script,
-      kind = s.kind, elevation = 0, rail = s.rail }
+      kind = s.kind, elevation = 0, rail = s.rail,
+      -- a sign's height is world units at +16 (Clay's lift panels stand at
+      -- 800 / 640 / 480 / -944, i.e. levels 50 / 40 / 30 / -59 in tiles)
+      gen5Level = s.height and math.floor(s.height / 16) or nil }
   end
   for _, t in ipairs(ev.triggers) do
     def.coordEvents[#def.coordEvents + 1] = { index = t.index + 1, x = t.x - ox, y = t.y - oy,

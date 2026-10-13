@@ -1521,6 +1521,21 @@ L.bwflagtovar = function(ins, s) emit(s, { "g4_bw_flag_to_var", ins.args[1], ins
 L.bwtrainerbeaten = function(ins, s) emit(s, { "g4_bw_trainer_beaten", ins.args[1], ins.args[2] }) end
 L.bwtrainerafter = function(ins, s) emit(s, { "g4_bw_trainer_after", ins.args[1], ins.args[2] }) end
 L.bwobjectmovement = function(ins, s) emit(s, { "g4_bw_object_movement", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE 0x07B: an object placed, its facing left as it is (99
+-- names no direction)
+L.bwplaceobject = function(ins, s)
+  emit(s, { "g4_place_object", ins.args[1], ins.args[2], ins.args[4], 99, ins.args[3] })
+end
+-- BLACK / WHITE 0x195: a gated rail ride (Icirrus Gym)
+L.bwrailride = function(ins, s) emit(s, { "g4_bw_rail_ride", ins.args[1] }) end
+-- BLACK / WHITE 0x0DF: has a species been seen
+L.bwdexseen = function(ins, s) emit(s, { "g4_bw_dex_seen", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE: Driftveil Gym's lifts
+L.bwliftmove = function(ins, s) emit(s, { "g4_bw_lift_move", ins.args[1] }) end
+-- BLACK / WHITE 0x021: the script the next warp's destination runs
+L.bwqueueentry = function(ins, s) emit(s, { "g4_bw_queue_entry", ins.args[1] }) end
+-- BLACK / WHITE 0x0D8: var = whether the value is a TM or HM's item id
+L.bwistmhm = function(ins, s) emit(s, { "g4_bw_is_tmhm", ins.args[1], ins.args[2] }) end
 -- BLACK / WHITE: Nimbasa Gym's coaster switch
 L.bwcoasterswitch = function(ins, s) emit(s, { "g4_bw_coaster_switch", ins.args[1] }) end
 -- BLACK / WHITE: the season, var *= value, and the park visitor's table
@@ -3334,19 +3349,23 @@ end
 -- the overworld for local id 128 on a map whose object list is empty: it finds
 -- nothing and says so, once per id. A no-op is the honest lowering until
 -- `sMapObjectEvents` is extracted, which is the real fix and is on the tracker.
-L.adddistortionworldmapobject = function(_, s)
-  emit(s, { "g4_noop", "a Distortion World cast member (its table is in overlay 9)" })
+-- ...AND NOW IT IS: `gen4_distortion_world.cast` is the overlay's table, and
+-- src/world/Gen4DistPlatforms.lua places and removes its members by local id.
+L.adddistortionworldmapobject = function(ins, s)
+  emit(s, { "g4_dw_cast_add", ins.args[1] })
 end
-L.deletedistortionworldmapobject = function(_, s)
-  emit(s, { "g4_noop", "a Distortion World cast member (its table is in overlay 9)" })
+L.deletedistortionworldmapobject = function(ins, s)
+  emit(s, { "g4_dw_cast_delete", ins.args[1] })
 end
 L.initpersistedmapfeaturesfordistortionworld = function(_, s)
   emit(s, { "g4_map_feature_init", "distortion" })
 end
 L.finishdistortionworldgiratinashadowevent = function(_, s)
-  emit(s, { "g4_noop", "the Giratina shadow event" })
+  emit(s, { "g4_dw_shadow_finish" })
 end
-L.dodwwarp = function(_, s) emit(s, { "g4_noop", "the Distortion World warp" }) end
+-- FieldSystem_StartDWWarp: the swirl into the Distortion World (its own
+-- application on the cartridge), played over the faded-out screen
+L.dodwwarp = function(_, s) emit(s, { "g4_dw_warp" }) end
 -- `ScrCmd_SetPartyGiratinaForm`: non-zero forces Origin Forme on every
 -- Giratina in the party (the Distortion World), zero puts each back by its
 -- held item. Both register the form in the Pokedex.
@@ -3545,7 +3564,7 @@ end
 L.showobject = function(ins, s) emit(s, { "g4_show_object", ins.args[1] }) end
 L.hideobject = function(ins, s) emit(s, { "g4_hide_object", ins.args[1] }) end
 L.resetdistortionworldpersistedcameraangles = function(_, s)
-  emit(s, { "g4_noop", "the Distortion World camera angles" })
+  emit(s, { "g4_dw_reset_camera" })
 end
 L.setsubscene63 = function(_, s) emit(s, { "g4_noop", "a subscene change" }) end
 
@@ -3557,8 +3576,8 @@ L.setsubscene63 = function(_, s) emit(s, { "g4_noop", "a subscene change" }) end
 L.startgiratinaoriginbattle = function(ins, s)
   emit(s, { "g4_legendary_battle", ins.args[1], ins.args[2] })
 end
-L.startdistortionworldgiratinashadowevent = function(_, s)
-  emit(s, { "g4_noop", "the Giratina shadow event" })
+L.startdistortionworldgiratinashadowevent = function(ins, s)
+  emit(s, { "g4_dw_shadow_start", ins.args[1] })
 end
 
 function Gen4ScriptVM.lower(instructions, state)

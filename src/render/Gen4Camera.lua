@@ -481,6 +481,11 @@ local FREE = { third = true, first = true }
 -- ladder stays the single source of truth about which view is up.
 function Gen4Camera.mode()
   local chosen = Gen4Camera.externalTilt or Gen4Camera.TILTS[Gen4Camera.chosen]
+  -- ON A DISTORTION WORLD WALL OR CEILING the cartridge's camera wins over
+  -- first and third person too: those follow the player's facing, and on a
+  -- rolled plane that facing is the sprite's, not a heading -- the view and
+  -- the controls spun with every step (reported from play).
+  if Gen4Camera.forceField3d == "surface" then return "field3d" end
   if FREE[chosen] then return chosen end
   -- A NUMERIC RUNG IS A CAMERA ANGLE, not a stretch.
   --
@@ -504,7 +509,21 @@ function Gen4Camera.mode()
   -- answers nil, which keeps the oblique pass for the one rung that asks for
   -- the cartridge's own framing.
   if tonumber(chosen) then return "field3d" end
+  -- THE DISTORTION WORLD IS DRAWN BY A REAL CAMERA even on the cartridge
+  -- rung: its walls and ceilings are planes the oblique pass cannot show, and
+  -- its camera turns (src/world/Gen4DistSurface.lua) -- from the map's own
+  -- pitch, which is what `cartridge` asks for.
+  if Gen4Camera.forceField3d then return "field3d" end
   return nil
+end
+
+-- Set by src/world/Gen4DistSurface.lua while a Distortion World floor is up.
+function Gen4Camera.setForceField3d(on)
+  if on ~= "surface" then on = on and true or nil end
+  if on ~= Gen4Camera.forceField3d then
+    Gen4Camera.forceField3d = on
+    Gen4Camera.generation = (Gen4Camera.generation or 0) + 1
+  end
 end
 
 -- HELD HERE RATHER THAN READ FROM THE SAVE, because the thing that needs it --
@@ -562,10 +581,28 @@ end
 
 -- The camera a map is drawn with: its header's type, with the OPTIONS row's
 -- pitch substituted when the player has chosen one.
+-- THE DISTORTION WORLD'S OWN CAMERA.  Its map headers say type 4, the
+-- orthographic interior, but overlay 9's `CameraInit` replaces the camera
+-- outright: distance 0x29AEC1, angle -10750, fovY 1473, perspective, clip
+-- 150..1700 -- and widens the fov by 0x681 - 0x5C1 everywhere but Giratina's
+-- room (DISTORTION_WORLD_NON_GIRATINA_ROOM_FOV_ADJUST).  Angles are u16 turns.
+Gen4Camera.DISTORTION_WORLD = {
+  id = "distortion_world", distance = 0x29AEC1 / 4096,
+  pitch = 10750 * 360 / 65536, projection = "perspective",
+  halfFov = (1473 + 0xC0) * 360 / 65536, near = 150, far = 1700,
+}
+Gen4Camera.DISTORTION_WORLD_GIRATINA = {
+  id = "distortion_world_giratina", distance = 0x29AEC1 / 4096,
+  pitch = 10750 * 360 / 65536, projection = "perspective",
+  halfFov = 1473 * 360 / 65536, near = 150, far = 1700,
+}
+
 function Gen4Camera.forMap(def)
   -- Black / White carry their camera record on the def (Gen5Field: the
   -- zone's index into /a/0/6/0, decoded at import)
   local config = def and def.gen5Camera
+                 or (def and def.gen4DistWorld == "giratina" and Gen4Camera.DISTORTION_WORLD_GIRATINA)
+                 or (def and def.gen4DistWorld and Gen4Camera.DISTORTION_WORLD)
                  or Gen4Camera.forType(def and def.cameraType, def and def.cameraFamily)
   local chosen = Gen4Camera.externalTilt or Gen4Camera.TILTS[Gen4Camera.chosen]
   if chosen == "cartridge" then return config end

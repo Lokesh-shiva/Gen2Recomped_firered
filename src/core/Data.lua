@@ -165,6 +165,7 @@ local GEN4_MODULES = {
 local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         "gen4_naming", "gen4_dex", "gen4_models",
                         "gen4_terrain", "gen4_distortion_world",
+                        "gen4_weather_sys", "gen4_mail_gra",
                         "gen4_species_sprites",
                         "gen4_move_anims", "gen4_particles",
                         "gen4_cellactors",
@@ -1802,6 +1803,88 @@ function Data:seedDefaults()
           Logger.warn("gen4 distortion world: %d lift(s) had no map or no "
                       .. "offsets and %d had no partner; those floors stay "
                       .. "unreachable", refused, #orphans)
+        end
+      end
+      -- ...AND THE PLATFORMS ARE DRAWN. Reported from play: "the distortion
+      -- world in platinum is all glitched out" -- the player stood in the
+      -- dark on cells that are walkable, because what they stand on there is
+      -- not land but a PROP the overlay places: the lifts' platforms and the
+      -- floor's simple props (overlay 9's tables). Each is a field-effect
+      -- model, member 124 + its prop kind (`sProp3DModelNARCIndexByKind`, a
+      -- straight run 124..148 in the overlay: d33_step01 .. d33_step18, the
+      -- waterfall, tree and rock), at world tile (x, y, z) less the floor's
+      -- offsets (tw_arc's map info) -- 1F's lift at (40, 289, 54) is map tile
+      -- (19, 44), one tile up, exactly the pocket the player went dark in.
+      do
+        local byHeader = {}
+        for _, def in pairs(self.maps or {}) do
+          if type(def) == "table" and def.header and not (def.sourceId and byHeader[def.header]) then
+            byHeader[def.header] = def
+          end
+        end
+        local placed = 0
+        local function place(header, list)
+          local info = dw.maps and (dw.maps[header] or dw.maps[tostring(header)])
+          local def = byHeader[tonumber(header)]
+          if not (info and def and type(list) == "table") then return end
+          def.gen4RuntimeProps = def.gen4RuntimeProps or {}
+          for _, p in ipairs(list) do
+            local kind = tonumber(p.propKind)
+            if kind and kind >= 0 and kind < 25 and p.x and p.z then
+              local props = def.gen4RuntimeProps
+              -- a MOVING platform (it has an index) gets a live record the
+              -- runtime drives -- rafts, lifts (src/world/Gen4DistPlatforms.lua)
+              local live = (p.index or p.group) and { template = p, group = p.group } or nil
+              -- sPropInitialPosOffsetByKind: the model sits 25 units under
+              -- the tile's centre height and 6 back, and the three large lifts
+              -- 8 west and 8 or 16 further south
+              local ox, oy, oz = 0, -25, -6
+              if kind == 8 or kind == 16 then ox, oz = -8, 2
+              elseif kind == 18 then ox, oz = -8, 10
+              elseif kind >= 20 and kind <= 23 then oy = -32
+              elseif kind == 24 then oy, oz = -14, 8 end
+              props[#props + 1] = { model = 124 + kind, archive = "fldeff",
+                distWorld = true, live = live,
+                x = (p.x - (info.offsetX or 0)) * 16 + 8 + ox,
+                y = ((p.y or 0) - (info.offsetAltitude or 0)) * 16 + 8 + oy,
+                z = (p.z - (info.offsetZ or 0)) * 16 + 8 + oz }
+              if live and p.index then
+                def.gen4DistLive = def.gen4DistLive or {}
+                def.gen4DistLive[p.index] = live
+              elseif live then
+                -- a ghost prop: shown or hidden with its group
+                def.gen4DistGhosts = def.gen4DistGhosts or {}
+                table.insert(def.gen4DistGhosts, live)
+              end
+              placed = placed + 1
+            end
+          end
+        end
+        -- IDEMPOTENT: `seedDefaults` runs again after the mod merge, and a
+        -- second pass would stack a second copy of every platform
+        for _, def in pairs(byHeader) do
+          if type(def.gen4RuntimeProps) == "table" then
+            for i = #def.gen4RuntimeProps, 1, -1 do
+              if def.gen4RuntimeProps[i].distWorld then table.remove(def.gen4RuntimeProps, i) end
+            end
+          end
+          def.gen4DistLive, def.gen4DistGhosts = nil, nil
+        end
+        -- every floor takes the overlay's own camera (Gen4Camera.DISTORTION_WORLD)
+        for header in pairs(dw.maps or {}) do
+          local def = byHeader[tonumber(header)]
+          if def then
+            def.gen4DistWorld = (tonumber(header) == 582) and "giratina" or true
+          end
+        end
+        for header, list in pairs(dw.movingPlatforms or {}) do place(header, list) end
+        for header, list in pairs(dw.simpleProps or {}) do place(header, list) end
+        -- the ghost props (the floating stepping stones), from each floor's file
+        for header, info in pairs(dw.maps or {}) do
+          if type(info.ghostProps) == "table" then place(header, info.ghostProps) end
+        end
+        if placed > 0 then
+          Logger.info("gen4 distortion world: %d platform / prop model(s) placed", placed)
         end
       end
     elseif self.isGen4Cache then

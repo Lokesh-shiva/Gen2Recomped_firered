@@ -1764,6 +1764,10 @@ function RomExtractorGen4:linkScripts(headers, events, names)
         maps[mapId] = {
           objects = objects, signs = signs, header = id,
           callbacks = callbacks, tables = tables, coords = coords,
+          -- the map's own script file IN HEADER ORDER: `ScriptManager_Set(fs,
+          -- id)` names a map script by number (the Distortion World's B7F and
+          -- Giratina room teleports, src/world/Gen4DistPlatforms.lua)
+          entries = list,
           -- Named `shared` rather than `specials`: they are entries in shared
           -- script files, which is a fact about them rather than an admission.
           shared = (next(shared.objects) or next(shared.signs)) and shared or nil,
@@ -6359,6 +6363,9 @@ local HGSS_MODEL_ARCHIVES = {
   -- three balls and their glow, with the balls' rock / open and the
   -- turntable's animations (choose_starter_app.c loads members 0..7)
   { path = "/a/0/8/2", out = "hgssStarter", label = "starter turntable" },
+  -- Platinum's fldeff.narc: found by its models' names, `sea_ride` (the surf
+  -- mount) at member 86 here against Platinum's 81
+  { path = "/a/1/0/3", out = "fldeff", label = "field-effect models" },
 }
 
 -- Platinum's 3D, in the shape the engine can load: packed geometry, the
@@ -6422,6 +6429,9 @@ function RomExtractorGen4:extractDistortionWorld()
         jumps = file.jumps,
         cameras = file.cameras,
         ghostPropBytes = file.ghostPropBytes,
+        ghostProps = file.ghostProps,
+        ghostTriggers = file.ghostTriggers,
+        ghostDefaultVisible = file.ghostDefaultVisible,
       }
     else
       out.refused["map" .. tostring(info.header)] = err
@@ -6469,6 +6479,13 @@ function RomExtractorGen4:extractDistortionWorld()
     self:tick("distortion", done, total)
   end
 
+  out.boulderFalls = Gen4DistWorld.findBoulderFalls(bin)
+  out.externalShadows = Gen4DistWorld.findExternalShadows(bin)
+  -- the sky behind it all (Gen4DistSky): tw_arc_etc's background and clouds
+  do
+    local okSky, sky, whySky = pcall(require("src.import.Gen4DistSky").extract, self)
+    if okSky and sky then out.sky = sky else out.refused.sky = tostring(okSky and whySky or sky) end
+  end
   local eat, paths = Gen4DistWorld.findElevatorPaths(bin)
   if paths then
     out.elevatorPaths = paths
@@ -6981,7 +6998,31 @@ function RomExtractorGen4:run()
   -- reads two archives of its own and one ARM9 overlay, and joins to the rest
   -- of the cache only by map header id.
   self:extractDistortionWorld()
+  self:extractWeatherSys()
+  self:extractMailGra()
   return self.wrote
+end
+
+-- Platinum's mail stationery (Gen4MailGra), for the bag's Mail USE
+function RomExtractorGen4:extractMailGra()
+  if require("src.import.Gen4Versions").family(self.version) == "hgss" then return end
+  local ok, rec, why = pcall(require("src.import.Gen4MailGra").extract, self)
+  if ok and rec then
+    self:write("gen4_mail_gra", rec)
+  else
+    self:write("gen4_mail_gra", { refused = tostring(ok and why or rec) })
+  end
+end
+
+-- Platinum's snow art (Gen4WeatherSys): the flakes and the blizzard's layer
+function RomExtractorGen4:extractWeatherSys()
+  if require("src.import.Gen4Versions").family(self.version) == "hgss" then return end
+  local ok, rec, why = pcall(require("src.import.Gen4WeatherSys").extract, self)
+  if ok and rec then
+    self:write("gen4_weather_sys", rec)
+  else
+    self:write("gen4_weather_sys", { refused = tostring(ok and why or rec) })
+  end
 end
 
 -- NOT BUILT YET, and each is a seam rather than a detail:

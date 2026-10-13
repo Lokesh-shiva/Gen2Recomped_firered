@@ -479,6 +479,17 @@ end
 function Game:recenterLookPointer()
   if not lookPointerWanted(self) then return end
   if not (love.mouse and love.mouse.setPosition) then return end
+  -- NO WARP IN RELATIVE MODE. Reported from play: "first person and third
+  -- person wont let me look around unless the window isnt active". With the
+  -- window focused the pointer is in relative mode, where SDL reports
+  -- unbounded deltas and the edge cannot be hit -- but every motion still
+  -- warped to the centre and armed `lookWarping`, and love.mousemoved threw
+  -- the NEXT motion away as the warp's echo: the look was eaten. Unfocused,
+  -- relative mode was off, nothing warped, and the look worked.
+  if self.lookRelative and love.mouse.getRelativeMode then
+    local ok, rel = pcall(love.mouse.getRelativeMode)
+    if ok and rel then return end
+  end
   local w, h = 0, 0
   if love.graphics and love.graphics.getDimensions then
     w, h = love.graphics.getDimensions()

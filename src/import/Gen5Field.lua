@@ -688,6 +688,18 @@ function F.build(x, save)
     local rail = rails[def.header]
     local hybrid = not def.gen5NoGrid and rail and rail.data and def.blocks
                    and (def.originX or 0) == 0 and (def.originY or 0) == 0
+    -- ...AND ONLY WHERE THE RAILS LEAVE THE GRID. Z030's run to row 44 of a
+    -- 32-row map; Icirrus Gym's (Z114) stay inside its 78 x 78, and opening
+    -- them there cut through the walls the gym's rotating bridges span --
+    -- the puzzle walked straight past. Inside the grid the cartridge's own
+    -- cells stand.
+    if hybrid then
+      local beyond = false
+      for _, pt in pairs(rail.data.points or {}) do
+        if pt.x / 16 >= (def.width or 0) or pt.z / 16 >= (def.height or 0) then beyond = true end
+      end
+      hybrid = beyond
+    end
     if not (def.gen5NoGrid or hybrid) then rail = nil end
     if def.gen5NoGrid or hybrid then
       local data = rail and rail.data
@@ -726,6 +738,15 @@ function F.build(x, save)
             end
           end
         end
+        -- ...and always the cell the point is in: a one-tile rail (16 wide)
+        -- reaches no other centre, so a diagonal run -- Dragonspiral's
+        -- spiral floors -- left cells touching only at their corners, which
+        -- no walker can cross
+        local tx, ty = math.floor(x / 16), math.floor(z / 16)
+        if tx >= 0 and ty >= 0 and tx < w and ty < h then
+          open[ty * w + tx] = true
+          if y and y ~= 0 then heights[tx .. "," .. ty] = math.floor(y + 0.5) end
+        end
       end
       local function widthAt(pt, line)
         for k = 1, 4 do if pt.lines[k] == line then return pt.widths[k] end end
@@ -759,6 +780,20 @@ function F.build(x, save)
           end
         end
       end
+      -- CORNERS: two rail cells meeting only diagonally (a ring's run where
+      -- the line crosses a cell corner -- Dragonspiral's entrance segment
+      -- to its first ring) get one side cell opened, so the walk the rail
+      -- describes is one a grid walker can take
+      for pass = 1, 2 do
+        for ty = 0, h - 2 do
+          for tx = 0, w - 2 do
+            local a, b = open[ty * w + tx], open[(ty + 1) * w + tx + 1]
+            local c, d = open[ty * w + tx + 1], open[(ty + 1) * w + tx]
+            if a and b and not c and not d then open[ty * w + tx + 1] = true end
+            if c and d and not a and not b then open[ty * w + tx] = true end
+          end
+        end
+      end
       local blocks, behav = {}, {}
       local oldW, oldH, oldBlocks, oldBehav = def.width, def.height, def.blocks, def.behaviorCells
       if hybrid then w, h = math.max(w, oldW), math.max(h, oldH) end
@@ -780,6 +815,107 @@ function F.build(x, save)
     local rail = rails[def.header]
     if rail and rail.data then
       report.railPlaced = (report.railPlaced or 0) + Events.placeOnRails(def, railTile(rail.data, def))
+    end
+  end
+  -- RAILS INSIDE AN ORDINARY GRID (Icirrus Gym, Z114: its rails stay in
+  -- its 64 x 64): each chain of lines is a track. One that STARTS at a
+  -- trigger is a ride the trigger's script starts (0x195 <n>, gated by the
+  -- gym's switches) -- kept as `gen5RailTracks`, start and end cell; one
+  -- that does not is a walkway over the gaps (the gym's bridges, 48 and 96
+  -- units up), opened as ground along its lines.
+  for _, def in pairs(maps) do
+    local rail = rails[def.header]
+    local data = rail and rail.data
+    if data and not def.gen5NoGrid and def.blocks and (def.originX or 0) == 0 and (def.originY or 0) == 0
+       and def.width and def.height then
+      local inside = true
+      for _, pt in pairs(data.points or {}) do
+        if pt.x / 16 >= def.width or pt.z / 16 >= def.height then inside = false end
+      end
+      if inside then
+        local lineOf, seen, chains, order = {}, {}, {}, {}
+        for li, line in pairs(data.lines or {}) do
+          lineOf[line.a] = lineOf[line.a] or {}; table.insert(lineOf[line.a], li)
+          lineOf[line.b] = lineOf[line.b] or {}; table.insert(lineOf[line.b], li)
+          order[#order + 1] = li
+        end
+        table.sort(order)
+        for _, li in ipairs(order) do
+          if not seen[li] then
+            local chain, stack, pts = {}, { li }, {}
+            while #stack > 0 do
+              local l = table.remove(stack)
+              if not seen[l] then
+                seen[l] = true; chain[#chain + 1] = l
+                local line = data.lines[l]
+                for _, p in ipairs({ line.a, line.b }) do
+                  pts[p] = (pts[p] or 0) + 1
+                  for _, o in ipairs(lineOf[p] or {}) do if not seen[o] then stack[#stack + 1] = o end end
+                end
+              end
+            end
+            local ends = {}
+            for p, n in pairs(pts) do if n == 1 then ends[#ends + 1] = p end end
+            table.sort(ends)
+            chains[#chains + 1] = { lines = chain, a = ends[1], b = ends[2] }
+          end
+        end
+        local function cellOf(p) local pt = data.points[p]; return math.floor(pt.x / 16), math.floor(pt.z / 16) end
+        local function triggerNear(x, y)
+          for _, c in ipairs(def.coordEvents or {}) do
+            if math.abs(c.x - x) <= 1 and math.abs(c.y - y) <= 1 then return true end
+          end
+        end
+        local tracks, opened, w = {}, 0, def.width
+        local blocks, behav = {}, {}
+        for i = 1, #def.blocks, 2 do blocks[#blocks + 1] = def.blocks:sub(i, i + 1) end
+        for i = 1, #(def.behaviorCells or "") do behav[i] = def.behaviorCells:sub(i, i) end
+        for _, ch in ipairs(chains) do
+          if ch.a and ch.b then
+            local ax, ay = cellOf(ch.a)
+            local bx, by = cellOf(ch.b)
+            if triggerNear(ax, ay) then
+              tracks[#tracks + 1] = { x = ax, y = ay, toX = bx, toY = by }
+            else
+              for _, l in ipairs(ch.lines) do
+                local line = data.lines[l]
+                local p, q = data.points[line.a], data.points[line.b]
+                local steps = math.max(1, math.ceil(math.sqrt((q.x - p.x) ^ 2 + (q.z - p.z) ^ 2) / 4))
+                for k = 0, steps do
+                  local t = k / steps
+                  local cx, cz = math.floor((p.x + (q.x - p.x) * t) / 16), math.floor((p.z + (q.z - p.z) * t) / 16)
+                  local i = cz * w + cx
+                  if cx >= 0 and cz >= 0 and cx < w and cz < def.height and blocks[i + 1] ~= "\0\0" then
+                    blocks[i + 1] = "\0\0"; behav[i + 1] = "\0"; opened = opened + 1
+                  end
+                end
+              end
+            end
+          end
+        end
+        if opened > 0 then def.blocks, def.behaviorCells = table.concat(blocks), table.concat(behav) end
+        if #tracks > 0 then def.gen5RailTracks = tracks end
+      end
+    end
+  end
+  -- ...AND THE GATES: Icirrus Gym's overlay (45 in Black) lets ride n start
+  -- only while switch group a stands at b -- eight u16 pairs, (0,0) (0,1)
+  -- (1,0) (1,1) (2,0) (2,0) (2,1) (2,1); a group's state is its switch's
+  -- var, 0x4001 + a (the switch scripts flip 0x4001 / 0x4002 / 0x4003)
+  do
+    local key = string.char(0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 2, 0, 0, 0)
+    for o = 30, 60 do
+      local ok, b = pcall(function() return rom:overlay(o) end)
+      local at = ok and b and b:find(key, 1, true)
+      if at then
+        local gates = {}
+        for n = 0, 7 do
+          local p = at - 1 + n * 4
+          gates[n] = { group = b:byte(p + 1) + b:byte(p + 2) * 256, state = b:byte(p + 3) + b:byte(p + 4) * 256 }
+        end
+        for _, def in pairs(maps) do if def.header == 114 then def.gen5RailGates = gates; report.railGates = "ov" .. o end end
+        break
+      end
     end
   end
   -- NIMBASA GYM'S ROLLER COASTER (zone 63; overlay 39 in Black). Its
@@ -815,6 +951,114 @@ function F.build(x, save)
           if sane and def.header == 63 then def.gen5Coaster = coaster; report.coaster = "ov" .. o end
         end
         if sane then break end
+      end
+    end
+  end
+  -- DRIFTVEIL GYM'S LIFTS (zone 97; overlay 43 in Black). Clay's mine is
+  -- three levels stacked on the same tiles -- heights 50, 40 and 30 in
+  -- tiles -- over his own floor at -59, which is what the permission grid
+  -- itself describes. Two tables in the gym's overlay, found by the first
+  -- lift's bytes (5 x 3 at height 50 << 16):
+  --   six lifts, 24 bytes: u32 x, z, width, height, fx height a, b -- the
+  --          lift moves between its two heights (flag 0x0A + i set: at the
+  --          lower, clear: at the upper -- the panels' scripts say so)
+  --   eight strips (+0x90), 20 bytes: u32 x, z, width, height, fx height --
+  --          the walkways of each level
+  do
+    local key = string.char(5, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0x32, 0)
+    for o = 30, 60 do
+      local ok, b = pcall(function() return rom:overlay(o) end)
+      local at = ok and b and b:find(key, 1, true)
+      if at and at > 9 and #b >= at - 9 + 0x90 + 8 * 20 then
+        local base = at - 9
+        local function s32(p)
+          local v = b:byte(p + 1) + b:byte(p + 2) * 256 + b:byte(p + 3) * 65536 + b:byte(p + 4) * 16777216
+          return v >= 2147483648 and v - 4294967296 or v
+        end
+        local lifts, strips = {}, {}
+        for i = 0, 5 do
+          local p = base + i * 24
+          lifts[i + 1] = { x = s32(p), z = s32(p + 4), w = s32(p + 8), h = s32(p + 12),
+                           a = math.floor(s32(p + 16) / 65536), b = math.floor(s32(p + 20) / 65536), flag = 0x0A + i }
+        end
+        for i = 0, 7 do
+          local p = base + 0x90 + i * 20
+          strips[i + 1] = { x = s32(p), z = s32(p + 4), w = s32(p + 8), h = s32(p + 12), level = math.floor(s32(p + 16) / 65536) }
+        end
+        local sane = lifts[1].x < 32 and strips[1].w < 32 and strips[1].level > 0
+        if sane then
+          -- WHERE THE LIFTS STAND ON ARRIVAL: the zone has no init scripts;
+          -- the overlay runs one of its scripts on entry (Black's entry 14:
+          -- the arrival lift, then `24 000A, 23 000B, 24 000C, 23 000D,
+          -- 23 000E, 24 000F`). Read as that run of set / clear flags on the
+          -- lifts' own flags, wherever it sits in the zone's script file.
+          local initial = {}
+          local z97 = zones[97]
+          local sarc = arc("/a/0/5/7")
+          local sd = z97 and sarc and sarc:get(z97.scripts)
+          if sd then
+            for p = 1, #sd - 24 do
+              local run, ok = {}, true
+              for k = 0, 5 do
+                local op = sd:byte(p + k * 4) + sd:byte(p + k * 4 + 1) * 256
+                local fl = sd:byte(p + k * 4 + 2) + sd:byte(p + k * 4 + 3) * 256
+                if (op ~= 0x23 and op ~= 0x24) or fl ~= 0x0A + k then ok = false break end
+                run[fl] = op == 0x23
+              end
+              if ok then initial = run break end
+            end
+          end
+          for _, def in pairs(maps) do
+            if def.header == 97 then
+              def.gen5Lifts = { lifts = lifts, strips = strips, start = 50, initial = initial }
+              report.lifts = "ov" .. o
+            end
+          end
+          break
+        end
+      end
+    end
+  end
+  -- MISTRALTON GYM'S CANNONS (zone 108; overlay 41 in Black). Skyla's gym
+  -- is islands, and a cannon fires the player from one to the next. Two
+  -- tables in the overlay, found by the first landing record (id 9, (15, 2,
+  -- 19), index 0) with the cannons 0x118 bytes before it:
+  --   ten cannons, fx32 x / height / z (cannon 0 at (15.5, 0, 28.5) -- in
+  --          the wall between the entrance and the next island)
+  --   per cannon, four 20-byte landings by the direction it is fired --
+  --          0 up, 1 down, 2 right, 3 left: <id, x, height, z, index>, id
+  --          -1 for none (cannon 0: up to (15, 19), down to (15, 35))
+  -- A press into the wall a cannon stands in fires it that way (the
+  -- overlay's own test; OverworldController.checkGen4EntranceWarp).
+  do
+    local key = string.char(9, 0, 0, 0, 15, 0, 0, 0, 2, 0, 0, 0, 19, 0, 0, 0, 0, 0, 0, 0)
+    for o = 30, 60 do
+      local ok, b = pcall(function() return rom:overlay(o) end)
+      local at = ok and b and b:find(key, 1, true)
+      if at and at > 0x118 and #b >= at - 1 + 10 * 0x50 then
+        local land, cbase = at - 1, at - 1 - 0x118
+        local function s32(p)
+          local v = b:byte(p + 1) + b:byte(p + 2) * 256 + b:byte(p + 3) * 65536 + b:byte(p + 4) * 16777216
+          return v >= 2147483648 and v - 4294967296 or v
+        end
+        local cannons = {}
+        for c = 0, 9 do
+          local p = cbase + c * 12
+          local entry = { x = s32(p) / 65536, height = s32(p + 4) / 65536, z = s32(p + 8) / 65536, landings = {} }
+          for slot = 0, 3 do
+            local q = land + c * 0x50 + slot * 0x14
+            if s32(q) >= 0 then
+              entry.landings[slot + 1] = { x = s32(q + 4), height = s32(q + 8), z = s32(q + 12) }
+            end
+          end
+          cannons[c + 1] = entry
+        end
+        if cannons[1].x > 0 and cannons[1].x < 32 then
+          for _, def in pairs(maps) do
+            if def.header == 108 then def.gen5Cannons = cannons; report.cannons = "ov" .. o end
+          end
+          break
+        end
       end
     end
   end

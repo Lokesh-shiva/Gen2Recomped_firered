@@ -1068,6 +1068,13 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
   -- BLACK / WHITE'S ARRIVAL GUARD: the warp you land on stays disarmed until
   -- you step off it (see checkGen4EntranceWarp's gen5 branch)
   self.gen5ArrivalMap, self.gen5ArrivalX, self.gen5ArrivalY = mapId, x, y
+  -- Clay's stacked mine (Gen5DriftveilGym): its level rule hooks on at entry
+  local liftDef = Game and Game.data and Game.data.maps and Game.data.maps[mapId]
+  if liftDef and liftDef.gen5Lifts then
+    self.pendingLiftAttach = true
+  else
+    self.gen5LiftRun = nil
+  end
   local fromMapId = self.map and self.map.id
   -- the header being left, for Platinum's area sign (which compares names)
   local fromHeader = self.map and self.map.def and self.map.def.header
@@ -3261,8 +3268,36 @@ function OverworldState:update(dt)
   self:tickPcScreen()
   -- ...and props a map's script ties to its people (HGSS's Morty's gym:
   -- each medium carries her candle's light), `def.gen4PropFollow(self)`
+  if self.pendingLiftAttach and self.map and self.map.def and self.map.def.gen5Lifts then
+    self.pendingLiftAttach = nil
+    require("src.world.Gen5DriftveilGym").attach(self, Game.save)
+  end
   local followProps = self.map and self.map.def and self.map.def.gen4PropFollow
   if followProps then followProps(self) end
+  -- the Distortion World's walls, ceilings and turning camera
+  if self.map and self.map.def and (self.map.def.header or self.dwFloor) then
+    require("src.world.Gen4DistSurface").update(self)
+  end
+  -- ...and Platinum's surf mount, which bobs and carries the player sprite
+  if self.map and self.map.def and self.map.def.header then
+    require("src.world.Gen4SurfMount").tick(self)
+  end
+  -- ...and Black/White's queued arrival script (op 0x021)
+  if self.gen5QueuedEntry then
+    local okQ, errQ = pcall(require("src.world.Gen5PostWarp").update, self)
+    if not okQ then
+      Logger.warn("gen5 queued entry: %s", tostring(errQ))
+      self.gen5QueuedEntry = nil
+    end
+  end
+  -- ...and Platinum's snow (Gen4Snow -> Gen4SnowView)
+  if GameVersion.isGen4() then
+    local okS, errS = pcall(require("src.world.Gen4Snow").update, self)
+    if not okS and not self.snowWarned then
+      self.snowWarned = true
+      Logger.warn("gen4 snow: %s", tostring(errS))
+    end
+  end
   -- ...and the Petalburg gym doors, which are a five-frame slide
   self:tickGymDoorSlide()
   -- ...and the rotating gates, which swing through their quarter turn
@@ -4181,9 +4216,44 @@ function OverworldState:checkGen4EntranceWarp(dir)
   -- press into a solid cell carrying a warp takes it, and a press off the
   -- warp the player stands on -- an exit mat, a route's edge -- takes that.
   if map.def and map.def.gen5 then
+    -- MISTRALTON GYM'S CANNONS (Gen5Field's gen5Cannons): a press into the
+    -- wall a cannon stands in -- the cell within a tile of its centre --
+    -- fires it the way the player faces, to that direction's landing
+    local cannons = map.def.gen5Cannons
+    if cannons then
+      local SLOT = { up = 1, down = 2, right = 3, left = 4 }
+      for _, c in ipairs(cannons) do
+        if math.abs(tx + 0.5 - c.x) <= 1 and math.abs(ty + 0.5 - c.z) <= 1 then
+          local to = c.landings and (c.landings[SLOT[dir]] or c.landings[tostring(SLOT[dir])])
+          if to then
+            self:setMap(map.id, to.x, to.z, dir)
+            return true
+          end
+        end
+      end
+    end
     local ahead = map:warpAtCell(tx, ty)
-    if ahead then self:takeWarp(ahead.def) return true end
     local here = map:warpAtCell(p.cellX, p.cellY)
+    -- ...but not the SAME doorway: a side entrance is a strip of cells
+    -- (Castelia's Z034 door to Z047 is 1 x 3), and arriving on its top cell
+    -- a press along the strip is still inside the doorway, not into it
+    local same = here and ahead and here.def and ahead.def
+                 and (here.def.extentOf or here.def.index) == (ahead.def.extentOf or ahead.def.index)
+    if ahead and not same then self:takeWarp(ahead.def) return true end
+    -- A DOOR SET BACK FROM THE WATER: Dragonspiral Tower's entrance (Z206's
+    -- warp to Z207, kind 2) stands one solid cell beyond the lake's last
+    -- water row, so a surfer pressing into the wall at the water's edge
+    -- goes in. Only afloat -- on foot a wall is a wall.
+    if self.player.surfing then
+      local t2x, t2y = Collision.target(tx, ty, dir)
+      local beyond = map:warpAtCell(t2x, t2y)
+      if beyond then
+        self.player.surfing = false
+        require("src.core.Music").setSurfing(Game.data, false)
+        self:takeWarp(beyond.def)
+        return true
+      end
+    end
     local arrived = self.gen5ArrivalMap == map.id and self.gen5ArrivalX == p.cellX
                     and self.gen5ArrivalY == p.cellY
     if here and not arrived then self:takeWarp(here.def) return true end
@@ -4850,6 +4920,13 @@ function OverworldState:handleInput()
   -- way `walkDirection` has to be: a grid step can only be one of four, but an
   -- off-grid one can take the angle it was given.
   -- ORBITAL, not merely 3D -- see `orbitalGroundFor`.
+  -- On a Distortion World floor the keys may belong to a wall, a ceiling or a
+  -- jump point first (src/world/Gen4DistSurface.lua).
+  if self.map and self.map.def and self.map.def.header then
+    local taken = require("src.world.Gen4DistSurface").input(self, input)
+    if taken ~= nil then return end
+  end
+
   local freeGround = self:orbitalGroundFor()
   if freeGround then
     local vx, vy = 0, 0
@@ -5123,7 +5200,11 @@ function OverworldState:checkBoulderPush(dir)
   end
   local bx, by = Collision.target(fx, fy, dir)
   if not self.map:inBounds(bx, by) then self.boulderTried = nil return false end
-  if not self.map:isWalkableCell(bx, by) then
+  -- DistWorld_WillBoulderBeAtFallLocation: a Distortion World pit takes a
+  -- boulder although nothing may walk there (Gen4DistPlatforms.fallAt)
+  local dwFall = self.map.def and self.map.def.gen4DistWorld
+                 and require("src.world.Gen4DistPlatforms").fallAt(self.map.def, bx, by)
+  if not dwFall and not self.map:isWalkableCell(bx, by) then
     -- boulders may be pushed into holes/switch spots that aren't walkable
     if not self.map:isWarpTileCell(bx, by) then
       self.boulderTried = nil
@@ -5143,6 +5224,7 @@ function OverworldState:checkBoulderPush(dir)
     end)
     if self:gen2BoulderIntoPit(npc) then return end
     if self:boulderIntoHole(npc) then return end
+    if dwFall and require("src.world.Gen4DistPlatforms").boulderFell(self, npc) then return end
     Runtime.emit("world.boulder_moved", { mapId = self.map.id, npcId = npc.id,
                                           x = npc.cellX, y = npc.cellY })
     local hooks = mapScripts.get(self.map.id)
@@ -5871,6 +5953,13 @@ end
 local function partyKnowsVanilla(moveId)
   if GameVersion.isGen4() then
     return require('src.world.Gen4FieldMoves').partyMember(Game.data,Game.save,moveId)
+  end
+  -- BLACK / WHITE asks no badge for a field move outside battle: the move
+  -- on a Pokemon in the party is the whole of it (ids as Platinum's)
+  if GameVersion.isGen5() then
+    local F = require('src.world.Gen4FieldMoves')
+    for _, mon in ipairs(Game.save.party or {}) do if F.knows(mon, moveId) then return mon end end
+    return nil
   end
   -- GEN 3 DOES NOT USE THE GEN 1 BADGE TABLE, and asking it was quietly
   -- fatal: field.hmBadges is R/B's list -- SURF costs the SOULBADGE, CUT the
@@ -6608,7 +6697,10 @@ function OverworldState:npcAtCell(cx, cy)
     -- rival, removed at the end of his scene and still answering A from the
     -- tile he used to stand on.  A BURIED trainer is covered up rather than
     -- gone, so they still answer -- which is how they spot you.
-    if not (npc.hidden and not npc.buried) then
+    -- (Black / White's invisible blockers -- sprite 185, no script -- are in
+    -- the way but never answer: Clay's lift panels share their cells with
+    -- the lifts' rail blockers, and the press is the panel's)
+    if not (npc.hidden and not npc.buried) and not (npc.def and npc.def.gen5Blocker) then
       local big = npc.big or (npc.sprite and npc.sprite.big)
         or (npc.def and (npc.def.sprite == "SPRITE_BIG_SNORLAX"
                         or npc.def.sprite == "SPRITE_BIG_LAPRAS"
@@ -6662,11 +6754,14 @@ end
 -- everything after it, which is what `0xffff` does in the C.
 function OverworldState:tryGen4TileScript(fx, fy)
   if not GameVersion.isGen4() then return false end
+  -- on a Distortion World wall or ceiling the tile ahead is the platform's
+  if self.dwSurface and require("src.world.Gen4DistSurface").pressA(self) then return true end
   if not (self.map and self.map.cellBehaviour) then return false end
   local behaviour = self.map:cellBehaviour(fx, fy)
   if behaviour == nil then return false end
   local TS = require("src.world.Gen4TileScripts")
   local row = TS.rowFor(behaviour, self.player and self.player.facing)
+    or TS.fieldMoveRow(self, behaviour, self.player and self.player.facing)
   if not row then return false end
   local rows, why = TS.compile(Game.data, row.band, row.index)
   if not rows then
@@ -6967,7 +7062,7 @@ function OverworldState:interact()
   -- never reached, because the call site asked for Gen 2 and only Gen 2.
   -- The suite did not catch it either: it checked that the SOURCE of the
   -- Gen 3 arm existed, which it did.
-  if (GameVersion.isGen2() or GameVersion.isGen3())
+  if (GameVersion.isGen2() or GameVersion.isGen3() or GameVersion.isGen5())
      and self:tryFieldMoveOW(fx, fy) then
     interacted(self, fx, fy, "hidden")
     return
@@ -8617,6 +8712,22 @@ local function screenWeather(self)
 end
 
 function OverworldState:drawFieldWeather()
+  -- PLATINUM'S SNOW is its own (Gen4SnowView), not Hoenn's
+  if GameVersion.isGen4() then
+    local SV = require("src.render.Gen4SnowView")
+    if SV.state then
+      local r = Game.renderer
+      if r then
+        self.snowDraw = self.snowDraw or function(w, h) return SV.draw(w, h) end
+        r.screenWeather = self.snowDraw
+        return true
+      end
+      local w, h = self:uiSize()
+      return SV.draw(w, h)
+    elseif require("src.world.Gen4Snow").wanted() then
+      return false
+    end
+  end
   local name = self:fieldWeather()
   if not name then return false end
   local Gen3Weather = gen3Weather()
@@ -9718,6 +9829,12 @@ function OverworldState:tryFieldMoveOW(fx, fy)
       and self.map:isWaterCell(fx, fy) and not self.player.surfing then
     move = "SURF"
   end
+  -- ...AND BLACK / WHITE, by its water behaviours (Map.gen5WaterAt: river,
+  -- sea, and the bank a surfer crosses -- Dragonspiral Tower's lake)
+  if not move and GameVersion.isGen5()
+      and self.map:isWaterCell(fx, fy) and not self.player.surfing then
+    move = "SURF"
+  end
 
   if not move then return false end
   -- TryHeadbuttOW.no / TryWhirlpoolOW.failed: no eligible mon means no
@@ -9985,6 +10102,17 @@ function OverworldState:useSurfFieldMove()
       return self:facingIsLandDismount() and "dismount" or "no_place"
     end
     return self:facingIsShoreOrWater() and "ok" or "no_water"
+  end
+  -- BLACK / WHITE: the water is a behaviour (Map.gen5WaterAt), and no badge
+  -- is asked; off the water is a step onto land.  PLATINUM the same, by its
+  -- own surfable behaviours (Map.gen4WaterAt; the badge is the menu's check)
+  if GameVersion.isGen5() or (GameVersion.isGen4() and self.map and self.map.def
+                              and self.map.def.generation == 4 and self.map.def.cameraFamily ~= "hgss") then
+    if p.surfing then
+      return self:facingIsLandDismount() and "dismount" or "no_place"
+    end
+    local fx, fy = p:facingCell()
+    return self.map:isWaterCell(fx, fy) and "ok" or "no_water"
   end
   -- IsSurfingAllowed (engine/overworld/field_move_messages.asm): surfing
   -- is refused while BIT_ALWAYS_ON_BIKE of wStatusFlags6 is set (the
@@ -12288,6 +12416,12 @@ end
 
 function OverworldState:onStepComplete()
   local p = self.player
+  -- THE DISTORTION WORLD'S COORDINATE EVENTS fire where a step ends
+  -- (DistWorld_HandlePlayerPositionChanged), before the next one can start
+  if self.map and self.map.def and self.map.def.gen4DistWorld then
+    local okD, errD = pcall(function() require("src.world.Gen4DistSurface").stepEnded(self) end)
+    if not okD then Logger.warn("distortion world step: %s", tostring(errD)) end
+  end
   -- Commit the cell serial before its coord event fires. Player:update calls
   -- this after the frame's earlier noteCellChange; leaving the old serial
   -- here made the next idle check treat the same switch as a second visit.
@@ -16802,6 +16936,14 @@ function OverworldState:drawWorld()
   local function riseOf(e)
     if not groundForRise then return 0 end
     local rise = groundForRise:rise(e.px + (e.shiftPx or 0) + 8, e.py + 8)
+    -- A SPRITE OFFSET (MapObject_SetSpritePosOffset: the surf mount's ride,
+    -- the Distortion World cast's flights) in the field view: up by the
+    -- camera's height lean, toward it by the ground's
+    local so = e.spriteOffset
+    if so and (so.lift or so.oz) then
+      rise = rise + (so.lift or 0) * (groundForRise.heightScale or 0)
+                  - (so.oz or 0) * (groundForRise.groundScale or 1)
+    end
     if groundSin >= 1 then return rise end
     return (e.py - cam.y) * (1 - groundSin) + rise
   end
@@ -16941,7 +17083,8 @@ function OverworldState:drawWorld()
               e.facing = view:worldToScreen(saved)
             end
             freeGround:freeEntity((e.px or 0), (e.py or 0), cam.x, cam.y, rise,
-                                  function() e:draw(cam.x, cam.y + rise) end)
+                                  function() e:draw(cam.x, cam.y + rise) end,
+                                  nil, require("src.world.Gen4SurfMount").poseFor(e, e == self.player and self.dwPose or nil))
             e.facing = saved
           end
           -- Deliberately without the flat shadow and the grass overdraw below:

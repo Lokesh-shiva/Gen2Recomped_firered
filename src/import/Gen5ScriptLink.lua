@@ -335,6 +335,69 @@ L.ALIASES = {
   -- sites; Nimbasa Gym's entry asks it and runs 0x260 only on a 1. Not
   -- identified, so it reads as a fresh save's 0
   [0x022] = { "setvar", "w" },
+  -- 0x09F <sequence>: another cutscene music start (Route 5's Elesa scene
+  -- opens with `9F 043F`), presentation like 0x098
+  [0x09F] = { "noop", "w" },
+  -- 0x0C4 <zone, x, height, z, dir>: the warp with an elevation word --
+  -- Driftveil Gym's lobby lift drops the player into Clay's mine (zone 97,
+  -- `C4 0061 0011 0032 0019 0000`: tile (17, 25), 50 units up). The height
+  -- is the arrival's; the map's own ground takes it here
+  [0x0C4] = { "warp", "wwwww", { 1, 1, 2, 4, 5 } },
+  -- the lift round it: 0x1B6 starts it, 0x192 <n> runs it
+  [0x1B6] = { "noop", "" }, [0x192] = { "noop", "w" },
+  -- 0x021 <entry>: THE SCRIPT TO RUN WHEN THE NEXT WARP LANDS -- entry n of
+  -- the destination zone's own file.  All 43 uses stand right before a warp
+  -- (or the lift ride that warps), and the entry is each time the scene the
+  -- story continues with: Dragonspiral's summit queues 4 and warps to zone
+  -- 205, whose entry 4 is Alder and Cedric's talk at the tower's foot (it
+  -- sets 0x409D); Relic Castle's floor queues 5 for zone 158, whose entry 5
+  -- sets 0x4092 = 6, the Nacrene museum's cue.  Read as a lift's exit note
+  -- before, and both scenes never played.
+  [0x021] = { "bwqueueentry", "w" },
+  -- RELIC CASTLE'S QUICKSAND (the pits' coord scripts, members 320..328 and
+  -- 370): 0x0C1 <zone, x, z> is the fall -- a warp with no facing, only the
+  -- castle's pits use it; and 0x0D8 <value, var> stores IsTMHM(value)
+  -- (handler 0x21AF6C5 -> 0x2021288: item 328..425 or 618..620), which on
+  -- B3F's pit picks between its two landing tiles
+  [0x0C1] = { "warp", "www", { 1, 1, 2, 3 } },
+  [0x0D8] = { "bwistmhm", "ww" },
+  -- Clay's lifts: 0x190 <lift> moves lift n to its other height (the panel
+  -- script flips the lift's flag 0x0A + n after), carrying the player when
+  -- standing on it (Gen5DriftveilGym); 0x191 <n> / 0x1B5 the arrival lift
+  [0x190] = { "bwliftmove", "w" }, [0x191] = { "noop", "w" }, [0x1B5] = { "noop", "" },
+  -- 0x1EB <index, x, y, z>: four var-or-values into a save-block slot
+  -- (0x02162708) -- Chargestone's mouth stores (107, 1, 337) there while
+  -- 0x409A < 2, a stored position nothing on the way reads
+  [0x1EB] = { "noop", "wwww" },
+  -- CEDRIC JUNIPER'S POKEDEX CHECK (Mistralton): 0x0DF <mode, species, var>
+  -- var = has the species been seen (Klink, 599), 0x0DD <mode, var> the
+  -- seen count, 0x05C <slot, var, digits, ?> the count into a string slot
+  -- (his "{CMD 0202 0} Pokemon"), 0x1D2 the upgrade -- form detection
+  [0x0DF] = { "bwdexseen", "www", { 2, 3 } }, [0x0DD] = { "getlocaldexseencount", "ww", { 2 } },
+  [0x05C] = { "buffernumber", "bwbb", { 1, 2 } }, [0x1D2] = { "turnonpokedexformdetection", "" },
+  -- 0x07B <object, x, height, z>: 0x6D's placement without a facing --
+  -- Twist Mountain's entrance moves Cheren (1) to (142, 206) mid-scene
+  [0x07B] = { "bwplaceobject", "wwww" },
+  -- THE PARTY, read by Cedric Juniper ("How is {VAR2}?") and Mistralton's
+  -- scene: 0x10D <var, mode> the first Pokemon that is not an egg (mode 2
+  -- at every site read), 0x0FC <var, slot> its friendship (70 and up is
+  -- "really taken a shine to you"), 0x0FE <var, slot> its species
+  -- ICIRRUS GYM: 0x195 <n> a ride along a gated rail track (Gen5Field's
+  -- gen5RailTracks / gen5RailGates); 0x193 / 0x194 <group> the switches'
+  -- animation, 0x077 the ride's preamble
+  [0x195] = { "bwrailride", "w" }, [0x193] = { "noop", "w" }, [0x194] = { "noop", "w" },
+  [0x077] = { "noop", "" },
+  -- 0x0DA <a, b, c>: three var-or-values into a save record after a
+  -- leader's win (Brycen's `DA 4 1 1`, 17 sites) -- bookkeeping nothing on
+  -- the story's path reads back
+  [0x0DA] = { "noop", "www" },
+  -- 0x148 <eight> right after a sound (Dragonspiral's 1F: the tower
+  -- shaking) and 0x1EC <five> in map-load callbacks (a model's set-up) --
+  -- presentation only
+  [0x148] = { "noop", "wwwwwwww" }, [0x1EC] = { "noop", "wwwww" },
+  [0x10D] = { "getfirstnonegginparty", "ww", { 1 } },
+  [0x0FC] = { "getpartymonfriendship", "ww", { 1, 2 } },
+  [0x0FE] = { "getpartymonspecies", "ww", { 2, 1 } },
   -- THE SHARED TRAINER SCRIPT (band 3000, member 863, every trainer):
   --   0x084 <var>  the trainer's id (Platinum's gettrainerid)
   --   0x097 <trainer, dest>  beaten?   0x092 <trainer, dest>  healer / prize
@@ -807,7 +870,7 @@ function L.pool(arc, widths, zones, maps, bandRows)
     local z = zones[def.header]
     if z then
       local labels = decodeMember(z.scripts)
-      local rec = { header = def.header, objects = {}, signs = {} }
+      local rec = { header = def.header, objects = {}, signs = {}, entries = labels }
       -- A SCRIPT ID PAST THE ZONE'S OWN names a shared file: the Pokemon
       -- Center's nurse is 2100 and its PC 2101 in every town. Filed the way
       -- the Gen 4 pool files them (`shared.objects[index] = { band, entry }`)

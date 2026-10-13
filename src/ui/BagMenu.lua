@@ -282,6 +282,36 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     Underground.enter(game, ow)
     return
   end
+  -- PLATINUM: an item whose use is a field script (Gen4ItemUse) -- the berry
+  -- patch's planting, mulching and watering, the Vs. Seeker.  The bag closes,
+  -- the item goes in VAR_0x8000 (SCRIPT_DATA_PARAMETER_0) and the script runs
+  -- with the faced object as its target, as sub_02068540 starts it.
+  if result == "gen4_script" and extra then
+    list:close()
+    local ow = game.overworld
+    local rows = require("src.world.Gen4TileScripts").compile(game.data, extra.band, extra.entry)
+    if ow and rows then
+      local C = require("src.script.Gen4Commands")
+      if C.setVar then C.setVar(game.save, 0x8000, extra.item) end
+      ow.runner:run(rows, { npc = extra.npc, mapId = ow.map and ow.map.id })
+    end
+    return
+  end
+  -- Mail: the mail reader over the bag, back to the bag when it closes
+  -- (StartMenu_ExitMail returns to the bag); nothing is used up
+  if result == "gen4_mail" and extra then
+    local MailView = require("src.ui.Gen4MailView")
+    game.stack:push(MailView.new(game, extra.mailType))
+    return
+  end
+  -- Honey: taken from the bag and Sweet Scent's lure task run
+  if result == "honey" then
+    list:close()
+    consume(game, id)
+    local ow = game.overworld
+    if ow and ow.gen4SweetScent then ow:gen4SweetScent() end
+    return
+  end
   if result == "bicycle" then
     -- StartMenu_Item .useOrTossItem (engine/menus/start_sub_menus.asm):
     -- while BIT_ALWAYS_ON_BIKE of wStatusFlags6 is set -- the Cycling Road,
@@ -314,12 +344,17 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
       game.save.onBike = false
       game.save.bikeKind = nil
       Music.playMap(game.data, ow and ow.map.id, false)
-      showMessages(game, { Strings("%s got off\nthe BICYCLE.", save_name(game)) })
+      if not require("src.core.GameVersion").isGen4() then
+        showMessages(game, { Strings("%s got off\nthe BICYCLE.", save_name(game)) })
+      end
     elseif bikeAllowed() then
       game.save.onBike = true
       game.save.bikeKind = payload
       Music.playMap(game.data, ow.map.id, true)
-      showMessages(game, { Strings("%s got on\nthe BICYCLE!", save_name(game)) })
+      -- Platinum's UseBicycleFromMenu closes the bag and mounts, silently
+      if not require("src.core.GameVersion").isGen4() then
+        showMessages(game, { Strings("%s got on\nthe BICYCLE!", save_name(game)) })
+      end
     else
       showMessages(game, { Strings("No cycling\nallowed here.") })
     end

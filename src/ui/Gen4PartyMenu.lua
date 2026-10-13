@@ -732,6 +732,11 @@ function Gen4PartyMenu:useFieldMove(mon,move)
     if ow.player.surfing then return self:fieldRefused('surfing') end
     if partner then return self:fieldRefused('partner') end
     if ow:useSurfFieldMove()~='ok' then return self:fieldRefused('location') end
+    -- PLATINUM: FieldMoves_UseSurfFromMenu (field_moves 12) -- the message,
+    -- then UseSurf, which hops onto the water (Gen4Commands.g4_use_surf)
+    if not (self.game.data.gen4_version and self.game.data.gen4_version.family=='hgss') then
+      return self:runFieldScript('field_moves',12)
+    end
     self:close()
     local x,y=ow.player:facingCell();ow:trySurf(x,y)
     return

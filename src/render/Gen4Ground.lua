@@ -1091,8 +1091,16 @@ function Gen4Ground:building(index, archive)
     cache[index] = false
     return nil
   end
+  -- THE DISTORTION WORLD'S PROPS (fldeff 0x7C..0x94, sProp3DModelNARCIndexByKind)
+  -- keep their node transforms.  Reported from play as a blue sheet across
+  -- B5F: the waterfall (0x91) is four planes modelled lying in x-z that its
+  -- nodes (pPlane1..7) stand up on end, and drawn without them it lay flat
+  -- 24 tiles over the floor, between the camera and everything.
+  local distProp = field and index >= 0x7C and index <= 0x94
   local model = Gen4Model.new({ name = (field and "fldeff%d" or "build%d"):format(index),
                                 posScale = packed.posScale, shapes = shapes,
+                                nodes = distProp and packed.nodes or nil,
+                                ops = distProp and packed.ops or nil,
                                 -- The building set is SHARED between maps and
                                 -- this cache is not: `self.buildings` belongs
                                 -- to one ground, so a house in Twinleaf and
@@ -1110,7 +1118,10 @@ function Gen4Ground:building(index, archive)
                                 -- geometry the ROM already has.  A model that
                                 -- already owns a `kage` shape keeps it either
                                 -- way; `addGroundShadow` checks.
-                                groundShadow = (self.outdoors == false)
+                                -- (not under a Distortion World prop: the
+                                -- waterfall's was cut from its unposed planes
+                                -- and lay across B5F as a 43-tile sheet)
+                                groundShadow = (self.outdoors == false) and not distProp
                                                and self:shadowTexture() or nil,
                                 -- CLOSE THE MISSING BACK.  The cartridge never
                                 -- modelled it because its camera never looks
@@ -1236,12 +1247,18 @@ function Gen4Ground:runtimePropsFor(land)
     for _, p in ipairs(list) do
       local mx, mz = (p.x or 0) + (self.offsetX or 0), (p.z or 0) + (self.offsetY or 0)
       local cx, cy = math.floor(mx / unitsPerChunk), math.floor(mz / unitsPerChunk)
-      if grid and mx >= 0 and mz >= 0 and cx < grid.width and cy < grid.height then
+      -- a LIVE prop may start off the map (Giratina's shadow sweeps in from
+      -- far outside it): it rides the nearest chunk, placed relative to it
+      if p.live and grid then
+        cx = math.max(0, math.min(grid.width - 1, cx))
+        cy = math.max(0, math.min(grid.height - 1, cy))
+      end
+      if grid and (p.live or (mx >= 0 and mz >= 0)) and cx < grid.width and cy < grid.height then
         local at = grid.land[cy * grid.width + cx + 1]
         if at then
           byLand[at] = byLand[at] or {}
-          table.insert(byLand[at], { model = p.model, x = mx % unitsPerChunk - half,
-            y = p.y or 0, z = mz % unitsPerChunk - half, rotY = p.rotY, ground = p.ground,
+          table.insert(byLand[at], { model = p.model, archive = p.archive, live = p.live, x = mx - cx * unitsPerChunk - half,
+            y = p.y or 0, z = mz - cy * unitsPerChunk - half, rotY = p.rotY, ground = p.ground,
             scaleX = p.scale or 1, scaleY = p.scale or 1, scaleZ = p.scale or 1 })
         end
       end
@@ -1297,6 +1314,24 @@ end
 -- empty, and reading those as zero collapses the model to a point -- which
 -- draws nothing and looks exactly like a missing building.  Absent means one.
 local function placement(object)
+  -- DWSKIPMODEL=n: a debugging switch that drops one model number
+  if os.getenv and os.getenv("DWSKIPMODEL") and tonumber(os.getenv("DWSKIPMODEL")) == tonumber(object.model) then
+    return { 0, 0, 0, 0, 0, 0, 0, -100000, 0, 0, 0, 0, 0, 0, 0, 1 }
+  end
+  -- A LIVE PROP (Gen4DistPlatforms: a Distortion World raft or shuttle) is
+  -- re-placed every frame from the record that drives it.  `hidden` drops it.
+  local live = object.live
+  if live then
+    if live.hidden then
+      return { 0, 0, 0, 0, 0, 0, 0, -100000, 0, 0, 0, 0, 0, 0, 0, 1 }
+    end
+    if live.dx or live.dy or live.dz then
+      local m = placement({ x = (object.x or 0) + (live.dx or 0), y = (object.y or 0) + (live.dy or 0),
+                            z = (object.z or 0) + (live.dz or 0), rotY = object.rotY,
+                            scaleX = object.scaleX, scaleY = object.scaleY, scaleZ = object.scaleZ })
+      return m
+    end
+  end
   local sx = (object.scaleX and object.scaleX ~= 0) and object.scaleX or 1
   local sy = (object.scaleY and object.scaleY ~= 0) and object.scaleY or 1
   local sz = (object.scaleZ and object.scaleZ ~= 0) and object.scaleZ or 1
@@ -1519,6 +1554,8 @@ local function liftedSpread(spread, lift)
   out[2] = (out[2] or 0) - lift
   return out
 end
+
+Gen4Ground.liftedSpread = liftedSpread
 
 -- m * translation(0, lift, 0), for a row-major 4x4: only column four moves.
 local function liftMatrix(m, lift)
@@ -1925,6 +1962,17 @@ function Gen4Ground:livePass(camX, camY, vw, vh, yCut)
       end
     end
   end
+  -- PLATINUM'S SURF MOUNT (Gen4SurfMount), in with the ground and under the
+  -- sprites -- not in the canopy pass, which paints over them
+  if not yCut then
+    local okM, errM = pcall(function()
+      require("src.world.Gen4SurfMount").drawLive(self, left, top, vw, vh)
+    end)
+    if not okM and not self.mountWarned then
+      self.mountWarned = true
+      Logger.warn("gen4 surf mount: %s", tostring(errM))
+    end
+  end
   return drawn
 end
 
@@ -1993,7 +2041,7 @@ function Gen4Ground:placeCamera(px, py, facing)
   local fx = (px or 0) + Gen4Ground.FEET_X
   local fz = (py or 0) + Gen4Ground.FEET_X
   self.view3d:follow(fx + (self.offsetX or 0), fz + (self.offsetY or 0),
-                     facing, self:groundY(fx, fz))
+                     facing, self.surfaceBaseY or self:groundY(fx, fz))
   -- ...and say so, so `draw` does not overwrite it with its own estimate.
   self.cameraPlaced = true
 end
@@ -2280,7 +2328,12 @@ function Gen4Ground:drawFree(vw, vh)
   local previous = { g.getCanvas() }
   g.setCanvas({ colour, depthstencil = depth })
   g.clear(0, 0, 0, 0, true, true)
-  self:drawSky(view, tw, th)
+  -- THE DISTORTION WORLD has its own sky (Gen4DistSkyView), not the panorama
+  local GameG = package.loaded["src.core.Game"]
+  local dwDef = GameG and GameG.overworld and GameG.overworld.map and GameG.overworld.map.def
+  if not (dwDef and dwDef.gen4DistWorld and require("src.render.Gen4DistSkyView").draw(tw, th)) then
+    self:drawSky(view, tw, th)
+  end
   -- TURN THE CARDS TO FACE THIS CAMERA, for the length of this pass only.
   --
   -- Requested: *"fix the trees so they always face the camera rotating"*.
@@ -2292,6 +2345,11 @@ function Gen4Ground:drawFree(vw, vh)
   local drawn = 0
   local fy0, fy1, fx0, fx1 = camCy - FREE_RADIUS, camCy + FREE_RADIUS, camCx - FREE_RADIUS, camCx + FREE_RADIUS
   if self.drawAllChunks then fy0, fy1, fx0, fx1 = 0, grid.height - 1, 0, grid.width - 1 end
+  -- A DISTORTION WORLD CAMERA (Gen4DistSurface) can swing to 18 degrees above
+  -- the horizon or below the player, which puts the EYE tens of tiles off the
+  -- map -- and chunks picked around the eye are then none at all.  Its floors
+  -- are a few chunks each, so they are drawn whole.
+  if Gen4Camera.forceField3d then fy0, fy1, fx0, fx1 = 0, grid.height - 1, 0, grid.width - 1 end
   for cy = fy0, fy1 do
     for cx = fx0, fx1 do
       if cx >= 0 and cy >= 0 and cx < grid.width and cy < grid.height then
@@ -2310,13 +2368,34 @@ function Gen4Ground:drawFree(vw, vh)
             local building = self:building(object.model, object.archive)
             if building then
               local mats = self:propMaterials(object, self.clock)
+              if os.getenv and tonumber(os.getenv("DWBOUNDS") or "") == tonumber(object.model) and not self.dwBoundsShown then
+                self.dwBoundsShown = true
+                local pose = building:restPose()
+                local pl = placement(object)
+                for _, sh in ipairs(building.shapes) do
+                  local m = pose[sh.index]
+                  print(("[bounds] shape %s lo (%.1f,%.1f,%.1f) hi (%.1f,%.1f,%.1f) posed=%s"):format(tostring(sh.index),
+                    sh.lo[1], sh.lo[2], sh.lo[3], sh.hi[1], sh.hi[2], sh.hi[3], m and table.concat(m, ",") or "nil"))
+                end
+                print("[bounds] placement " .. table.concat(pl, ","), "chunk", cx, cy)
+              end
+              Gen4Model.drawTint = object.live and object.live.tint or nil
               building:draw(Gen4Model.multiply(mvp, placement(object)),
                             self:oneShotPose(object, building),
                             mats, nil, nil)
+              Gen4Model.drawTint = nil
             end
           end
         end
       end
+    end
+  end
+  -- PLATINUM'S SURF MOUNT (Gen4SurfMount), with the world's depth
+  do
+    local okM, errM = pcall(function() require("src.world.Gen4SurfMount").drawFree(self, vp) end)
+    if not okM and not self.mountWarned then
+      self.mountWarned = true
+      Logger.warn("gen4 surf mount: %s", tostring(errM))
     end
   end
   -- THE TARGET STAYS BOUND, and that is the whole of the masking fix.
@@ -2566,14 +2645,29 @@ local FEET_Y, FEET_X = Gen4Ground.FEET_Y, Gen4Ground.FEET_X
 -- ABOVE the feet instead of at them, while it is still placed exactly as the
 -- owner's sprite is. Sinnoh's "!" hangs 32 units up (Gen4Emotes): tested at
 -- the feet it lost to every treetop behind its trainer and never showed.
-function Gen4Ground:freeEntity(mapX, mapY, camX, camY, rise, draw, depthLift)
+function Gen4Ground:freeEntity(mapX, mapY, camX, camY, rise, draw, depthLift, pose)
   if not self:freeMode() then return false end
   local vw, vh = self.freeW, self.freeH
   if not (vw and vh and draw) then return true end
-  local gx = (mapX or 0) + FEET_X
-  local gz = (mapY or 0) + FEET_X
+  local gx = (mapX or 0) + FEET_X + (pose and pose.ox or 0)
+  local gz = (mapY or 0) + FEET_X + (pose and pose.oz or 0)
+  -- A DISTORTION WORLD POSE (src/world/Gen4DistSurface.lua): feet at the
+  -- tracked altitude rather than the ground's, and the body rolled to stand
+  -- out of whatever plane it is on -- the projected normal is screen-up.
+  -- `lift` / `ox` / `oz` are a sprite offset (MapObject_SetSpritePosOffset:
+  -- the lake trio's flights, Giratina's descent) from wherever it stands.
+  local footY = (pose and pose.y or self:groundY(gx, gz)) + (pose and pose.lift or 0)
+  local roll = 0
+  if pose and pose.ny and pose.ny < 0.999 then
+    local view = self.view3d
+    roll = require("src.world.Gen4DistSurface").roll(function(x, y, z)
+      return view:project(x, y, z, vw, vh)
+    end, gx + (self.offsetX or 0), footY, gz + (self.offsetY or 0), pose)
+  end
+  -- an explicit screen roll (the waterfall ride's RotateMapObject rotator)
+  if pose and pose.rollDeg then roll = math.rad(pose.rollDeg) end
   local sx, sy, scale, depth = self.view3d:project(gx + (self.offsetX or 0),
-                                                   self:groundY(gx, gz),
+                                                   footY,
                                                    gz + (self.offsetY or 0), vw, vh)
   -- Behind the eye. `project` returns nil rather than a mirrored point, and
   -- drawing nothing is right: a character behind the camera painted in front of
@@ -2581,7 +2675,7 @@ function Gen4Ground:freeEntity(mapX, mapY, camX, camY, rise, draw, depthLift)
   if not sx then return true end
   if depthLift and depthLift ~= 0 then
     local _, _, _, lifted = self.view3d:project(gx + (self.offsetX or 0),
-                                                self:groundY(gx, gz) + depthLift,
+                                                footY + depthLift,
                                                 gz + (self.offsetY or 0), vw, vh)
     depth = lifted or depth
   end
@@ -2607,13 +2701,42 @@ function Gen4Ground:freeEntity(mapX, mapY, camX, camY, rise, draw, depthLift)
       g.setDepthMode("lequal", true)
     end
   end
+  -- ...AND FACES THE WAY IT IS GOING ON SCREEN: the world step, projected,
+  -- turned back by the roll into the sprite's own frame, picks the facing.
+  local facer, savedFacing
+  if pose and pose.entity and pose.mx and roll ~= 0 then
+    local view = self.view3d
+    local fx, fy = view:project(gx + (self.offsetX or 0) + pose.mx * 16, footY + pose.my * 16,
+                                gz + (self.offsetY or 0) + pose.mz * 16, vw, vh)
+    if fx then
+      local dx, dy = fx - sx, fy - sy
+      local c, sn = math.cos(-roll), math.sin(-roll)
+      local lx, ly = dx * c - dy * sn, dx * sn + dy * c
+      local face
+      if math.abs(lx) > math.abs(ly) then face = lx > 0 and "right" or "left"
+      else face = ly > 0 and "down" or "up" end
+      facer, savedFacing = pose.entity, pose.entity.facing
+      facer.facing = face
+    end
+  end
   g.push()
   g.translate(sx, sy)
+  if roll ~= 0 then g.rotate(roll) end
   g.scale(scale, scale)
   g.translate(-(gx - (camX or 0)),
               -((mapY or 0) + FEET_Y - (camY or 0) - (rise or 0)))
+  -- A SPRITE TINTED TOWARD BLACK (pose.dark, 0..1): Giratina's arrival
+  -- (CmdRunDataPlayGiratinaArrival_UpdateSpritePalette) darkens its palette
+  local dr, dg, db, da
+  if pose and pose.dark and pose.dark > 0 then
+    dr, dg, db, da = g.getColor()
+    local k = 1 - math.min(1, pose.dark)
+    g.setColor(dr * k, dg * k, db * k, da)
+  end
   draw()
+  if dr then g.setColor(dr, dg, db, da) end
   g.pop()
+  if facer then facer.facing = savedFacing end
   if mode then
     g.setDepthMode(mode, write)
     g.setShader(shader)
@@ -3622,7 +3745,7 @@ function Gen4Ground:draw(camX, camY, vw, vh)
       -- camera to this view's own stale angle -- the very divergence the sync
       -- exists to remove.  `follow` falls back to the kept heading on its own.
       self.view3d:follow(ex + (self.offsetX or 0), ey + (self.offsetY or 0),
-                         nil, self:groundY(ex, ey))
+                         nil, self.surfaceBaseY or self:groundY(ex, ey))
     end
     self.cameraPlaced = nil
     -- HOLD THE EYE ABOVE THE GROUND IT IS LOOKING OVER.

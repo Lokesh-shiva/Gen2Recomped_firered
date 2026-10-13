@@ -420,6 +420,28 @@ if b then
   local p00 = p0 and (p0[0] or p0['0'])
   check(d1 and d1.x == 22 and d1.y == 39 and p00 and p00[1] == 1 and p00[2] == 0,
     "Nimbasa Gym's coaster tables read from its overlay (dock 1 at (22, 39), track 0 joins docks 1 and 0)")
+  -- Driftveil Gym's lifts: six lifts and eight walkways from its overlay,
+  -- and where the lifts stand on arrival (the entry script's flag run)
+  local gl = b.maps and b.maps.Z097 and b.maps.Z097.gen5Lifts
+  local l6 = gl and gl.lifts and gl.lifts[6]
+  local init = gl and gl.initial
+  check(l6 and l6.x == 14 and l6.z == 20 and l6.a == 50 and l6.b == -59 and #gl.strips == 8
+      and init and init[11] == true and init[15] == false,
+    "Driftveil Gym's lifts read from its overlay (lift 6 at (14, 20) from 50 down to Clay's -59; flag 0x0B set on arrival)")
+  -- Mistralton Gym's cannons: ten, each with its landings by direction
+  local cn = b.maps and b.maps.Z108 and b.maps.Z108.gen5Cannons
+  local c0 = cn and cn[1]
+  local up = c0 and c0.landings and (c0.landings[1] or c0.landings['1'])
+  check(cn and #cn == 10 and c0.x == 15.5 and c0.z == 28.5 and up and up.x == 15 and up.z == 19,
+    "Mistralton Gym's cannons read from its overlay (cannon 0 at (15.5, 28.5) fires up to (15, 19))")
+  -- Icirrus Gym: its rails stay inside the grid (no hybrid growth); the
+  -- trigger-started chains are gated rides, the gate table from its overlay
+  local ic = b.maps and b.maps.Z114
+  local t1 = ic and ic.gen5RailTracks and ic.gen5RailTracks[1]
+  local g6 = ic and ic.gen5RailGates and (ic.gen5RailGates[6] or ic.gen5RailGates['6'])
+  check(ic and ic.width == 64 and t1 and t1.x == 17 and t1.y == 61 and t1.toX == 11 and t1.toY == 60
+      and g6 and g6.group == 2 and g6.state == 1,
+    "Icirrus Gym: 64 x 64 kept, ride 0 from (17, 61) to (11, 60), ride 6 gated on switch group 2 at 1")
   local pv = b.constants and b.constants.gen5ParkVisitors
   check(pv and (pv[0] or pv['0']) == 15 and (pv[2] or pv['2']) == 64,
     "0x232's park-visitor table read off its handler (15, 55, 64, ...)")

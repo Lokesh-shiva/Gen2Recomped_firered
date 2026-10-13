@@ -921,8 +921,16 @@ function Commands.g4_warp(ctx, header, x, z, direction)
                 tostring(header))
     return
   end
-  return Commands.warp(ctx, mapId, valueOf(ctx, x), valueOf(ctx, z),
-                       DIRECTION[valueOf(ctx, direction)])
+  local wx, wz = valueOf(ctx, x), valueOf(ctx, z)
+  -- BLACK / WHITE names MATRIX tiles: Dragonspiral Tower's summit sends the
+  -- player to zone 205 at (179, 146), which is local (19, 18) of a map cut
+  -- at (160, 128). A coordinate past the map's own size is taken back by
+  -- its origin.
+  local def = data.maps[mapId]
+  if def and def.gen5 and def.width and (wx >= def.width or wz >= def.height) then
+    wx, wz = wx - (def.originX or 0), wz - (def.originY or 0)
+  end
+  return Commands.warp(ctx, mapId, wx, wz, DIRECTION[valueOf(ctx, direction)])
 end
 
 -- THE LINE, AND THE BANK IT COMES OUT OF.
@@ -1020,6 +1028,60 @@ function Commands.g4_gender_message(ctx, male, female, bank)
   local entry = (save and save.player and save.player.gender == "girl") and female or male
   if bank then return Commands.g4_message_bank(ctx, bank, entry) end
   return Commands.g4_message(ctx, entry)
+end
+
+-- ICIRRUS GYM 0x195 <n>: ride n starts only while its switch group stands
+-- as the gate table says (var 0x4001 + group, 0 or 1); then the player
+-- goes along the track that starts where they stand to its far end
+function Commands.g4_bw_rail_ride(ctx, n)
+  local ow = ctx.overworld
+  local def = ow and ow.map and ow.map.def
+  local p = ow and ow.player
+  if not (def and p and def.gen5RailTracks) then return end
+  local k = math.floor(valueOf(ctx, n) or 0)
+  local gates = def.gen5RailGates or {}
+  local gate = gates[k] or gates[tostring(k)]
+  if gate then
+    local state = (getVar(ctx.save, 0x4001 + gate.group) or 0) ~= 0 and 1 or 0
+    if state ~= gate.state then return end
+  end
+  local best, bestD
+  for _, t in ipairs(def.gen5RailTracks) do
+    local d = math.abs(t.x - p.cellX) + math.abs(t.y - p.cellY)
+    if not bestD or d < bestD then best, bestD = t, d end
+  end
+  if best and bestD <= 2 then ow:setMap(ow.map.id, best.toX, best.toY, p.facing or "down") end
+end
+
+-- BLACK / WHITE 0x0DF <mode, species, var>: 1 if the species is in the
+-- Pokedex as seen (Cedric Juniper asks after Klink, 599)
+function Commands.g4_bw_dex_seen(ctx, species, destVar)
+  local id = math.floor(valueOf(ctx, species) or 0)
+  local seen = ctx.save and ctx.save.pokedex and ctx.save.pokedex.seen or {}
+  setVar(ctx.save, destVar, (seen[id] or seen[tostring(id)]) and 1 or 0)
+end
+
+-- DRIFTVEIL GYM: lift n to its other height, the player with it if aboard
+-- BLACK / WHITE 0x021: remember entry n for the map the next warp lands on
+-- (Gen5PostWarp runs it once the warp is done and this script has ended)
+function Commands.g4_bw_queue_entry(ctx, n)
+  local ow = ctx.overworld
+  if ow then
+    ow.gen5QueuedEntry = { entry = math.floor(valueOf(ctx, n) or 0), from = ow.map and ow.map.id }
+  end
+end
+
+-- BLACK / WHITE 0x0D8 (0x2021288): TM01..HM06 are items 328..425, TM93..95
+-- are 618..620
+function Commands.g4_bw_is_tmhm(ctx, value, var)
+  local v = math.floor(valueOf(ctx, value) or 0)
+  local yes = (v >= 328 and v <= 425) or (v >= 618 and v <= 620)
+  setVar(ctx.save, tonumber(var), yes and 1 or 0)
+end
+
+function Commands.g4_bw_lift_move(ctx, n)
+  local ow = ctx.overworld
+  if ow then require("src.world.Gen5DriftveilGym").move(ow, ctx.save, math.floor(valueOf(ctx, n) or 0)) end
 end
 
 -- NIMBASA GYM: turn coaster track n's switch over (the floor switch's
@@ -3572,6 +3634,42 @@ function Commands.g4_bw_spawn_object(ctx, x, y, dir, object, sprite, script)
   if ow.syncObjectVisibility then pcall(function() ow:syncObjectVisibility(obj) end) end
 end
 
+-- PLATINUM: the Distortion World's cast by local id (overlay 9's table, see
+-- src/world/Gen4DistPlatforms.lua)
+function Commands.g4_dw_cast_add(ctx, localId)
+  local id = tonumber(valueOf(ctx, localId))
+  if id and ctx.overworld then require("src.world.Gen4DistPlatforms").castAdd(ctx.overworld, id) end
+end
+-- the scripts' own Giratina shadow (sGiratinaShadowExternal; 1F's flyby) --
+-- started, left to fly, and cleared by the finish command
+function Commands.g4_dw_shadow_start(ctx, index)
+  if ctx.overworld then
+    require("src.world.Gen4DistPlatforms").shadowExternal(ctx.overworld, tonumber(valueOf(ctx, index)) or 0)
+  end
+end
+function Commands.g4_dw_shadow_finish(ctx)
+  if ctx.overworld then require("src.world.Gen4DistPlatforms").shadowFinish(ctx.overworld) end
+end
+-- DistWorld_ResetPersistedCameraAngles: the turned camera back to its base
+function Commands.g4_dw_reset_camera(ctx)
+  local S = require("src.world.Gen4DistSurface")
+  S.cam.x, S.cam.y, S.cam.n = 0, 0, 0
+end
+-- FieldSystem_StartDWWarp: the swirl (src/ui/Gen4DistortionWarp.lua); the
+-- script waits for it as the cartridge's child process makes it wait
+function Commands.g4_dw_warp(ctx)
+  local game = ctx.game or require("src.core.Game")
+  local ok, W = pcall(require, "src.ui.Gen4DistortionWarp")
+  if not (ok and W and game.stack and ctx.runner) then return end
+  game.stack:push(W.new(game, function() ctx.runner:resume() end))
+  ctx.runner:yield()
+end
+
+function Commands.g4_dw_cast_delete(ctx, localId)
+  local id = tonumber(valueOf(ctx, localId))
+  if id and ctx.overworld then require("src.world.Gen4DistPlatforms").castDelete(ctx.overworld, id) end
+end
+
 function Commands.g4_bw_object_movement(ctx, destVar, object)
   local e = objectById(ctx, object)
   local mt = e and e.def and tonumber(e.def.movementType) or 0
@@ -5894,6 +5992,13 @@ function Commands.g4_use_surf(ctx)
   local ow = ctx.overworld
   local p = ow and ow.player
   if not p then return end
+  -- on a Distortion World surface the water ahead is the platform's own
+  if ow.dwSurface then
+    require("src.world.Gen4DistSurface").surfMount(ow)
+    local okMusic, Music = pcall(require, "src.core.Music")
+    if okMusic and ctx.game then Music.setSurfing(ctx.game.data, true) end
+    return
+  end
   p.surfing = true
   -- Being on the water means being at the water's level; the step onto it is
   -- otherwise refused by the rule that keeps a walker out of the sea.
@@ -5904,6 +6009,16 @@ function Commands.g4_use_surf(ctx)
   if ow.syncSurfingPikachu then ow:syncSurfingPikachu() end
   local okMusic, Music = pcall(require, "src.core.Music")
   if okMusic and ctx.game then Music.setSurfing(ctx.game.data, true) end
+  -- ...AND ONTO THE WATER: `UseSurf`'s task hops the player onto the tile
+  -- ahead (PlayerAvatar_SetSurfMount...).  Setting the flag alone left them
+  -- standing on the bank as a surfer (HM sweep, Route 218).
+  if ow.map and ow.map.isWaterCell then
+    local fx, fy = p:facingCell()
+    if ow.map:isWaterCell(fx, fy) then
+      if ow.stepForwardOrCrossEdge then pcall(ow.stepForwardOrCrossEdge, ow, p.facing)
+      elseif ow.scriptMove then ow:scriptMove(p, p.facing, 1) end
+    end
+  end
 end
 
 -- `usewaterfall <slot>` -- the climb itself already exists for Hoenn
@@ -5912,10 +6027,38 @@ end
 -- to whichever of those the overworld exposes rather than walking the player
 -- by hand -- the cell-by-cell climb is the overworld's business and a second
 -- copy of it here is how the two end up disagreeing about where you surface.
+-- PLATINUM'S CLIMBS, Waterfall and Rock Climb alike: the player is carried
+-- straight across the run of climb tiles ahead (the waterfall's 0x13, the wall's
+-- ROCK_CLIMB_N_S 0x4B / _E_W 0x4C) and set down on the first tile past it --
+-- the field tasks for both walk the same cell-by-cell line.  Returns true when
+-- it moved.  An HM sweep found both dead: Waterfall handed off to Hoenn's climb,
+-- which needs Hoenn's tiles, and Rock Climb had nothing at all.
+local function gen4Climb(ctx, isClimb)
+  local ow = ctx.overworld
+  local p = ow and ow.player
+  local map = ow and ow.map
+  if not (p and map and map.cellBehaviour and map.def and map.def.generation == 4
+          and map.def.cameraFamily ~= "hgss") then return false end
+  local Collision = require("src.world.Collision")
+  local dir = p.facing
+  local x, y = p.cellX, p.cellY
+  local n = 0
+  while n < 32 do
+    local nx, ny = Collision.target(x, y, dir)
+    if not map:inBounds(nx, ny) then break end
+    if not isClimb(map:cellBehaviour(nx, ny), dir) then break end
+    x, y, n = nx, ny, n + 1
+  end
+  if n == 0 then return false end
+  ow:scriptMove(p, dir, n + 1)
+  return true
+end
+
 function Commands.g4_use_waterfall(ctx)
   local ow = ctx.overworld
   local p = ow and ow.player
   if not (ow and p) then return end
+  if gen4Climb(ctx, function(b) return b == 0x13 end) then return end
   if ow.tryWaterfallOW then
     local handled = ow:tryWaterfallOW()
     if handled then return end
@@ -5933,7 +6076,15 @@ end
 -- exactly this -- "decoded and lowered, the thing it drives is not built" --
 -- and a second hand-rolled copy of its say-once logic would be this port's
 -- favourite fault in miniature.
-pending("g4_use_rock_climb", "a rock-climb motion")
+function Commands.g4_use_rock_climb(ctx)
+  local ok = gen4Climb(ctx, function(b, dir)
+    if dir == "up" or dir == "down" then return b == 0x4B end
+    return b == 0x4C
+  end)
+  if not ok then
+    Logger.info("gen4 script: `userockclimb` found no rocky wall ahead -- the player stays put")
+  end
+end
 -- 0x14B. Identical to 0x14A in the cartridge and deliberately NOT sharing its
 -- row: 0x14A's handler is a no-op justified by its caller (a lost honey-tree
 -- battle, where the teardown has already blacked out), and 0x14B's only caller

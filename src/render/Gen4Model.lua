@@ -1913,13 +1913,29 @@ function Gen4Model.new(record)
     -- the measured one is the one to trust.
     local lo = { math.huge, math.huge, math.huge }
     local hi = { -math.huge, -math.huge, -math.huge }
+    -- A CACHE OLDER THAN THE `unlit` FLAG still has lightmapped shapes, and
+    -- they are the ones whose vertices carry BAKED COLOURS. Reported from
+    -- play: "the indoors of buildings are missing their lighting and appear
+    -- dark in platinum". Every shape of the Jubilife Pokemon Center's room
+    -- issues COLOR and no NORMAL (vertex colours 132..255), and shaded with
+    -- the decoder's resting normal its floor came out at 0.61 x 0.774 of its
+    -- texture -- under half. A shape lit by NORMAL commands issues no COLOR,
+    -- so its vertices stay pure white: a non-white vertex is the lightmap.
+    local unlit = shape.unlit
+    if unlit == nil and shade and lit then
+      for i = 0, count - 1 do
+        local at = i * stride
+        local r, g, b = shape.vertices:byte(at + 11, at + 13)
+        if (r and r < 255) or (g and g < 255) or (b and b < 255) then unlit = true; break end
+      end
+    end
     for i = 0, count - 1 do
       local at = i * stride
       local r, g, b = shape.vertices:byte(at + 11, at + 13)
       r, g, b = r or 255, g or 255, b or 255
       -- ...not on a shape with no NORMALs (Gen4ModelPack `unlit`):
       -- its vertex colours ARE its lighting
-      if shade and lit and not shape.unlit then
+      if shade and lit and not unlit then
         -- The normal, back out of its three signed bytes.  Absent on a cache
         -- imported before the stride changed, and `s8` answers nil there --
         -- which leaves the colour alone rather than multiplying it by a
@@ -2546,10 +2562,14 @@ function Gen4Model:draw(viewProjection, pose, materials, yCut, spread, depthComp
   -- uniform reads as zero, and relying on that is how the texture matrix once
   -- collapsed every model to a single texel.
   shader:send("billboardYaw", tonumber(Gen4Model.billboardYaw) or 0)
+  -- a caller's TINT (Gen4Model.drawTint, set around one draw): Giratina's
+  -- shadow is the field-effect model drawn as a dark translucent silhouette
+  local tint = Gen4Model.drawTint
   for _, shape in ipairs(self.shapes) do
     -- Per shape, because a model mixes opaque walls with a translucent shadow
     -- and one colour for the whole model would make one of them wrong.
-    g.setColor(1, 1, 1, shapeAlpha(shape))
+    if tint then g.setColor(tint[1], tint[2], tint[3], shapeAlpha(shape) * (tint[4] or 1))
+    else g.setColor(1, 1, 1, shapeAlpha(shape)) end
     local place = pose[shape.index]
     if shape.matrixSlots and pose.stack then
       -- A display list can restore a different joint for every vertex.
