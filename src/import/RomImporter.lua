@@ -1587,6 +1587,8 @@ local REQUIRED_FILES_GEN4 = {
 local function requiredFiles(version)
   local gen = GameVersion.generation(version)
   if gen == 4 then return REQUIRED_FILES_GEN4 end
+  -- Black and White: their own list as the Gen 5 stages arrive (RomExtractorGen5)
+  if gen == 5 then return require("src.import.RomExtractorGen5").REQUIRED_FILES end
   if gen == 3 then return REQUIRED_FILES_GEN3 end
   if gen == 2 then return REQUIRED_FILES_GEN2 end
   return REQUIRED_FILES_GEN1
@@ -1686,6 +1688,14 @@ local PAL = {
   -- and a chip that has to be read twice has failed.
   chipPlatinumTop = { 166, 176, 216 }, -- #a6b0d8  Platinum
   chipPlatinumBot = { 74, 82, 134 },   -- #4a5286
+  chipHeartGoldTop = { 236, 186, 72 },  -- #ecba48  HeartGold
+  chipHeartGoldBot = { 140, 82, 20 },   -- #8c5214
+  chipSoulSilverTop = { 176, 196, 222 }, -- #b0c4de SoulSilver
+  chipSoulSilverBot = { 70, 92, 126 },  -- #465c7e
+  chipBlackTop = { 96, 100, 112 },      -- #606470  Black
+  chipBlackBot = { 24, 26, 32 },        -- #181a20
+  chipWhiteTop = { 238, 240, 246 },     -- #eef0f6  White
+  chipWhiteBot = { 146, 150, 164 },     -- #9296a4
   chipPrismTop = { 106, 240, 150 },   -- #6af096  Prism
   chipPrismBot = { 22, 138, 82 },     -- #168a52
   -- Polished Crystal: amethyst, deliberately far from Crystal's cyan and
@@ -2945,7 +2955,7 @@ function RomImporter.new(onComplete, opts)
     self.returning[version] =
       (not ready) and marker ~= nil and head ~= markerFor(version)
     self.romName[version] = "pokemon_" .. info.id
-      .. (info.generation == 4 and ".nds"
+      .. (info.generation >= 4 and ".nds"
           or info.generation == 3 and ".gba"
           or ((info.id == "yellow" or info.generation == 2) and ".gbc" or ".gb"))
   end
@@ -3326,10 +3336,10 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
 
     local CacheFs=require('src.import.CacheFs')
     local modules={[1]='src.import.RomExtractor',[2]='src.import.RomExtractorGen2',
-      [3]='src.import.RomExtractorGen3',[4]='src.import.RomExtractorGen4'}
+      [3]='src.import.RomExtractorGen3',[4]='src.import.RomExtractorGen4',[5]='src.import.RomExtractorGen5'}
     local task=require('src.import.RomImportTask').new({action='extract',version=version,
       generation=info.generation,module=modules[info.generation],manifest=manifest,
-      prefix=info.cachePrefix,root=CacheFs.root(),path=self.romPath,bytes=info.generation~=4 and self.romData or nil,clear=true,recovery=self.importRecovery})
+      prefix=info.cachePrefix,root=CacheFs.root(),path=self.romPath,bytes=info.generation<4 and self.romData or nil,clear=true,recovery=self.importRecovery})
     if task then
       self.romData=nil
       local complete=false
@@ -3381,6 +3391,9 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
       -- `takesPath` is the one thing that made it more than a line: Gen 4
       -- opens the cartridge itself instead of being handed its bytes.
       [4] = { module = "src.import.RomExtractorGen4", takesVersion = true,
+              takesPath = true },
+      -- ...and the fifth, Black and White: a DS cartridge like the fourth
+      [5] = { module = "src.import.RomExtractorGen5", takesVersion = true,
               takesPath = true },
     }
     local choice = EXTRACTORS[info.generation]
@@ -7615,6 +7628,19 @@ function RomImporter:_drawTabBar(x, y, w, h, chip)
     { id = "platinum", letter = "PL", top = PAL.chipPlatinumTop,
       bot = PAL.chipPlatinumBot, under = PAL.chipPlatinumTop,
       label = Strings("PLATINUM"), ink = PAL.chipInkSilver },
+    -- Gen 4's other pair and Gen 5's, after Platinum in generation order
+    { id = "heartgold", letter = "HG", top = PAL.chipHeartGoldTop,
+      bot = PAL.chipHeartGoldBot, under = PAL.chipHeartGoldTop,
+      label = Strings("HEARTGOLD"), ink = PAL.chipInkGold },
+    { id = "soulsilver", letter = "SS", top = PAL.chipSoulSilverTop,
+      bot = PAL.chipSoulSilverBot, under = PAL.chipSoulSilverTop,
+      label = Strings("SOULSILVER"), ink = PAL.chipInkSilver },
+    { id = "black", letter = "B", top = PAL.chipBlackTop,
+      bot = PAL.chipBlackBot, under = PAL.chipBlackTop,
+      label = Strings("BLACK"), ink = PAL.white },
+    { id = "white", letter = "W", top = PAL.chipWhiteTop,
+      bot = PAL.chipWhiteBot, under = PAL.chipWhiteTop,
+      label = Strings("WHITE"), ink = PAL.chipInkSilver },
     -- Prism sits after Crystal: it is a Crystal romhack, so it belongs at the
     -- end of the Gen 2 run rather than beside the official carts.
     { id = "prism", letter = "P", top = PAL.chipPrismTop, bot = PAL.chipPrismBot,
@@ -7907,6 +7933,10 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   elseif version == "firered" then accent = PAL.chipFireRedTop
   elseif version == "emerald" then accent = PAL.chipEmeraldTop
   elseif version == "platinum" then accent = PAL.chipPlatinumTop
+  elseif version == "heartgold" then accent = PAL.chipHeartGoldTop
+  elseif version == "soulsilver" then accent = PAL.chipSoulSilverTop
+  elseif version == "black" then accent = PAL.chipBlackTop
+  elseif version == "white" then accent = PAL.chipWhiteTop
   elseif version == "prism" then accent = PAL.chipPrismTop
   -- Without a branch here the panel silently falls back to PAL.blue, which
   -- reads as a rendering bug rather than a missing case.

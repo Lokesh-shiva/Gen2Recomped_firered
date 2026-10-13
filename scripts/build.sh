@@ -90,7 +90,7 @@ say "manifests:$MANIFESTS"
 # mods/ ships too: the launcher's MODS tab lists what is installed, and the
 # bundled example mods (DramaticShapes among them) live there.
 (cd "$ROOT" && zip -q -9 -r "$LOVE_FILE" \
-  main.lua conf.lua src data assets mods tools/save-editor \
+  main.lua conf.lua src data assets mods tools/save-editor tools/map-editor \
   $MANIFESTS \
   -x '*.DS_Store' 'data/generated/*' 'assets/generated/*')
 if unzip -Z1 "$LOVE_FILE" \
@@ -102,8 +102,13 @@ fi
 # ROM import fails in the built app (dev reads them off the source tree, so
 # the miss only ever shows up in a build -- the Yellow manifest shipped this
 # way once).
+# tools/map-editor too: the editor's MAP pages require it pcall'd, so a build
+# without it opened a MAP EDITOR with an empty body for every game --
+# scripts/pack_love.sh shipped it, this list did not.
 for required in tools/save-editor/App.lua tools/save-editor/Kit.lua \
-                tools/save-editor/panels/Party.lua; do
+                tools/save-editor/panels/Party.lua \
+                tools/map-editor/MapEdits.lua tools/map-editor/ModExport.lua \
+                tools/map-editor/panels/Preview.lua; do
   unzip -Z1 "$LOVE_FILE" | grep -qx "$required" \
     || fail "game.love is missing $required"
 done

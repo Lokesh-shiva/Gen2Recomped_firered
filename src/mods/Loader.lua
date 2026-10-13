@@ -816,10 +816,11 @@ function Loader:_api(mod)
     -- returns the same module table the engine holds, so a mod that mutates
     -- one is changing the engine, exactly as it always was.
     engineRequire = engineRequire,
-    -- 1, 2 or 3.  The one field worth reaching for before anything else.
+    -- 1 to 5.  The one field worth reaching for before anything else.
     generation = hostGen,
     -- the version id the launcher started: "red", "crystal", "emerald",
-    -- "prism", "polishedcrystal"
+    -- "platinum", "heartgold", "soulsilver", "black", "white", "prism",
+    -- "polishedcrystal"
     gameVersion = hostId,
     -- ...and the same three plus the trimmings, for a mod that would rather
     -- read one table than three fields.  `name` is what the game calls

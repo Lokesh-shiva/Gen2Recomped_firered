@@ -269,6 +269,19 @@ L.message = function(ins, s) message(ins.args[1], s) end
 L.messageinstant = L.message
 L.messagenoskip = L.message
 L.messagesynchronized = L.message
+-- HEARTGOLD / SOULSILVER's `GenderMsgBox <male> <female>`: one of two entries
+-- of the script's own bank by the player's gender (ScrCmd_GenderMsgBox reads
+-- PlayerProfile_GetTrainerGender; anything not male takes the second).
+L.gendermsgbox = function(ins, s)
+  emit(s, { "g4_gender_message", ins.args[1], ins.args[2], s.bankFor and s.bankFor(s.member) })
+end
+-- ...and `GetStdMsgNaix <index> <destVar>`, which hands a script one of four
+-- shared banks to print from with MsgBoxExtern (scrcmd_message.c,
+-- ov01_022067C8): the day-of-week siblings 752, field moves 211, Cameron the
+-- photographer 30, the shops 435; anything past the table is 0.
+L.getstdmsgnaix = function(ins, s)
+  emit(s, { "g4_std_msg_bank", ins.args[1], ins.args[2] })
+end
 L.messagevar = function(ins, s)
   emit(s, { "g4_message_var", ins.args[1], s.bankFor and s.bankFor(s.member) })
 end
@@ -337,8 +350,10 @@ L.bufferplayername = function(ins, s) emit(s, { "g4_buffer", ins.args[1], "playe
 -- `bufferpokemonname` is not an opcode either; the cartridge has one buffer
 -- for a party member's SPECIES and another for its NICKNAME, plus move,
 -- number and the counterpart's name.  All six are byte-slot-then-word.
+-- ...and bufferpartymonspecies's second operand is a PARTY SLOT
+-- (ScriptContext_GetVar -> Party_GetPokemonBySlotIndex), not a species.
 L.bufferpartymonspecies = function(ins, s)
-  emit(s, { "g4_buffer", ins.args[1], "species", ins.args[2] })
+  emit(s, { "g4_buffer", ins.args[1], "partyspecies", ins.args[2] })
 end
 L.bufferpartymonnickname = function(ins, s)
   emit(s, { "g4_buffer", ins.args[1], "nickname", ins.args[2] })
@@ -1296,6 +1311,182 @@ end
 L.getplayerstarterspecies = function(ins, s)
   emit(s, { "g4_starter_species", ins.args[1] })
 end
+-- HEARTGOLD / SOULSILVER'S STARTER. `ChooseStarter` (ScrCmd_ChooseStarter ->
+-- LaunchStarterChoiceScene, choose_starter.c) runs Elm's turntable and then
+-- ADDS THE CHOICE TO THE PARTY ITSELF -- Chikorita, Cyndaquil or Totodile at
+-- level 5 -- so the lab script follows it with `GetPartyMonSpecies 0` rather
+-- than a give. `SetStarterChoice <var>` stores the species in the save's
+-- starter field and `GetStarterChoice <var>` reads it back.
+L.choosestarter = function(_, s) emit(s, { "g4_hgss_choose_starter" }) end
+L.setstarterchoice = function(ins, s) emit(s, { "g4_set_starter_choice", ins.args[1] }) end
+L.getstarterchoice = function(ins, s) emit(s, { "g4_starter_species", ins.args[1] }) end
+L.placestarterballsinelmslab = function(_, s) emit(s, { "g4_place_starter_balls" }) end
+-- `GetFriendSprite <var>`: the other hero's overworld sprite -- Ethan's for
+-- a girl, Lyra's for a boy -- into the object-graphics var the friend wears.
+L.getfriendsprite = function(ins, s) emit(s, { "g4_friend_sprite", ins.args[1] }) end
+-- `CatchingTutorial`: the friend catches a Rattata on Route 29
+L.catchingtutorial = function(_, s) emit(s, { "g4_hgss_catching_tutorial" }) end
+-- `NameRival <var>`: the naming screen for the rival, var = 1 when nothing
+-- was entered (the lab script asks again until something is)
+L.namerival = function(ins, s) emit(s, { "g4_name_rival", ins.args[1] }) end
+-- THE POKEGEAR AND MOM'S SAVINGS (HGSS), save state only: which cards and
+-- phone numbers are registered, how far the map is unlocked, and the balance.
+L.registerpokegearcard = function(ins, s) emit(s, { "g4_pokegear_card", ins.args[1] }) end
+L.registergearnumber = function(ins, s) emit(s, { "g4_pokegear_number", ins.args[1] }) end
+L.checkregisteredphonenumber = function(ins, s) emit(s, { "g4_pokegear_has_number", ins.args[1], ins.args[2] }) end
+L.scrcmd_804 = function(ins, s) emit(s, { "g4_pokegear_map_level", ins.args[1] }) end
+L.checkbankbalance = function(ins, s) emit(s, { "g4_bank_balance_at_least", ins.args[1], ins.args[2] }) end
+L.bankorwalletisfull = function(ins, s) emit(s, { "g4_bank_or_wallet_full", ins.args[1], ins.args[2] }) end
+L.banktransaction = function(ins, s) emit(s, { "g4_bank_transaction", ins.args[1], ins.args[2] }) end
+-- `GetPersonCoords <object> <xVar> <zVar>` (HGSS): where an object stands
+L.getpersoncoords = function(ins, s) emit(s, { "g4_object_coords", ins.args[1], ins.args[2], ins.args[3] }) end
+-- `UnlockMysteryGift` (Platinum) / ScrCmd_573 (HGSS, after Oak's Pokedex):
+-- the title menu's MYSTERY GIFT entry turns on -- a save flag here
+L.unlockmysterygift = function(_, s) emit(s, { "g4_unlock_mystery_gift" }) end
+-- CAMERON THE PHOTOGRAPHER (HGSS): CameronPhoto <n> takes photo n into the
+-- album (the script fades around it), CountSavedPhotos / PhotoAlbumIsFull
+-- read it back; 36 photos (photo_album.h PHOTO_ALBUM_MAX)
+L.cameronphoto = function(ins, s) emit(s, { "g4_take_photo", ins.args[1] }) end
+L.countsavedphotos = function(ins, s) emit(s, { "g4_count_photos", ins.args[1] }) end
+L.photoalbumisfull = function(ins, s) emit(s, { "g4_photo_album_full", ins.args[1] }) end
+-- `GiveTogepiEgg` (HGSS): the Mystery Egg's Togepi, as an Egg that knows
+-- Extrasensory
+L.givetogepiegg = function(_, s) emit(s, { "g4_give_togepi_egg" }) end
+-- FALKNER'S GYM (HGSS): the lift. VioletGymInit runs from the gym's entry
+-- script; VioletGymElevator carries the player up or down
+L.violetgyminit = function(_, s) emit(s, { "g4_violet_gym_init" }) end
+L.violetgymelevator = function(_, s) emit(s, { "g4_violet_gym_elevator" }) end
+-- BUGSY'S GYM (HGSS): the Spinarak carts and their two switches
+L.azaleagyminit = function(_, s) emit(s, { "g4_azalea_gym_init" }) end
+L.azaleagymspinarak = function(ins, s) emit(s, { "g4_azalea_gym_spinarak", ins.args[1] }) end
+L.azaleagymswitch = function(ins, s) emit(s, { "g4_azalea_gym_switch", ins.args[1] }) end
+-- THE HEADBUTT TUTOR in Ilex Forest (HGSS), on Platinum's tutor commands:
+-- `PartySelectUI` is the plain party pick GetPartySelection reads;
+-- `ScrCmd_656 slot, dest` is GetLearnableTutorMoves(mon, NPC 3) > 0;
+-- `PokemonSummaryScreen 1, slot, move` / `GetMoveSelection 1, dest` the
+-- forget-a-move pick (4 keeps them); `SetMonMove slot, moveSlot, move`
+-- PartyMonSetMoveInSlot. `MonHasMove` and `CountMonMoves` are Platinum's
+-- checkpartymonhasmove / getpartymonmovecount, operands in the same order.
+-- APRICORNS (HGSS): the trees' shared script (scr_seq_0150) and Kurt's
+-- (T23R0501) -- scrcmd_apricorn.c and scrcmd_pokemon_misc.c
+L.animapricorntree = function(ins, s) emit(s, { "g4_apricorn_tree_shake", ins.args[1] }) end
+L.apricorntreegetapricorn = function(ins, s) emit(s, { "g4_apricorn_tree_colour", ins.args[1] }) end
+L.giveapricornfromtree = function(ins, s)
+  emit(s, { "g4_apricorn_give", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.bufferapricornname = function(ins, s) emit(s, { "g4_buffer_apricorn", ins.args[1], ins.args[2] }) end
+L.scrcmd_735 = function(ins, s) emit(s, { "g4_kurt_quantity", ins.args[1] }) end
+L.clearkurtapricorn = function(_, s) emit(s, { "g4_kurt_clear" }) end
+L.scrcmd_737 = function(ins, s) emit(s, { "g4_kurt_ball", ins.args[1] }) end
+L.gettotalapricorncount = function(ins, s) emit(s, { "g4_apricorn_total", ins.args[1] }) end
+L.scrcmd_739 = function(_, s) emit(s, { "g4_apricorn_box_for_kurt" }) end
+-- GOLDENROD AND ROUTES 34-36 (HGSS): small ones, each a Platinum command
+-- or a few lines (scrcmd_c.c, scrcmd_party.c, scrcmd_battle.c, scrcmd_8.c)
+L.scrcmd_522 = function(ins, s) emit(s, { "g4_get_hour", ins.args[1] }) end
+L.getstaticencounteroutcome = function(ins, s) emit(s, { "g4_static_outcome", ins.args[1] }) end
+L.staticwildwonorcaughtcheck = function(ins, s) emit(s, { "g4_static_not_won", ins.args[1] }) end
+L.countalivemons = function(ins, s) emit(s, { "g4_party_alive_except", ins.args[1], ins.args[2] }) end
+L.partycountnotegg = function(ins, s) emit(s, { "g4_party_non_eggs", ins.args[1] }) end
+L.checkdaycareegg = function(ins, s) emit(s, { "g4_daycare_has_egg", ins.args[1] }) end
+L.getitemquantity = function(ins, s) emit(s, { "g4_item_quantity", ins.args[1], ins.args[2] }) end
+L.addmoney = function(ins, s) emit(s, { "g4_add_money", ins.args[1] }) end
+L.setobjectmovementtype = function(ins, s) emit(s, { "g4_set_object_movement", ins.args[1], ins.args[2] }) end
+L.scrcmd_582 = function(ins, s) emit(s, { "g4_special_spawn", ins.args[1], ins.args[2], ins.args[3] }) end
+-- GOLDENROD DEPT. STORE'S LIFT: the floor name is msg_0191 (BufferDeptStore-
+-- FloorNo: 0 is B1F, entry 122; n is entry 116 + n - 1); the floor window and
+-- the car's rocking are drawn by Platinum's lift as nothing, here likewise
+L.bufferdeptstorefloorno = function(ins, s)
+  local floor = tonumber(ins.args[2]) or 1
+  emit(s, { "g4_buffer", ins.args[1], "bank:191", floor == 0 and 122 or (115 + floor) })
+end
+L.elevatorcurfloorbox = function(_, s) emit(s, { "g4_noop", "the lift's current-floor window" }) end
+L.elevatoranim = function(_, s) emit(s, { "g4_noop", "the elevator animation" }) end
+-- THE BURNED TOWER (HGSS): `CreateRoamer n` is Platinum's release on HGSS's
+-- four slots (Gen4Roamers / HgssRoamers); `ScrCmd_523 obj, count, step,
+-- ampX, ampZ` rattles an object in place (the beasts rearing)
+L.createroamer = function(ins, s) emit(s, { "g4_release_roamer", ins.args[1] }) end
+L.scrcmd_523 = function(ins, s)
+  emit(s, { "g4_object_shake", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5] })
+end
+-- THE ROCKET DISGUISE (HGSS, Radio Tower): SetAvatarBits is Platinum's
+-- setplayerstate (the bits), UpdateAvatarState its latch;
+-- RocketCostumeFlagAction / Check the save's costume flag
+L.setavatarbits = function(ins, s) emit(s, { "g4_player_state", ins.args[1] }) end
+L.updateavatarstate = function(_, s) emit(s, { "g4_noop", "the player-state latch (applied when set)" }) end
+L.rocketcostumeflagaction = function(ins, s) emit(s, { "g4_rocket_costume_flag", ins.args[1] }) end
+L.rocketcostumeflagcheck = function(ins, s) emit(s, { "g4_rocket_costume_check", ins.args[1] }) end
+L.scrcmd_436 = function(_, s) emit(s, { "g4_noop", "leaving the overworld for an app" }) end
+-- THE ROCKET HIDEOUT (HGSS, Mahogany): the floor traps are wild battles
+-- (ScrCmd_RocketTrapBattle: SetupAndStartWildBattle with the species and
+-- level); MovePerson is Platinum's setobjecteventpos (the template's x, y);
+-- MultiBattle <partner> <foe 1> <foe 2> <byte> is the tag battle beside Lance
+-- in Platinum's operand order; ScrCmd_530 <n> <on> writes sys_vars.c's
+-- _020FE4A8[n] (or 0) into var 0x4036 + n. ScrCmd_708 (the trap's flash),
+-- 709 (the Persian statues' alarm) and 710 (the B2F doors' prop animations)
+-- are pictures only.
+L.rockettrapbattle = function(ins, s) emit(s, { "g4_start_wild_battle", ins.args[1], ins.args[2] }) end
+L.moveperson = function(ins, s) emit(s, { "g4_set_object_pos", ins.args[1], ins.args[2], ins.args[3] }) end
+L.multibattle = function(ins, s)
+  emit(s, { "g4_start_tag_battle", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.scrcmd_530 = function(ins, s)
+  local magic = { [0] = 0x6208, 0xF229, 0x0382, 0x1228 }
+  local n = tonumber(ins.args[1]) or 0
+  emit(s, { "g4_set_var", 0x4036 + n, (tonumber(ins.args[2]) or 0) ~= 0 and (magic[n] or 0) or 0 })
+end
+L.scrcmd_708 = function(_, s) emit(s, { "g4_noop", "the rocket trap's flash" }) end
+L.scrcmd_709 = function(_, s) emit(s, { "g4_noop", "the Persian statues' alarm" }) end
+L.scrcmd_710 = function(_, s) emit(s, { "g4_noop", "the hideout doors' prop animations" }) end
+-- LOAN POKEMON (HGSS): Shuckie in Cianwood, Kenya on Route 35
+L.giveloanmon = function(ins, s) emit(s, { "g4_give_loan_mon", ins.args[1], ins.args[2], ins.args[3] }) end
+L.checkreturnloanmon = function(ins, s)
+  emit(s, { "g4_check_return_loan_mon", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.returnloanmon = function(ins, s) emit(s, { "g4_return_loan_mon", ins.args[1] }) end
+L.kenyacheckpartyormailbox = function(ins, s) emit(s, { "g4_kenya_mail", ins.args[1] }) end
+-- LAKE OF RAGE (HGSS): Lance and Dragonite fly off
+L.scrcmd_775 = function(ins, s) emit(s, { "g4_fly_off_pair", ins.args[1], ins.args[2] }) end
+-- CHUCK'S GYM (HGSS): the winch that stops the waterfall
+L.cianwoodgyminit = function(_, s) emit(s, { "g4_cianwood_gym_init" }) end
+L.cianwoodgymturnwinch = function(ins, s) emit(s, { "g4_cianwood_turn_winch", ins.args[1] }) end
+-- BLACKTHORN'S MOVE RELEARNER AND TUTORS (HGSS; scrcmd_move_relearner.c):
+-- MoveRelearnerInit <slot> is Platinum's move reminder, MoveTutorInit <slot>
+-- <move> its one-move tutor (Draco Meteor and friends), and
+-- MoveRelearnerGetResult answers 0 learned / 255 not, as checklearned* does
+L.moverelearnerinit = function(ins, s) emit(s, { "g4_open_move_reminder_menu", ins.args[1] }) end
+L.movetutorinit = function(ins, s) emit(s, { "g4_open_move_tutor_menu", ins.args[1], ins.args[2] }) end
+L.moverelearnergetresult = function(ins, s) emit(s, { "g4_learned_move", ins.args[1] }) end
+-- KANTO'S GYMS (HGSS): Lt. Surge's cans, Janine's and Blue's gymmicks
+L.vermiliongyminit = function(_, s) emit(s, { "g4_vermilion_gym_init" }) end
+L.vermiliongymcancheck = function(ins, s) emit(s, { "g4_vermilion_can_check", ins.args[1], ins.args[2] }) end
+L.vermiliongymlockaction = function(ins, s) emit(s, { "g4_vermilion_lock_action", ins.args[1], ins.args[2] }) end
+L.resamplevermiliongymcans = function(_, s) emit(s, { "g4_vermilion_resample" }) end
+L.fuchsiagyminit = function(_, s) emit(s, { "g4_kanto_gym_init", "fuchsia" }) end
+L.viridiangyminit = function(_, s) emit(s, { "g4_kanto_gym_init", "viridian" }) end
+-- SetBikeStateLock <on> (Cycling Road): Platinum's forcebicycling
+L.setbikestatelock = function(ins, s) emit(s, { "g4_force_bike", ins.args[1] }) end
+L.scrcmd_452 = function(ins, s) emit(s, { "g4_show_mon_pic", ins.args[1], ins.args[2] }) end
+L.scrcmd_453 = function(_, s) emit(s, { "g4_close_mon_pic" }) end
+-- CLAIR'S GYM (HGSS): the platforms over the magma (HgssBlackthornGym)
+L.blackthorngyminit = function(_, s) emit(s, { "g4_blackthorn_gym_init" }) end
+-- MORTY'S GYM (HGSS): the fog and the mediums' candles
+L.ecruteakgyminit = function(_, s) emit(s, { "g4_ecruteak_gym_init" }) end
+L.extinguishecruteakgymcandle = function(_, s) emit(s, { "g4_ecruteak_candle_out" }) end
+-- the following Pokemon's commands: none walks behind the player here, so
+-- "is it in the way" answers 0 and waiting for it is immediate
+L.scrcmd_596 = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 0 }) end
+L.scrcmd_600 = function(_, s) emit(s, { "g4_noop", "follower wait" }) end
+-- `ScreenShake ampX, ampY, count, period` (HGSS): the look-at target shakes
+L.screenshake = function(ins, s)
+  emit(s, { "g4_screen_shake", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.partyselectui = function(_, s) emit(s, { "g4_select_tutor_mon" }) end
+L.scrcmd_656 = function(ins, s) emit(s, { "g4_tutor_has_moves", ins.args[1], 3, ins.args[2] }) end
+L.monhasmove = function(ins, s) emit(s, { "g4_mon_has_move", ins.args[1], ins.args[2], ins.args[3] }) end
+L.countmonmoves = function(ins, s) emit(s, { "g4_mon_move_count", ins.args[1], ins.args[2] }) end
+L.pokemonsummaryscreen = function(ins, s) emit(s, { "g4_tutor_forget_menu", ins.args[2], ins.args[3] }) end
+L.getmoveselection = function(ins, s) emit(s, { "g4_tutor_forget_slot", ins.args[2] }) end
+L.setmonmove = function(ins, s) emit(s, { "g4_tutor_set_move", ins.args[1], ins.args[3], ins.args[2] }) end
 
 -- THE FIVE ROWS THAT HAND OVER THE FIRST POKEMON, and three of them were
 -- unlowered.  Route 201's briefcase scene, in full:
@@ -1311,6 +1502,25 @@ end
 -- the tree.  This is the line that opens it.
 L.startchoosestarterscene = function(_, s) emit(s, { "g4_choose_starter" }) end
 L.savechosenstarter = function(_, s) emit(s, { "g4_save_starter" }) end
+-- Black / White's gift box (Gen5ScriptLink 0x153): answers 0..2 into a var
+L.bwchoosestarter = function(ins, s) emit(s, { "g4_bw_choose_starter", ins.args[1] }) end
+-- 0x101 <dest, slot>: is that Pokemon at full HP (or an Egg)
+L.bwmonhpfull = function(ins, s) emit(s, { "g4_mon_hp_full", ins.args[1], ins.args[2] }) end
+-- 0x110 <dest, slot, u16>: does that Pokemon carry a nickname
+L.bwmonhasnickname = function(ins, s) emit(s, { "g4_mon_has_nickname", ins.args[1], ins.args[2] }) end
+-- 0x17D: Juniper's catching demonstration on Route 1
+L.bwcatchingtutorial = function(_, s) emit(s, { "g4_bw_catching_tutorial" }) end
+-- 0x0D0 / 0x0D4 <month var, day var>: today, and the DS profile's birthday
+L.bwgetdate = function(ins, s) emit(s, { "g4_bw_date", ins.args[1], ins.args[2] }) end
+L.bwgetbirthday = function(ins, s) emit(s, { "g4_bw_birthday", ins.args[1], ins.args[2] }) end
+-- 0x0E0 <var>: the version id (21 Black, 20 White)
+L.bwgetversion = function(ins, s) emit(s, { "g4_bw_version", ins.args[1] }) end
+-- 0x025 <flag, dest>: a flag's state into a var
+L.bwflagtovar = function(ins, s) emit(s, { "g4_bw_flag_to_var", ins.args[1], ins.args[2] }) end
+-- the shared trainer script: beaten?, healer / prize, object movement type
+L.bwtrainerbeaten = function(ins, s) emit(s, { "g4_bw_trainer_beaten", ins.args[1], ins.args[2] }) end
+L.bwtrainerafter = function(ins, s) emit(s, { "g4_bw_trainer_after", ins.args[1], ins.args[2] }) end
+L.bwobjectmovement = function(ins, s) emit(s, { "g4_bw_object_movement", ins.args[1], ins.args[2] }) end
 -- `givepokemon <species> <level> <heldItem> <destVar>` -- the first three are
 -- var-or-literal, which matters because the starter arrives as a var.
 L.givepokemon = function(ins, s)
@@ -3075,6 +3285,12 @@ L["29f"] = function(_, s) emit(s, { "g4_noop", "a cartridge no-op (scrcmd 29F)" 
 L.cleargame = function(_, s)
   emit(s, { "g4_clear_game" })
 end
+-- HEARTGOLD / SOULSILVER: `HOFCredits <vsTrainerRed>` is that ClearGame
+-- (CallTask_GameClear); `HallOfFameAnim <count>` the machine's balls lighting
+-- one per Pokemon (ov02_0224CDB0 on prop 0x26), Platinum's healing
+-- animation, likewise a picture
+L.hofcredits = function(ins, s) emit(s, { "g4_clear_game", ins.args[1] }) end
+L.halloffameanim = function(_, s) emit(s, { "g4_noop", "the Hall of Fame machine's balls" }) end
 L.playhalloffamehealinganimation = function(_, s)
   emit(s, { "g4_noop", "the Hall of Fame healing animation" })
 end

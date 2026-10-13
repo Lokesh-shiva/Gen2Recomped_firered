@@ -22,7 +22,7 @@ python -m venv tmp/translation-env
 .\tmp\translation-env\Scripts\python.exe tools/translation/build_desktop.py
 ```
 
-Include `translation/rom-translate.exe`, `data/localization`, and `src/translation` in desktop release packaging. Android releases use the Java/JNI bridge and do not need the Windows helper. Do not package downloaded model caches, test catalogs, or `tmp/`.
+Include `translation/rom-translate.exe`, `data/localization`, and `src/translation` in desktop release packaging. The release workflow builds the helper per platform (PyInstaller cannot cross-compile): `windows-translator` on a Windows runner for the win64 zip and the MSIX, `linux-translator` in Debian bullseye for x86_64 (Linux AppImage) and arm64 (ARM64 AppImage, RG34XXSP port), and the macOS job in place. Each packaging job fails if its helper is missing from the archive. Android releases use the Java/JNI bridge and do not need the Windows helper. Do not package downloaded model caches, test catalogs, or `tmp/`.
 
 Tests: `tools/translation/check.lua` covers setting precedence, placeholders and read-only source overlays. `check_download.py` covers download progress and GPU fallback. `tools/translation/native_check` runs the real LOVE worker and packaged desktop helper. It downloads an English-Spanish model/font if missing, writes a separate test catalog, and renders the translated text. `launcher_check` translates the real launcher catalog, renders its buttons, and checks restoring English. Android Java compilation and NDK syntax checks cover its bridge; live Android inference still needs a device test.
 

@@ -412,6 +412,9 @@ function Gen4View:follow(x, z, facing, baseY)
     self.x = x - sin(f) * horizontal
     self.z = z + cos(f) * horizontal
     self.y = baseY + pivotY + sin(e) * radius
+    -- what the eye looks at, kept so the ground can pull the eye in along
+    -- this line when a wall stands on it (Gen4Ground:clearCameraLine)
+    self.pivotX, self.pivotY, self.pivotZ = x, baseY + pivotY, z
     -- LOOK AT THE PIVOT, which is what puts the player in the middle.
     --
     -- Reported from play: *"players not centered on the screen in third

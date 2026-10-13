@@ -211,6 +211,9 @@ local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         -- PLATINUM'S TOWN MAP: its sprites, name blocks and
                         -- fly locations (Gen4TownMap).
                         "gen4_town_map",
+                        -- ...and its bottom screen: the zoomed map, zoom
+                        -- button, signposts and descriptions (Gen4TownMapArt).
+                        "gen4_town_map_art", "gen4_town_map_ink",
                         -- THE AREA-NAME SIGNS and the per-header label data
                         -- (Gen4AreaPopup).
                         "gen4_area_popup",
@@ -272,6 +275,9 @@ local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         -- (Gen4EvolutionArt).
                         "gen4_poketch_art", "gen4_poketch_ink",
                         "gen4_evolution_art", "gen4_evolution_ink",
+                        -- the field start menu's icons in both palettes and
+                        -- their swell/wiggle animations (Gen4StartMenuArt).
+                        "gen4_start_menu_art", "gen4_start_menu_ink",
                         -- each trainer class's prize multiplier (Gen4TrainerPrize).
                         "gen4_trainer_prize",
                         -- each trainer class's front picture (the Hall of Fame's player).
@@ -2183,6 +2189,23 @@ function Data:load()
   -- Optional, each one, and each says so in the log: a cache imported before
   -- a stage existed must boot and lose that screen's art, not refuse to start.
   if isGen4Cache then
+    -- WHICH GEN 4 CARTRIDGE. A HeartGold or SoulSilver cache writes
+    -- gen4_version with family "hgss"; its script ids dispatch through HGSS's
+    -- own bands and its menus read HGSS's bank (Gen4ScriptBands.setFamily).
+    -- Platinum's cache has no such file and keeps Platinum's tables.
+    do
+      local okV, ver = loadModule(dir, "gen4_version")
+      self.gen4_version = okV and ver or nil
+      local family = okV and type(ver) == "table" and ver.family or "platinum"
+      -- Black and White write gen5_version, with the cartridge's script id table
+      local rows
+      if not okV then
+        local ok5, v5 = loadModule(dir, "gen5_version")
+        if ok5 and type(v5) == "table" and v5.family == "bw" then family, rows = "bw", v5.scriptBands end
+      end
+      local okB, Bands = pcall(require, "src.import.Gen4ScriptBands")
+      if okB then Bands.setFamily(family, rows) end
+    end
     for _, name in ipairs(GEN4_PREFIXED) do
       local ok, mod = loadModule(dir, name)
       self[name] = ok and mod or nil

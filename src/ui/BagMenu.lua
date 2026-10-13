@@ -733,7 +733,22 @@ local function pickTargetAndUse(game, battle, id, list)
   if def and def.machine then
     opts.tmhm = { move = def.machine.move, kind = def.machine.kind }
   end
-  require("src.ui.Screens").push(game, "PartyMenu", opts)
+  -- PLATINUM'S BATTLE PARTY LIST picks the target on the bottom screen when
+  -- the battle says it is the party screen there (BattleState:
+  -- gen4ItemTargetScreen); it asks for the move itself (its RESTORE WHICH
+  -- MOVE? page) and hands it to `onMove`.
+  local screenId = "PartyMenu"
+  if battle and type(battle.gen4ItemTargetScreen) == "function" and not opts.tmhm then
+    local okS, sid = pcall(battle.gen4ItemTargetScreen, battle)
+    if okS and sid then
+      screenId = sid
+      opts.mode, opts.itemId = "useItem", id
+      if wantsMove then
+        opts.onMove = function(mon, mi) useOn(game, battle, id, mon, list, mi) end
+      end
+    end
+  end
+  require("src.ui.Screens").push(game, screenId, opts)
 end
 
 -- TEXT_BANK_BAG, line 8 of generated/text_banks.txt (zero-based 7), and the

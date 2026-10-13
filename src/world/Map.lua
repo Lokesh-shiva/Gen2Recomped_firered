@@ -1651,6 +1651,10 @@ function Map:isCounterCell(cx, cy)
   local t = self.tileset.behaviourBytes and self:cellBehaviour(cx, cy)
             or self:cellTile(cx, cy)
   if self.tileset.id=='TILESET_GEN4_STANDIN' and t==0x80 then return true end
+  -- Black / White's counter is behaviour 0xD4 (Gen5Field: a room's counters
+  -- are byte 4 = 0xD4) -- every Pokemon Center nurse and mart clerk is
+  -- spoken to across one
+  if self.tileset.id=='TILESET_GEN4_STANDIN' and t==0xD4 and self.def and self.def.gen5 then return true end
   for _, c in ipairs(self.tileset.counterTiles or {}) do
     if c == t then return true end
   end
