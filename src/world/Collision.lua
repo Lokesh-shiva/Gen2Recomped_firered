@@ -65,6 +65,12 @@ local function entityBlocks(e, cx, cy)
     -- Origin cell is the top-left of the 2x2 (pret big object_event)
     return cx >= x and cx <= x + 1 and cy >= y and cy <= y + 1
   end
+  -- a wider object (Black / White's invisible blockers: Gen5Events'
+  -- footprintW x footprintH from its top-left cell)
+  local fw, fh = e.def and e.def.footprintW, e.def and e.def.footprintH
+  if fw and fh and (fw > 1 or fh > 1) then
+    return cx >= x and cx < x + fw and cy >= y and cy < y + fh
+  end
   if x == cx and y == cy then return true end
   if e.targetX == cx and e.targetY == cy then return true end
   return false
@@ -193,7 +199,13 @@ local function verdict(map, entities, mover, dir, tx, ty)
   if mover.onBike and map.runningBlockedAt and map:runningBlockedAt(tx, ty) then
     return false, "tile"
   end
-  if not map:isWalkableCell(tx, ty) then
+  -- A MAP'S OWN RULE FIRST, where one is hung on its def (HGSS's
+  -- GymmickCheckCollision table -- Clair's platforms over the magma): true
+  -- blocks, false is walkable whatever the tile says, nil asks the tile
+  local gymSays = map.def and map.def.gen4CollisionHook
+                  and map.def.gen4CollisionHook(map, tx, ty)
+  if gymSays == true then return false, "tile" end
+  if gymSays ~= false and not map:isWalkableCell(tx, ty) then
     if not (mover.surfing and map:isWaterCell(tx, ty)) then
       return false, "tile"
     end

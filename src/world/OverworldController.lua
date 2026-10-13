@@ -552,7 +552,20 @@ local function normaliseGfxName(name)
 end
 
 local gen4NormalisedNames = nil
+-- HEARTGOLD AND SOULSILVER: the cache says so (gen4_version.family), and their
+-- graphics ids go straight to an archive member through pret's own table
+-- (Gen4HgssObjectGfx) -- the member labels are numbers, so there is no name
+-- to join on.
+local function isHgssData(data)
+  return data and data.gen4_version and data.gen4_version.family == "hgss" or false
+end
 local function gen4SpriteFor(data, graphicsId)
+  if isHgssData(data) then
+    local okH, Hg = pcall(require, "src.import.Gen4HgssObjectGfx")
+    local row = okH and Hg.byId[tonumber(graphicsId) or -1]
+    if not row then return nil, nil end
+    return ("SPRITE_G4_%03d"):format(row[1]), row[2]
+  end
   local ok, Gfx = pcall(require, "src.import.Gen4ObjectGfx")
   local name = ok and Gfx and Gfx.name(graphicsId) or nil
   local sprites = data and data.gen4_overworld and data.gen4_overworld.sprites
@@ -577,10 +590,32 @@ OverworldState.gen4SpriteFor = gen4SpriteFor
 
 local function resolveGraphicsVar(save, obj)
   local id = tonumber(obj and obj.graphicsId)
-  if not id or id < GFX_VAR_FIRST or id > GFX_VAR_LAST then return obj end
   local data = Game and Game.data
+  -- AN APRICORN TREE WEARS ITS FRUIT (HGSS): SPRITE_BONGURI (262) bare, else
+  -- SPRITE_BONGURI + colour (sub_020640A4's table, 263 red .. 269 black)
+  if obj and obj.apricornTree and save then
+    local A = require("src.world.HgssApricorns")
+    if A.treeHasFruit(save, obj.apricornTree) then
+      local colour = A.TREES[obj.apricornTree + 1]
+      local sprite, name = colour and gen4SpriteFor(data, 262 + colour)
+      if sprite then
+        local copy = {}
+        for k, v in pairs(obj) do copy[k] = v end
+        copy.graphicsId, copy.sprite, copy.spriteName = 262 + colour, sprite, name
+        return copy
+      end
+    end
+    return obj
+  end
+  -- HGSS resolves exactly as Platinum does: map_object.c maps sprite ids
+  -- 101..117 to VAR_OBJ_GFX_BASE + (id - 101), so SPRITE_VAR_2 (102) reads
+  -- VAR_OBJ_1 -- what Route 29's GetFriendSprite VAR_OBJ_1 fills for Lyra.
+  -- (An earlier HGSS-only base of 100, read off SPRITE_VAR_0's #define, put
+  -- every friend one var out.)
+  local first = GFX_VAR_FIRST
+  if not id or id < first or id > first + (GFX_VAR_LAST - GFX_VAR_FIRST) then return obj end
   local vars = save and save.gen4Vars
-  local slot = GFX_VAR_BASE + (id - GFX_VAR_FIRST)
+  local slot = GFX_VAR_BASE + (id - first)
   local resolved = vars and tonumber(vars[slot])
   local sprite, name = nil, nil
   if resolved and resolved ~= 0 then sprite, name = gen4SpriteFor(data, resolved) end
@@ -593,7 +628,7 @@ local function resolveGraphicsVar(save, obj)
       gfxVarReported[slot] = true
       Logger.warn("gen4 object: graphics id %d is var_%d (var 0x%04X) and it "
                   .. "holds %s -- this object keeps the placeholder and will "
-                  .. "not draw", id, id - GFX_VAR_FIRST, slot,
+                  .. "not draw", id, id - first, slot,
                   resolved and tostring(resolved) or "nothing yet")
     end
     return obj
@@ -1007,6 +1042,9 @@ function OverworldState:stampClosedDoors()
 end
 
 function OverworldState:setMap(mapId, x, y, facing, opts)
+  -- BLACK / WHITE'S ARRIVAL GUARD: the warp you land on stays disarmed until
+  -- you step off it (see checkGen4EntranceWarp's gen5 branch)
+  self.gen5ArrivalMap, self.gen5ArrivalX, self.gen5ArrivalY = mapId, x, y
   local fromMapId = self.map and self.map.id
   -- the header being left, for Platinum's area sign (which compares names)
   local fromHeader = self.map and self.map.def and self.map.def.header
@@ -2656,6 +2694,9 @@ function OverworldState:noteCellChange()
   if self.lastCellX ~= p.cellX or self.lastCellY ~= p.cellY then
     self.lastCellX, self.lastCellY = p.cellX, p.cellY
     self.cellSerial = (self.cellSerial or 0) + 1
+    if self.gen5ArrivalMap and (p.cellX ~= self.gen5ArrivalX or p.cellY ~= self.gen5ArrivalY) then
+      self.gen5ArrivalMap = nil
+    end
   end
 end
 
@@ -2790,6 +2831,8 @@ function OverworldState:drainPendingScripts()
     -- still fired.
     if not self.runner:isRunning() and (GameVersion.isGen2() or GameVersion.isGen3()) then
       self:syncObjectVisibility()
+    elseif not self.runner:isRunning() and GameVersion.isGen4() then
+      self:refreshGen4VarSprites()
     end
   end
 end
@@ -2865,6 +2908,39 @@ function OverworldState:reassertEntities(why)
     Logger.warn("entity list desync repaired (%s): %s was in npcs but not "
                 .. "entities -- it would have been invisible but still solid",
                 tostring(why or "?"), tostring(missing.id))
+  end
+end
+
+-- A GEN 4 OBJECT DRAWN FROM A GRAPHICS VAR, once the map's entry script has
+-- filled the var. The NPC list is built before that script runs (it is
+-- queued), so the object was built with the placeholder; the cartridge runs
+-- the script first. Only placeholders are touched: everything else on the
+-- map stays exactly as built. HGSS's friend is the case that showed it --
+-- Route 29's `GetFriendSprite VAR_OBJ_1` dresses Lyra, who stood invisible
+-- through her own catching demonstration.
+function OverworldState:refreshGen4VarSprites()
+  if not (self.map and self.map.def and GameVersion.isGen4()) then return end
+  local mapId = self.map.id
+  for i, npc in ipairs(self.npcs or {}) do
+    local def = npc.def
+    if def and (def.noSprite == "runtime_variable" or def.apricornTree ~= nil) then
+      local obj
+      for _, o in ipairs(self.map.def.objects or {}) do
+        if o.index == def.index then obj = o break end
+      end
+      local resolved = obj and objectHome(nil, mapId, obj)
+      if resolved and resolved.sprite and not resolved.noSprite then
+        local fresh = pooledNPC(self.npcPool, Game.data, mapId, obj)
+        if fresh ~= npc then
+          fresh.cellX, fresh.cellY, fresh.px, fresh.py = npc.cellX, npc.cellY, npc.px, npc.py
+          fresh.facing, fresh.hidden = npc.facing, npc.hidden
+          self.npcs[i] = fresh
+          for j, e in ipairs(self.entities or {}) do
+            if e == npc then self.entities[j] = fresh end
+          end
+        end
+      end
+    end
   end
 end
 
@@ -3160,6 +3236,10 @@ function OverworldState:update(dt)
   self:tickPacifidlogLogs()
   -- ...and the PC's screen, which blinks itself on when you use one
   self:tickPcScreen()
+  -- ...and props a map's script ties to its people (HGSS's Morty's gym:
+  -- each medium carries her candle's light), `def.gen4PropFollow(self)`
+  local followProps = self.map and self.map.def and self.map.def.gen4PropFollow
+  if followProps then followProps(self) end
   -- ...and the Petalburg gym doors, which are a five-frame slide
   self:tickGymDoorSlide()
   -- ...and the rotating gates, which swing through their quarter turn
@@ -3360,6 +3440,9 @@ function OverworldState:update(dt)
   -- ENTRY -- after this engine has already built the NPC list. So every
   -- object that a Hoenn map's own entry script hides stayed on screen for the
   -- whole visit, and only went away if the player left and came back.
+  if scriptWasRunning and not self.runner:isRunning() and GameVersion.isGen4() then
+    self:refreshGen4VarSprites()
+  end
   if scriptWasRunning and not self.runner:isRunning()
      and (GameVersion.isGen2() or GameVersion.isGen3()) then
     self:syncObjectVisibility()
@@ -4069,6 +4152,21 @@ function OverworldState:checkGen4EntranceWarp(dir)
   local tx, ty = Collision.target(p.cellX, p.cellY, dir)
   if not map:gen4TerrainBlocked(tx, ty) then return false end
 
+  -- BLACK / WHITE HAS NO DOOR BEHAVIOURS: a door's or a staircase's cell is
+  -- a plain solid tile (byte 4 = 0x01, the same as the wall beside it) and
+  -- the warp event on it is the whole of what makes it an entrance. So a
+  -- press into a solid cell carrying a warp takes it, and a press off the
+  -- warp the player stands on -- an exit mat, a route's edge -- takes that.
+  if map.def and map.def.gen5 then
+    local ahead = map:warpAtCell(tx, ty)
+    if ahead then self:takeWarp(ahead.def) return true end
+    local here = map:warpAtCell(p.cellX, p.cellY)
+    local arrived = self.gen5ArrivalMap == map.id and self.gen5ArrivalX == p.cellX
+                    and self.gen5ArrivalY == p.cellY
+    if here and not arrived then self:takeWarp(here.def) return true end
+    return false
+  end
+
   -- THE DOOR IN FRONT. The warp event sits on the door, not on the ground the
   -- player stands on, so it is the target that is asked.
   if map.gen4DoorAt and map:gen4DoorAt(tx, ty) then
@@ -4089,6 +4187,32 @@ function OverworldState:checkGen4EntranceWarp(dir)
   local w = map:warpAtCell(p.cellX, p.cellY)
   if not w then return false end
   self:takeWarp(w.def)
+  return true
+end
+
+-- BLACK / WHITE: hand the player to the zone that owns the chunk they now
+-- stand in. A zone is a set of 32 x 32 chunks of one matrix (the matrix's
+-- zone table, written as `headers` on gen4_map_matrices), and its map def is
+-- the bounding box of them -- so a box can contain another zone's chunk
+-- (Route 2 round Accumula) and the edge seams alone cannot say whose ground
+-- this is. Same seamless crossing the edge connections use.
+function OverworldState:gen5ChunkHandoff()
+  local def = self.map and self.map.def
+  local data = Game.data
+  local mx = data and data.gen4_map_matrices and def and data.gen4_map_matrices[def.layout]
+  if not (mx and mx.headers and mx.width) then return false end
+  local p = self.player
+  local wx, wy = (def.originX or 0) + p.cellX, (def.originY or 0) + p.cellY
+  local cx, cy = math.floor(wx / 32), math.floor(wy / 32)
+  if cx < 0 or cy < 0 or cx >= mx.width or cy >= (mx.height or 0) then return false end
+  local zone = mx.headers[cy * mx.width + cx + 1]
+  if not zone or zone == 0 or zone == def.header then return false end
+  local target = ("Z%03d"):format(zone)
+  local tdef = data.maps and data.maps[target]
+  if not (tdef and tdef.layout == def.layout) then return false end
+  self:setMap(target, wx - (tdef.originX or 0), wy - (tdef.originY or 0), p.facing,
+              { seamless = true, keepMusic = true })
+  self.pendingSeamMusic = target
   return true
 end
 
@@ -6354,7 +6478,19 @@ function OverworldState:followCamera()
     local rise = ground:rise(target.px + 8, target.py + 8) or 0
     camera.spriteCenterX, camera.spriteCenterY = 8, -4 - rise
   end
-  camera:follow(target.px, target.py, Game.renderer:worldViewSize())
+  -- WHERE THE TARGET'S FEET ARE ON THE GROUND, in every camera mode: the
+  -- live pass picks its chunk rows by it and the 3D cameras stand on it. The
+  -- view follows the RAISED sprite, so anything worked back from the view
+  -- lands rows above the floor of a tall map -- Falkner's gym drew black, and
+  -- its tilted camera stood 230 units under the walkway it was looking for.
+  -- A SCRIPTED SCREEN SHAKE (HGSS `ScreenShake`, Gen4Commands) nudges the
+  -- look-at target; zero otherwise
+  local sx, sy = 0, 0
+  if self.gen4ShakeOffset then sx, sy = self.gen4ShakeOffset[1], self.gen4ShakeOffset[2] end
+  if ground then
+    ground.cameraFeetX, ground.cameraFeetZ = target.px + 8 + sx, target.py + 8
+  end
+  camera:follow(target.px + sx, target.py - sy, Game.renderer:worldViewSize())
 end
 
 -- The Gen 4 ground when a FREE camera owns the frame, or nil.
@@ -11435,6 +11571,17 @@ function OverworldState:showMapText(textConst, npc, onDone)
         end
       end
     end
+    -- BLACK / WHITE'S is 0x8011: the nurse's `applymovement 0x8011` turns
+    -- her, and the Cut tree's shared script removes `0x8011`
+    if GameVersion.isGen5() and npc then
+      local lid = npc.localId or (npc.def and npc.def.localId)
+      if lid then
+        local okG4, Gen4Commands = pcall(require, "src.script.Gen4Commands")
+        if okG4 and Gen4Commands and Gen4Commands.setVar then
+          Gen4Commands.setVar(Game.save, 0x8011, lid)
+        end
+      end
+    end
     self.runner:run(script, { npc = npc, onDone = onDone,
       source = mapScripts.talkSource(self.map.id, textConst) })
     return
@@ -12128,6 +12275,10 @@ function OverworldState:onStepComplete()
     if not (Game and Game.save) then return end
     if GameVersion.isGen4() then
       require("src.pokemon.Gen4GameRecords").increment(Game.save, 0)
+      -- THE TOWN MAP'S HISTORY DOTS: overworld_map_history.c pushes on every
+      -- matrix-cell change outside, and `remember` only pushes when the cell
+      -- differs from the last entry, so calling it per step costs a compare
+      require("src.ui.Gen4TownMap").remember(Game)
     elseif GameVersion.isGen3() then
       require("src.pokemon.Gen3GameStats").increment(Game.save, 5)
     end
@@ -12345,6 +12496,16 @@ function OverworldState:onStepComplete()
       end
     end
   end
+
+  -- BLACK / WHITE'S ZONES ARE CHUNKS, NOT RECTANGLES: Route 2's box wraps
+  -- round Accumula's single chunk, so the map a step lands in is the one the
+  -- matrix's zone table names for that chunk
+  if not warpFirst and self.map.def and self.map.def.gen5 and self:gen5ChunkHandoff() then return end
+
+  -- A MAP'S OWN STEP RULE (HGSS: a button on Clair's platforms), which
+  -- FieldSystem_ProcessStep asks before anything else
+  local stepHook = not warpFirst and self.map.def and self.map.def.gen4StepHook
+  if stepHook and stepHook(self, p.cellX, p.cellY) then return end
 
   -- hand-ported step triggers (Pallet intro, Saffron gate guards, ...)
   local hooks = mapScripts.get(self.map.id)
@@ -13988,7 +14149,9 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
       -- would switch on fourteen other behaviour-driven branches in Map.lua
       -- at the same time, and each wants its own look.
       local stepsOut
-      if GameVersion.isGen4() then
+      -- Black / White arrive on their door the same way (the door cell is a
+      -- solid tile there, so standing in it is never where a walk ends)
+      if GameVersion.isGen4() or GameVersion.isGen5() then
         stepsOut = self.player.facing == "down"
       else
         stepsOut = self.map:isDoorTileCell(self.player.cellX, self.player.cellY)

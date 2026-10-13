@@ -53,6 +53,18 @@ local LIST_X,LIST_Y,ROW_HEIGHT,VISIBLE_ROWS=96,16,16,7
 Shop.layout={iconX=22,iconY=172,listX=LIST_X,listY=LIST_Y,rowHeight=ROW_HEIGHT,visibleRows=VISIBLE_ROWS,descriptionX=40,descriptionY=144}
 Shop.__index = Shop
 Shop.isOpaque = false
+-- THE COUNTER'S SOUNDS are shop_menu.c's and the list/menu code it calls:
+-- SEQ_SE_DP_SELECT (SE_CONFIRM_sseq_3) for every A / B and the BUY / SELL /
+-- SEE YA! and YES / NO cursors (menu.c Menu_ProcessInput), SEQ_SE_DP_BAG_004
+-- for the item list's cursor (Shop_MenuCursorCallback) and the quantity dial
+-- (Shop_SelectPurchaseMenu), SEQ_SE_DP_REGI for the till on YES
+-- (Shop_SelectConfirmPurchase; bag/main.c ResolveSale for a sale).
+local function se(self, name, opts)
+  local data = self.game and self.game.data
+  local ok, Sound = pcall(require, "src.core.Sound")
+  if ok and type(Sound) == "table" and Sound.playSe and data then return Sound.playSe(data, name, opts) end
+end
+
 function Shop:uiSize() return 256, 192 end
 function Shop:wantsFillScale() return true end
 function Shop:sgbPalettes() return {require('src.render.PaletteFX').trueColorZone(0,0,31,23)} end
@@ -189,7 +201,11 @@ function Shop:rows()
   return self.stock
 end
 
-function Shop:back()
+-- `silent`: the Bag closed itself (its own B made the sound)
+function Shop:back(silent)
+  -- MENU_CANCEL / B: Menu_ProcessInput, Shop_SelectBuyMenu,
+  -- Shop_SelectPurchaseMenu, ProcessItemCountInput_SellCount
+  if not silent then se(self, "SEQ_SE_DP_SELECT") end
   if self.mode == 'menu' then return self:close() end
   if self.mode == 'quantity' or self.mode == 'confirm' then
     self.mode = self.transaction
@@ -207,7 +223,7 @@ function Shop:openBag()
   local ok = pcall(require('src.ui.Screens').push, self.game, 'BagMenu', {
     pick = true,
     onPick = function(id) self:sellItem(id) end,
-    onCancel = function() self.transaction = nil; self.mode = 'sell'; self:back() end,
+    onCancel = function() self.transaction = nil; self.mode = 'sell'; self:back(true) end,
   })
   return ok
 end
@@ -230,6 +246,8 @@ end
 
 function Shop:choose()
   if self.mode == 'menu' then
+    -- Menu_ProcessInput: A
+    se(self, "SEQ_SE_DP_SELECT")
     if self.cursor == #self:rows() then return self:close() end
     if self.cursor == 1 then
       self.mode = 'buy'
@@ -242,9 +260,13 @@ function Shop:choose()
   if self.mode == 'sell' then return self:openBag() end
   if self.mode == 'confirm' then
     if self.yesNo == 2 then return self:back() end
+    -- Menu_ProcessInputAndHandleExit: A on YES
+    se(self, "SEQ_SE_DP_SELECT")
     return self:transact()
   end
   if self.mode == 'quantity' then
+    -- Shop_SelectPurchaseMenu / ProcessItemCountInput_SellCount: A
+    se(self, "SEQ_SE_DP_SELECT")
     self.mode, self.yesNo = 'confirm', 1
     local def = self:def(self.item)
     if self.transaction == 'buy' and self.frontier then
@@ -273,7 +295,9 @@ function Shop:choose()
   local price = tonumber(def.price) or 0
   self.unit = price
   self.max = math.min(99, price > 0 and math.floor(self:funds() / price) or 99)
+  -- not enough money: the line, and no sound (Shop_SelectBuyMenu)
   if self.max < 1 then self.message = self:poorLine(); return end
+  se(self, "SEQ_SE_DP_SELECT")
   self.item, self.transaction, self.qty, self.mode = id, 'buy', 1, 'quantity'
   if self.frontier then
     self.message = self:line(33, (def.name or '') .. '? OK.\nHow many would you like?', def.name)
@@ -290,9 +314,12 @@ function Shop:transact()
       self.message = self.goods.fullMessage or 'There is no more room.'
     elseif self.goods then
       self.goods.add(self.item, self.qty)
+      se(self, "SEQ_SE_DP_REGI")
       self:pay(cost); self.message = 'Thank you!'
     elseif not Bag.add(save, self.item, self.qty, self.game.data) then self.message = self:line(7, 'Your Bag is full.')
     else self:pay(cost)
+      -- the till (Shop_SelectConfirmPurchase, on YES)
+      se(self, "SEQ_SE_DP_REGI")
       self.purchases = bump(self.purchases, self.qty)
       local def = self:def(self.item) or {}
       local pockets = ((self.game.data.gen4_menus or {}).bag or {}).pockets or {}
@@ -307,6 +334,8 @@ function Shop:transact()
   else
     if (save.inventory[self.item] or 0) >= self.qty then
       Bag.remove(save, self.item, self.qty); save.money = math.min(999999, (save.money or 0) + cost)
+      -- bag/main.c ResolveSale: the till as the money is paid
+      se(self, "SEQ_SE_DP_REGI")
       self.sales = bump(self.sales, self.qty)
       local def = self:def(self.item) or {}
       self.message = self:bagLine(77, 'Thank you!', def.name or '', tostring(cost))
@@ -317,11 +346,28 @@ function Shop:transact()
 end
 
 function Shop:step(delta)
-  if self.mode == 'quantity' then self.qty = (self.qty - 1 + delta) % self.max + 1; return end
-  if self.mode == 'confirm' then self.yesNo = (self.yesNo - 1 + (delta > 0 and 1 or -1)) % 2 + 1; return end
+  if self.mode == 'quantity' then
+    -- sub_0208C15C moved the count: SEQ_SE_DP_BAG_004 (Shop_SelectPurchaseMenu)
+    local old = self.qty
+    self.qty = (self.qty - 1 + delta) % self.max + 1
+    if self.qty ~= old then se(self, "SEQ_SE_DP_BAG_004") end
+    return
+  end
+  if self.mode == 'confirm' then
+    -- YES / NO: TryMovingCursorAndPlaySound
+    self.yesNo = (self.yesNo - 1 + (delta > 0 and 1 or -1)) % 2 + 1
+    se(self, "SEQ_SE_DP_SELECT")
+    return
+  end
   if self.mode == 'sell' then return end
   local count = #self:rows() + (self.mode == 'menu' and 0 or 1)
+  local old = self.cursor
   self.cursor = (self.cursor - 1 + delta) % math.max(1, count) + 1
+  if self.cursor ~= old then
+    -- BUY / SELL / SEE YA!: Menu_ProcessInput's cursor; the list:
+    -- Shop_MenuCursorCallback
+    se(self, self.mode == 'menu' and "SEQ_SE_DP_SELECT" or "SEQ_SE_DP_BAG_004")
+  end
   if self.mode ~= 'menu' then self.message = nil end
   self.scroll = math.max(0, math.min(self.scroll, self.cursor - 1))
   if self.cursor > self.scroll + VISIBLE_ROWS then self.scroll = self.cursor - VISIBLE_ROWS end

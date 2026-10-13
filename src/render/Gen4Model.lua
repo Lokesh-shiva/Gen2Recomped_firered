@@ -865,7 +865,8 @@ local function grassCutout(path)
   img:setWrap("repeat", "repeat")
   grassCutouts[path] = img
   return img
-end
+end
+
 -- One standing card per TILE, not per triangle: a chunk's grass is merged into
 -- quads that span two tiles as often as one, so the triangles are grouped back
 -- onto the tile grid the cartridge measured (`tileUnits`, 16).
@@ -1016,7 +1017,8 @@ local function addGrassCards(self, shape, vertices, positions, tileUnits)
     lo = lo, hi = hi,
   }
   return true
-end
+end
+
 -- ---------------------------------------------------------------------------
 -- SPLITTING A WALL COURSE INTO ITS SIDING AND ITS GLASS
 -- ---------------------------------------------------------------------------
@@ -1855,7 +1857,10 @@ function Gen4Model.new(record)
         -- will be drawn several times their own size, and smoothing them turns
         -- a Poke Ball's seam into a smear.
         image:setFilter("nearest", "nearest")
-        image:setWrap("repeat", "repeat")
+        -- the material's own edge mode (Gen4ModelPack.wrapOf); repeat when
+        -- the cache says nothing, which is what every model assumed before
+        local wrap = shape.wrap
+        image:setWrap(wrap and wrap[1] or "repeat", wrap and wrap[2] or "repeat")
       end
     end
 
@@ -1899,6 +1904,9 @@ function Gen4Model.new(record)
     -- (which knows the map) and by screens that have no map at all, and a
     -- model with no light must keep drawing exactly as it did.
     local shade = record.shade
+    -- ...and the map's fog, which paints every shape that has not opted out
+    -- (Gen4ModelPack `noFog`) in its colour
+    local fog = record.fog
     -- The shape's own box, kept while the vertices are still here.  It is what
     -- `framing` works from: the header states a bounding box too, but it does
     -- not agree with the geometry on two thirds of this cartridge's models, so
@@ -1909,7 +1917,9 @@ function Gen4Model.new(record)
       local at = i * stride
       local r, g, b = shape.vertices:byte(at + 11, at + 13)
       r, g, b = r or 255, g or 255, b or 255
-      if shade and lit then
+      -- ...not on a shape with no NORMALs (Gen4ModelPack `unlit`):
+      -- its vertex colours ARE its lighting
+      if shade and lit and not shape.unlit then
         -- The normal, back out of its three signed bytes.  Absent on a cache
         -- imported before the stride changed, and `s8` answers nil there --
         -- which leaves the colour alone rather than multiplying it by a
@@ -1923,6 +1933,9 @@ function Gen4Model.new(record)
           g = g * (lg or 1)
           b = b * (lb or 1)
         end
+      end
+      if fog and not shape.noFog then
+        r, g, b = (fog[1] or 0) * 255, (fog[2] or 0) * 255, (fog[3] or 0) * 255
       end
       local x = s16(shape.vertices, at) / FX16 * self.posScale
       local y = s16(shape.vertices, at + 2) / FX16 * self.posScale
@@ -2240,7 +2253,8 @@ function Gen4Model.new(record)
                     if b.area > (wallBand and wallBand.area or 0) then
                       wallBand = b
                     end
-                  end                end
+                  end
+                end
               end
             end
           end

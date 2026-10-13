@@ -486,6 +486,63 @@ function BattleState:worldBackdrop()
   return live
 end
 
+-- IS A MOD FIGHTING THIS BATTLE ON THE MAP ITSELF?
+--
+-- Reported from play: with BATTLE BG "world", DramaticShapes' map battles
+-- (and absol89's BATTLE_ART_VOXEL_GEN2 fork) went "almost everything black --
+-- only the HUD is visible". The world IS their battle: the arena, the
+-- billboards and the Pokemon are drawn in the world pass, so the
+-- BG_WORLD_DIM wash meant for a frozen map behind a paper field landed on the
+-- whole fight, and at night it left nothing but the boxes.
+--
+-- Two ways a mod says so, neither of which is `inWorld3DBattleStatus` above:
+--   * `exports.battleStage.state(battle)` (Battle Art's descriptor): a table
+--     with `staged` and `surfaceOwned` for THIS battle;
+--   * `exports.lib.require("OverworldBattle")`: DramaticShapes' own module,
+--     whose `battle()` is this battle while it stages one.
+-- Kept apart from worldBackdrop: that one also turns the windows to glass,
+-- which these mods style for themselves.
+function BattleState:worldStaged()
+  if self:worldBackdrop() then return true end
+  local frame = self.frame or 0
+  local last = self._stagedPolled
+  if last ~= nil and (frame - last) < BattleState.BACKDROP_POLL_FRAMES then
+    return self._stagedLive == true
+  end
+  self._stagedPolled = frame
+  local live = false
+  pcall(function()
+    local mods = self.game and self.game.mods
+    local exports = mods and mods.exports
+    if type(exports) ~= "table" then return end
+    for _, mod in pairs(exports) do
+      if type(mod) == "table" then
+        local stage = mod.battleStage
+        if type(stage) == "table" and type(stage.state) == "function" then
+          local ok, st = pcall(stage.state, self)
+          if ok and type(st) == "table" and st.staged and st.surfaceOwned then
+            live = true
+            return
+          end
+        end
+        local lib = mod.lib
+        if type(lib) == "table" and type(lib.require) == "function" then
+          local okR, OB = pcall(lib.require, "OverworldBattle")
+          if okR and type(OB) == "table" and type(OB.battle) == "function" then
+            local okB, b = pcall(OB.battle)
+            if okB and b ~= nil and (b == self or (type(b) == "table" and b.battle == self)) then
+              live = true
+              return
+            end
+          end
+        end
+      end
+    end
+  end)
+  self._stagedLive = live
+  return live
+end
+
 -- The style this battle's windows wear, or nil for the Game Boy's solid
 -- white paper.  Separate from worldBackdrop so a caller can override the
 -- look without re-deciding when it applies.
@@ -4090,6 +4147,9 @@ function BattleState:touchpressed(_, px, py)
   local kind, index = Gen4B.bottomHit(x, y, over)
   local input = self.game and self.game.input
   if not input then return true end
+  -- a tap hides the keypad cursor; the overlay press below must not be
+  -- swallowed as the "show the cursor" press, so it is marked as touch
+  if kind then self.gen4CursorActive = false; self.gen4TouchPress = true end
   if kind == "cancel" then
     input:overlayPressed("b")
     input:overlayReleased("b")
@@ -4149,6 +4209,27 @@ function BattleState:update(dt)
     if okSS and SecondScreen.mode(self.game) ~= "off" then
       SecondScreen.toggleStow(self.game)
       return
+    end
+  end
+
+  -- THE BOTTOM SCREEN'S CURSOR IS HIDDEN UNTIL A KEY IS PRESSED
+  -- (battle_subscreen.c BattleSystem_MenuKeys: an inactive cursor turns on at
+  -- the first A, B, X, Y or d-pad press, which does nothing else).  A tap
+  -- turns it off again (touchpressed below), and the bag and the party list
+  -- share the same flag, as the cartridge carries isCursorEnabled across.
+  if self.gen4TouchPress then
+    self.gen4TouchPress = nil
+  elseif input and self:gen4Layout() and not self.gen4CursorActive
+     and (self.phase == "menu" or self.phase == "moveSelect" or self.phase == "targetSelect") then
+    local presentation = Gen4Battle.menuPresentation(self, self.phase)
+    if presentation == "bottom" then
+      for _, k in ipairs({ "a", "b", "x", "y", "up", "down", "left", "right" }) do
+        if input:wasPressed(k) then
+          self.gen4CursorActive = true
+          require("src.ui.Gen4SubMenuCursor").sound("cursor", self.data)
+          return
+        end
+      end
     end
   end
 
@@ -8865,8 +8946,53 @@ function BattleState:learnMove(mon, moveId)
   -- ordered insert so multi-level gains keep each level's checks
   -- between its own stat box and the next "grew to level" text
   self:uiNext(function()
-    return self:buildScreen("MoveLearnMenu", mon, moveId)
+    local screen = self:buildScreen("MoveLearnMenu", mon, moveId)
+    self:gen4LearnOnBottom(screen, mon, moveId)
+    return screen
   end)
+end
+
+-- PLATINUM ASKS WHICH MOVE TO FORGET ON THE BOTTOM SCREEN: after "Delete an
+-- older move?" YES the battle party list opens in BATTLE_PARTY_MODE_LEARN_MOVE
+-- (the four moves, the one to learn, FORGET / CANCEL) instead of the field's
+-- list.  The question, the refusal and the "1, 2 and... Poof!" are still the
+-- move-learn screen's; only the pick moves.  Same rule as the party list:
+-- the bottom screen up and the pages in the cache.
+function BattleState:gen4LearnOnBottom(screen, mon, moveId)
+  if not (screen and type(screen.update) == "function" and screen.mon == mon) then return end
+  if Gen4Battle.partyScreenId(self) ~= "Gen4BattleParty" then return end
+  local okP, P = pcall(require, "src.ui.Gen4BattleParty")
+  if not (okP and P.pagesAvailable(self.data or self.game.data)) then return end
+  local battle = self
+  local plainUpdate, plainDraw = screen.update, screen.draw
+  screen.update = function(s, dt)
+    if s.selecting and not s.gen4Asked then
+      s.gen4Asked = true
+      battle.game.stack:push(P.new(battle.game, {
+        battle = battle, mode = "learnMove", mon = mon, moveId = moveId,
+        onChoose = function(index)
+          s.gen4Asked = false
+          if not index then
+            if s.confirmAbandon then s:confirmAbandon() end
+            return
+          end
+          local old = mon.moves[index]
+          local def = battle.data.moves[moveId]
+          mon.moves[index] = { id = moveId, pp = def and def.pp }
+          local oldDef = old and battle.data.moves[old.id]
+          s.forgot = (oldDef and oldDef.name) or (old and old.id)
+          s:finish(true)
+        end,
+      }))
+      return
+    end
+    if s.gen4Asked then return end
+    return plainUpdate(s, dt)
+  end
+  screen.draw = function(s, ...)
+    if s.selecting then return end
+    if plainDraw then return plainDraw(s, ...) end
+  end
 end
 
 -- Map the battle was fought on (overworld wins; save.player.map is fallback).
@@ -9406,8 +9532,15 @@ function BattleState:openItems()
     return
   end
   self:ui(function()
-    return self:buildScreen("BagMenu", { battle = self })
+    return self:buildScreen(Gen4Battle.bagScreenId(self) or "BagMenu", { battle = self })
   end)
+end
+
+-- Which screen picks an item's target in this battle: Platinum's battle party
+-- list in its USE ON WHICH POKeMON? mode when it is the party screen here
+-- (BagMenu's pickTargetAndUse asks), nil for the generation's party menu.
+function BattleState:gen4ItemTargetScreen()
+  return Gen4Battle.partyScreenId(self)
 end
 
 -- called by BagMenu after an item is used in battle (consumes the turn)

@@ -640,6 +640,9 @@ function Game.worldBgBattleDim(stack)
   for i = #(stack and stack.states or {}), 1, -1 do
     local state = stack.states[i]
     if state and state.bgMode and state:bgMode() == "world" then
+      -- not when a mod is fighting the battle ON the map: the world is the
+      -- battle then, and dimming it blacks out the fight (BattleState:worldStaged)
+      if state.worldStaged and state:worldStaged() then return nil end
       return state.BG_WORLD_DIM or 0.55
     end
   end

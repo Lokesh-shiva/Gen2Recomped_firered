@@ -38250,3 +38250,194 @@ Battle Points.
   `sTrainerScoreIncrements`.
 - Both Frontier harnesses print the records at the end. A Castle lobby run
   shows victories, CP received and the round-completion score adding up.
+
+## Battle screens, touch screens, Pokétch, evolution, and the particle mirror fix
+
+### Battle (src/battle/Gen4Battle.lua, src/ui/Gen4BattleParty.lua, src/import/Gen4BattleArt.lua)
+
+**Top screen.**
+- "What will X do?" (battle strings 921, or 922 in the Great Marsh) now shows in the message box while the menus are on the bottom screen.
+- Healthboxes gain status icons at the cartridge's VRAM offsets and, for wild Pokémon already caught, the caught-ball mark.
+- Nicknames use the box palette's colours 14/2.
+
+**Bottom screen.**
+- The cursor is four pulsing red corners.
+- The player's party balls appear at (12+19i, 13), and the foe's at (246−12i, 9).
+- Trainer battles show the `party_gauge.c` ball capsules as each side's Pokémon comes out.
+- Double battles use the cartridge's target-select buttons.
+
+**Battle party list.** It is the `pl_b_plist_gra` list (six panels, then SHIFT / SUMMARY / CHECK MOVES), shown when the bottom screen is up.
+
+Harness: `tools/gen4_battle_ui_harness`.
+
+### Touch and backlog (Summary, Bag, PC, Trainer Card)
+
+**Summary.**
+- Its page buttons take touch, with press faces and the tap circle.
+- CONDITION, CONTEST MOVES and RIBBONS stay hidden until flag 0x978, the Contest Hall visit, is set.
+- The condition graph grows over four frames, then flashes.
+
+**Bag.**
+- Pocket buttons and the dial take touch; dragging the dial scrolls the list.
+- A opens the per-pocket action menu: USE, GIVE, TRASH, REGISTER and CHECK TAG.
+- TRASH asks how many, then YES/NO.
+- SELECT picks an item up to move it, showing the moving bar.
+
+**PC.**
+- Changing box slides the wallpaper ring over 30 frames.
+- JUMP opens the thumbnail popup.
+
+**Trainer Card.**
+- It flips over 17 frames.
+- The lid opens from the touch button.
+- Badges can be polished, with dirt levels and sparkles.
+- A saved signature is drawn in its box.
+
+Check: `gen4_touch_screen_parity_check` (44).
+
+### Pokétch, evolution, start menu, Town Map
+
+**Pokétch.**
+- Every app is redrawn to the decomp, using its own tile patches, sprites and animation clocks.
+- Pokémon icons are in the LCD's four shades.
+- The shutter uses tile 164 when switching apps.
+- Touch areas use the cartridge's `TouchScreenRect`s.
+
+**Evolution.** It follows `evolution.c`'s timeline: the letterbox, the forms trading places as the scale step doubles from 8 to 64, the emitters from `shinka_demo_particle.narc`, and the B-button cancel with its white flash.
+
+**Start menu.** Icons use their palette rows and swell, then wiggle when selected. Labels are left-aligned at +28, and the menu reopens on the last option chosen.
+
+**Town Map.** Unlocked hidden locations are drawn.
+
+### Fix: move effects drew rings as four notched squares
+
+`SPLTextureParam` bits 14–15 are the texture's FLIP S/T. A flipped repeat mirrors every other copy, which is how a quarter-circle texture tiled 2×2 becomes a ring or orb. `Gen4Particle.textures` now reads the bits, the importer saves them on each particle record, and `Gen4Battle.drawParticles` uses mirrored wrap. 764 of the 1,706 move-effect textures set it.
+
+An existing cache is patched with `tools/gen4_particle_flip_patch <rom> <cache dir>`.
+
+## The battle bag, the party list's pages, and double battles on the top screen
+
+### The battle bag (`src/ui/Gen4BattleBag.lua`)
+
+BAG now opens the cartridge's bottom-screen bag (`battle_bag*.c`) when the bottom screen is up and the cache has the art; otherwise the field bag opens as before. The rule is `Gen4Battle.bagScreenId`, which works like `partyScreenId`.
+
+- **Menu.** It shows the four battle pockets (HP/PP RESTORE, STATUS HEALERS, POKé BALLS, BATTLE ITEMS), the "Item used last" bar with that item's icon, and CANCEL. When no item is remembered, the bar is disabled.
+- **Pocket.** It shows six items a page, each with its icon, name and "xN". Below are the page arrows, which wrap and are disabled for a single page, the pocket's name and "n/m".
+- **Use.** It shows the item's icon, name, count and description, with the USE bar in the pocket's colour.
+- **Pockets.** These follow `BattleBag_Init`. Each bag item is filed under every pocket its battle-pocket mask names, in field-pocket order and then bag order.
+- **Bag cursor.** The pocket, each pocket's page and position, and the last item used live on the game, as the cartridge's `BagCursor` does. An item no longer carried is forgotten.
+- **Refusals.** `TryUseItem`'s refusals show in the message box: a ball with two foes standing, a foe out of sight, or a foe behind a substitute.
+- **Using an item.** This goes through `BagMenu.useItem`, so it does what the field bag does. An item that needs a target opens the battle party list in its "Use on which Pokémon?" mode, through a small hook in `BagMenu`'s `pickTargetAndUse` (`BattleState:gen4ItemTargetScreen`).
+- **Buttons.** Pressing a button shows PRESSING, then PRESSED, and the button's words and icon lift 4 px, then 2 px.
+
+Positions, windows, touch rects and cursor tables are the decomp's. Art: `gen4_battle_art` `bbag_*`; ink: `gen4_battle_anims.bagInk` (palette rows 0 and 4).
+
+### The battle party list's other pages (`src/ui/Gen4BattleParty.lua`)
+
+SUMMARY and CHECK MOVES are now the cartridge's own bottom-screen pages, not the field summary:
+
+- **Summary.** Level, NEXT LV with the EXP bar, HP with its bar, the five stats, the ability and its description, the held item, and the prev/next buttons. Prev/next skip eggs.
+- **Check moves.** Four move buttons, each with its type icon and PP.
+- **Move summary.** The move's type and category icons, PP, power, accuracy, category and description, plus the four small move buttons.
+
+Two new modes:
+
+- **`useItem`.** The list asks "Use on which Pokémon?". An ETHER-type item then opens RESTORE WHICH MOVE?, and the move goes to the bag flow's `onMove`.
+- **`learnMove`.** It shows the four moves and the move to learn, then FORGET or CANCEL. An HM cannot be forgotten ("HM moves can't be forgotten now."). `BattleState:gen4LearnOnBottom` opens it from the level-up move-learn question in place of the field's list.
+
+All pages share `src/ui/Gen4SubMenuCursor.lua`, the port of `battle_sub_menu_cursor.c`, including its "go back where you came from" links.
+
+### Small things
+
+- **Hidden cursor.** The cursor is hidden until a key is pressed (`IsCursorVisible` / `BattleSystem_MenuKeys`). That first press only shows it, and a tap hides it again. The flag, `battle.gen4CursorActive`, is shared by the battle's own menus, the bag and the party list.
+- **Target names.** The gender symbol uses `{COLOR 3}` / `{COLOR 4}`, which is palette 6 colours 7/8 for ♂ and 9/10 for ♀. The foes' slots now show their Pokémon icon (`sTargetSelectIconPositions`). The icon animates at `shared_anim_32k`'s speed for its HP colour, and holds still when the Pokémon has fainted.
+- **Party balls.** A ball whose Pokémon is 87% or more of the way to its next level wobbles (`SysTask_AnimatePartyBalls`).
+
+### Double battles on the top screen
+
+- **Battlers.** All four battlers are drawn at battler types 2–5 (position p is type p + 2), far side first.
+- **Healthboxes.** Four boxes are drawn. The foe's two use the solo art at (64,16) and (58,45); the player's two use `healthbox_player_doubles` on the short cell at (192,103) and (198,132).
+
+### Extraction and checks
+
+- **Re-extract.** `love tools/gen4_art_extract <rom> <asset root> <cache dir> battle` adds 65 pictures: the bag's three views and its buttons, the six party pages and their buttons, and the EXP fills. It also adds `bagInk` and `partyInk13` to `gen4_battle_anims`. The importer (`RomExtractorGen4:battleArt`) writes the same thing, and no new cache module was needed.
+- **Harness.** `tools/gen4_battle_ui_harness` has new states: `bag_*`, `party_summary`, `party_moves`, `party_movesum`, `party_item`, `party_restore`, `party_learn`, `party_confirm`, `doubles`, `doubles_target` and `balls_wobble`.
+- **Check.** `tools/gen4_battle_bag_check.lua <cache dir>` runs 75 checks. They cover the pockets, paging, the cursor, touch, "Item used last", the refusals, the party pages' modes and the wobble.
+
+### Known gaps
+
+- Neither screen has the palette fade on entering or leaving.
+- The catch tutorial's scripted bag is not ported.
+- The CONTEST STATS toggle on the learn pages is not ported.
+- The party list does not animate the HP or PP filling after a restore item. The item flow's own messages say what happened instead.
+- In a double battle, move effects still aim at the singles positions.
+
+## Sound effects, the PC and Town Map bottom screens
+
+### Sound effects (src/core/Sound.lua, src/audio/NitroAudio.lua, src/import/Gen4Sdat.lua)
+
+The audio cache already held all 1,013 of the ROM's named sequences; the
+screens simply never played them.
+
+**API.** `Sound.playSe(data, key, opts)` accepts any of:
+
+- a ROM symbol (`SEQ_SE_DP_CARD5`);
+- an id;
+- a decomp constant (`SE_CONFIRM_sseq_3`), resolved through shared sequence
+  files plus a short table for the files the decomp renamed.
+
+**Playback.** It plays through NitroAudio and honours the SDAT's SE players:
+each sequence's player and its maximum, and priority stealing. `opts.pitch`
+and `opts.handle` set pitch and a separate handle. `isSePlaying` and
+`stopSe` go with it.
+
+**Wired from each screen's C:**
+
+- the contest (dance, acting, visual and results);
+- Poffin cooking and the Poffin Case;
+- the Mart;
+- the Pokétch and its apps;
+- mining;
+- the Trainer Card, including the badge chimes' four-player rotation and
+  pitch;
+- the Bag, Summary and naming screen;
+- Options, the start menu, the Pokédex and evolution.
+
+The Hall of Fame plays no effects on the cartridge.
+
+**Not done.** The feeding cutscene's "pinch" cry when a Pokémon dislikes a
+Poffin is not played, because `Sound.playCry` has no pinch variant. NitroAudio
+still ignores ADSR envelopes, so effects are close to the DS but not
+identical.
+
+Check: `gen4_sound_effects_check` (2,286). Tool: `tools/gen4_sound_effects_render`
+writes effects to WAV.
+
+### PC storage bottom screen (src/ui/Gen4BoxMenu.lua, src/import/Gen4BoxArt.lua)
+
+The bottom screen is ov19's layers:
+
+- the backdrop, the cover and the two dial faces, scrolled by the decomp's
+  offset tables;
+- the corner buttons;
+- the BOX dial, a 144-point arc of box thumbnails;
+- the MARKINGS dial with its filter.
+
+Filtered icons fade to 6/16. MOVE ITEMS shows each Pokémon's held item.
+
+COMPARE mode (`g4_storage` mode 4, PC_MODE_COMPARE) has a battle-stats page,
+a contest pentagon page and a moves page.
+
+### Town Map bottom screen (src/ui/Gen4TownMap.lua, src/import/Gen4TownMapArt.lua)
+
+**Zoom button.** Pressing it plays the press and shockwave, then a fade, and
+opens the zoomed GUIDE MAP. The map scrolls to the player, with a signpost
+(the map or arrow style, or a landmark) and each block's flag-gated area and
+landmark descriptions.
+
+**History dots.** `save.gen4MapHistory` is a six-entry ring
+(`overworld_map_history.c`). It is pushed on every outdoor step that changes
+matrix cell, from `onStepComplete`. The town map shows the dots oldest to
+newest, one every 26 ticks.
+
+Check: `gen4_pc_town_map_bottom_check` (33).

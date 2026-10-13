@@ -314,8 +314,22 @@ function love.load()
     -- party is a test that cannot fail.
     if os.getenv("PARTY") then
       local Pokemon = require("src.pokemon.Pokemon")
-      Game.save.party = { Pokemon.new(Data, tonumber(os.getenv("PARTY")),
+      Game.save.party = { Pokemon.new(Data, tonumber(os.getenv("PARTY"):match("^%d+")),
                                       tonumber(os.getenv("PARTYLEVEL") or "12")) }
+      -- PARTY=495,515: more than one (the rest at the same level)
+      for id in os.getenv("PARTY"):gmatch(",(%d+)") do
+        Game.save.party[#Game.save.party + 1] = Pokemon.new(Data, tonumber(id),
+          tonumber(os.getenv("PARTYLEVEL") or "12"))
+      end
+      -- PARTYMOVES=15,33: the lead's moves (a field-move test: Cut, Surf...)
+      if os.getenv("PARTYMOVES") then
+        local mon = Game.save.party[1]
+        mon.moves = {}
+        for id in os.getenv("PARTYMOVES"):gmatch("%d+") do
+          local m = Data.moves and Data.moves[tonumber(id)]
+          mon.moves[#mon.moves + 1] = { id = tonumber(id), pp = m and m.pp or 10 }
+        end
+      end
     end
     -- HURT THE PARTY FIRST, so "it healed" is a change and not a constant.
     -- A heal test on a full-health party passes whether or not anything runs.
