@@ -1022,6 +1022,34 @@ function Commands.g4_gender_message(ctx, male, female, bank)
   return Commands.g4_message(ctx, entry)
 end
 
+-- NIMBASA GYM: turn coaster track n's switch over (the floor switch's
+-- 0x180). Kept in the save, as the cartridge keeps it in the gym's block.
+function Commands.g4_bw_coaster_switch(ctx, n)
+  local save = ctx.save
+  if not save then return end
+  save.bwCoaster = save.bwCoaster or {}
+  local k = tostring(math.floor(valueOf(ctx, n) or 0))
+  save.bwCoaster[k] = (save.bwCoaster[k] == 1) and 0 or 1
+end
+
+-- BLACK / WHITE'S SEASON: one a month in turn, January spring, so
+-- (month - 1) % 4 -- 0 spring, 1 summer, 2 autumn, 3 winter
+function Commands.g4_bw_season(ctx, destVar)
+  setVar(ctx.save, destVar, ((tonumber(os.date("%m")) or 1) - 1) % 4)
+end
+-- 0x02B <var, value>: var *= value (the handler's `muls`, kept to a u16)
+function Commands.g4_bw_mul_var(ctx, destVar, value)
+  setVar(ctx.save, destVar, (getVar(ctx.save, destVar) * valueOf(ctx, value)) % 65536)
+end
+-- 0x232 <index, dest>: dest = the park-visitor table's entry (constants,
+-- read off the handler by RomExtractorGen5)
+function Commands.g4_bw_park_visitor(ctx, index, destVar)
+  local data = ctx.game and ctx.game.data or (_G.Game and _G.Game.data)
+  local t = data and data.constants and data.constants.gen5ParkVisitors
+  local i = math.floor(valueOf(ctx, index) or 0)
+  setVar(ctx.save, destVar, t and (t[i] or t[tostring(i)]) or 0)
+end
+
 -- BLACK / WHITE'S ELEVATORS: the building's floors (Gen5ScriptLink reads the
 -- table out of the script file), the menu of every floor but this one, the
 -- choice, and the ride -- a warp to the floor's zone at its car's tile.

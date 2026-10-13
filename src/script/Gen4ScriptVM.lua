@@ -1521,6 +1521,12 @@ L.bwflagtovar = function(ins, s) emit(s, { "g4_bw_flag_to_var", ins.args[1], ins
 L.bwtrainerbeaten = function(ins, s) emit(s, { "g4_bw_trainer_beaten", ins.args[1], ins.args[2] }) end
 L.bwtrainerafter = function(ins, s) emit(s, { "g4_bw_trainer_after", ins.args[1], ins.args[2] }) end
 L.bwobjectmovement = function(ins, s) emit(s, { "g4_bw_object_movement", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE: Nimbasa Gym's coaster switch
+L.bwcoasterswitch = function(ins, s) emit(s, { "g4_bw_coaster_switch", ins.args[1] }) end
+-- BLACK / WHITE: the season, var *= value, and the park visitor's table
+L.bwseason = function(ins, s) emit(s, { "g4_bw_season", ins.args[1] }) end
+L.bwmulvar = function(ins, s) emit(s, { "g4_bw_mul_var", ins.args[1], ins.args[2] }) end
+L.bwparkvisitor = function(ins, s) emit(s, { "g4_bw_park_visitor", ins.args[1], ins.args[2] }) end
 -- BLACK / WHITE MENUS AND ELEVATORS (Gen5ScriptLink 0xB2, 0x1CB..0x1CD, 0xA7)
 L.bwmenuopen = function(ins, s)
   emit(s, { "g4_menu_init", ins.args[5], ins.args[4], ins.args[3], s.bankFor and s.bankFor(s.member) or nil })

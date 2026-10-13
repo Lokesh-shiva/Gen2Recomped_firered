@@ -782,6 +782,42 @@ function F.build(x, save)
       report.railPlaced = (report.railPlaced or 0) + Events.placeOnRails(def, railTile(rail.data, def))
     end
   end
+  -- NIMBASA GYM'S ROLLER COASTER (zone 63; overlay 39 in Black). Its
+  -- platforms are islands, and the cars between them are the only way
+  -- across. Three tables in the gym's overlay, found by the first's bytes:
+  --   track of each dock  00 00 00 01 01 02 02 03 03  (nine docks)
+  --   +0x1C  per track, 4 bytes: the dock pair the track joins with its
+  --          switch at 0, then at 1 (0xFF: none) -- track 0 takes the
+  --          middle island to the entrance, or to the next island up
+  --   +0x4C  the nine docks, u16 x / u16 y tiles: (14,39) (22,39) (16,27)
+  --          (16,15) (41,40) (49,40) (34,8) (22,8) (5,39)
+  -- Stepping on a dock rides its track; 0x180 <n> (the four floor switches)
+  -- turns track n's switch over.
+  do
+    local key = string.char(0, 0, 0, 1, 1, 2, 2, 3, 3)
+    for o = 30, 60 do
+      local ok, b = pcall(function() return rom:overlay(o) end)
+      local at = ok and b and b:find(key, 1, true)
+      if at and #b >= at + 0x4C + 36 then
+        local base = at - 1
+        local function u16(p) return b:byte(p + 1) + b:byte(p + 2) * 256 end
+        local coaster = { docks = {}, track = {}, pairs = {} }
+        for d = 0, 8 do
+          coaster.track[d] = b:byte(base + d + 1)
+          coaster.docks[d] = { x = u16(base + 0x4C + d * 4), y = u16(base + 0x4E + d * 4) }
+        end
+        for t = 0, 3 do
+          local p = base + 0x1C + t * 4
+          coaster.pairs[t] = { [0] = { b:byte(p + 1), b:byte(p + 2) }, [1] = { b:byte(p + 3), b:byte(p + 4) } }
+        end
+        local sane = coaster.docks[0].x < 64 and coaster.docks[8].y < 64
+        for _, def in pairs(maps) do
+          if sane and def.header == 63 then def.gen5Coaster = coaster; report.coaster = "ov" .. o end
+        end
+        if sane then break end
+      end
+    end
+  end
   local linker = { }
   require("src.import.RomExtractorGen4").linkRegions(linker, maps)
   report.seams = linker.regionLinkReport

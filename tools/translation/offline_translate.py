@@ -33,7 +33,19 @@ def prepare_cuda(request):
             metadata = json.load(response)
         wheel = next(item for item in metadata["urls"] if item["filename"].endswith("win_amd64.whl"))
         archive = root / "cublas.whl"
-        fetch(wheel["url"], archive, message="Downloading NVIDIA GPU support")
+        # the package and the two libraries it holds are on disk together for
+        # a moment: ~435 MB + ~640 MB.  Said up front, not discovered as a
+        # truncated download -- a full C: drive left a 155 MB .part behind and
+        # GPU mode quietly fell back to the CPU every time.
+        needed = int(wheel.get("size") or 450_000_000) + 700_000_000
+        free = shutil.disk_usage(root).free
+        if free < needed:
+            raise OSError("not enough disk space for NVIDIA GPU support: needs %.1f GB free on %s, has %.1f GB"
+                          % (needed / 1e9, root.anchor or root, free / 1e9))
+        try:
+            fetch(wheel["url"], archive, message="Downloading NVIDIA GPU support")
+        finally:
+            archive.with_suffix(archive.suffix + ".part").unlink(missing_ok=True)
         digest = hashlib.sha256()
         with archive.open("rb") as file:
             for chunk in iter(lambda: file.read(1024 * 1024), b""):
@@ -41,16 +53,22 @@ def prepare_cuda(request):
         if digest.hexdigest() != wheel["digests"]["sha256"]:
             archive.unlink(missing_ok=True)
             raise ValueError("GPU library checksum mismatch")
-        with zipfile.ZipFile(archive) as package:
-            for name in names:
-                member = next(item for item in package.infolist() if item.filename.endswith("/" + name))
-                with package.open(member) as source, (root / (name + ".part")).open("wb") as output:
-                    shutil.copyfileobj(source, output)
-                (root / (name + ".part")).replace(root / name)
-            for member in package.infolist():
-                if Path(member.filename).name.upper().startswith("LICENSE"):
-                    (root / "NVIDIA-LICENSE.txt").write_bytes(package.read(member))
-        archive.unlink(missing_ok=True)
+        try:
+            with zipfile.ZipFile(archive) as package:
+                for name in names:
+                    member = next(item for item in package.infolist() if item.filename.endswith("/" + name))
+                    try:
+                        with package.open(member) as source, (root / (name + ".part")).open("wb") as output:
+                            shutil.copyfileobj(source, output)
+                    except BaseException:
+                        (root / (name + ".part")).unlink(missing_ok=True)
+                        raise
+                    (root / (name + ".part")).replace(root / name)
+                for member in package.infolist():
+                    if Path(member.filename).name.upper().startswith("LICENSE"):
+                        (root / "NVIDIA-LICENSE.txt").write_bytes(package.read(member))
+        finally:
+            archive.unlink(missing_ok=True)
     if all((root / name).is_file() for name in names):
         os.environ["PATH"] = str(root.resolve()) + os.pathsep + os.environ.get("PATH", "")
         CUDA_HANDLES.extend(ctypes.WinDLL(str((root / name).resolve())) for name in names)

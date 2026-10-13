@@ -13,12 +13,18 @@ import java.util.concurrent.TimeUnit;
 public final class OfflineTranslation {
     private static Translator client;
     private static String pair;
+    /** The game's codes are Argos'; ML Kit knows Norwegian as "no" and has one Portuguese. */
+    private static String mlkitTag(String code) {
+        if (code.equals("nb")) return "no";
+        if (code.equals("pb")) return "pt";
+        return code;
+    }
     public static synchronized byte[] translate(String source, String target, byte[] input) throws Exception {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
             throw new IllegalStateException("Translation must run on a worker thread");
         if (source.equals(target)) return input;
-        String from = TranslateLanguage.fromLanguageTag(source.equals("nb") ? "no" : source);
-        String to = TranslateLanguage.fromLanguageTag(target.equals("nb") ? "no" : target);
+        String from = TranslateLanguage.fromLanguageTag(mlkitTag(source));
+        String to = TranslateLanguage.fromLanguageTag(mlkitTag(target));
         if (from == null || to == null) throw new IllegalArgumentException("Unsupported translation language");
         String requested = from + ":" + to;
         if (!requested.equals(pair)) {

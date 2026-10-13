@@ -375,6 +375,8 @@ function X:extractConstants()
     local derived = require("src.import.Gen5ScriptOps").derive(self.rom, scriptArc)
     self._scriptBands = self._scriptBands or Link.findBands(self.rom)
     constants.gen4NewGame = derived and Link.newGame(scriptArc, derived.widths, self._scriptBands) or nil
+    -- 0x232's table: Nimbasa's park visitor, by season x 2 + badges
+    constants.gen5ParkVisitors = derived and require("src.import.Gen5ScriptOps").handlerTable(self.rom, derived, 0x232, 16) or nil
   end
   self:write("constants", constants)
   return constants

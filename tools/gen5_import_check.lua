@@ -399,10 +399,30 @@ if b then
     "Platinum's hidden paths leave Black and White's maps alone")
   local cas = b.maps and b.maps.Z028
   local ct = cas and cas.coordEvents and cas.coordEvents[1]
+  -- 1 step along x 8 tiles across line 4 -- the street's width -- which
+  -- on the map is the 7 x 3 box at (17, 36)
   check(ct and ct.rail and ct.rail.line == 4 and ct.rail.along == 24 and ct.rail.across == -5
-      and ct.width == 1 and ct.height == 8 and ct.x == 17 and ct.y == 36,
-    ("a trigger's rail shape (+8 = 1: line, along, across, width, height): Castelia's 1 x 8 strip on line 4, step 24, placed at (%s, %s)")
-      :format(tostring(ct and ct.x), tostring(ct and ct.y)))
+      and ct.x == 17 and ct.y == 36 and ct.width == 7 and ct.height == 3,
+    ("a trigger's rail shape (+8 = 1: line, along, across, 1 along x 8 across): Castelia's on line 4, step 24, placed at (%s, %s) %s x %s")
+      :format(tostring(ct and ct.x), tostring(ct and ct.y), tostring(ct and ct.width), tostring(ct and ct.height)))
+  -- a hybrid map: Z030's plaza grid grown to take its rails, its exits across
+  -- the streets' ends, and its Burgh trigger on the map
+  local z30 = b.maps and b.maps.Z030
+  local zt = z30 and z30.coordEvents and z30.coordEvents[1]
+  check(z30 and z30.height > 32 and zt and zt.rail and zt.x == 3 and zt.y == 20,
+    ("hybrid rail map: Z030 grown past its 32 x 32 chunk (%s tall), its trigger at (%s, %s)")
+      :format(tostring(z30 and z30.height), tostring(zt and zt.x), tostring(zt and zt.y)))
+  -- Nimbasa Gym's coaster: nine docks, track 0 joining the middle island
+  -- (dock 1, 22,39) to the entrance (dock 0) with its switch at 0
+  local co = b.maps and b.maps.Z063 and b.maps.Z063.gen5Coaster
+  local d1 = co and (co.docks[1] or co.docks['1'])
+  local p0 = co and (co.pairs[0] or co.pairs['0'])
+  local p00 = p0 and (p0[0] or p0['0'])
+  check(d1 and d1.x == 22 and d1.y == 39 and p00 and p00[1] == 1 and p00[2] == 0,
+    "Nimbasa Gym's coaster tables read from its overlay (dock 1 at (22, 39), track 0 joins docks 1 and 0)")
+  local pv = b.constants and b.constants.gen5ParkVisitors
+  check(pv and (pv[0] or pv['0']) == 15 and (pv[2] or pv['2']) == 64,
+    "0x232's park-visitor table read off its handler (15, 55, 64, ...)")
   -- rail-placed warps, and the NG chunk size per rail map
   local gate
   for _, w in ipairs(cas and cas.warps or {}) do if w.index == 10 then gate = w end end

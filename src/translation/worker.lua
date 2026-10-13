@@ -101,7 +101,9 @@ local ok,err=xpcall(function()
   for first=1,#texts,BATCH do
    local batch={}
    for i=first,math.min(#texts,first+BATCH-1)do batch[#batch+1]=texts[i]end
-   local reply=bridge({op="translate",source=job.source,target=job.target,texts=batch})
+   -- ML Kit has one Portuguese: Brazilian ("pb", Argos' code) runs as "pt"
+   local function mlkit(code)return code=="pb" and "pt" or code end
+   local reply=bridge({op="translate",source=mlkit(job.source),target=mlkit(job.target),texts=batch})
    assert(reply.ok,reply.err or "Offline translation failed. Check Wi-Fi and available storage for the model download.")
    for k,text in ipairs(reply.out)do translated[first+k-1]=text end
    emit({kind="progress",phase="translate",message="Translating game text",done=#translated,total=#texts,unit="segments"})

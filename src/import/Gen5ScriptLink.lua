@@ -302,6 +302,39 @@ L.ALIASES = {
   [0x1CB] = { "bwelevator", "d" }, [0x1CC] = { "bwelevatorfloors", "" },
   [0x1CD] = { "bwelevatorpick", "w" }, [0x0A7] = { "bwelevatorwarp", "" },
   [0x1AE] = { "noop", "" }, [0x1AD] = { "noop", "" }, [0x1B1] = { "noop", "" },
+  -- 0x155 <caller>: the Xtransceiver's caller picture, between 0x14B (the
+  -- call opens) and 0x14A (it closes) -- Route 4's call is caller 6
+  [0x155] = { "noop", "w" },
+  -- 0x13D / 0x13E: the bracket round a long arrival scene (Nimbasa's
+  -- Bianca and her father: 13D first, 13E just before the release) --
+  -- nothing in between reads what they set
+  [0x13D] = { "noop", "" }, [0x13E] = { "noop", "" },
+  -- 0x240 <item>: the item-gift script (common 0xAF5) runs it for a KEY
+  -- item only, before buffering the name -- Nimbasa's Bicycle (450). The
+  -- bag already holds the item; this is the cartridge's own bookkeeping
+  [0x240] = { "noop", "w" },
+  -- NIMBASA'S PARK VISITOR (Z064's map entry): 0x0D2 <var> the season
+  -- (0 spring .. 3 winter), 0x02B <var, value> var *= value, and 0x232
+  -- <index, dest> dest = a sixteen-sprite table (season x 2 + badges) --
+  -- the sprite var 0x4020 that object 162 draws as
+  [0x0D2] = { "bwseason", "w" }, [0x02B] = { "bwmulvar", "ww" },
+  [0x232] = { "bwparkvisitor", "ww" },
+  -- the park's chase (Z064's trigger): 0x078 <var> is asked first and a 1
+  -- answered with 0x075 1 -- read as "is the player on the bicycle", which
+  -- this port's scenes start off it, so 0 (setvar); 0x253 <a, b> a screen
+  -- effect, 0x154 <caller, ?> the Xtransceiver picture's other form, 0x254
+  -- <n> and 0x1D3 <three> / 0x1D4 a picture window round one line --
+  -- presentation only
+  [0x078] = { "setvar", "w" }, [0x253] = { "noop", "ww" }, [0x154] = { "noop", "ww" },
+  [0x254] = { "noop", "w" }, [0x1D3] = { "noop", "www" }, [0x1D4] = { "noop", "" },
+  -- NIMBASA GYM: 0x17F <a, b> records two trainer flags in the gym's save
+  -- block (its overlay only stores them); 0x180 <n> turns coaster track n's
+  -- switch over (Gen5Field's gen5Coaster, ridden from OverworldController)
+  [0x17F] = { "noop", "ww" }, [0x180] = { "bwcoasterswitch", "w" },
+  -- 0x022 <var>: byte +5 of a save sub-block (0x02012B38's) into var -- 4
+  -- sites; Nimbasa Gym's entry asks it and runs 0x260 only on a 1. Not
+  -- identified, so it reads as a fresh save's 0
+  [0x022] = { "setvar", "w" },
   -- THE SHARED TRAINER SCRIPT (band 3000, member 863, every trainer):
   --   0x084 <var>  the trainer's id (Platinum's gettrainerid)
   --   0x097 <trainer, dest>  beaten?   0x092 <trainer, dest>  healer / prize
@@ -741,10 +774,11 @@ function L.pool(arc, widths, zones, maps, bandRows)
           if not ins.name:match("^bw_") then named = named + 1 end
           if ins.name == "gotoif" and ins.args[1] == 0xFF then ins.name = "bw_01F" end
           if shared[m] and ins.name == "end" then ins.name = "return" end
-          if ins.op == 0x1CB and ins.operands and #ins.operands >= 4 and ins.at then
-            -- the elevator's floor table, in this file after the code
-            local o = ins.operands
-            local rel = o:byte(1) + o:byte(2) * 256 + o:byte(3) * 65536 + o:byte(4) * 16777216
+          if ins.op == 0x1CB and ins.args and ins.args[1] and ins.at then
+            -- the elevator's floor table, in this file after the code (the
+            -- named row keeps the u32 as its argument, not the operands)
+            local rel = ins.args[1]
+            if rel >= 2147483648 then rel = rel - 4294967296 end
             local t = (ins.at - 1) + 6 + rel
             local function h(p) return (d:byte(p + 1) or 0) + (d:byte(p + 2) or 0) * 256 end
             ins.floors = {}

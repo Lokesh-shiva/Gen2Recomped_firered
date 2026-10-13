@@ -1,6 +1,7 @@
 local L={
  {"original","Original ROM text"},{"en","English"},{"fr","French"},{"de","German"},
- {"es","Spanish"},{"it","Italian"},{"pt","Portuguese"},{"nl","Dutch"},
+ -- two Portugueses, by Argos' own codes: "pt" is European, "pb" Brazilian
+ {"es","Spanish"},{"it","Italian"},{"pt","Portuguese (Portugal)"},{"pb","Portuguese (Brazil)"},{"nl","Dutch"},
  {"pl","Polish"},{"cs","Czech"},{"da","Danish"},{"sv","Swedish"},
  {"fi","Finnish"},{"el","Greek"},{"ro","Romanian"},{"hu","Hungarian"},
  {"tr","Turkish"},{"nb","Norwegian"},{"bg","Bulgarian"},

@@ -612,6 +612,29 @@ local function resolveGraphicsVar(save, obj)
   -- VAR_OBJ_1 -- what Route 29's GetFriendSprite VAR_OBJ_1 fills for Lyra.
   -- (An earlier HGSS-only base of 100, read off SPRITE_VAR_0's #define, put
   -- every friend one var out.)
+  -- BLACK / WHITE'S RANGE IS ITS OWN: ids 162..177 (the sixteen the sprite
+  -- table points at member 0) read vars 0x4020..0x402F -- Nimbasa's park
+  -- visitor (162) is whatever 0x232 put in 0x4020 for the season. Platinum's
+  -- 101..117 are ordinary pictures there (110 is the item ball on 90-odd
+  -- maps), so they are left alone. The value is a BW sprite id, drawn with
+  -- the sheet any map's object of that id uses.
+  if obj and obj.gen5 then
+    if not id or id < 162 or id > 177 then return obj end
+    local slot = 0x4020 + (id - 162)
+    local want = tonumber(save and save.gen4Vars and save.gen4Vars[slot])
+    if not want or want == 0 then return obj end
+    for _, def in pairs(data and data.maps or {}) do
+      for _, o in ipairs(type(def) == "table" and def.objects or {}) do
+        if o.graphicsId == want and o.sprite then
+          local copy = {}
+          for k, v in pairs(obj) do copy[k] = v end
+          copy.graphicsId, copy.sprite, copy.spriteName, copy.noSprite = want, o.sprite, o.spriteName, nil
+          return copy
+        end
+      end
+    end
+    return obj
+  end
   local first = GFX_VAR_FIRST
   if not id or id < first or id > first + (GFX_VAR_LAST - GFX_VAR_FIRST) then return obj end
   local vars = save and save.gen4Vars
@@ -12501,6 +12524,31 @@ function OverworldState:onStepComplete()
   -- round Accumula's single chunk, so the map a step lands in is the one the
   -- matrix's zone table names for that chunk
   if not warpFirst and self.map.def and self.map.def.gen5 and self:gen5ChunkHandoff() then return end
+
+  -- NIMBASA GYM'S COASTER (Gen5Field's gen5Coaster): a step onto a dock
+  -- rides its track to the dock the track's switch joins it to -- the
+  -- player lands on that dock, and the arrival guard keeps it from riding
+  -- straight back
+  local coaster = not warpFirst and self.map.def and self.map.def.gen5Coaster
+  if coaster then
+    local arrived = self.gen5ArrivalMap == self.map.id and self.gen5ArrivalX == p.cellX
+                    and self.gen5ArrivalY == p.cellY
+    for d = 0, 8 do
+      local dock = coaster.docks[d] or coaster.docks[tostring(d)]
+      if dock and dock.x == p.cellX and dock.y == p.cellY and not arrived then
+        local t = coaster.track[d] or coaster.track[tostring(d)]
+        local sw = (Game.save and Game.save.bwCoaster or {})[tostring(t)] or 0
+        local tp = coaster.pairs[t] or coaster.pairs[tostring(t)]
+        local pair = tp and (tp[sw] or tp[tostring(sw)])
+        local other = pair and ((pair[1] == d and pair[2]) or (pair[2] == d and pair[1]))
+        local to = other and other ~= 0xFF and (coaster.docks[other] or coaster.docks[tostring(other)])
+        if to then
+          self:setMap(self.map.id, to.x, to.y, p.facing or "down")
+          return
+        end
+      end
+    end
+  end
 
   -- BLACK / WHITE'S RAIL MAPS (Castelia, Skyarrow): the walkable corridor is
   -- rasterised from the rail widths, so a door's warp cell (placed by rail

@@ -276,6 +276,45 @@ function Ops.derive(rom, scriptArchive)
            report = { clean = bestS, entries = total, secondBest = second } }
 end
 
+-- handlerTable(rom, derived, op, count) -> { u16 x count } or nil: the
+-- table a command's handler indexes through its first pc-relative literal.
+-- 0x232 <index, dest> is `dest = TABLE[index]` (`ldr r1, =table; lsls r2,
+-- r4, #1; ldrh r1, [r1, r2]`), and the table is the sixteen sprites of
+-- Nimbasa's park visitor by season and badges -- read from the handler so
+-- White's copy is found the same way as Black's.
+function Ops.handlerTable(rom, derived, op, count)
+  if not (derived and derived.table) then return nil end
+  local segs = segments(rom)
+  local tseg
+  for _, s in ipairs(segs) do if s.name == derived.table.segment then tseg = s end end
+  if not tseg then return nil end
+  local h = u32(tseg.b, derived.table.at + (op + derived.offset) * 4)
+  if not h or h == 0 then return nil end
+  local addr = h - 1
+  -- the handler's own segment: try the table's first, then any that holds it
+  local order = { tseg }
+  for _, s in ipairs(segs) do if s ~= tseg then order[#order + 1] = s end end
+  for _, s in ipairs(order) do
+    local a = addr - s.ram
+    if a >= 0 and a + 64 <= #s.b and math.floor(u16(s.b, a) / 256) == 0xB5 then
+      for i = 0, 30 do
+        local ins = u16(s.b, a + i * 2)
+        if math.floor(ins / 2048) == 0x09 then
+          local pc = addr + i * 2
+          local lit = (math.floor((pc + 4) / 4) * 4) + (ins % 256) * 4
+          local at = u32(s.b, lit - s.ram)
+          local off = at and at - s.ram
+          if not off or off < 0 or off + count * 2 > #s.b then return nil end
+          local out = {}
+          for k = 0, count - 1 do out[k] = u16(s.b, off + k * 2) end
+          return out
+        end
+      end
+    end
+  end
+  return nil
+end
+
 -- decode(data, at, widths) -> instructions, why it stopped
 function Ops.decode(data, at, widths)
   local out, pc = {}, at
