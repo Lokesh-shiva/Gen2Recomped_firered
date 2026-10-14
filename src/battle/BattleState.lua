@@ -171,7 +171,7 @@ function BattleState:isWideBattleLayout()
   -- Emerald's own healthboxes on the surface's own edges and Emerald's own
   -- bottom strip spanning it.  This function is the Game Boy layout's
   -- question and keeps the Game Boy layout's answer.
-  if GameVersion.isGen3() or GameVersion.isGen4() then return false end
+  if GameVersion.isGen3() or GameVersion.isGen4() or GameVersion.isGen5() then return false end
   local options = self.game and self.game.save and self.game.save.options
   return options and options.battleLayout == "wide" or false
 end
@@ -205,7 +205,9 @@ end
 -- No wide option here, unlike Hoenn: the DS screen IS the layout, and there is
 -- no narrower cartridge shape underneath it to widen.
 function BattleState:gen4Layout()
-  return GameVersion.isGen4() and true or false
+  -- Black and White ride the same two-screen battle: their pictures are
+  -- imported in its shape (src/import/Gen5BattleSprites.lua and on)
+  return (GameVersion.isGen4() or GameVersion.isGen5()) and true or false
 end
 
 -- BATTLE LAYOUT = WIDE, ANSWERED IN EMERALD'S OWN TERMS.
@@ -3605,10 +3607,17 @@ function BattleState:enter()
   -- a mod can vary it per save.  It loads through getImage like every other
   -- battle pic, so a replacement keeps the SGB recolor, the transition
   -- fade, the ground-padding measurement and battle_sprite_scales.
+  -- A DEMO FOUGHT BY A REAL PLAYER CHARACTER (Platinum's Dawn or Lucas,
+  -- HeartGold's Lyra or Ethan -- Gen4Commands' catching tutorials): their own
+  -- back pic, the player form of the demo save's gender, not Gen 1's old man.
+  -- Reported from play: "in the dawn catching tutorial ... its showing the
+  -- old man placeholder sprite rather than dawns sprite".
+  local counterpart = self.counterpartBack and true or false
   local backPath, backTrueColor =
     require("src.pokemon.Sprites").playerPath(self.data, "back",
-      { kind = "battle", demo = self.demo, oakDemo = self.oakDemo,
+      { kind = "battle", demo = self.demo and not counterpart, oakDemo = self.oakDemo,
         pokedudeDemo = self.pokedudeDemo ~= nil,
+        save = counterpart and self.game.save or nil,
         battle = self })
   local backPalette=namedPalette(self.data,"MEWMON")
   if not self.demo and not backTrueColor then
@@ -4127,7 +4136,7 @@ end
 -- battle's while it is up, and letting a miss fall through would work the d-pad
 -- underneath it.
 function BattleState:touchpressed(_, px, py)
-  if not GameVersion.isGen4() then return false end
+  if not (GameVersion.isGen4() or GameVersion.isGen5()) then return false end
   local over
   if self.phase == "menu" then over = "action"
   elseif self.phase == "moveSelect" then over = "moves"
@@ -4140,11 +4149,23 @@ function BattleState:touchpressed(_, px, py)
   -- the buttons are somewhere else: `menuPresentation` answers "bottom" only
   -- when the second screen is actually up and carrying them.
   local presentation, SecondScreen = Gen4B.menuPresentation(self, self.phase)
+  local kind, index
+  if presentation == "compact" then
+    -- THE STRIP UNDER THE BATTLE (single-screen play): the same buttons,
+    -- tapped where they are drawn, in the battle's own screen pixels
+    local r = require("src.render.Renderer").uiPresentation
+    if not r or px < r.x or py < r.y or px >= r.x + r.w or py >= r.y + r.h then return false end
+    kind, index = Gen4B.compactHit((px - r.x) / r.scaleX, (py - r.y) / r.scaleY, over)
+    if not kind then return false end
+  else
   if presentation ~= "bottom" or not SecondScreen then return false end
 
   local x, y = SecondScreen.toLocal(self.game, px, py)
   if not x then return false end
-  local kind, index = Gen4B.bottomHit(x, y, over)
+  local okG5, G5 = pcall(require, "src.battle.Gen5BattleHud")
+  if okG5 and G5.active(self) then kind, index = G5.bottomHit(x, y, over)
+  else kind, index = Gen4B.bottomHit(x, y, over) end
+  end
   local input = self.game and self.game.input
   if not input then return true end
   -- a tap hides the keypad cursor; the overlay press below must not be
@@ -10245,7 +10266,7 @@ function BattleState:bugContestBall()
   self.afterQueue = "menu"
   BugContest.useBall(save)
   self:say(self:romText("_ItemUseText001", "%s used\n%s!",
-                        save.player.name, Strings("PARK BALL")))
+                        save.player.name, Strings(self.contestBallName or "PARK BALL")))
   self:act(function()
     require("src.core.Sound").play(self.data, "Ball_Toss")
     self.lastBall = "PARK_BALL"

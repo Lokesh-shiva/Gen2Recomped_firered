@@ -1645,6 +1645,8 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
   -- After rebuildEntities, so the map's own cast is already there to be
   -- adopted when the map owns a real object for him.
   require("src.world.Gen4Follower").onMapEntered(Game, self)
+  -- HGSS's walking Pokemon (src/world/HgssFollowMon.lua)
+  require("src.world.HgssFollowMon").onMapEntered(Game, self)
 
   -- opts.keepMusic: the Oak-escort warp keeps MUSIC_MEET_PROF_OAK
   -- playing into the lab (BIT_NO_MAP_MUSIC in wStatusFlags7);
@@ -3296,6 +3298,14 @@ function OverworldState:update(dt)
   if self.map and self.map.def and self.map.def.header then
     require("src.world.Gen4SurfMount").tick(self)
   end
+  -- ...and HeartGold / SoulSilver's Bug-Catching Contest clock and endings
+  if Game.save and Game.save.g2BugContest and Game.save.g2BugContest.hgss then
+    local okB, errB = pcall(require("src.world.HgssBugContest").update, self, dt)
+    if not okB and not self.hgssContestWarned then
+      self.hgssContestWarned = true
+      Logger.warn("hgss bug contest: %s", tostring(errB))
+    end
+  end
   -- ...and Black/White's queued arrival script (op 0x021)
   if self.gen5QueuedEntry then
     local okQ, errQ = pcall(require("src.world.Gen5PostWarp").update, self)
@@ -3875,6 +3885,7 @@ function OverworldState:update(dt)
   end
   require("src.world.PikachuFollower").update(Game, self)
   require("src.world.Gen4Follower").update(Game, self)
+  require("src.world.HgssFollowMon").update(Game, self)
 
   for _, g in ipairs(self.ghosts) do
     -- the same reasoning as ghostCell: a ghost that names no neighbour is
@@ -6933,6 +6944,10 @@ function OverworldState:interact()
       -- after landing -- exactly when you turn round to face it (#407).
       -- talk() lands the follower on its cell first.
       require("src.world.PikachuFollower").talk(Game, self, npc)
+    elseif npc.hgssFollowMon then
+      -- HGSS's walking Pokemon: std 9700's face-the-player and its talk
+      -- rules, answered mid-step like the Pikachu above
+      if not npc.hidden then require("src.world.HgssFollowMon").talk(Game, self, npc) end
     elseif not npc.moving then
       self:talkTo(npc)
     end
@@ -12562,6 +12577,7 @@ function OverworldState:onStepComplete()
   self.todSteps = (self.todSteps or 0) + 1
   -- UpdatePikachuHappinessAndMood rides the step counter (poison.asm)
   require("src.world.PikachuFollower").onStep(Game.save)
+  require("src.world.HgssFollowMon").onStep(Game, self)
   -- Original Gen 2 friendship shares the egg step counter in stepEggs.
   -- Keep the existing walking rule for other datasets.
   if GameVersion.get()=="emerald" then
@@ -12923,6 +12939,23 @@ function OverworldState:onStepComplete()
   -- park rolls its OWN table (ContestMons) and ignores the map's wildmons
   -- entirely.  Guarded on the run being live, so visiting the park outside the
   -- contest still rolls the ordinary National Park slots.
+  -- HEARTGOLD / SOULSILVER'S CONTEST: the park's land tiles roll the
+  -- contest table while its clock runs (src/world/HgssBugContest)
+  do
+    local HBC = require("src.world.HgssBugContest")
+    if HBC.running(Game.save) and self.map.id == HBC.CONTEST_MAP then
+      local battle = HBC.encounter(self)
+      if battle then
+        battle.onFinish = function(result)
+          local s = HBC.state(Game.save)
+          if s then s.afterBattle = result end
+          self:afterBattle(result, battle)
+        end
+        self:pushBattle(battle)
+      end
+      return
+    end
+  end
   local BugContest = require("src.world.BugContest")
   if BugContest.active(Game.save)
      and self.map.id == BugContest.contestMap()

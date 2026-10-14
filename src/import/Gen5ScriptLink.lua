@@ -375,6 +375,31 @@ L.ALIASES = {
   [0x196] = { "bwdragoninit", "" }, [0x19A] = { "bwdragonflip", "ww" },
   [0x199] = { "bwdragonsettle", "w" }, [0x197] = { "noop", "ww" }, [0x198] = { "noop", "w" },
   [0x0D8] = { "bwcondition", "ww" },
+  -- 0x121 <var, 5>: how many of the party can battle (not an egg, not
+  -- fainted) -- the legendary's "able to battle" test in N's Castle (Z278,
+  -- M0556 S1A78: none able and the dragon only stares), beside 0x103's count
+  [0x121] = { "bwpartyable", "ww", { 1 } },
+  -- 0x245 <mode, var>: N's Castle's dragon joining the party (Z278, M0556
+  -- S187F): mode 0 answers whether the party has room, mode 1 adds the
+  -- version's dragon -- Reshiram on Black, Zekrom on White, level 50 -- and
+  -- a full party first sends one to the PC (S19BA)
+  [0x245] = { "bwlegend", "ww" },
+  -- THE SCRIPTED WILD BATTLES (17 of them -- N's Castle's dragon, the
+  -- legendaries): 0x178 <species, level, flags var> starts it, 0x17B <var>
+  -- answers 1 when the battle ended without a loss (caught, knocked out or
+  -- fled -- N's Castle reads the catch only then), 0x17C <var> whether it got
+  -- away uncaught (N's Castle sets 0x133 when it was caught and removes the
+  -- dragon), and 0x17A <n> closes the battle's field effect. 0x013 <var,
+  -- value> adds to a var -- the battle's flag word, 0x100 | 1 | 0x10.
+  [0x178] = { "startwildbattle", "www", { 1, 2 } },
+  [0x17B] = { "bwbattleok", "w" },
+  [0x17C] = { "checkdidnotcapture", "w" },
+  [0x17A] = { "noop", "w" },
+  [0x013] = { "addvar", "ww" },
+  -- 0x156 <kind>: THE GAME CLEAR. Kind 0 closes N's Castle (Z278, the last
+  -- row before 0x40B6 = 6): the ending plays and the game goes on in the
+  -- player's room; kind 1 is the Champion's room after Alder (Z145)
+  [0x156] = { "bwgameclear", "w" },
   -- Clay's lifts: 0x190 <lift> moves lift n to its other height (the panel
   -- script flips the lift's flag 0x0A + n after), carrying the player when
   -- standing on it (Gen5DriftveilGym); 0x191 <n> / 0x1B5 the arrival lift
