@@ -1534,8 +1534,14 @@ L.bwdexseen = function(ins, s) emit(s, { "g4_bw_dex_seen", ins.args[1], ins.args
 L.bwliftmove = function(ins, s) emit(s, { "g4_bw_lift_move", ins.args[1] }) end
 -- BLACK / WHITE 0x021: the script the next warp's destination runs
 L.bwqueueentry = function(ins, s) emit(s, { "g4_bw_queue_entry", ins.args[1] }) end
--- BLACK / WHITE 0x0D8: var = whether the value is a TM or HM's item id
-L.bwistmhm = function(ins, s) emit(s, { "g4_bw_is_tmhm", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE: Opelucid Gym's dragons (Gen5DragonGym)
+L.bwdragoninit = function(_, s) emit(s, { "g4_bw_dragon_init" }) end
+-- BLACK / WHITE 0x1A2: an Elite Four room's lift
+L.bwe4lift = function(ins, s) emit(s, { "g4_bw_e4_lift", ins.args[1] }) end
+L.bwdragonflip = function(ins, s) emit(s, { "g4_bw_dragon_flip", ins.args[1], ins.args[2] }) end
+L.bwdragonsettle = function(ins, s) emit(s, { "g4_bw_dragon_settle", ins.args[1] }) end
+-- BLACK / WHITE 0x0D8: var = whether condition n of the field's table holds
+L.bwcondition = function(ins, s) emit(s, { "g4_bw_condition", ins.args[1], ins.args[2] }) end
 -- BLACK / WHITE: Nimbasa Gym's coaster switch
 L.bwcoasterswitch = function(ins, s) emit(s, { "g4_bw_coaster_switch", ins.args[1] }) end
 -- BLACK / WHITE: the season, var *= value, and the park visitor's table

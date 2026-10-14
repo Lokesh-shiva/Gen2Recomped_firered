@@ -930,6 +930,17 @@ function Commands.g4_warp(ctx, header, x, z, direction)
   if def and def.gen5 and def.width and (wx >= def.width or wz >= def.height) then
     wx, wz = wx - (def.originX or 0), wz - (def.originY or 0)
   end
+  -- THE DISTORTION WORLD'S FLOORS are this port's maps cut out of the floor's
+  -- own grid at the floor's offset, and a script names the floor's tile:
+  -- Spear Pillar's "Warp MAP_HEADER_DISTORTION_WORLD_1F, 55, 40" is 1F's
+  -- (55, 40), the map's (34, 30). Taken as the map's own, the player
+  -- arrived in the air beside the island -- reported from play as "when
+  -- first entering the distorted world via the story it has you floating in
+  -- the middle of the air".
+  if def and def.gen4DistWorld then
+    local okF, m = pcall(function() return require("src.world.Gen4DistSurface").floorFor(def) end)
+    if okF and m then wx, wz = wx - (m.offsetX or 0), wz - (m.offsetZ or 0) end
+  end
   return Commands.warp(ctx, mapId, wx, wz, DIRECTION[valueOf(ctx, direction)])
 end
 
@@ -1071,12 +1082,49 @@ function Commands.g4_bw_queue_entry(ctx, n)
   end
 end
 
--- BLACK / WHITE 0x0D8 (0x2021288): TM01..HM06 are items 328..425, TM93..95
--- are 618..620
-function Commands.g4_bw_is_tmhm(ctx, value, var)
-  local v = math.floor(valueOf(ctx, value) or 0)
-  local yes = (v >= 328 and v <= 425) or (v >= 618 and v <= 620)
+-- BLACK / WHITE 0x0D8 <n, var>: var = whether condition n holds.  The ten
+-- rows of overlay 10's table at 0x2170FB0 (0x2159F04 finds a row by n,
+-- 0x2159F54 compares): event var 0x4031 + n against its own value
+Commands.BW_CONDITIONS = {
+  [0] = { 0x4031, 0x1220 }, { 0x4032, 0x0224 }, { 0x4033, 0x0206 }, { 0x4034, 0x1209 }, { 0x4035, 0x0316 },
+  { 0x4036, 0x1227 }, { 0x4037, 0x0830 }, { 0x4038, 0x0408 }, { 0x4039, 0x0120 }, { 0x403A, 0x1028 },
+}
+function Commands.g4_bw_condition(ctx, n, var)
+  local row = Commands.BW_CONDITIONS[math.floor(valueOf(ctx, n) or -1)]
+  local yes = row and getVar(ctx.save, row[1]) == row[2]
   setVar(ctx.save, tonumber(var), yes and 1 or 0)
+end
+
+-- BLACK / WHITE 0x1A2: an Elite Four room's lift. The platform carries the
+-- player up their own column, past the solid rows, to the first floor tile
+-- that has floor beyond it (the lone tile in the shaft, (15, 16), does not)
+function Commands.g4_bw_e4_lift(ctx, n)
+  local ow = ctx.overworld
+  local map = ow and ow.map
+  local p = ow and ow.player
+  if not (map and p) then return end
+  local x = p.cellX
+  local function open(cx, cy) return cy >= 0 and map:isWalkableCell(cx, cy) end
+  local y, seenSolid = p.cellY - 1, false
+  while y > 0 do
+    if not open(x, y) then seenSolid = true
+    elseif seenSolid and open(x, y - 1) then break end
+    y = y - 1
+  end
+  if y <= 0 then return end
+  return Commands.warp(ctx, map.id, x, y, "up")
+end
+
+-- OPELUCID GYM (Gen5DragonGym): 0x196, 0x19A <statue, side>, 0x199 <statue>
+function Commands.g4_bw_dragon_init(ctx)
+  require("src.world.Gen5DragonGym").apply(ctx.overworld, ctx.save)
+end
+function Commands.g4_bw_dragon_flip(ctx, statue, side)
+  require("src.world.Gen5DragonGym").flip(ctx.save, math.floor(valueOf(ctx, statue) or 0),
+                                          math.floor(valueOf(ctx, side) or 0))
+end
+function Commands.g4_bw_dragon_settle(ctx, statue)
+  require("src.world.Gen5DragonGym").settle(ctx.overworld, ctx.save, math.floor(valueOf(ctx, statue) or 0))
 end
 
 function Commands.g4_bw_lift_move(ctx, n)

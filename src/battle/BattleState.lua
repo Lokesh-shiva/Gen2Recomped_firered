@@ -4421,6 +4421,27 @@ function BattleState:update(dt)
       end
       self.menuIndex = row * 2 + col + 1
     end
+    -- B ON THE SECOND POKEMON'S MENU GOES BACK TO THE FIRST. Reported from
+    -- play: "when you select a move for the first pokemon, you cannot
+    -- reverse/rechange it by hitting the b button like you can in the rom".
+    -- Platinum's command screen for the right flank carries BACK (and B), and
+    -- it undoes the left flank's choice -- its target and any switch it had
+    -- reserved -- and asks for it again. Not when the left flank was never
+    -- asked (fainted, or locked into a move it cannot choose).
+    if input:wasPressed("b") and self:isDouble()
+       and self:choosingSlotNow() == BattleState.POS.PLAYER_RIGHT then
+      local left = self:battlerAt(BattleState.POS.PLAYER_LEFT)
+      local pend = self.pendingActions and self.pendingActions[BattleState.POS.PLAYER_LEFT]
+      if left and not left.ally and (left.mon and left.mon.hp or 0) > 0 and pend
+         and not self:menuLockedAction(left) then
+        self.pendingActions[BattleState.POS.PLAYER_LEFT] = nil
+        if self.chosenTargets then self.chosenTargets[BattleState.POS.PLAYER_LEFT] = nil end
+        self.choosingSlot = BattleState.POS.PLAYER_LEFT
+        self.menuIndex, self.moveIndex = 1, 1
+        pcall(function() require("src.core.Sound").play(self.game.data, "SEQ_SE_DP_DECIDE") end)
+        return
+      end
+    end
     if input:wasPressed("a") then
       local choice = self:menuActions()[self.menuIndex]
       -- BattleMenu_Pack `.contest` (core.asm:4990): `ld a, PARK_BALL /
@@ -8435,6 +8456,20 @@ function BattleState:fillEmptySlots()
           break
         end
       end
+      local promptSlot = isPlayer and not (self.ally and pos == BattleState.POS.PLAYER_RIGHT)
+                         and not (self.palace or self.arena)
+      if pick and promptSlot then
+        -- THE PLAYER CHOOSES WHO GOES IN. Reported from play: "On double
+        -- battles, when your pokemon faints, it auto-sends out the next one,
+        -- without asking you what one". The cartridge opens the party screen
+        -- for each of the player's fallen slots in turn (the forced
+        -- "choose a Pokemon" list, no cancel); the rest of the slots, and the
+        -- side check, wait until it is answered.
+        local rest = {}
+        for _, q in ipairs(pending) do if q > pos then rest[#rest + 1] = q end end
+        self:promptDoubleReplacement(pos, rest)
+        return
+      end
       if pick then
         local allySlot = isPlayer and self.ally and pos == BattleState.POS.PLAYER_RIGHT
         self:placeBattler(pos, makeBattler(self.data, pick, isPlayer,
@@ -8454,6 +8489,57 @@ function BattleState:fillEmptySlots()
   end
   -- ...and only once nobody can be sent out at all is the side beaten
   self:checkSideBeaten()
+end
+
+-- The party screen for one of the player's empty slots in a double battle;
+-- once a Pokemon is sent out the remaining slots (`rest`) are filled.
+-- Closed without a pick, it opens again, as the singles' ChooseNextMon does.
+function BattleState:promptDoubleReplacement(pos, rest)
+  local game = self.game
+  local done = false
+  local function onSwitch(mon)
+    if done or not mon then return end
+    if Party.isEgg(mon) then
+      self:say(self:romText("_EggNoWillText", "An EGG can't\nbattle!"))
+      return
+    end
+    if (mon.hp or 0) <= 0 then
+      self:say(self:romText("_NoWillText", "There's no will\nto fight!"))
+      return
+    end
+    for p = 0, 3 do
+      local b = self:battlerAt(p)
+      if b and b.mon == mon then
+        self:say(Strings("%s is already\nin battle!", b.name or ""))
+        return
+      end
+    end
+    done = true
+    self:placeBattler(pos, makeBattler(self.data, mon, true, game.save))
+    self:syncSides()
+    local who = self:battlerAt(pos)
+    self.nextInsert = 0
+    self:sayNext(self:sendOutText(who.name))
+    self:actNext(function()
+      require("src.core.Sound").playCry(self.data, who.mon.species)
+      HeldItems.onEntry(self, who)
+    end)
+    self:actNext(function() self:abilitySwitchIn(who) end)
+    self:actNext(function()
+      self.pendingReplacements = (#rest > 0) and rest or nil
+      self:fillEmptySlots()
+    end)
+  end
+  self:ui(function()
+    return self:buildScreen(Gen4Battle.partyScreenId(self) or "PartyMenu", {
+      battle = self,
+      forceSwitch = true,
+      onSwitch = onSwitch,
+    })
+  end)
+  self:act(function()
+    if not done then self:promptDoubleReplacement(pos, rest) end
+  end)
 end
 
 -- IS EITHER SIDE OUT OF POKEMON?  Latched, because the victory and defeat
