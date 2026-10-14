@@ -15,7 +15,8 @@ function A.catalogue(sdat,headers)
    if h.allowFly then out.outdoorSongs[h.dayMusic]=true;out.outdoorSongs[h.nightMusic]=true end
   end
  end
- out.special={bike=symbols.SEQ_BICYCLE,surf=symbols.SEQ_NAMINORI,evolution=symbols.SEQ_SHINKA,
+ out.special={bike=symbols.SEQ_BICYCLE,surf=symbols.SEQ_NAMINORI,evolution=symbols.SEQ_SHINKA or symbols.SEQ_GS_SHINKA,
+  evolved=symbols.SEQ_ME_SHINKAOME,
   title=symbols.SEQ_TITLE01,opening=symbols.SEQ_TITLE00,heal=symbols.SEQ_FANFA5}
  out.battle={wild=symbols.SEQ_BA_POKE,trainer=symbols.SEQ_BA_TRAIN,gym=symbols.SEQ_BA_GYM,
   champion=symbols.SEQ_BA_CHANP,final=symbols.SEQ_BA_CHANP,rival=symbols.SEQ_BA_RIVAL,

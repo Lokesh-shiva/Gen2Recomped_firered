@@ -1034,8 +1034,8 @@ local function makeBattler(data, mon, isPlayer, save)
     -- Silver have none at all, where this stays nil and the pic holds still.
     -- forMon rather than new: a shiny Gen 3 Pokemon animates from its own
     -- strip, and only the Pokemon can say whether it is one
-    picAnim = (not isPlayer)
-      and require("src.pokemon.PicAnim").forMon(data, mon) or nil,
+    picAnim = (not isPlayer or (data.pokemon[mon.species] or {}).gen5Animation)
+      and require("src.pokemon.PicAnim").forMon(data, mon,isPlayer and "back" or "front") or nil,
     -- Emerald's procedural front-pic animation -- the squash/hop/glow the
     -- sprite itself does when it appears.  Front pic only, same as above.
     monAnim = (not isPlayer)
@@ -4037,6 +4037,7 @@ function BattleState:battlerPic(battler)
   end
   local frame = anim and anim:frame() or 0
   if frame <= 0 then return still end
+  if anim.liveMultiCell then return anim:image() or still end
   local meta = imageMeta[battler.sprite]
   local record = anim.anim
   -- ...AND A SHINY ANIMATES IN ITS OWN COLOURS.  The still pic and the strip

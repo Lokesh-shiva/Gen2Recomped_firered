@@ -112,7 +112,8 @@ function love.load()
     -- menu, nothing is pressed or held, so the picture at TICKS is that menu
     local frozen = false
     Game.input = {
-      wasPressed  = function(_, k) return not frozen and pressA and k == "a" end,
+      -- PRESS_KEY=right: the scheduled press is that button rather than A
+      wasPressed  = function(_, k) return not frozen and ((pressA and k == (os.getenv("PRESS_KEY") or "a")) or (keyNow ~= nil and k == keyNow)) end,
       isDown      = function(_, k) return not frozen and held ~= nil and k == held end,
       wasReleased = function() return false end,
     }
@@ -375,6 +376,24 @@ function love.load()
       for i = 1, rosters do Game.save.hallOfFame[i] = {} end
       print(("[hof] %d roster(s)"):format(#Game.save.hallOfFame))
     end
+    -- SECOND_SCREEN=vertical (or any SecondScreen mode): both screens in shot
+    if os.getenv("SECOND_SCREEN") and Game.save then
+      Game.save.options = Game.save.options or {}
+      Game.save.options.secondScreenMode = os.getenv("SECOND_SCREEN")
+    end
+    -- BADGES=n: the first n of the dataset's badges won (a card / board test)
+    if os.getenv("BADGES") and Game.save then
+      Game.save.badges = Game.save.badges or {}
+      for i, entry in ipairs(require("src.inventory.Badges").list(Data) or {}) do
+        if i <= (tonumber(os.getenv("BADGES")) or 0) then Game.save.badges[entry.id] = true end
+      end
+    end
+    -- LEARN_MOVE=<move id>: the lead is offered a move (MoveLearnMenu)
+    if os.getenv("LEARN_MOVE") and Game.save and Game.save.party and Game.save.party[1] then
+      local okL, errL = pcall(require("src.ui.Screens").push, Game, "MoveLearnMenu",
+        Game.save.party[1], tonumber(os.getenv("LEARN_MOVE")), function() print("[learn] done") end)
+      print(("[learn] push -> %s"):format(okL and "ok" or tostring(errL)))
+    end
     if screenName then
       local Screens = require("src.ui.Screens")
       -- OPEN IT AT A NAMED PAGE.  A screen that only ever renders its first
@@ -383,6 +402,8 @@ function love.load()
       -- highlighted one MOVES.
       local opts = {}
       if os.getenv("POCKET") then opts.pocket = os.getenv("POCKET") end
+      -- the summary opens on the lead (PARTY=...)
+      if screenName == "SummaryMenu" and Game.save and Game.save.party then opts.mon = Game.save.party[1] end if screenName == "SummaryMenu" and os.getenv("LEARN_CHOOSE") then opts.choose = { move = tonumber(os.getenv("LEARN_CHOOSE")), onChoose = function(i) print("[learn] chose " .. tostring(i)) end } end
       -- ANY SCREEN, NOT ONLY A REGISTERED ONE.  The starter selection,
       -- the intro and the title are pushed by script rather than named
       -- in `Screens`, so a harness that can only reach the registry
@@ -492,6 +513,9 @@ function love.load()
           print(("[battle menu shot] frozen at the command menu, tick %d"):format(i))
         end
       end
+      -- PRESS_KEYS="5:right,9:a": one button on each named tick
+      keyNow = nil
+      for t, k in (os.getenv("PRESS_KEYS") or ""):gmatch("(%d+):(%a+)") do if tonumber(t) == i then keyNow = k end end
       pressA = pressEvery > 0 and (i % pressEvery == 0) and i <= (tonumber(os.getenv("PRESS_UNTIL") or "") or math.huge)
       -- STRENGTH=1: Strength active (as the boulder's field-move script leaves it)
       if os.getenv("STRENGTH") and OW and i == 1 then OW.strengthActive = true end

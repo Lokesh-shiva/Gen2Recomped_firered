@@ -57,7 +57,19 @@ M.ALIAS = {
   -- the item icons (NARC_itemtool_itemdata_item_icon, 797 members); the
   -- ARM9 item -> icon table is found and verified exactly as on Platinum
   ["/itemtool/itemdata/item_icon.narc"] = { path = "/a/0/1/8" },
+  -- THE SCREENS THAT MAP (scratch_claude/hgss_ui_screens_map.md, member by
+  -- member against both ROMs): the naming screen's namein (/a/0/3/1, the same
+  -- 19 members, four of them HGSS's own art), the mart's top screen
+  -- (/a/0/6/0, members 0-10), and the bag archive's tap ripple (34-37 -> 27-30)
+  ["/data/namein.narc"] = { path = "/a/0/3/1" },
+  ["/graphic/shop_gra.narc"] = { path = "/a/0/6/0" },
+  ["/graphic/pl_bag_gra.narc"] = { path = "/a/0/1/5",
+    member = function(p) return (p >= 34 and p <= 37) and p - 7 or p end },
 }
+
+-- the party menu's blanked HP bar on an egg: FillBgTilemapRect(..., 0x4B, ...)
+-- (party_menu.c 1129-1131) where Platinum fills 0x17
+M.EGG_TILE = 0x4B
 
 M.MOVE_BUTTON_OVERLAY = 6
 
@@ -172,11 +184,26 @@ function M.extract(x)
   end
   x.extractWindowFrames = function(self) return self._winFrames end
 
+  local Party = require("src.import.Gen4PartyArt")
+  local eggTile = Party.EGG_TILE
+  Party.EGG_TILE = M.EGG_TILE
   local ok, err = pcall(function()
     x:extractGraphics()
     x:moveButtons()
     x:battleArt()
+    -- the screens that are Platinum's under other numbers
+    x:extractNaming()
+    x:partyArt()
+    local shop = require("src.import.Gen4ShopArt").images(x.rom)
+    if shop then
+      local index = {}
+      for key, image in pairs(shop) do
+        index[key] = x:saveImage("shop_art/" .. key, image, { originX = image.originX, originY = image.originY })
+      end
+      x:write("gen4_shop_art", index)
+    end
   end)
+  Party.EGG_TILE = eggTile
 
   x.rom, x._archives = saved.rom, saved.archives
   Screens.planAll, UiRes.images = saved.plan, saved.ui

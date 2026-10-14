@@ -4360,6 +4360,14 @@ function RomExtractorGen4:extractSpeciesSprites()
   end
   local heights = self:archive("pokeHeight")
   local total = Gen4Pokegra.speciesCount(arc)
+  -- EACH SPECIES' OWN FRAME SCRIPT (src/import/Gen4PokeAnimScript.lua):
+  -- Platinum's pl_poke_data.narc, HGSS's /a/1/8/0 (PATH.pokeAnim)
+  local animData
+  do
+    local arcA = self:archiveAt(PATH.pokeAnim or "/poketool/poke_edit/pl_poke_data.narc")
+    animData = arcA and arcA:get(0)
+  end
+  local AnimScript = require("src.import.Gen4PokeAnimScript")
 
   local written, fellBack, femaleSheets, animated = 0, 0, 0, 0
 
@@ -4403,13 +4411,21 @@ function RomExtractorGen4:extractSpeciesSprites()
           local entry = strip and self:saveImage(
             ("battle/anim/%s"):format(slug), strip, { species = species })
           if entry and def then
+            local script = animData and AnimScript.parse(animData, species)
+            local own = script and AnimScript.play(script.faces[1])
             def.picAnim = {
               sheet = entry.path,
               count = Gen4Pokegra.FRAMES,
               width = floor(entry.width / Gen4Pokegra.FRAMES),
               height = entry.height,
-              play = GEN4_PIC_ANIM_PLAY,
-              source = ("ROM:pl_pokegra.narc[%d]"):format(species * 6 + slot),
+              play = own or GEN4_PIC_ANIM_PLAY,
+              -- the script's own start delay and motion program (the latter
+              -- not yet played: the motion VM is not ported)
+              startDelay = script and script.faces[1].startDelay or nil,
+              motion = script and script.faces[1].animation or nil,
+              cryDelay = script and script.faces[1].cryDelay or nil,
+              source = ("ROM:pl_pokegra.narc[%d]%s"):format(species * 6 + slot,
+                own and " + species frame script" or ""),
             }
             local shinyStrip = Gen4Pokegra.strip(sheet, shiny)
             local shinyEntry = shinyStrip and self:saveImage(
@@ -5705,6 +5721,7 @@ function RomExtractorGen4:extractTerrain(names)
     self:areaLights(out.maps)
     -- the Headbutt tutor and the Frontier's three (Gen4MoveTutor.HGSS)
     self:moveTutor()
+    self:poketchEvolutionArt()
     self:write("gen4_terrain", out)
     self.terrainReport = { chunks = packed, refused = refused, sets = setsBuilt,
       pairedShapes = pairedShapes, undecoded = undecoded, maps = attributed,
@@ -6024,17 +6041,36 @@ function RomExtractorGen4:poketchEvolutionArt()
     end
     return index
   end
+  local hgss=require("src.import.Gen4Versions").isHgss(self.version)
   local P = require("src.import.Gen4PoketchArt")
-  local poketch = P.images(self.rom)
+  local poketch = not hgss and P.images(self.rom)
   if poketch then
     self:write("gen4_poketch_art", save("poketch_art", poketch))
     self:write("gen4_poketch_ink", P.data(self.rom))
   end
   local E = require("src.import.Gen4EvolutionArt")
-  local evolution = E.images(self.rom)
+  local config=hgss and E.HGSS or nil
+  local evolution = E.images(self.rom,config)
   if evolution then
     self:write("gen4_evolution_art", save("evolution_art", evolution))
-    self:write("gen4_evolution_ink", E.data(self.rom))
+    self:write("gen4_evolution_ink", E.data(self.rom,config))
+  end
+  if hgss then
+    local O=require("src.import.Gen4HgssOptionsArt")
+    local options=O.images(self.rom)
+    if options then
+      self:write("gen4_options_art",save("options",options))
+      self:write("gen4_menus",{options=O.words(function(bank,index)return self:string(bank,index)end)})
+    end
+    local raw=self.rom:read("/data/sound/gs_sound_data.sdat")
+    local sdat=raw and require("src.import.Gen4Sdat").open(raw)
+    if sdat then
+      local audio=require("src.import.Gen4Audio").catalogue(sdat,self._mapHeaders)
+      audio.ndsArchive=self:saveBinary("sound/gs_sound_data.sdat",raw)
+      audio.source="ROM:HGSS /data/sound/gs_sound_data.sdat"
+      self:write("audio",audio)
+    end
+    return
   end
   local SM = require("src.import.Gen4StartMenuArt")
   local startMenu = SM.images(self.rom)
@@ -6931,6 +6967,66 @@ RomExtractorGen4.STAGE_CHAIN = {
     local rec = require("src.import.Gen4HgssFollowMon").build(self)
     self:write("gen4_follow_mon", rec)
     self.followMonReport = rec.counts
+  end,
+  -- HGSS's own screens' art: the trainer card (/a/0/4/9, the screens the
+  -- other way round -- src/import/Gen4HgssTrainerCardArt.lua), written as
+  -- `gen4_trainer_card_art` with `hgss = true` so the screen knows the layout
+  hgss_screens = function(self)
+    self:beginStage("hgss_screens")
+    if not self.rom then return end
+    local H = require("src.import.Gen4HgssTrainerCardArt")
+    local card = H.images(self.rom)
+    if card then
+      local index = {}
+      for key, image in pairs(card) do
+        index[key] = self:saveImage("trainer_card_art/" .. key, image, { originX = image.originX, originY = image.originY })
+      end
+      index.hgss, index.ink = true, H.ink(self.rom)
+      self:write("gen4_trainer_card_art", index)
+    end
+    -- ...and the field menu's touch panel (src/import/Gen4HgssMenuArt.lua)
+    local M = require("src.import.Gen4HgssMenuArt")
+    local menu = M.images(self.rom)
+    if menu then
+      local idx = {}
+      for key, image in pairs(menu) do
+        idx[key] = self:saveImage("hgss_menu/" .. key, image, { originX = image.originX, originY = image.originY })
+      end
+      idx.ink = M.ink(self.rom)
+      self:write("gen4_hgss_menu_art", idx)
+    end
+    -- ...and the bag (src/import/Gen4HgssBagArt.lua), its 3D bag included
+    local B = require("src.import.Gen4HgssBagArt")
+    local bag = B.images(self.rom)
+    if bag then
+      local idx = {}
+      for key, image in pairs(bag) do
+        idx[key] = self:saveImage("hgss_bag/" .. key, image, { originX = image.originX, originY = image.originY })
+      end
+      idx.models = B.models(self.rom, function(rel, image) return self:saveImage(rel, image) end)
+      self:write("gen4_hgss_bag_art", idx)
+    end
+    -- ...and the summary (src/import/Gen4HgssSummaryArt.lua)
+    local summary = require("src.import.Gen4HgssSummaryArt").images(self.rom)
+    if summary then
+      local idx = {}
+      for key, image in pairs(summary) do
+        idx[key] = self:saveImage("hgss_summary/" .. key, image, { originX = image.originX, originY = image.originY })
+      end
+      self:write("gen4_hgss_summary_art", idx)
+    end
+    -- ...and the screens whose importers follow the `build(x) -> index`
+    -- shape (each optional until its module exists): the Pokedex, the PC
+    for _, entry in ipairs({ { "src.import.Gen4HgssDexArt", "gen4_hgss_dex_art" },
+                             { "src.import.Gen4HgssBoxArt", "gen4_hgss_box_art" },
+                             { "src.import.Gen4HgssPokegearArt", "gen4_hgss_pokegear_art" } }) do
+      local okM, M = pcall(require, entry[1])
+      if okM and type(M) == "table" and M.build then
+        local okB, built = pcall(M.build, self)
+        if okB and built then self:write(entry[2], built)
+        elseif not okB then print(("%s failed: %s"):format(entry[1], tostring(built))) end
+      end
+    end
   end,
   trainer_sprites = function(self) self:extractTrainerSprites() end,
   heights = function(self) self:extractHeights() end,

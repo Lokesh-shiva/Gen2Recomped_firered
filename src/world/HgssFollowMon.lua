@@ -369,7 +369,7 @@ end
 local function context(game, ow, npc, mon)
   local data = game.data
   local def = data.pokemon and data.pokemon[tonumber(mon.species)] or {}
-  local hp, max = tonumber(mon.hp) or 0, math.max(1, tonumber(mon.maxHp) or 1)
+  local hp, max = tonumber(mon.hp) or 0, math.max(1, tonumber(mon.stats and mon.stats.hp) or tonumber(mon.maxHp) or 1)
   local c = {}
   c.hp = hp >= max and 1 or (hp * 4 >= max * 3 and 2) or (hp * 2 >= max and 3) or (hp * 4 >= max and 4) or 5
   c.status = STATUS_CODE[mon.status] or 1

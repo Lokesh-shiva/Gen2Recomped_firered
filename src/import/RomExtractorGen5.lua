@@ -462,6 +462,52 @@ function X:extractFont()
   local def = { pages = { message = page }, charmap = F.charmap(font, 1), frame = "drawn",
                 source = ("ROM:%s /a/0/2/3[0] NFTR (%d glyphs, %dx%d)")
                   :format(tostring(self.version), font.numGlyphs, font.pixelWidth, font.pixelHeight) }
+  -- THE OTHER TWO FACES: /a/0/2/3 member 2 (11 x 13), what the battle prints
+  -- names in -- the "system" face Gen4Battle's boxes ask for -- and member 1
+  -- (10 x 10), the small one
+  def.faces = {}
+  for _, f in ipairs({ { 2, "system" }, { 1, "small" } }) do
+    local face = arc and F.parse(arc:get(f[1]))
+    local fsheet = face and F.sheet(face, { columns = 32 })
+    local fentry = fsheet and self:saveImage("font/font_" .. f[2] .. "_sheet", fsheet,
+      { glyphs = face.numGlyphs, glyphWidth = face.pixelWidth, glyphHeight = face.pixelHeight, columns = 32 })
+    if fentry then
+      local w = {}
+      for i = 0, face.numGlyphs - 1 do w[i + 1] = face.widths[i] end
+      def.faces[f[2]] = { image = fentry.path, base = 1, glyphsPerRow = 32,
+                          glyphWidth = face.pixelWidth, glyphHeight = face.pixelHeight,
+                          advance = face.maxWidth, widths = w, preTinted = true }
+    end
+  end
+  -- THE MESSAGE WINDOW: /a/0/0/5 tileset 10 is BW's 6 x 3 message-box frame,
+  -- eighteen tiles in the same row-major arrangement Platinum's DrawMessageBox
+  -- Frame reads (so Font's "gen4" layout draws it), once per palette 0-4 --
+  -- the light ones for the field, the dark ones the battle uses
+  do
+    local G = require("src.import.Gen4Graphics")
+    local fb = self.rom:read("/a/0/0/5")
+    local farc = fb and Narc.parse(fb)
+    local tiles = farc and G.tiles(farc:get(10))
+    if tiles then
+      local rows, count = {}, 0
+      for _, p in ipairs({ 3, 0, 1, 2, 4 }) do  -- white first: the field's
+        local pal = G.palette(farc:get(p))
+        if pal then
+          local cells = {}
+          for t = 0, 17 do cells[t + 1] = { tile = t, palette = 0 } end
+          local strip = G.compose({ width = 144, height = 8, cells = cells }, tiles, pal)
+          if strip then rows[#rows + 1] = strip.rgba; count = count + 1 end
+        end
+      end
+      local framed = count > 0 and self:saveImage("windows/dialogue",
+        { width = 144, height = 8 * count, rgba = table.concat(rows) })
+      if framed then
+        def.dialogueFrame = { image = framed.path, tiles = 18, count = count, layout = "gen4",
+                              fill = { 1, 1, 1 }, battleFrame = 5,
+                              source = "ROM:/a/0/0/5 tileset 10, palettes 3, 0, 1, 2, 4 (the battle's is 4)" }
+      end
+    end
+  end
   self:write("font", def)
   return def
 end
@@ -505,12 +551,58 @@ end
 function X:extractBattleSprites()
   self:beginStage("species_sprites")
   local index = require("src.import.Gen5BattleSprites").build(self)
+  -- the party icons ride in the same record, as Platinum's do (Gen5Icons)
+  index.icons = require("src.import.Gen5Icons").build(self)
   self:write("gen4_species_sprites", index)
   if self._pokemon then self:write("pokemon", self._pokemon) end
   self.battleSpriteReport = index.counts
   -- ...and the battle's own interface (src/import/Gen5BattleUi.lua)
   local ui = require("src.import.Gen5BattleUi").build(self)
   if ui then self:write("gen5_battle_ui", ui) end
+  -- ...and its 3D backdrops and platforms (src/import/Gen5BattleScene.lua)
+  local scene = require("src.import.Gen5BattleScene").build(self)
+  if scene then self:write("gen5_battle_scene", scene) end
+  -- ...and the evolution scene's (src/import/Gen5EvolutionArt.lua)
+  local evo = require("src.import.Gen5EvolutionArt").build(self)
+  if evo then self:write("gen5_evolution", evo) end
+  -- ...and the party screen's plates and backdrop, in Platinum's shape
+  -- (src/import/Gen5PartyArt.lua): the backdrop goes where Gen4PartyMenu
+  -- looks for it, `gen4_graphics.screens["party/menu"]`
+  local party = require("src.import.Gen5PartyArt").build(self)
+  if party then
+    local back = party.background
+    party.background = nil
+    self:write("gen4_party_art", party)
+    -- the party backdrop and the item icons (src/import/Gen5ItemIcons.lua)
+    local screens = require("src.import.Gen5ItemIcons").build(self) or {}
+    if back then screens["party/menu"] = back end
+    -- ...and the type and category badges (src/import/Gen5TypeIcons.lua)
+    local types = require("src.import.Gen5TypeIcons").build(self) or {}
+    self:write("gen4_graphics", { screens = screens, battleObjects = types })
+  end
+  -- ...and the trainer card (src/import/Gen5TrainerCardArt.lua), `bw = true`
+  local card = require("src.import.Gen5TrainerCardArt").build(self)
+  if card then self:write("gen4_trainer_card_art", card) end
+  -- ...and the field menu (src/import/Gen5MenuArt.lua)
+  local menu = require("src.import.Gen5MenuArt").build(self)
+  if menu then self:write("gen5_menu_art", menu) end
+  -- ...and the bag (src/import/Gen5BagArt.lua)
+  local bag = require("src.import.Gen5BagArt").build(self)
+  if bag then self:write("gen5_bag_art", bag) end
+  -- ...and the summary (src/import/Gen5SummaryArt.lua)
+  local summary = require("src.import.Gen5SummaryArt").build(self)
+  if summary then self:write("gen5_summary_art", summary) end
+  -- ...and the screens whose importers follow the same `build(x)` shape
+  -- (each optional until its module exists): the Pokedex, the PC
+  for _, entry in ipairs({ { "src.import.Gen5DexArt", "gen5_dex_art" },
+                           { "src.import.Gen5BoxArt", "gen5_box_art" } }) do
+    local okM, M = pcall(require, entry[1])
+    if okM and type(M) == "table" and M.build then
+      local okB, built = pcall(M.build, self)
+      if okB and built then self:write(entry[2], built)
+      elseif not okB then print(("%s failed: %s"):format(entry[1], tostring(built))) end
+    end
+  end
 end
 
 function X:run()
