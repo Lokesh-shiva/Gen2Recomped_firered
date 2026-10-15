@@ -1,5 +1,48 @@
 # HeartGold, SoulSilver, Black and White: import status
 
+## HGSS field/service repair pass: October 14, 2026
+
+- `ReleaseAll` now unpauses the walking Pokémon, including Elm's starter
+  scene. Map entry clears the old object's transient pause/recall state.
+- HGSS's `MartBuy`, `SpecialMartBuy`, `PartyHasPokerus`, `PokeCenAnim`,
+  `GetTrcardStars`, and storage command 158 reach their shared runtime handlers.
+  Common mart stock is read from HGSS ARM9. Its purchase list opens directly
+  after the ROM's BUY choice; its messages use HGSS bank 435 with its own
+  entry mapping. PC interaction selects common script 2010 (not Platinum's
+  2018). Fresh-party Pokerus checks write zero instead of reusing a stale var.
+- Ethan/Lyra battle back pictures are extracted from `/a/0/0/6`, DP-order
+  decrypted, and assigned to the player forms. Trainer fronts carry trueColor.
+- The overworld lower panel uses HGSS's idle touch art rather than Platinum's
+  Poketch. L opens the HGSS menu on one-screen layouts too.
+- Starter choice renders the Pokémon preview and 3D turntable on their own
+  panels. Single-screen mode shows the preview when inspecting a starter;
+  L/SELECT switches views, and A/B still confirm/cancel. Both panels accept
+  controls without a physical second display.
+- Pokegear now opens with extracted backgrounds for all six skins, contact
+  names from the ROM's phone-bank table, and map/radio card gates. L/SELECT
+  switches its panels on one screen. **This is a basic page viewer, not full
+  Pokegear parity**: phone-call scripts, radio programs, map scrolling and
+  live markers still need their native controllers.
+- HGSS move resources now import: 496/501 programs decode through the shared
+  interpreter, plus the native particles and cell sprites. Programs 192, 224,
+  226, 231 and 276 use HGSS-only opcodes 85–87 and retain generic effects;
+  their handlers are not implemented yet.
+
+Native screenshot checks: walking Chikorita in the bedroom; two-panel starter
+preview/turntable; six-skin Pokegear resource composition; trainer backs;
+HGSS BUY interaction (SoulSilver UI ROM with the existing shared HGSS field
+fixture). An injured Chikorita healed from 8/34 to 34/34 in the nurse harness.
+The screenshot harness needs native LOVE outside the sandbox on this host.
+Validation: HGSS import/services 92/92; BW import 97/97; Platinum nurse-script
+traversal 152 reachable instructions with its existing contest-text exception.
+
+**Still outstanding from the current request:** full HGSS and BW Game Freak
+boot/movies, native title/main menus and professor introductions; complete
+Pokegear controllers; HGSS-specific shop touch layout; the five extra HGSS
+animation programs; BW trainer/player art and move effects. These have not
+been completed or claimed as ROM parity. New import resources require a
+re-import; the HGSS cache marker now invalidates older imports.
+
 ## Continuation: October 14, 2026
 
 Reviewed the previous research in `G:/Gen2Recomped/scratch_claude/`:

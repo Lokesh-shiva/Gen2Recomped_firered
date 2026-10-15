@@ -1283,6 +1283,11 @@ function Gen4Ground:setHealingBalls(count, visible)
     local path = '/fielddata/build_model/build_model.narc'
     local machine = A.find(path, 'pokecenter_healing_machine.nsbmd')
     local ball = A.find(path, 'pokecenter_healing_machine_mini_pokeball.nsbmd')
+    if self.def.cameraFamily == 'hgss' then
+      -- PokecenterAnimCreate/Run (HGSS overlay 2): prop 0x24 is the
+      -- machine, 0x6b is each ball, both from the indoor building set.
+      machine, ball = 0x24, 0x6b
+    end
     if machine and ball then
       for _, land in ipairs(self.grid.land or {}) do
         local record = self.terrain.chunks[land]
@@ -1290,8 +1295,10 @@ function Gen4Ground:setHealingBalls(count, visible)
           if object.model == machine then
             local props = {}
             for i = 1, math.min(6, count) do
-              props[i] = { model = ball, x = (object.x or 0) + ((i-1)%2 == 0 and -4.5 or 4.5),
-                y = (object.y or 0) + 12, z = (object.z or 0) + (math.floor((i-1)/2)-1)*4.5,
+              local dx = ((i-1)%2 == 0 and -4.5 or 4.5)
+              local dz = (math.floor((i-1)/2)-1)*4.5
+              props[i] = { model = ball, x = (object.x or 0) + dx,
+                y = (object.y or 0) + 12, z = (object.z or 0) + dz,
                 scaleX = 1, scaleY = 1, scaleZ = 1 }
             end
             self.healingProps = { [land] = props }

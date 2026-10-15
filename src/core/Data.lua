@@ -166,7 +166,7 @@ local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         "gen4_naming", "gen4_dex", "gen4_models",
                         "gen4_terrain", "gen4_distortion_world",
                         "gen4_weather_sys", "gen4_mail_gra", "gen4_voltorb_flip", "gen4_follow_mon", "gen5_battle_ui", "gen5_battle_scene", "gen5_evolution", "gen4_hgss_menu_art", "gen4_hgss_bag_art", "gen4_hgss_summary_art", "gen5_menu_art", "gen5_bag_art", "gen5_summary_art", "gen4_hgss_dex_art", "gen4_hgss_box_art", "gen5_dex_art", "gen5_box_art", "gen4_hgss_pokegear_art",
-                        "gen4_species_sprites",
+                        "gen4_species_sprites", "gen4_hgss_starter_art", "gen4_hgss_oak_art",
                         "gen4_move_anims", "gen4_particles",
                         "gen4_cellactors",
                         -- the name -> archive member hop for `var_0`..`var_f`;

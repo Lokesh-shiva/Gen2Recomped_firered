@@ -269,7 +269,13 @@ end
 -- the one that records the state the later rows read rather than an empty
 -- function that pretends there is nothing to say.
 function Commands.g4_lock_all(ctx) ctx.g4Locked = true end
-function Commands.g4_release_all(ctx) ctx.g4Locked = false end
+function Commands.g4_release_all(ctx)
+  ctx.g4Locked = false
+  -- ReleaseAll unpauses every map object, including the walking partner.
+  -- Elm's starter scene pauses it before switching back to normal following.
+  local st = ctx.save and ctx.save.hgssFollowMon
+  if st then st.paused = nil end
+end
 function Commands.g4_lock(ctx, _) ctx.g4Locked = true end
 function Commands.g4_release(ctx, _) ctx.g4Locked = false end
 

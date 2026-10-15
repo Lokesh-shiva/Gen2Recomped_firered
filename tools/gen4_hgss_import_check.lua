@@ -54,6 +54,15 @@ local h = extract(hg, 'heartgold')
 check(h ~= nil, 'HeartGold: the core stages run')
 if h then
   local mons = h.pokemon or {}
+  check(h.gen4_move_anims and h.gen4_move_anims.count == 501 and h.gen4_move_anims.skipped == 5,
+    '496 HGSS animation programs decode; five using HGSS-only opcodes remain unsupported')
+  check(h.gen4_particles and h.gen4_particles.textures > 0, 'HGSS move particles extracted')
+  check(h.constants.martCommon and #h.constants.martCommon == 19, 'HGSS badge-tier mart stock extracted')
+  check(h.gen4_trainer_sprites.backs[0] and h.gen4_trainer_sprites.backs[1], 'Ethan and Lyra back sprites extracted')
+  check(h.gen4_hgss_pokegear_art and h.gen4_hgss_pokegear_art.map_top_0,
+    'Pokegear skin backgrounds extracted')
+  check(h.gen4_hgss_starter_art and h.gen4_hgss_starter_art.preview,
+    'starter preview backgrounds extracted')
   check(mons[1] and mons[1].name == 'BULBASAUR' and mons[152] and mons[152].name == 'CHIKORITA'
     and mons[493] and mons[493].name == 'ARCEUS', 'species 1, 152 and 493 by name (bank 237)')
   local chik = mons[152] or {}
@@ -752,6 +761,95 @@ do
         and VM.lowered('scrcmd_452') and VM.lowered('resamplevermiliongymcans'),
     ('Vermilion cans: answers %s/%s, then %s/%s, then %s; switch pairs neighbours %s')
       :format(a1, a0, b2, b3, c4, tostring(neighbourOk)))
+end
+
+do
+  local V=require('src.core.GameVersion');local previous=V.get();V.set('soulsilver')
+  local Alias=require('src.import.Gen4HgssScriptAliases')
+  local VM=require('src.script.Gen4ScriptVM')
+  local G4=require('src.script.Gen4Commands')
+  local Cmd=require('src.script.Commands')
+  local ctx={save={party={{species=152,hp=20}},hgssFollowMon={paused=true}}}
+  Cmd.g4_release_all(ctx)
+  check(not ctx.save.hgssFollowMon.paused,'ReleaseAll unpauses Elm starter follower')
+  Cmd.g4_party_pokerus(ctx,0x8006)
+  check(G4.getVar(ctx.save,0x8006)==0,'fresh starter does not trigger Pokerus dialogue')
+  ctx.save.party[1].pokerus=0x21;Cmd.g4_party_pokerus(ctx,0x8006)
+  check(G4.getVar(ctx.save,0x8006)==1,'infected party still triggers ROM Pokerus branch')
+  for _,name in ipairs({'martbuy','partyhaspokerus','pokecenanim','gettrcardstars','scrcmd_158'}) do
+    local ins={name=name,args={0x8006}};Alias.apply(ins)
+    local rows=VM.lower({ins})
+    check(rows[1] and rows[1][1]~='g4_unimplemented','HGSS service dispatch '..name)
+  end
+  local TS=require('src.world.Gen4TileScripts')
+  local value=require('src.import.Gen4Behaviors').matching('^PC$')[1]
+  local pc=TS.rowFor(value,'up')
+  check(pc and pc.band=='common_scripts' and pc.index==10,'HGSS PC selects std_pokecenter_pc 2010')
+  local Shop=require('src.ui.Gen4ShopMenu')
+  local shop=Shop.new({data={text=h.text},save={money=3000}},{4,17})
+  check(shop.mode=='buy' and shop.direct,'HGSS MartBuy opens the purchase list directly')
+  local price=shop:line(9,'missing','200')
+  check(price:find('200',1,true) and not price:find('anything',1,true),'HGSS shop prices use bank 435 entry 18')
+  local Gear=require('src.ui.HgssPokegear')
+  local gear=Gear.new({save={hgssPokegear={cards={}}},data={}},{})
+  check(gear:canPage(2) and not gear:canPage(1) and not gear:canPage(3),'Pokegear gates map and radio cards')
+  local Screen=require('src.ui.Gen4HgssStarterSelect')
+  local SS=require('src.ui.SecondScreen');local draw=SS.draw
+  local top,bottom=0,0
+  local game={data={isGen4Cache=true},save={options={secondScreenMode='vertical'}}}
+  local screen=setmetatable({game=game,state='inspect',drawPreview=function() top=top+1 end,
+    drawTurntable=function() bottom=bottom+1 end},Screen)
+  SS.draw=function(_,body) body() end
+  screen:draw()
+  check(top==1 and bottom==1,'dual-screen starter renders preview and turntable')
+  game.save.options.secondScreenMode='swap';screen:draw()
+  check(top==2 and bottom==1,'single-screen starter shows full Pokemon preview')
+  SS.draw=draw;V.set(previous)
+end
+
+do
+  local art=h.gen4_hgss_oak_art
+  check(art and art.oak and art.gender and art.boy_cursor and art.girl_cursor
+    and art.sequences[1][1].scaleX~=nil,'Oak art includes gender avatars and native Marill SRT frames')
+  check(art and art.text[6]:find('Oak',1,true) and art.text[43]:find('adventure',1,true),
+    'Oak introduction uses HGSS bank 219')
+  local Oak=require('src.ui.HgssOakIntro')
+  local Screens=require('src.ui.Screens');local push=Screens.push
+  local refresh,pops,done,naming=0,0,0,0
+  local game={data={gen4_hgss_oak_art=art,constants={}},
+    save={player={name='Old',rival='Silver'},options={secondScreenMode='swap'}},
+    stack={pop=function() pops=pops+1 end},input={wasPressed=function() return false end},
+    overworld={player={refreshForm=function() refresh=refresh+1 end}}}
+  Screens.push=function(_,id,opts)
+    check(id=='NamingScreen' and opts.female,'Oak opens native naming screen for chosen gender')
+    naming=naming+1;opts.onDone('Lyra')
+  end
+  local screen=Oak.new(game,function() done=done+1 end)
+  screen:enter();screen.choice=3;screen:advance()
+  for n=1,60 do if screen.phase=='gender' then break end
+    if screen.phase=='release' then for j=1,90 do screen:update() end else screen:advance() end
+  end
+  check(screen.phase=='gender','Oak main path reaches gender selection without skipping dialogue')
+  screen.choice=2;screen:advance();screen:advance()
+  screen.choice=2;screen:advance()
+  check(screen.phase=='genderQuestion','declining gender returns to the ROM gender question')
+  for n=1,10 do if screen.phase=='gender' then break end;screen:advance() end
+  screen.choice=2;screen:advance()
+  for n=1,10 do if screen.phase=='name' then break end;screen:advance() end
+  screen:advance()
+  check(naming==1 and game.save.player.name=='Lyra' and game.save.player.gender=='girl'
+    and refresh==1 and game.save.player.rival=='Silver','Oak saves gender/name and refreshes avatar without renaming rival')
+  for n=1,30 do if screen.phase=='shrink' then break end;screen:advance() end
+  for n=1,75 do screen:update() end
+  check(done==1 and pops==1,'Oak shrink animation finishes New Game exactly once')
+  local SS=require('src.ui.SecondScreen');local draw=SS.draw;local panels={}
+  SS.draw=function(_,body) body() end
+  screen=Oak.new(game);screen:enter();screen.panel=function(_,sub) panels[#panels+1]=sub end
+  screen:draw();check(panels[1]==true,'single-screen Oak exposes tutorial choices automatically')
+  screen.bottom=false;screen:draw();check(panels[2]==false,'single-screen Oak can also show the dialogue panel')
+  game.data.isGen4Cache=true;game.save.options.secondScreenMode='vertical';screen:draw()
+  check(panels[3]==false and panels[4]==true,'dual-screen Oak renders both panels')
+  SS.draw=draw;Screens.push=push
 end
 
 print(('%d checks, %d failed'):format(PASS + FAIL, FAIL))

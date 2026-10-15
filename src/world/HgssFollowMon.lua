@@ -163,7 +163,8 @@ function F.onMapEntered(game, ow)
   ow.hgssFollowTrail, ow.hgssFollowPending, ow.hgssFollowTalk = nil, nil, nil
   local save = game.save or {}
   -- SaveFollowMon's inhibit flag is cleared on every map change
-  state(save).inhibit = nil
+  local st = state(save)
+  st.inhibit, st.paused, st.recalled = nil, nil, nil
   local mon = F.lead(save)
   if not (mon and F.allowed(game, ow, mon)) then return end
   spawn(game, ow, mon)

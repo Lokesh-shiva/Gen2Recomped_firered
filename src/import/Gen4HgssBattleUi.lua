@@ -46,6 +46,16 @@ end
 local function shiftFont(p) return p >= 4 and p + 1 or p end
 
 M.ALIAS = {
+  -- Matched to Platinum member by member: all 37 chars/cells/animations
+  -- and all 39 palettes are byte-identical. HGSS owns its programs (501)
+  -- and particle records (486 moves, 133 balls).
+  ["/wazaeffect/we.arc"] = { path = "/a/0/1/0" },
+  ["/wazaeffect/effectdata/waza_particle.narc"] = { path = "/a/0/2/9" },
+  ["/wazaeffect/effectdata/ball_particle.narc"] = { path = "/a/0/9/5" },
+  ["/wazaeffect/effectclact/wechar.narc"] = { path = "/a/0/2/2" },
+  ["/wazaeffect/effectclact/wepltt.narc"] = { path = "/a/0/2/3" },
+  ["/wazaeffect/effectclact/wecell.narc"] = { path = "/a/0/2/4" },
+  ["/wazaeffect/effectclact/wecellanm.narc"] = { path = "/a/0/2/5" },
   ["/battle/graphic/pl_batt_obj.narc"] = { path = "/a/0/0/8" },
   ["/battle/graphic/pl_batt_bg.narc"] = { path = "/a/0/0/7", member = shiftBg },
   ["/battle/graphic/pl_b_plist_gra.narc"] = { path = "/a/0/7/1" },
@@ -191,6 +201,12 @@ function M.extract(x)
     x:extractGraphics()
     x:moveButtons()
     x:battleArt()
+    x:extractMoveAnims()
+    if x._moveAnims and x._moveAnims.skipped>0 then
+      print(('HGSS move animations: %d programs use unsupported HGSS-only opcodes; generic effects remain for these moves'):format(x._moveAnims.skipped))
+    end
+    x:extractParticles()
+    x:extractCellActors()
     -- the screens that are Platinum's under other numbers
     x:extractNaming()
     x:partyArt()

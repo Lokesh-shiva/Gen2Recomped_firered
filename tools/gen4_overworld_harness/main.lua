@@ -70,6 +70,40 @@ function love.load()
     local SaveData = require("src.core.SaveData")
     local Game = require("src.core.Game")
     Game.data = Data
+    -- Exercise freshly decoded HGSS UI assets without overwriting an install.
+    if os.getenv('HGSS_UI_ROM') then
+      local rom=assert(require('src.import.NdsRom').open(os.getenv('HGSS_UI_ROM')))
+      local aliases=require('src.import.Gen4HgssScriptAliases')
+      for _,block in pairs((Data.map_scripts or {}).scripts or {}) do
+        for _,ins in ipairs(block.instructions or {}) do aliases.apply(ins) end
+      end
+      local Mart=require('src.import.Gen4Mart')
+      local arm9=rom:arm9();local at=Mart.find(arm9)
+      Data.constants.martCommon=assert(Mart.parse(arm9,at))
+      local pictures={}
+      for _,entry in ipairs({{'src.import.Gen4HgssStarterArt','gen4_hgss_starter_art'},
+        {'src.import.Gen4HgssOakArt','gen4_hgss_oak_art'},
+        {'src.import.Gen4HgssPokegearArt','gen4_hgss_pokegear_art'},
+        {'src.import.Gen4HgssMenuArt','gen4_hgss_menu_art'}}) do
+        local index={}
+        local images,sequences=require(entry[1]).images(rom)
+        for key,pic in pairs(images) do
+          local path='__hgss_ui/'..entry[2]..'/'..key..'.png'
+          pictures[path]=love.graphics.newImage(require('src.import.ImageWriter').fromRGBA8(pic.width,pic.height,pic.rgba))
+          index[key]={path=path,width=pic.width,height=pic.height,originX=pic.originX,originY=pic.originY}
+        end
+        if sequences then
+          index.sequences=sequences;index.text={}
+          local X=require('src.import.RomExtractorGen4').new(os.getenv('HGSS_UI_ROM'),os.getenv('VERSION') or 'heartgold')
+          X.rom=rom
+          for i=1,48 do index.text[i]=X:string(219,i) end
+        end
+        Data[entry[2]]=index
+      end
+      local Assets=require('src.render.Assets');local original=Assets.image
+      Assets.image=function(path,...) if pictures[path] then return pictures[path] end return original(path,...) end
+      rom:close()
+    end
 
     -- THE SERVICES THE ENGINE BRINGS UP, IN THE ENGINE'S OWN ORDER.
     --
@@ -712,7 +746,7 @@ function love.load()
         print(("t=%d top=%s page=%s index=%s species=%s"):format(i,
           tostring(top and top.name or (top == OW and "overworld" or "screen")),
           tostring(top and top.page), tostring(top and top.index),
-          tostring(top and top.species and top:species())))
+          tostring(top and type(top.species)=='function' and top:species())))
       end
       if os.getenv("TRACE") then
         local f = Follower.current(OW)
@@ -761,16 +795,19 @@ function love.load()
     end
     _G.__owHarness = { game = Game, ow = OW, tag = TAG }
   end, debug.traceback)
-  if not ok then print("FAILED:\n" .. tostring(err)) end
+  if not ok then
+    _G.__owHarnessFailed=true
+    print("FAILED:\n" .. tostring(err))
+  end
 end
 
 -- One real frame, captured after it is presented.
 local shot = false
 function love.draw()
   local h = _G.__owHarness
-  if not h then love.event.quit() return end
+  if not h then love.event.quit(_G.__owHarnessFailed and 1 or 0) return end
   local okD, errD = pcall(h.game.draw, h.game)
-  if not okD then print("draw raised: " .. tostring(errD)) end
+  if not okD then print("draw raised: " .. tostring(errD));love.event.quit(1);return end
   if not shot then
     shot = true
     love.graphics.captureScreenshot(function(imageData)

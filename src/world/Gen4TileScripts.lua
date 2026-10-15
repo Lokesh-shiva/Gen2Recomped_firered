@@ -153,6 +153,15 @@ function Gen4TileScripts.rowFor(behaviour, facing)
   local row = index()[behaviour]
   if not row then return nil end
   if row.facing and row.facing ~= facing then return nil end
+  if require("src.core.GameVersion").info().family == "hgss" then
+    -- pokeheartgold constants/std_script.h: HGSS reorganized these bands.
+    local band, n = row.band, row.index
+    if row.behaviour == "PC" then n = 10
+    elseif row.behaviour == "BIKE_PARKING" then n = 20
+    elseif band == "bg_events" then band = "bookshelves"
+    elseif row.behaviour == "TV" then band = "tv" end
+    return { behaviour = row.behaviour, band = band, index = n, facing = row.facing }
+  end
   return row
 end
 

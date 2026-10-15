@@ -4330,6 +4330,7 @@ function RomExtractorGen4:extractTrainerSprites()
     local path = trainer.class and byClass[trainer.class]
     if path then
       trainer.pic = path
+      trainer.trueColor = true
       stamped = stamped + 1
     end
   end
@@ -4342,6 +4343,18 @@ function RomExtractorGen4:extractTrainerSprites()
   -- it is for a species.  An animation stage can read this back.
   index.counts.twoFrame = animated
   index.counts.stamped = stamped
+  if dpOrder then
+    local backs = self:archive("trainerBack")
+    index.backs = {}
+    for class = 0, Gen4Trgra.classCount(backs) - 1 do
+      local sheet = Gen4Trgra.sheet(backs, Gen4Graphics, class, true)
+      local pal = Gen4Trgra.palette(backs, Gen4Graphics, class)
+      local image = sheet and pal and Gen4Trgra.frame(sheet, pal, 1)
+      if image then
+        index.backs[class] = self:saveImage(("battle/trainer_back/%03d"):format(class), image)
+      end
+    end
+  end
   self.trainerSpriteReport = { classes = total, written = written,
                                stamped = stamped, twoFrame = animated }
   self:write("gen4_trainer_sprites", index)
@@ -4655,7 +4668,7 @@ function RomExtractorGen4:extractField()
       -- into the bedroom.  There is something now: the `intro` stage extracts
       -- the television broadcast and Rowan's script, and Gen4RowanIntro plays
       -- them.
-      newGame = "Gen4RowanIntro",
+      newGame = hgssBoot and "HgssOakIntro" or "Gen4RowanIntro",
       -- Named for the same reason as the two above: left at the default this
       -- resolves to the Game Boy OPTION screen, whose rows are Gen 1's and
       -- whose FRAME row cannot reach Platinum's twenty message boxes.
@@ -7018,6 +7031,8 @@ RomExtractorGen4.STAGE_CHAIN = {
     -- ...and the screens whose importers follow the `build(x) -> index`
     -- shape (each optional until its module exists): the Pokedex, the PC
     for _, entry in ipairs({ { "src.import.Gen4HgssDexArt", "gen4_hgss_dex_art" },
+                             { "src.import.Gen4HgssStarterArt", "gen4_hgss_starter_art" },
+                             { "src.import.Gen4HgssOakArt", "gen4_hgss_oak_art" },
                              { "src.import.Gen4HgssBoxArt", "gen4_hgss_box_art" },
                              { "src.import.Gen4HgssPokegearArt", "gen4_hgss_pokegear_art" } }) do
       local okM, M = pcall(require, entry[1])

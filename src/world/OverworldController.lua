@@ -4930,7 +4930,8 @@ function OverworldState:handleInput()
       -- By its own id, not through an alias: there is no Game Boy Poketch for
       -- `GEN4_ALIASES` to stand in front of, so an alias would be a redirect
       -- from a screen that does not exist.
-      Screens.push(Game, "Gen4Poketch", {
+      local version = GameVersion.info()
+      Screens.push(Game, version and version.family == "hgss" and "StartMenu" or "Gen4Poketch", {
         onCancel = function() Game.secondScreenUp = false end,
       })
       return

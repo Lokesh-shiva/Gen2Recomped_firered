@@ -930,7 +930,9 @@ function Game:draw()
     local okSS, SS = pcall(require, "src.ui.SecondScreen")
     if okSS and SS.mode and (SS.mode(self) == "display" or SS.combined(self))
        and not self.secondScreenDrawnThisFrame then
-      local okP, Poketch = pcall(require, "src.ui.Gen4Poketch")
+      local version = require("src.core.GameVersion").info()
+      local panelModule = version and version.family == "hgss" and "src.ui.HgssFieldPanel" or "src.ui.Gen4Poketch"
+      local okP, Poketch = pcall(require, panelModule)
       if okP and Poketch and Poketch.new then
         if not self.secondScreenOverworldPoketch then
           local okNew, p = pcall(Poketch.new, self, {})
