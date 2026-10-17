@@ -482,6 +482,20 @@ L.ALIASES = {
   [0x088] = { "gettrainermessagetypes", "www" },
   [0x087] = { "printtrainerdialogue", "www", { 1, 2 } },
   [0x066] = { "bwobjectmovement", "ww" }, [0x073] = { "noop", "ww" },
+  -- THE BATTLE SUBWAY (src/script/Gen5BattleSubway.lua): 0x15A <function,
+  -- a, b, dest> is the facility's switch (ov21 0x021CA5C4: a raw u16, two
+  -- var-or-values, a var); 0x157 / 0x158 <kind, mode> / 0x159 clear, make
+  -- and free the challenge's work (ov21 0x021C9924 / 0x021C9934 /
+  -- 0x021C9B24); 0x1BA <regulation, dest> the party-or-Battle-Box check;
+  -- 0x067 <object, x var, z var> an object's tile; 0x0D3 <var> the zone
+  -- (ov10 0x0215AD38); 0x137 <var> the save under "Saving...", its answer; 0x13B <var> whether
+  -- wireless play is on (0 here: the Wi-Fi branches say so); 0x13C / 0x1F0
+  -- <kind, var> close the field windows / count a game record
+  [0x15A] = { "bwsubway", "wwww" },
+  [0x157] = { "bwsubwayinit", "" }, [0x158] = { "bwsubwaycreate", "ww" }, [0x159] = { "bwsubwayfree", "" },
+  [0x1BA] = { "bwteamsource", "ww" }, [0x067] = { "bwobjectpos", "www" },
+  [0x0D3] = { "getcurrentmapid", "w" }, [0x137] = { "bwsavegame", "w" },
+  [0x13B] = { "bwwirelessoff", "w" }, [0x13C] = { "noop", "" }, [0x1F0] = { "noop", "ww" },
 }
 
 -- THE STACK FORM. Most of BW's conditional jumps are an expression on the

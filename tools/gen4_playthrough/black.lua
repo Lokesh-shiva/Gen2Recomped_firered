@@ -353,12 +353,15 @@ B[#B + 1] = { name = "pinwheel forest: the plasma grunts",
   expect = function(r) return r:var(0x40AA) >= 4 and r:var(0x4092) >= 5 and r:var(0x408D) >= 3 end,
   why = "0x40AA >= 4, 0x4092 >= 5, 0x408D >= 3 (the Dragon Skull)", budget = 200000 }
 
--- CASTELIA. Skyarrow Bridge (Z249, a rail map) is crossed by teleport to its
--- Castelia gate (Z252). The gym's street (Z031, M0062): Cheren at the door,
+-- CASTELIA, on foot: out of Pinwheel Forest by its east gate (Z250 ->
+-- Z251), over Skyarrow Bridge (Z249, a rail map: its east warp at
+-- (111,15)) to the Castelia gate (Z252) and into the city (Z028, a rail map,
+-- warp 8 -> Z031). The gym's street (Z031, M0062): Cheren at the door,
 -- Burgh is out (coord 1 at (24,48), 0x40AF == 0, S00B0) -> 0x40AF 1,
 -- 0x40D3 1
 B[#B + 1] = { name = "castelia: the gym door",
-  steps = { { "teleport", "Z031", 21, 48, "right" }, { "coord", 1 },
+  steps = { { "warpto", "Z250" }, { "warpto", "Z251" }, { "warpto", "Z249" }, { "warpto", "Z252" },
+            { "warpto", "Z028" }, { "warpto", "Z031" }, { "coord", 1 },
             { "until", function(r) return r:var(0x40AF) >= 1 end, 30000 }, settle },
   expect = function(r) return r:var(0x40AF) >= 1 and r:var(0x40D3) >= 1 end, why = "0x40AF >= 1, 0x40D3 >= 1" }
 
@@ -726,15 +729,22 @@ B[#B + 1] = { name = "dragonspiral: alder at the foot",
 -- Z158's entry 5: back in the desert, 0x4092 -> 6
 local relic = { { "do", trainUp }, { "teleport", "Z158", 61, 33, "up" }, { "coord", 1 },
   { "until", function(r) return r:var(0x409D) >= 2 end, 30000 }, settle,
-  -- down on foot: in at the door (Z158 warp 2 -> Z160), into 1F's east pit
-  -- (coord 2) and stand -> B1F (Z161) (15,11); its stairs (19,4) -> B2F
-  -- (Z162); the south pit (coord 2) -> B3F (Z163) (21,19); its south-east
-  -- pit (coord 4) -> B4F (Z164) (26,26)
-  { "warpto", "Z160" }, { "do", heal }, { "coord", 2 },
-  { "until", function(r) return r:map() == "Z161" end, 20000 }, settle,
-  { "warpto", "Z162" }, { "coord", 2 },
+  -- down on foot (the castle's way down is its pits and the stairs behind
+  -- them; the sandfalls 0x72 / 0x75 beside each stair are one-way ledges):
+  -- in at the door (Z158 warp 2 -> Z160); across the west pit's edge (Z160
+  -- (9,15) .. (8,16), off its centre (7,14)) to the stairs down at (7,20) ->
+  -- B1F's south room (Z161); its pit (coord 1) -> B2F (Z162) (22,17); along
+  -- the east pit's south row (y 15) to the south pit (coord 2) -> B3F (Z163)
+  -- (21,19); west along y 21 over pit 3 into pit 1 and stand -> B4F (Z164)
+  -- (15,21), the side of the sandfall (x 18) its own pit is on
+  { "warpto", "Z160" }, { "do", heal },
+  -- (one walk over the sand: a turn from a standstill there costs the turn
+  -- window, and that is standing still; (9,17) is a person's)
+  { "walkto", 13, 18 }, { "walkto", 8, 17 }, { "warpto", "Z161" },
+  { "coord", 1 }, { "until", function(r) return r:map() == "Z162" end, 20000 }, settle,
+  { "walkto", 19, 15 }, { "walkto", 13, 15 }, { "coord", 2 },
   { "until", function(r) return r:map() == "Z163" end, 20000 }, settle,
-  { "do", heal }, { "coord", 4 },
+  { "do", heal }, { "walkto", 16, 21 }, { "walkto", 10, 21 },
   { "until", function(r) return r:map() == "Z164" end, 20000 }, settle,
   { "do", heal }, { "coord", 1 },
   { "until", function(r) return r:map() == "Z165" or r:var(0x4092) >= 6 end, 30000 },
@@ -766,18 +776,24 @@ B[#B + 1] = { name = "opelucid: drayden's house",
   steps = { { "warpto", "Z123" }, { "until", function(r) return r:var(0x40A8) >= 4 end, 30000 }, settle },
   expect = function(r) return r:var(0x40A8) >= 4 and r:flag(0x26C) end, why = "0x40A8 >= 4, flag 0x26C" }
 
--- DRAYDEN'S GYM (Z121, M0242; Gen5DragonGym): the trainer at the door
--- (coord 7 at (32,34), 0x40A9 == 0, S039E) -> 1. The dragons' floor
--- switches (coords on a temp var: 0x19A <statue, side>, 0x199 settles the
--- head; both down lowers the head and opens its neck) are placed by rail
--- position, and three of the six land on cells the rasterised walkways do
--- not reach (21,27 and 33,27 are wall here), so the climb is TELEPORTED past,
--- as heartgold.lua does Azalea's carts. Drayden (person 4 at (27,2), S0072):
--- the Legend Badge, 0x40B8 -> 1
+-- DRAYDEN'S GYM (Z121, M0242; Gen5DragonGym), climbed: a floor, a deck six
+-- tiles up and the dragons' rails between them (Gen5DragonGym.surfaces).
+-- The dragons' switches are coords on a temp var (0x19A <statue, side>,
+-- 0x199 settles the head; both down opens the neck), so each is stepped on
+-- once. The second dragon's, on the floor's row 22 (coord 3 at (36,22),
+-- coord 4 at (48,22)), open its neck from its head (42,12) up to the deck;
+-- along the deck to its row 27 and the third dragon's (coord 5 at (33,27),
+-- coord 6 at (21,27)), which open its neck up to Drayden's platform; on the
+-- way, down its body to the trainer at (32,34) (coord 7, 0x40A9 == 0, S039E)
+-- -> 1. (The first dragon's neck, from row 29's switches, reaches the deck
+-- too, but by the spiral the rail trainer, person 9, stands on.) Drayden
+-- (person 4 at (27,2), S0072): the Legend Badge, 0x40B8 -> 1
 B[#B + 1] = { name = "drayden: the legend badge",
-  steps = { { "do", trainUpWith(58, 100, 150) }, { "warpto", "Z120" }, { "warpto", "Z121" }, { "coord", 7 },
-            { "until", function(r) return r:var(0x40A9) >= 1 end, 60000 }, settle,
-            { "teleport", "Z121", 27, 4, "up" }, { "walkto", 27, 3 }, { "face", "up" }, { "press", "a" },
+  steps = { { "do", trainUpWith(58, 100, 150) }, { "warpto", "Z120" }, { "warpto", "Z121" },
+            { "coord", 3 }, settle, { "coord", 4 }, settle,
+            { "coord", 5 }, settle, { "coord", 6 }, settle,
+            { "coord", 7 }, { "until", function(r) return r:var(0x40A9) >= 1 end, 60000 }, settle,
+            { "walkto", 27, 3 }, { "face", "up" }, { "press", "a" },
             { "until", function(r) return r:var(0x40B8) >= 1 end, 60000 }, settle },
   expect = function(r) return r:var(0x40B8) >= 1 end, why = "0x40B8 >= 1 (Legend Badge)", budget = 200000 }
 

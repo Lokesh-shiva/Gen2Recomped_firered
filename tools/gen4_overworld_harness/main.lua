@@ -638,33 +638,39 @@ function love.load()
       if not (p and map and p.cellX) then return nil end
       local sx, sy = p.cellX, p.cellY
       if sx == tx and sy == ty then return "here" end
-      local key = function(x, y) return x * 4096 + y end
-      local prev, q, head = { [key(sx, sy)] = false }, { { sx, sy } }, 1
+      -- a map with levels (def.elevationCells: Drayden's gym's floor, deck
+      -- and rails) is searched by cell AND level, the level a step leaves
+      -- the walker at (Map:elevationAfter) carried along
+      local elevated = map.def and map.def.elevationCells and map.elevationAfter and true or false
+      local key = function(x, y, e) return (x * 4096 + y) * 32 + ((elevated and e) or 0) end
+      local se = elevated and p.elevation or nil
+      local prev, q, head = { [key(sx, sy, se)] = false }, { { sx, sy, se } }, 1
       local ents = ow.cast or ow.entities or ow.npcs or {}
       -- (a cap past the biggest map: Pinwheel Forest is 128 x 96)
       while head <= #q and head < 40000 do
         local c = q[head]; head = head + 1
         for dname, d in pairs(DIRS) do
           local nx, ny = c[1] + d[1], c[2] + d[2]
-          local k = key(nx, ny)
+          local ne = elevated and map:elevationAfter(c[3], nx, ny, c[1], c[2]) or nil
+          local k = key(nx, ny, ne)
           if prev[k] == nil then
-            local mover = { cellX = c[1], cellY = c[2], elevation = p.elevation, facing = dname, surfing = p.surfing }
+            local mover = { cellX = c[1], cellY = c[2], elevation = (elevated and c[3]) or p.elevation, facing = dname, surfing = p.surfing }
             local ok = Collision.canMove(map, ents, mover, dname)
-            if ok and avoid and avoid[k] and not (nx == tx and ny == ty) then ok = false end
+            if ok and avoid and avoid[nx * 4096 + ny] and not (nx == tx and ny == ty) then ok = false end
             if ok or (nx == tx and ny == ty) then
-              prev[k] = { c[1], c[2], dname }
+              prev[k] = { c[1], c[2], dname, c[3] }
               if nx == tx and ny == ty then
-                local cx, cy, first = nx, ny, dname
+                local cx, cy, ce, first = nx, ny, ne, dname
                 while true do
-                  local pr = prev[key(cx, cy)]
+                  local pr = prev[key(cx, cy, ce)]
                   if not pr then break end
                   first = pr[3]
-                  if pr[1] == sx and pr[2] == sy then break end
-                  cx, cy = pr[1], pr[2]
+                  if pr[1] == sx and pr[2] == sy and pr[4] == se then break end
+                  cx, cy, ce = pr[1], pr[2], pr[4]
                 end
                 return first
               end
-              if ok then q[#q + 1] = { nx, ny } end
+              if ok then q[#q + 1] = { nx, ny, ne } end
             end
           end
         end
@@ -706,6 +712,14 @@ function love.load()
       if not PT then
       keyNow = nil
       for t, k in (os.getenv("PRESS_KEYS") or ""):gmatch("(%d+):(%a+)") do if tonumber(t) == i then keyNow = k end end
+      -- PRESS_ON_BITE=n: press A n ticks into a Gen 4 rod's "!" (Gen4FishingTask)
+      if os.getenv("PRESS_ON_BITE") then
+        local top = Game.stack.states[#Game.stack.states]
+        if top and top.name == "Gen4FishingTask" and top.state == "checkReel" then
+          _G.__biteTicks = (_G.__biteTicks or 0) + 1
+          if _G.__biteTicks == (tonumber(os.getenv("PRESS_ON_BITE")) or 1) then keyNow = "a"; print("[fish] A on the bite at tick " .. i) end
+        end
+      end
       pressA = pressEvery > 0 and (i % pressEvery == 0) and i <= (tonumber(os.getenv("PRESS_UNTIL") or "") or math.huge)
       end
       -- STRENGTH=1: Strength active (as the boulder's field-move script leaves it)
@@ -718,6 +732,39 @@ function love.load()
           { close = function() end, items = {}, index = 1, refresh = function() end })
         print(("[item] used %s: %s onBike=%s repel=%s"):format(tostring(id), okU and "ok" or tostring(errU),
           tostring(Game.save.onBike), tostring(Game.save.repelSteps)))
+      end
+      -- DIGWARP=MAP,x,y: the recorded Escape Rope / Dig exit (save.digWarp)
+      if os.getenv("DIGWARP") and OW and i == 1 then
+        local m, x, y = os.getenv("DIGWARP"):match("([^,]+),(%d+),(%d+)")
+        Game.save.digWarp = { id = m, x = tonumber(x), y = tonumber(y) }
+        OW.digWarp = Game.save.digWarp
+      end
+      -- FIELD_MOVE=CUT FIELD_MOVE_AT=<tick>: the party menu's field-move row
+      -- for party slot 1 (Gen4PartyMenu:useFieldMove), as if chosen
+      if os.getenv("FIELD_MOVE") and OW and i == (tonumber(os.getenv("FIELD_MOVE_AT") or "") or 5) then
+        local PM = require("src.ui.Gen4PartyMenu")
+        local menu = PM.new(Game, {})
+        menu.index = 1
+        Game.stack:push(menu)
+        local okF, errF = pcall(menu.useFieldMove, menu, Game.save.party[1], os.getenv("FIELD_MOVE"))
+        local top = Game.stack.states[#Game.stack.states]
+        print(("[fieldmove] %s: %s top=%s"):format(os.getenv("FIELD_MOVE"), okF and "ok" or tostring(errF),
+          require("src.core.StateStack").describe(top)))
+        if top == menu then Game.stack:pop() end
+      end
+      -- FIND_WATER=1: list land cells that face water (a fishing spot finder)
+      if os.getenv("FIND_WATER") and OW and i == 2 then
+        local m, n = OW.map, 0
+        local W, H = m.width or (m.def and m.def.width) or 64, m.height or (m.def and m.def.height) or 64
+        for y = 0, H - 1 do for x = 0, W - 1 do
+          if n < 12 and not m:isWaterCell(x, y) then
+            for _, d in ipairs({ { 0, 1, "down" }, { 0, -1, "up" }, { 1, 0, "right" }, { -1, 0, "left" } }) do
+              if m:inBounds(x + d[1], y + d[2]) and m:isWaterCell(x + d[1], y + d[2]) then
+                print(("[water] X=%d Y=%d FACING=%s"):format(x, y, d[3])); n = n + 1; break
+              end
+            end
+          end
+        end end
       end
       -- DWWARPTEST=1: open the Distortion World warp (DoDWWarp) at tick 2
       if os.getenv("DWWARPTEST") and OW and i == 2 then

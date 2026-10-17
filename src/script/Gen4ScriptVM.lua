@@ -517,6 +517,10 @@ end
 L.setmovecodeforfacingdirection = function(_, s)
   emit(s, { "g4_set_move_code_facing" })
 end
+-- `StartVsSeeker <destVar>` (Platinum 0x20A): src/world/Gen4VsSeeker.lua
+L.startvsseeker = function(ins, s)
+  emit(s, { "g4_start_vs_seeker", ins.args[1] })
+end
 L.checkwonbattle = function(ins, s) emit(s, { "g4_check_won_battle", ins.args[1] }) end
 -- Its twin, and NOT the negation of it: `CheckPlayerLostBattle` reads a
 -- different bit of the same result mask, so a battle that ended some third way
@@ -3003,8 +3007,9 @@ L.checkplayeronbike = function(ins, s)
   emit(s, { "g4_check_on_bike", ins.args[1] })
 end
 L.forcebicycling = function(ins, s) emit(s, { "g4_force_bike", ins.args[1] }) end
+-- ScrCmd_SetCyclingBGM (pokeplatinum scrcmd.c): the gate plays SEQ_BICYCLE
 L.setcyclingbgm = function(_, s)
-  emit(s, { "g4_noop", "the cycling BGM override" })
+  emit(s, { "g4_cycling_bgm" })
 end
 L.getpreviousmapid = function(ins, s)
   emit(s, { "g4_previous_map", ins.args[1] })
@@ -4144,5 +4149,7 @@ require("src.script.Gen5TradeCommands").install(L)
 -- HGSS's scripted Pokegear calls (SetPhoneCall / RunPhoneCall / UnsetPhoneCallTrigger):
 -- src/script/HgssPhoneCallCommands.lua
 require("src.script.HgssPhoneCallCommands").install(L)
+-- Black / White's Battle Subway (0x15A and its kin): src/script/Gen5BattleSubway.lua
+require("src.script.Gen5BattleSubway").install(L)
 
 return Gen4ScriptVM

@@ -1058,6 +1058,9 @@ function RomExtractorGen4:extractMaps()
         allowRunning = h.allowRunning,
         allowEscapeRope = h.allowEscapeRope,
         allowFly = h.allowFly,
+        -- MAP_TYPE_* (1 town, 2 route, 3 cave, 4 indoors ...): Escape Rope and
+        -- Dig need a cave, Teleport refuses a town (map_header.c)
+        mapType = h.mapType,
         weather = h.weather,
         -- WHICH MESSAGE BANK THIS MAP'S OWN SCRIPTS READ FROM.
         --
@@ -4773,6 +4776,8 @@ function RomExtractorGen4:extractField()
       isWarpPos = row.isWarpPos == 1,
       unlockOnMapEntry = row.unlockOnMapEntry == 1,
       firstArrival = row.firstArrival,
+      -- HGSS rows: the flypoint flag index and the fly-point bit (Gen4Fly)
+      flagIdx = row.flagIdx, isFlyPoint = row.isFlyPoint,
     }
   end
 
@@ -6403,7 +6408,12 @@ end
 
 function RomExtractorGen4:emotes()
   local Gen4Emotes = require("src.import.Gen4Emotes")
-  local raw = self.rom and self.rom:read(Gen4Emotes.ARCHIVE)
+  -- Platinum's fldeff.narc, else HGSS's /a/1/0/3
+  local raw
+  for _, path in ipairs(Gen4Emotes.ARCHIVES) do
+    local okR, bytes = pcall(function() return self.rom and self.rom:read(path) end)
+    if okR and bytes then raw = bytes break end
+  end
   local arc = raw and Narc.parse(raw)
   local out = arc and Gen4Emotes.extract(arc)
   if out then self:write("gen4_emotes", out) end
@@ -6520,7 +6530,8 @@ local MODEL_ARCHIVES = {
 -- paths and wait to be identified.
 local HGSS_MODEL_ARCHIVES = {
   { path = "/a/0/4/0", out = "buildings", label = "map buildings (outdoor)" },
-  { path = "/a/1/4/8", out = "interiorBuildings", label = "map buildings (rooms)" },
+  { path = "/a/1/4/8", out = "interiorBuildings", label = "map buildings (rooms)",
+    fieldSet = "interiorField" },
   -- choose_starter_main_res: Elm's turntable -- tabletop, turntable, the
   -- three balls and their glow, with the balls' rock / open and the
   -- turntable's animations (choose_starter_app.c loads members 0..7)
@@ -6685,6 +6696,13 @@ function RomExtractorGen4:extractModels()
   local patternWritten = 0
 
   local hgssModels = require("src.import.Gen4Versions").family(self.version) == "hgss"
+  -- HGSS's map prop animations (/a/1/0/6, claimed by /a/1/0/7 and /a/1/0/8):
+  -- `field` and `interiorField`, read BEFORE the buildings so their flipbook
+  -- frames are decoded below.  See src/import/Gen4HgssPropAnim.lua.
+  if hgssModels then
+    local okP, report = pcall(require("src.import.Gen4HgssPropAnim").extractInto, self, out)
+    self.hgssPropAnimReport = okP and report or { error = tostring(report) }
+  end
   for _, entry in ipairs(hgssModels and HGSS_MODEL_ARCHIVES or MODEL_ARCHIVES) do
     local arc = self:archiveAt(entry.path)
     local set = { label = entry.label, path = entry.path,
@@ -6805,7 +6823,8 @@ function RomExtractorGen4:extractModels()
             -- 590 members of `build_model.narc` hold exactly one model, so
             -- member and index coincide for this archive; using the index is
             -- what keeps that a coincidence rather than a dependency.
-            local fieldSet = out.sets.field
+            -- (an HGSS room's claims are its own set: `fieldSet` on the entry)
+            local fieldSet = out.sets[entry.fieldSet or "field"]
             local modelIndex = #set.models
             if textures and fieldSet and model.name then
               for _, record in ipairs(fieldSet.animations or {}) do

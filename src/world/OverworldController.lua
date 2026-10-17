@@ -6308,7 +6308,9 @@ function OverworldState:goFishing(rod)
     local fx, fy = self.player:facingCell()
     local enc = require("src.world.Gen4Fishing").roll(Game.data, Game.save,
       self.map.def, self.map.id, gen4Rod, fx, fy)
-    return self:castLine(enc)
+    -- the DS's cast / wait / "!" / A-press task (src/world/Gen4FishingTask.lua)
+    require("src.world.Gen4FishingTask").start(self, gen4Rod, enc)
+    return
   end
   local pool, always = fishingPool(Game.data, rod, self.map.id)
   local enc
@@ -7915,6 +7917,11 @@ function OverworldState:trySurf(fx, fy, onClose, selectedMon)
   Game.stack:push(TextBox.new(Game, text, function()
     if onClose then onClose() end
     p.surfing = true
+    -- Gen 4: surfing replaces cycling (the bike is put away)
+    if Game.save.onBike and self.map.def and self.map.def.generation == 4 then
+      Game.save.onBike, Game.save.bikeKind = false, nil
+      pcall(require("src.core.Music").setBike, Game.data, false)
+    end
     -- getting on the water means being AT the water's level: on a Gen 3 map
     -- the sea is elevation 1 and the step onto it would otherwise be refused
     -- by the same rule that keeps a walker out of it
@@ -9186,6 +9193,14 @@ function OverworldState:bikeFrames()
   -- SLIGHTLY_FAST 6, FAST 4, SLIGHTLY_FASTER 3, FASTER 2 -- doubled here for
   -- the engine's 60 frames to the field's 30. Reported from play: the bike
   -- "cant change the speed ... like you can in platinum".
+  -- HEARTGOLD / SOULSILVER HAVE NO GEARS (no gear field in pokeheartgold's
+  -- PlayerAvatar, no SE_GEAR outside the apps): one riding pace, taken as
+  -- Platinum's top rung (FASTER, 2 field frames) -- the ov01 movement code is
+  -- not decompiled, so the pace is an approximation
+  if p and Game.save and Game.save.onBike and self.map and self.map.def
+     and self.map.def.generation == 4 and GameVersion.family() == "hgss" then
+    return 4
+  end
   if p and p.gen4Gear ~= nil and self.map and self.map.def and self.map.def.generation == 4 then
     if p.gen4Gear == 1 then
       local GEAR4 = { [0] = 12, 8, 6, 4 }
@@ -9288,7 +9303,7 @@ function OverworldState:updateGen4Bike()
   local map = self.map
   local gen4 = (map and map.def and map.def.generation) == 4
   local G0 = Game or require("src.core.Game")
-  if not (gen4 and G0 and G0.save and G0.save.onBike) then
+  if not (gen4 and G0 and G0.save and G0.save.onBike) or GameVersion.family() == "hgss" then
     p.gen4Gear, p.gen4Speed = nil, nil
     return
   end
@@ -12693,6 +12708,10 @@ function OverworldState:onStepComplete()
       G3.frlgStep({ save = Game.save, game = Game, overworld = self })
     end
   end
+  -- PLATINUM'S VS. SEEKER battery and active window (src/world/Gen4VsSeeker.lua)
+  if self.map.def and self.map.def.generation == 4 and GameVersion.family() == "platinum" then
+    pcall(require("src.world.Gen4VsSeeker").step, Game, self)
+  end
   -- THE MACH BIKE PICKS UP SPEED, and that speed is the only thing that beats
   -- a mud ramp.
   --
@@ -13099,7 +13118,17 @@ function OverworldState:onStepComplete()
     if Game.save.repelSteps == 0 then
       -- no encounter on the exact wear-off step (wild_encounters.asm
       -- .lastRepelStep returns CantEncounter)
-      Game.stack:push(TextBox.new(Game, Strings("REPEL's effect\nwore off.")))
+      -- GEN 4: CommonScript_RepelsEffectWoreOff (Platinum: SE_CONFIRM, common
+      -- strings 213:79) / std_repel_wore_off (HGSS: SEQ_SE_DP_SELECT, 40:65);
+      -- neither cartridge offers another Repel
+      local g4line
+      if self.map.def and self.map.def.generation == 4 then
+        local hgss = GameVersion.family() == "hgss"
+        pcall(function() require("src.core.Sound").play(Game.data, hgss and "SEQ_SE_DP_SELECT" or "SEQ_SE_CONFIRM") end)
+        local okT, T = pcall(require, "src.import.Gen4Text")
+        g4line = okT and T.resolve(Game.data, hgss and 40 or 213, hgss and 65 or 79, Game) or nil
+      end
+      Game.stack:push(TextBox.new(Game, g4line or Strings("REPEL's effect\nwore off.")))
       return
     end
   end

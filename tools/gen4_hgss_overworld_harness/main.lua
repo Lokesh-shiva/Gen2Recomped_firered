@@ -292,6 +292,84 @@ if os.getenv("HGSS_PHONE_ROM") then
   end
 end
 
+-- HGSS_PROP_ROM=<HeartGold/SoulSilver .nds>: the map prop animations
+-- (gen4_models.sets.field / interiorField, src/import/Gen4HgssPropAnim.lua)
+-- read from the ROM as the overworld is pushed, with the flipbook frames the
+-- import would write decoded into memory instead -- so the windmill turns on
+-- an install imported before they existed. HGSS_PROP_OFF=1: drop them instead
+-- (the "before" picture).
+if os.getenv("HGSS_PROP_ROM") or os.getenv("HGSS_PROP_OFF") then
+  local StateStack = require("src.core.StateStack")
+  local push, injected = StateStack.push, false
+  local memory = {}
+  local Assets = require("src.render.Assets")
+  local image = Assets.image
+  Assets.image = function(path, ...)
+    if type(path) == "string" and memory[path] then
+      local img = love.graphics.newImage(memory[path])
+      return img
+    end
+    return image(path, ...)
+  end
+  StateStack.push = function(self, state, ...)
+    local G = package.loaded["src.core.Game"]
+    if not injected and G and G.data and G.data.gen4_models then
+      injected = true
+      local sets = G.data.gen4_models.sets or {}
+      if os.getenv("HGSS_PROP_OFF") then
+        sets.field, sets.interiorField = nil, nil
+        print("[props] prop animations dropped")
+        return push(self, state, ...)
+      end
+      local path = os.getenv("HGSS_PROP_ROM")
+      local X = assert(require("src.import.RomExtractorGen4").new(path, os.getenv("VERSION") or "heartgold"))
+      local P = require("src.import.Gen4HgssPropAnim")
+      local report = assert(P.extractInto(X, G.data.gen4_models))
+      -- the BTP0 frames, decoded from each claiming model's own TEX0
+      local Nsbmd = require("src.import.Gen4Nsbmd")
+      local Models = require("src.import.Gen4Models")
+      local Graphics = require("src.import.Gen4Graphics")
+      local ImageWriter = require("src.import.ImageWriter")
+      local frames = 0
+      for key, modelsKey, archive in ([[field buildings /a/0/4/0 interiorField interiorBuildings /a/1/4/8]]):gmatch("(%S+) (%S+) (%S+)") do
+        local fset, mset = sets[key], sets[modelsKey]
+        local arc = X:archiveAt(archive)
+        for _, record in ipairs((fset and fset.animations) or {}) do
+          for _, index in ipairs((record.pattern and record.props) or {}) do
+            local packed = mset and mset.models and mset.models[index + 1]
+            local bytes = packed and arc and arc:get(index)
+            if bytes and Graphics.isCompressed(bytes) then bytes = Graphics.decompress(bytes) end
+            local sections = bytes and Nsbmd.sections(bytes)
+            local textures = sections and sections.TEX0 and Models.parse(bytes, sections.TEX0)
+            if textures then
+              packed.patternImages = packed.patternImages or {}
+              for i, name in ipairs(record.pattern.textures or {}) do
+                local ti, pi
+                for j, t in ipairs(textures.textures) do if t.name == name then ti = j end end
+                for j, p in ipairs(textures.palettes) do if p.name == (record.pattern.palettes or {})[i] then pi = j end end
+                local img = ti and Models.decode(textures, bytes, ti, pi or 1)
+                local data = img and ImageWriter.fromRGBA8(img.width, img.height, img.rgba)
+                if data then
+                  local key2 = ("hgssprop:%s/%d/%s"):format(modelsKey, index, name)
+                  memory[key2] = data
+                  packed.patternImages[name] = key2
+                  frames = frames + 1
+                end
+              end
+            end
+          end
+        end
+      end
+      X:close()
+      print(("[props] from %s: outdoor %d props / %d records, rooms %d props / %d records, %d flipbook frames"):format(
+        path, report.field and report.field.props or 0, report.field and report.field.records or 0,
+        report.interiorField and report.interiorField.props or 0,
+        report.interiorField and report.interiorField.records or 0, frames))
+    end
+    return push(self, state, ...)
+  end
+end
+
 -- SET_VARS="0x4108=1,0x4030=152", SET_FLAGS / CLEAR_FLAGS="0x6A,0x73", APRICORNS: story state
 -- before the first frame, through the engine's own setters, so a later
 -- scene can be tested without playing up to it

@@ -1686,3 +1686,15 @@ returntofield) and a fade back in. Before this pass `SetPhoneCall` and
   * The HGSS playthrough from RESUME=63 passes all 66 beats, both with and
     without HGSS_PHONE_ROM. Without it the call is skipped with a warning.
   * gen4_hgss_import_check: 114/114.
+
+### HGSS "!" / "!!" emotes from the cartridge (2026-10-17)
+
+The emote over a trainer who spots the player drew the engine's placeholder on
+HeartGold / SoulSilver: `RomExtractorGen4:emotes` only read Platinum's
+`/data/mmodel/fldeff.narc`, which HGSS does not have, so no `gen4_emotes` was
+ever written. HGSS keeps the same field-effect models in `/a/1/0/3`, and the
+two emotes are members **118** (`sisen_ef`) and **125** (`saisen_ef`) there --
+Platinum's 85 / 108 would have picked `h_exit`. `Gen4Emotes` now tries both
+archives and finds each emote by its texture name (the cartridge member first).
+Import marker `hgss-emotes-v1`. Black / White's emote is a 2D sprite (no model
+texture in the ROM matches), handled with the BW field work.

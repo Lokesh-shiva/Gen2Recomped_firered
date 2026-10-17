@@ -4718,9 +4718,15 @@ function Commands.g4_approach_type(ctx, destVar)
 end
 
 function Commands.g4_get_rematch_trainer_id(ctx, trainer, destVar)
-  local VsSeeker = require("src.world.VsSeeker")
-  local id = VsSeeker.rematchFor(ctx.save, ctx.overworld, ctx.npc)
-  local value = tonumber(id) or 0
+  local value
+  if require("src.import.Gen4ScriptBands").family ~= "hgss" then
+    -- Platinum: the armed object's next rung (src/world/Gen4VsSeeker.lua)
+    value = require("src.world.Gen4VsSeeker").rematchTrainerId(ctx.save, ctx.overworld, ctx.npc)
+  else
+    local VsSeeker = require("src.world.VsSeeker")
+    value = tonumber(VsSeeker.rematchFor(ctx.save, ctx.overworld, ctx.npc)) or 0
+  end
+  value = tonumber(value) or 0
   if destVar then setVar(ctx.save, destVar, value) end
   setResult(ctx, value)
 end
@@ -4736,7 +4742,26 @@ end
 -- the row being unlowered.  Unlowered it logged a warning in the middle of
 -- every trainer battle in the region and left the next reader unable to tell
 -- whether something was missing.  One use, in `Battles_DoTrainerBattle`.
-Commands.g4_set_move_code_facing = noop
+-- ...except that on Platinum it is also where an armed Vs. Seeker trainer (and
+-- a double partner) stands down after the rematch.
+function Commands.g4_set_move_code_facing(ctx)
+  if require("src.import.Gen4ScriptBands").family == "hgss" then return end
+  pcall(require("src.world.Gen4VsSeeker").clear, ctx.save, ctx.overworld, ctx.npc)
+end
+
+-- `StartVsSeeker <destVar>` (VsSeeker_Start): 0 OK, 1 no battery (missing
+-- steps to STRVAR 0), 2 no trainers in range, 3 nobody ready
+function Commands.g4_start_vs_seeker(ctx, destVar)
+  local V = require("src.world.Gen4VsSeeker")
+  local ok, result, missing = pcall(V.use, ctx.game, ctx.overworld)
+  if not ok then result = V.RESULT.NO_TRAINERS end
+  if result == V.RESULT.NO_BATTERY and ctx.game then
+    ctx.game.stringBuffers = ctx.game.stringBuffers or {}
+    ctx.game.stringBuffers[1] = tostring(missing or 0)
+  end
+  if destVar then setVar(ctx.save, destVar, result) end
+  setResult(ctx, result)
+end
 
 -- GameRecords_AddToRecordValue: record IDs are literal; only the small
 -- add command resolves its amount through script variables. The cartridge
@@ -5668,15 +5693,26 @@ end
 -- pose, which this port draws no differently.
 Gen4Commands.PLAYER_STATE = { WALKING = 1, CYCLING = 2, SURFING = 4 }
 
+-- The bike song follows a scripted mount or dismount (ScrCmd_SetPlayerBike
+-- sets / clears the SEQ_BICYCLE override, pokeplatinum scrcmd.c).
+local function bikeMusicAfter(ctx, was)
+  local save = ctx.save
+  if not (save and ctx.game) or (not was) == (not save.onBike) then return end
+  local ok, Music = pcall(require, "src.core.Music")
+  if ok and Music.setBike then pcall(Music.setBike, ctx.game.data, save.onBike) end
+end
+
 function Commands.g4_player_state(ctx, state)
   local bits = math.floor(tonumber(state) or 0)
   local save = ctx.save
   if not save then return end
+  local wasOnBike = save.onBike
   if bits % 2 == 1 then            -- WALKING
     save.onBike = false
   elseif math.floor(bits / 2) % 2 == 1 then  -- CYCLING
     save.onBike = true
   end
+  bikeMusicAfter(ctx, wasOnBike)
   -- HGSS: PLAYER_TRANSITION_ROCKET (1 << 10) puts on the Rocket disguise
   -- (the Radio Tower), WALKING takes it off; the sheet follows
   -- (Player:refreshForm)
@@ -5714,7 +5750,9 @@ end
 function Commands.g4_player_bike(ctx, on)
   local save = ctx.save
   if not save then return end
+  local was = save.onBike
   save.onBike = (math.floor(tonumber(on) or 0) ~= 0)
+  bikeMusicAfter(ctx, was)
 end
 
 -- `getdayofweek <destVar>` -- `GetDayOfWeek()`, 0 Sunday .. 6 Saturday, which
@@ -6523,6 +6561,13 @@ function Commands.g4_use_surf(ctx)
     return
   end
   p.surfing = true
+  -- SURFING REPLACES CYCLING (PlayerAvatar state): the bike is put away
+  local gsave = ctx.game and ctx.game.save
+  if gsave and gsave.onBike then
+    gsave.onBike, gsave.bikeKind = false, nil
+    local okB, MusicB = pcall(require, "src.core.Music")
+    if okB and MusicB.setBike then pcall(MusicB.setBike, ctx.game.data, false) end
+  end
   -- Being on the water means being at the water's level; the step onto it is
   -- otherwise refused by the rule that keeps a walker out of the sea.
   if ow.map and ow.map.cellElevation then
@@ -6676,7 +6721,21 @@ function Commands.g4_force_bike(ctx, on)
   if not save then return end
   local want = math.floor(tonumber(on) or 0) ~= 0
   save.forcedBike = want or nil
+  -- HGSS's SetBikeStateLock only LOCKS the state (AVATAR_FLAG_LOCK_BIKE_STATE,
+  -- pokeheartgold scrcmd_c.c / player_avatar.c); it never mounts the player
+  if require("src.import.Gen4ScriptBands").family == "hgss" then return end
+  local was = save.onBike
   if want then save.onBike = true end
+  bikeMusicAfter(ctx, was)
+end
+
+-- `setcyclingbgm`: the bike song now, whatever the map's own is
+function Commands.g4_cycling_bgm(ctx)
+  local data = ctx.game and ctx.game.data
+  local ok, Music = pcall(require, "src.core.Music")
+  if not (ok and data) then return end
+  local bike = Music.special(data, "bike")
+  if bike then pcall(Music.play, data, bike, nil, { reason = "map" }) end
 end
 
 -- `getpreviousmapid <destVar>` -- `FieldOverworldState_GetPrevLocation`, as a

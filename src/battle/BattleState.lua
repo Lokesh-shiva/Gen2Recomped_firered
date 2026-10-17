@@ -11057,6 +11057,16 @@ function BattleState:gen3AnimSpecialMonState(battler)
     tint = 0, r = 1, g = 1, b = 1,
     alpha = 1, brightness = 1, mosaic = 1,
   }
+  -- Sinnoh: alpha / mosaic / brightness / white from Gen4MoveAnimExtras.
+  if self.gen4AnimPlaying and self.gen4Anim and self.gen4Anim.monSpecial then
+    local ok4, sp = pcall(self.gen4Anim.monSpecial, self.gen4Anim, battler == self.player)
+    if ok4 and type(sp) == "table" then
+      state.alpha = sp.alpha or 1
+      state.mosaic = sp.mosaic or 1
+      state.brightness = sp.brightness or 1
+      state.white = math.max(state.white, sp.white or 0)
+    end
+  end
   local anim = self.gen3AnimPlaying and self.gen3Anim or nil
   if anim then
     if anim.monMosaic then
@@ -11179,6 +11189,12 @@ end
 -- Gen3MoveAnim:monRotate walks them (see both).  What comes back is radians
 -- and a rise in pixels.
 function BattleState:gen3AnimRotate(battler)
+  -- Sinnoh's animator rotates through the same seam (Gen4MoveAnimExtras).
+  if self.gen4AnimPlaying and self.gen4Anim and battler and self.gen4Anim.monRotate then
+    local ok4, angle4, rise4 = pcall(self.gen4Anim.monRotate, self.gen4Anim, battler == self.player)
+    if ok4 and type(angle4) == "number" and angle4 ~= 0 then return angle4, tonumber(rise4) or 0 end
+    return nil
+  end
   if not (self.gen3AnimPlaying and self.gen3Anim and battler) then return nil end
   if not self.gen3Anim.monRotate then return nil end
   local ok, angle, rise = pcall(self.gen3Anim.monRotate, self.gen3Anim, battler)

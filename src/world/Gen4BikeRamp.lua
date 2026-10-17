@@ -30,8 +30,10 @@ local R = {}
 R.EAST, R.WEST = 0xD7, 0xD8
 R.TOP_SPEED = 3
 
+-- Platinum's: HGSS leaves behaviours 0xD7..0xDA unnamed (TILE_BEHAVIOR_215..)
 local function gen4(map)
   return map and map.def and map.def.generation == 4
+    and require("src.core.GameVersion").family() ~= "hgss"
 end
 
 local function behaviourAt(map, x, y)

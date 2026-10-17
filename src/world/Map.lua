@@ -939,6 +939,8 @@ function Map:isGrassCell(cx, cy)
   -- animated grass tuft over the player's head for the whole step.  pokered
   -- only ever reads $52 from loaded map tiles, not the border filler.
   if not self:inBounds(cx, cy) then return false end
+  -- BLACK / WHITE: its own behaviour numbers (src/world/Gen5FieldRules.lua)
+  if self.def and self.def.gen5 then return require("src.world.Gen5FieldRules").isGrass(self, cx, cy) end
   return self.grassTiles[self:cellTile(cx, cy)] or false
 end
 
@@ -953,6 +955,8 @@ end
 --
 -- A tileset that does not name a wider set keeps the old answer exactly.
 function Map:isEncounterCell(cx, cy)
+  -- BLACK / WHITE: the tile's encounter bit (src/world/Gen5FieldRules.lua)
+  if self.def and self.def.gen5 then return require("src.world.Gen5FieldRules").isLandEncounter(self, cx, cy) end
   local wider = self.encounterTiles
   if not wider then return self:isGrassCell(cx, cy) end
   if not self:inBounds(cx, cy) then return false end
@@ -1523,6 +1527,8 @@ end
 
 function Map:gen4BikeSlopeAt(cx, cy)
   if (self.def and self.def.generation) ~= 4 then return false end
+  -- Platinum's mud slopes; HGSS leaves 0xD9/0xDA unnamed
+  if require("src.core.GameVersion").family() == "hgss" then return false end
   local b = self:cellBehaviour(cx, cy)
   return (b ~= nil and GEN4_BIKE_SLOPES[b]) == true
 end

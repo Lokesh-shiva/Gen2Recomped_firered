@@ -221,6 +221,14 @@ function Music.special(data, key)
   local special = data and data.audio and data.audio.special
   local label = special and special[key]
   if label ~= nil then return label end
+  -- HEARTGOLD / SOULSILVER name the two SEQ_GS_BICYCLE / SEQ_GS_NAMINORI
+  -- (pokeheartgold sndseq.h), which a cache imported before Gen4Audio knew
+  -- that spelling left out of `special`
+  if data and data.isGen4Cache and (key == "bike" or key == "surf") then
+    local songs = data.audio and data.audio.songs
+    local def = songs and songs[key == "bike" and "SEQ_GS_BICYCLE" or "SEQ_GS_NAMINORI"]
+    if type(def) == "table" and def.nds then return def.nds end
+  end
   return SPECIAL[key]
 end
 
@@ -452,6 +460,14 @@ function Music.playMap(data, mapId, onBike, surfing)
 end
 
 -- toggle the surf override mid-map (starting/ending a surf)
+-- the bike override alone (a scripted mount / dismount, or the bike given up
+-- for Surf), without restarting a map song that is already right
+function Music.setBike(data, onBike)
+  state.onBike = not not onBike
+  local play = effectiveMapSong(data, state.mapSong)
+  if play then Music.play(data, play, nil, { reason = "map" }) end
+end
+
 function Music.setSurfing(data, surfing)
   state.surfing = not not surfing
   local play = effectiveMapSong(data, state.mapSong)

@@ -449,6 +449,10 @@ Game.cameraLookDX = 0
 Game.cameraLookDY = 0
 
 local function lookPointerWanted(self)
+  -- never for the launcher's background game: it is a picture behind the
+  -- launcher, and capturing the pointer hid the launcher's mouse whenever the
+  -- player's camera was set to first or third person
+  if self.launcherPreview then return false end
   if not self:freeView() then return false end
   if (self.stack and self.stack:top()) ~= self.overworld then return false end
   if love.window and love.window.hasFocus then
@@ -540,7 +544,9 @@ end
 -- nothing and the camera would stop turning while the player is still asking it
 -- to.  An analog control that means "keep going" has to be read per frame.
 function Game:updateCameraStick(dt)
-  local view = self:freeView()
+  -- the launcher's background takes no look input (the right stick was
+  -- turning its camera while the player navigated the launcher)
+  local view = (not self.launcherPreview) and self:freeView() or nil
   if not view then
     if self.lookRelative then syncLookPointer(self, false) end
     Game.cameraLookDX = 0

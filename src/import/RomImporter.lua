@@ -1243,7 +1243,8 @@ local function markerFor(version)
   if version == "prism" then revision = "prism-events-art-v2:" end
   -- hgss-phone-call-v1: gen4_hgss_phone_call (Gen4HgssPhoneCall), the
   -- scripted Pokegear calls' phonebook / script defs / ink
-  if version == "heartgold" or version == "soulsilver" then revision = "hgss-phone-call-v1:" end
+  -- hgss-emotes-v1: gen4_emotes from HGSS's own /a/1/0/3 (members 118 / 125)
+  if version == "heartgold" or version == "soulsilver" then revision = "hgss-emotes-v1:" end
   -- Include version-specific field encounters, sleep, swarm and rate tables.
   -- Only these three caches need rebuilding; other markers remain stable.
   -- v8: field.gen2TradeAnim, GSC's own trade movie art (Gen2TradeArt).

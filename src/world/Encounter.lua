@@ -294,6 +294,8 @@ function Encounter.forMap(data, mapDef, mapId, hour, save)
     def=require("src.world.Gen2Swarms").forMap(data,save,mapDef,mapId,def)
   end
   if not isGen4Shaped(def) then return def end
+  -- BLACK / WHITE: seasons, dark grass, phenomena, rippling water (src/world/Gen5WildTables.lua)
+  if def.family == "bw" then return require("src.world.Gen5WildTables").view(def, save) end
   -- HEARTGOLD / SOULSILVER'S SAFARI ZONE: the area under the player, by time
   -- of day (src/world/HgssSafariZone.lua)
   do

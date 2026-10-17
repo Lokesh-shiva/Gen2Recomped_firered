@@ -824,14 +824,31 @@ function Gen4Battle.drawBattlers(battle)
   local pairs_ = Gen4Battle.battlerRows(battle)
   for _, row in ipairs(pairs_) do
     local battler = row.battler
+    -- A HIDDEN BATTLER'S COPIES ARE STILL DRAWN: Faint Attack hides the
+    -- attacker and swings a copy of it round the defender.
+    local hiddenNow = battler and not battler.fainted
+                      and Gen4Battle.battlerHidden(battle, battler)
+    if hiddenNow then
+      local pic = battle.battlerPic and battle:battlerPic(battler)
+      if pic then
+        local gx, gy = corner(row.pos.x, row.pos.y, pic)
+        gy = gy + Gen4Battle.spriteYOffset(battle, battler)
+        Gen4Battle.drawGhosts(battle, battler, pic, gx, gy, false)
+        Gen4Battle.drawGhosts(battle, battler, pic, gx, gy, true)
+      end
+    end
     if battler and not battler.fainted
-       and not Gen4Battle.battlerHidden(battle, battler) then
+       and not hiddenNow then
       local pic = battle.battlerPic and battle:battlerPic(battler)
       if pic then
         local x, y = corner(row.pos.x, row.pos.y, pic)
         -- ...and then down by the species' own offset, BEFORE the three
         -- branches below, because each of them derives from this y.
         y = y + Gen4Battle.spriteYOffset(battle, battler)
+        -- AFTER-IMAGES under the Pokemon (Double Team, Minimize, Agility...),
+        -- and the few copies the cartridge puts above it (`over`).
+        Gen4Battle.drawGhosts(battle, battler, pic, x, y, false)
+        row.ghostAt = { pic = pic, x = x, y = y }
         local clip = Gen4Battle.monWindowClip(battle, row.pos, pic)
         if clip then
           -- SAVE AND PUT BACK, rather than `setScissor()`: a screen that scissors
@@ -876,6 +893,11 @@ function Gen4Battle.drawBattlers(battle)
       end
     end
   end
+  for _, row in ipairs(pairs_) do
+    local at = row.ghostAt
+    if at then Gen4Battle.drawGhosts(battle, row.battler, at.pic, at.x, at.y, true) end
+    row.ghostAt = nil
+  end
   -- THE MOVE'S PARTICLES, IN FRONT OF BOTH POKEMON.
   --
   -- The cartridge draws them in a 3D scene and they genuinely pass behind a
@@ -887,6 +909,72 @@ function Gen4Battle.drawBattlers(battle)
   -- ...AND THE FLAT 2D SPRITES, on top of the particles. 32 of the 501 programs
   -- build one out of four separate archives and until now they drew nothing.
   Gen4Battle.drawCellActors(battle)
+  -- A whole-field brightness wash (HGSS's flash opcode, Flash, ...).
+  Gen4Battle.drawScreenWash(battle)
+end
+
+-- drawGhosts(battle, battler, pic, x, y): copies of the battler's picture a
+-- move animation has put on screen (`Player:monGhosts`), each with its own
+-- offset, translucency and scale (pivoting on the picture's foot, like the
+-- battler's own squash).
+-- One shader for the copies: a tint wash ({r,g,b,a}, the palette blend) and
+-- a greyscale factor (Double Team's and Harden's grey copies).
+local ghostShader = nil
+local function ghostFx()
+  if ghostShader ~= nil then return ghostShader or nil end
+  local ok, sh = pcall(love.graphics.newShader, [[
+    extern vec4 wash;
+    extern number gray;
+    vec4 effect(vec4 colour, Image tex, vec2 uv, vec2 screen) {
+      vec4 px = Texel(tex, uv);
+      float l = dot(px.rgb, vec3(0.299, 0.587, 0.114));
+      px.rgb = mix(px.rgb, vec3(l), gray);
+      px.rgb = mix(px.rgb, wash.rgb, wash.a);
+      return px * colour;
+    }
+  ]])
+  ghostShader = ok and sh or false
+  return ok and sh or nil
+end
+
+function Gen4Battle.drawGhosts(battle, battler, pic, x, y, overPass)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.monGhosts and pic) then return end
+  local got, list = pcall(player.monGhosts, player, battler == battle.player)
+  if not (got and type(list) == "table") then return end
+  local g = love.graphics
+  local cr, cg, cb, ca = g.getColor()
+  local w, h = pic:getWidth(), pic:getHeight()
+  local old = g.getShader and g.getShader() or nil
+  for _, gh in ipairs(list) do
+    local a = gh.alpha or 0.5
+    if a > 0 and ((gh.over and true or false) == (overPass and true or false)) then
+      local sx, sy = gh.sx or 1, gh.sy or 1
+      local t = gh.tint
+      local sh = (t or (gh.gray or 0) > 0) and ghostFx() or nil
+      if sh then
+        sh:send("wash", t and { t[1] or 0, t[2] or 0, t[3] or 0, t[4] or 1 } or { 0, 0, 0, 0 })
+        sh:send("gray", math.max(0, math.min(1, gh.gray or 0)))
+        g.setShader(sh)
+      end
+      g.setColor(cr, cg, cb, ca * math.min(1, a))
+      g.draw(pic, x + (gh.dx or 0) + w / 2, y + (gh.dy or 0) + h, gh.rot or 0, sx, sy, w / 2, h)
+      if sh then g.setShader(old) end
+    end
+  end
+  g.setColor(cr, cg, cb, ca)
+end
+
+-- drawScreenWash(battle): `Player:screenWash` over the battle field.
+function Gen4Battle.drawScreenWash(battle)
+  local player = battle and battle.gen4AnimPlaying and battle.gen4Anim
+  if not (player and player.screenWash) then return end
+  local got, r, g, b, a = pcall(player.screenWash, player)
+  if not (got and a and a > 0) then return end
+  local gfx = love.graphics
+  gfx.setColor(r or 1, g or 1, b or 1, a)
+  gfx.rectangle("fill", 0, 0, Gen4Battle.width(battle), Gen4Battle.HEIGHT)
+  gfx.setColor(1, 1, 1, 1)
 end
 
 -- drawBackgroundFade(battle) -> true if anything was drawn

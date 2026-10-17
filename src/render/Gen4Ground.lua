@@ -437,6 +437,13 @@ function Gen4Ground.forMap(map, data)
   -- ...AND BY THE PROP MODEL THAT CLAIMS IT.  See the loop below.
   self.animsByProp = {}
   local field = ((data.gen4_models or {}).sets or {}).field
+  -- HGSS (Gen4HgssPropAnim): a room's props are claimed by their own list, and
+  -- the set names which members are script-owned and that names never join.
+  -- Absent from Platinum's cache, so its maps keep the door-id set and names.
+  local interiorField = ((data.gen4_models or {}).sets or {}).interiorField
+  if interiorField and interior and self.buildingSet == interior then field = interiorField end
+  self.scriptedMembers = field and field.scripted or nil
+  self.claimsOnly = field and field.claimsOnly or nil
   for _, record in ipairs((field or {}).animations or {}) do
     if record.name then
       local list = self.animsByName[record.name]
@@ -783,15 +790,24 @@ end
 -- origin.
 function Gen4Ground:oneShotPose(object, building)
   if not (object and building) then return nil end
+  -- no one-shot running: a prop whose joints loop on the clock (HGSS's
+  -- windmill, Gen4PropClock) -- nil, the rest pose, for every Platinum prop
   local slots = self.oneShots
-  if not slots then return nil end
+  if not slots then return self:clockPose(object, building) end
   local okO, OneShot = pcall(require, "src.world.Gen4PropOneShot")
   if not okO or not OneShot then return nil end
   local slot = OneShot.poseIn(slots, object)
-  if not slot then return nil end
+  if not slot then return self:clockPose(object, building) end
   local byJoint = self:jointMatricesAt(slot)
   if not byJoint then return nil end
   return building:posed(function(node) return byJoint[node] end)
+end
+
+-- The looping joint pose a prop wears on the frame clock (Gen4PropClock).
+function Gen4Ground:clockPose(object, building)
+  local okC, Clock = pcall(require, "src.render.Gen4PropClock")
+  if not (okC and Clock) then return nil end
+  return Clock.pose(self, object, building)
 end
 
 -- jointMatricesAt(slot) -> { [joint index] = 4x4 } | nil
@@ -845,9 +861,10 @@ function Gen4Ground:oneShotProps()
   if self.oneShotPropSet then return self.oneShotPropSet end
   local set = {}
   local models = (self.buildingSet or {}).models or {}
-  local oneShot = Gen4Ground.oneShotAnimations()
+  local oneShot = self.scriptedMembers or Gen4Ground.oneShotAnimations()
   for _, record in pairs(self.animsByMember or {}) do
-    if record.tracks and record.props then
+    -- (`bca`: an HGSS joint animation, decoded on first draw by Gen4PropClock)
+    if (record.tracks or record.bca) and record.props then
       for _, index in ipairs(record.props) do set[index] = true end
     end
     -- A TEXTURE-PATTERN ONE-SHOT IS STILL A ONE-SHOT, and `tracks` alone
@@ -1021,20 +1038,23 @@ function Gen4Ground:animationsFor(index, archive)
   local packed = set and set.models and set.models[index + 1]
   if not packed then return nil end
   local images = packed.patternImages
-  local oneShot = Gen4Ground.oneShotAnimations()
+  -- HGSS's own script-owned members (Gen4HgssPropAnim), not Platinum's door ids
+  local oneShot = self.scriptedMembers or Gen4Ground.oneShotAnimations()
+  local Clock = require("src.render.Gen4PropClock")
   local list, seen = nil, {}
   local function add(records)
     for _, record in ipairs(records or {}) do
       local scripted=record.member and oneShot[record.member]
       if record.member==32 and self.healScreenActive then scripted=false end
-      if not seen[record] and not scripted then
+      -- an HGSS time-of-day record is worn only in its own state
+      if not seen[record] and not scripted and Clock.wears(record, index) then
         seen[record] = true
         list = list or {}
         list[#list + 1] = record
       end
     end
   end
-  add(packed.name and self.animsByName[packed.name])
+  if not self.claimsOnly then add(packed.name and self.animsByName[packed.name]) end
   add(self.animsByProp and self.animsByProp[index])
   if not (list and Gen4TexAnim.animates(list, images)) then return nil end
   return list, images
@@ -1109,8 +1129,21 @@ function Gen4Ground:building(index, archive)
   local distProp = field and index >= 0x7C and index <= 0x94
   local model = Gen4Model.new({ name = (field and "fldeff%d" or "build%d"):format(index),
                                 posScale = packed.posScale, shapes = shapes,
-                                nodes = distProp and packed.nodes or nil,
-                                ops = distProp and packed.ops or nil,
+                                -- EVERY BUILDING KEEPS ITS NODES, not only the
+                                -- Distortion World's props. Reported from play:
+                                -- "in heartgold and soul silver the windmills
+                                -- dont have their fans at the top". New Bark's
+                                -- `wk_sp1` models the pole standing from the
+                                -- ground and the hub and sails around the
+                                -- ORIGIN, and its node `polySurface1` lifts them
+                                -- 80 units to the top of the pole (turned 40
+                                -- degrees). Drawn without nodes, the sails sat at
+                                -- the foot of the pole. A model whose nodes are
+                                -- all identity -- nearly every building -- poses
+                                -- to exactly what it drew before.
+                                nodes = packed.nodes, ops = packed.ops,
+                                inverseBind = packed.inverseBind,
+                                scalingRule = packed.scalingRule,
                                 -- The building set is SHARED between maps and
                                 -- this cache is not: `self.buildings` belongs
                                 -- to one ground, so a house in Twinleaf and
