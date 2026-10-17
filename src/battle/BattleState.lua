@@ -2622,8 +2622,17 @@ function BattleState:updateQueue()
   -- own clear window instead of letting the next beat play over it
   if self.waitingSound then
     local src = self.waitingSound
-    if src and src.isPlaying and src:isPlaying() then return true end
-    self.waitingSound = nil
+    -- ...but never past 240 frames: no sound effect runs that long, and a
+    -- source that never reports stopped (a cached source another caller
+    -- set looping, a driver that stopped answering) held a battle in
+    -- "messages" with nothing on screen for good -- seen once in a long
+    -- HGSS playthrough run, at the start of a double battle.
+    self.waitingSoundT = (self.waitingSoundT or 0) + 1
+    if src and src.isPlaying and src:isPlaying() and self.waitingSoundT <= 240 then return true end
+    if self.waitingSoundT > 240 then
+      require("src.core.Logger").warn("battle: a sound never finished -- stopped waiting after 240 frames")
+    end
+    self.waitingSound, self.waitingSoundT = nil, nil
   end
   -- an HP-bar drain holds the queue until the bar catches up
   if self.draining then

@@ -30,6 +30,12 @@ local ok,err=xpcall(function()
    if bytes then
     result.hash=love.data.encode('string','hex',love.data.hash('sha1',bytes))
     result.version=GV.forSha1(result.hash)
+    if not result.version then
+     -- which revision a refused dump is (FireRed Rev 1, Crystal AU ...)
+     local okRev,RR=pcall(require,'src.import.RomRevisions')
+     local found=okRev and RR.describe(bytes,result.hash)
+     result.revision=found and found.short or nil
+    end
    end
    results[#results+1]=result
    channel:push({kind='progress',current=index,total=#job.paths,name=result.name})

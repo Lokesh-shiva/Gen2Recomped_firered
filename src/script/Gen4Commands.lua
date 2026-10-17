@@ -667,11 +667,20 @@ itemKey = function(data, id)
   return id
 end
 
+-- SILENT, as the cartridge's GiveItem is (scrcmd_item.c: Bag_AddItem and the
+-- result into the var). The std scripts around it print "Obtained the X!",
+-- play the fanfare and say which pocket; going through the Gen 1/2
+-- `give_item` added its own "{PLAYER} got X!" box and jingle in front of
+-- every gift in Sinnoh and Johto (Kurt's Fast Ball, reported in the HGSS
+-- playthrough).
 function Commands.g4_give_item(ctx, item, count, destVar)
   local id = itemKey(ctx.game and ctx.game.data, valueOf(ctx, item))
   local n = math.max(valueOf(ctx, count), 1)
-  Commands.give_item(ctx, id, n)
-  if destVar then setVar(ctx.save, destVar, 1) end
+  pcall(function() require("src.core.Probe").say("item", "give %s x%s", tostring(id), tostring(n)) end)
+  local ok = ctx.save and require("src.inventory.Bag").add(ctx.save, id, n, ctx.game and ctx.game.data) and true or false
+  ctx.lastCheck = ok
+  if destVar then setVar(ctx.save, destVar, ok and 1 or 0) end
+  setResult(ctx, ok and 1 or 0)
 end
 
 function Commands.g4_take_item(ctx, item, count, destVar)
@@ -1001,8 +1010,15 @@ end
 -- Falls through to the bare id when the map has no bank, which is what a cache
 -- imported before that byte was carried looks like: an empty box rather than a
 -- crash, and the same empty box it gave before.
+-- THE SCRIPT'S OWN MAP'S BANK, not the one the player stands on now:
+-- ScriptContext_Load reads the message archive once, when the script starts,
+-- so a script that warps the player and keeps talking still reads its home
+-- map's lines. Reading the current map's printed TEXT_B labels (Kurt's house
+-- scene, entries 15-17, resolved against Azalea Gym's bank).
 local function lineFor(ctx, entry)
-  local def = ctx.overworld and ctx.overworld.map and ctx.overworld.map.def
+  local maps = ctx.game and ctx.game.data and ctx.game.data.maps
+  local home = ctx.mapId and maps and maps[ctx.mapId]
+  local def = (home and home.messages and home) or (ctx.overworld and ctx.overworld.map and ctx.overworld.map.def)
   local bank = def and def.messages
   if not bank then return entry end
   return require("src.import.Gen4Text").label(bank, tonumber(entry) or 0)
@@ -1143,7 +1159,18 @@ function Commands.g4_bw_rail_ride(ctx, n)
     local d = math.abs(t.x - p.cellX) + math.abs(t.y - p.cellY)
     if not bestD or d < bestD then best, bestD = t, d end
   end
-  if best and bestD <= 2 then ow:setMap(ow.map.id, best.toX, best.toY, p.facing or "down") end
+  if best and bestD <= 2 then
+    -- A RIDE IS NOT A MAP LOAD: the player is carried along the track inside
+    -- the same field, so the gym's temporary vars (its switch groups,
+    -- 0x4001 + a) and the block arms its switches moved stay as they are.
+    -- Reloading the map here ran ClearTempFieldEventData and put every
+    -- switch back after each ride.
+    p.cellX, p.cellY = best.toX, best.toY
+    p.px, p.py = best.toX * 16, best.toY * 16
+    p.moving, p.targetX, p.targetY = false, nil, nil
+    if ow.followCamera then pcall(ow.followCamera, ow) end
+    if ow.refreshStandingOnWarp then pcall(ow.refreshStandingOnWarp, ow) end
+  end
 end
 
 -- BLACK / WHITE 0x0DF <mode, species, var>: 1 if the species is in the
@@ -1541,14 +1568,23 @@ local function objectById(ctx, id)
     end
     return overworld.gen4Camera
   end
-  local best, bestIndex
+  local best, bestIndex, bestHidden
   for _, e in ipairs(overworld.entities) do
     -- On the def, because that is where the extractor writes it; checked on
     -- the entity too so a future spawner that copies it up still matches.
     local localId = e.localId or (e.def and e.def.localId)
     if localId == wanted then
       local index = tonumber(e.def and e.def.index) or math.huge
-      if not best or index < bestIndex then best, bestIndex = e, index end
+      -- ...THE ONE STILL THERE before one already taken away: Black / White
+      -- spawn a temporary under the same id more than once (Castelia's gym
+      -- door, Z031 M0062 S00B0: 251 as Cheren, removed, then 251 again), and
+      -- the second `removeobject 251` hid the first one over again -- the
+      -- second stood in the gym's doorway for the rest of the session
+      local hidden = (e.hidden and not e.buried) and true or false
+      if not best or (bestHidden and not hidden)
+         or (hidden == bestHidden and index < bestIndex) then
+        best, bestIndex, bestHidden = e, index, hidden
+      end
     end
   end
   return best
@@ -1669,6 +1705,21 @@ end
 function Commands.g4_hide_object(ctx, id)
   local e = objectById(ctx, id)
   if not e then return end
+  -- A BLACK / WHITE TEMPORARY SPAWNED AGAIN UNDER THE SAME ID whose body is
+  -- not up yet: the one found is the earlier, already removed. The later
+  -- template is the one this removes (Castelia's gym door, Z031 M0062
+  -- S00B0: 251 spawned, removed, spawned again, removed -- the second stood
+  -- in the doorway for the rest of the session).
+  if e.hidden and e.def and e.def.gen5Temp then
+    local def = ctx.overworld and ctx.overworld.map and ctx.overworld.map.def
+    for _, o in ipairs(def and def.objects or {}) do
+      if o.gen5Temp and o.localId == e.def.localId and not o.hidden then
+        o.hidden = true
+        local ow = ctx.overworld
+        if ow.syncObjectVisibility then pcall(function() ow:syncObjectVisibility(o) end) end
+      end
+    end
+  end
   e.hidden = true
   -- a Black / White temporary (g4_bw_spawn_object) is gone for good
   if e.def and e.def.gen5Temp then e.def.hidden = true end
@@ -1840,6 +1891,22 @@ local function moveEvent(ctx, key, index, x, z, what)
     return
   end
   row.x, row.y = toLocal(ctx, valueOf(ctx, x), valueOf(ctx, z))
+  -- ...AND THE MAP'S CELL INDEX, which Map.new built from the rows at load:
+  -- left stale, a moved warp still answered at its old cell. The S.S. Aqua's
+  -- 1F stacks its Olivine and Vermilion gangway warps and its OnResume script
+  -- moves the unused one aside (MoveWarp 0 / 12 to 27,20); with the stale
+  -- index the Vermilion gangway went back to Olivine. First row wins, as at
+  -- load.
+  local map = ctx.overworld and ctx.overworld.map
+  local w = map and map.widthCells
+  if w and (key == "warps" or key == "signs") then
+    local index = {}
+    for i, r in ipairs(list) do
+      local at = r.y * w + r.x
+      if index[at] == nil then index[at] = key == "warps" and { index = i, def = r } or r end
+    end
+    if key == "warps" then map.warpAt = index elseif not map.signLevels then map.signAt = index end
+  end
 end
 
 function Commands.g4_set_warp_pos(ctx, index, x, z)
@@ -2553,6 +2620,21 @@ function Commands.g4_swarm_map_species(ctx, mapVar, speciesVar)
   setVar(ctx.save, speciesVar, species)
 end
 
+-- HGSS MASS OUTBREAKS (`ScrCmd_EnableMassOutbreaks`; ScrCmd_211 is
+-- GetSwarmInfoFromRand: today's map header and its swarm species).
+function Commands.g4_hgss_enable_outbreaks(ctx)
+  require("src.world.HgssOutbreaks").enable(ctx.save)
+end
+function Commands.g4_hgss_outbreak_info(ctx, mapVar, speciesVar)
+  local data = ctx.game and ctx.game.data
+  local entry = require("src.world.HgssOutbreaks").today(ctx.save)
+  local def = entry and data and data.maps and data.maps[entry[1]]
+  local area = def and data.encounters and data.encounters[def.encounters or entry[1]]
+  local sw = area and area.hgssSwarm or {}
+  setVar(ctx.save, mapVar, tonumber(def and def.header) or 0)
+  setVar(ctx.save, speciesVar, tonumber(sw[entry and entry[2] or "land"]) or 0)
+end
+
 -- THE SAFARI GAME (`ScrCmd_StartEndSafariGame`). Starting one is thirty
 -- Safari Balls and a zeroed step count; ending one zeroes both. The flag the
 -- cartridge sets is `save.safari` here, the field reads it
@@ -2631,7 +2713,8 @@ end
 --
 -- There are two spellings of this call in the file -- the bare
 -- `pending("g4_use_rock_climb", ...)` and the assigned
--- `Commands.g4_open_hall_of_fame = pending("g4_open_hall_of_fame", ...)` --
+-- `Commands.g4_open_hall_of_fame = pending(...)` (the Hall of Fame row, a real
+-- screen since pass 34) --
 -- and while this returned nothing, the assigned form **overwrote the handler
 -- it had just installed with nil**.  Both of them: the PC's Hall of Fame row
 -- (pass 173) and the seal capsule editor reached no handler at all, which is
@@ -3137,6 +3220,9 @@ Commands.meta.g4_name_rival = { foreground = true, blocking = true }
 local function pokegear(save)
   if not save then return nil end
   save.hgssPokegear = save.hgssPokegear or { cards = {}, numbers = {}, mapLevel = 0 }
+  -- the Pokegear screen's skin choice can create the record first ({ skin })
+  local pg = save.hgssPokegear
+  pg.cards, pg.numbers, pg.mapLevel = pg.cards or {}, pg.numbers or {}, pg.mapLevel or 0
   return save.hgssPokegear
 end
 function Commands.g4_pokegear_card(ctx, card)
@@ -5160,11 +5246,14 @@ end
 Commands.meta.g4_open_party_for_trade = { foreground = true, blocking = true }
 
 -- `startnpctrade <slot>` -- FieldTask_StartNPCTrade: build their Pokemon, swap
--- it for yours, and play the trade cutscene. THE CUTSCENE IS NOT BUILT and is
--- not faked -- there is no trade animation anywhere in this port -- so the swap
--- happens and the scene does not. Said out loud rather than left to be noticed:
--- the alternative is a trade that silently does nothing, which is what was
--- happening before.
+-- it for yours, and play the trade cutscene. The order is FieldTask_Process-
+-- NPCTrade's: state 0 builds the Pokemon and puts it in the party
+-- (NPCTrade_ReceiveMon), states 1-3 fade the field out and run the trade
+-- sequence application, 4-5 bring the field back. So the swap below happens
+-- first and then src/ui/Gen4TradeSequence.lua plays (send, tube, fly-by,
+-- wormhole, arrival, reveal, receive -- the cartridge's seven phases, on the
+-- cartridge's art), and the script resumes when it is over. HeartGold's
+-- Task_NPCTrade (unk_0206793C.s) is the same seven states around overlay 71.
 --
 -- WHAT THE POKEMON IS, from NPCTrade_CreateMon:
 --   * ITS LEVEL IS THE LEVEL OF THE ONE YOU GAVE. Not a stored level -- the
@@ -5217,18 +5306,19 @@ function Commands.g4_trade_start(ctx, slotArg)
     for i, key in ipairs(Stats.ORDER_GEN3) do
       if row.ivs[i] then mon.ivs[key] = row.ivs[i] end
     end
-    local def = data.pokemon[row.species]
-    local okStats, stats = pcall(Stats.calc, def, mon.level, mon.ivs,
-                                 mon.evs, mon.nature)
-    if okStats and type(stats) == "table" then
-      mon.stats, mon.hp = stats, stats.hp
-    end
   end
+  -- ...and the record's PERSONALITY, which fixes the nature, the ability slot,
+  -- the gender and the shininess (NPCTrade's Pokemon_InitWith... takes it
+  -- whole); applySeed recomputes those and the stats from it and the IVs.
+  if row.personality then mon.hp = nil end
+  pcall(require("src.pokemon.Pokemon").applySeed, data, mon,
+        { personality = row.personality, ivs = mon.ivs })
+  if mon.stats and not mon.hp then mon.hp = mon.stats.hp end
 
-  -- The one you gave leaves and the one you were given joins at the END, which
-  -- is where Party_AddPokemonBySlotIndex puts it, and the dex is told.
-  table.remove(party, slot)
-  party[#party + 1] = mon
+  -- The one you were given takes the SLOT of the one you gave:
+  -- Party_AddPokemonBySlotIndex (both decomps' npc_trade.c) overwrites
+  -- party->pokemon[slot] in place. Then the dex is told.
+  party[slot] = mon
   local save = ctx.save
   save.pokedex = save.pokedex or {}
   save.pokedex.seen = save.pokedex.seen or {}
@@ -5239,7 +5329,28 @@ function Commands.g4_trade_start(ctx, slotArg)
   -- The slot is spent: a second `getselectedpartyslot` after a swap must not
   -- name a member that has moved.
   ctx.g4PartySlot = nil
+
+  -- THE CUTSCENE, with the two Pokemon NPCTrade_FillAnimationTemplate hands
+  -- it: yours as it left, theirs as it arrived, the other trainer's name for
+  -- "X will be sent to Y." -- and the time of day for the sky.
+  local runner = ctx.runner
+  local game = ctx.game
+  if game and game.stack and data.gen4_trade_art then
+    local okS, err = pcall(function()
+      require("src.ui.Screens").push(game, "Gen4TradeSequence", {
+        sending = given, receiving = mon, otName = row.otName,
+        onDone = function() if runner then runner:resume() end end,
+      })
+    end)
+    if okS then
+      if runner then runner:yield() end
+    else
+      Logger.warn("gen4 trade: the trade cutscene would not start: %s", tostring(err))
+    end
+  end
 end
+
+Commands.meta.g4_trade_start = { foreground = true, blocking = true }
 
 -- ---------------------------------------------------------------------------
 -- CHAPTER THREE -- Oreburgh to Eterna
@@ -6219,9 +6330,17 @@ end
 --
 -- The script carries on into `ReturnToField` and back to the PC menu, so the
 -- row answers and the player is returned rather than stranded.
-Commands.g4_open_hall_of_fame = pending("g4_open_hall_of_fame",
-  "the PC's Hall of Fame browser is not built; save.hallOfFame holds the "
-  .. "records and src/ui/HallOfFame.lua is the induction ceremony, not a viewer")
+-- ...built now: src/ui/Gen4PcHallOfFame.lua, Platinum's and HGSS's browser.
+-- The script waits on it, as the cartridge's ScriptContext_Pause does.
+function Commands.g4_open_hall_of_fame(ctx)
+  local game = ctx.game
+  local Screen = require("src.ui.Gen4PcHallOfFame")
+  if not (game and game.stack and Screen.available(game)) then return end
+  local runner = ctx.runner
+  game.stack:push(Screen.new(game, { onDone = function() if runner then runner:resume() end end }))
+  if runner then runner:yield() end
+end
+Commands.meta.g4_open_hall_of_fame = { foreground = true, blocking = true }
 
 -- `givetrap <trapID> <unused> <destVar>` and
 -- `givesphere <type> <size> <destVar>` -- the Underground inventory, and the
@@ -9510,9 +9629,21 @@ function Commands.g4_clear_game(ctx, vsTrainerRed)
     onDone = function()
       -- the induction (HallOfFame_AddEntry), which the gift offer counts
       save.hallOfFame = save.hallOfFame or {}
+      -- what the PC's Hall of Fame browser shows (Gen4PcHallOfFame,
+      -- HallOfFame_GetEntryPokemonData): name, species, level, gender, form,
+      -- OT and moves, and the entry's date
       local entry = {}
+      local now = os.date("*t")
+      entry.date = { year = now.year, month = now.month, day = now.day }
       for _, mon in ipairs(party) do
-        entry[#entry + 1] = { species = mon.species, level = mon.level, nickname = mon.nickname }
+        local moves = {}
+        for i, mv in ipairs(mon.moves or {}) do
+          moves[i] = type(mv) == "table" and (mv.id or mv.move or mv.name) or mv
+        end
+        entry[#entry + 1] = { species = mon.species, level = mon.level, nickname = mon.nickname,
+          gender = require("src.pokemon.Pokemon").genderOf(game.data, mon), form = mon.form,
+          shiny = mon.shiny or nil, personality = mon.personality,
+          otName = mon.otName or mon.ot or (save.player or {}).name, moves = moves }
       end
       table.insert(save.hallOfFame, entry)
       local function afterGift()

@@ -122,7 +122,12 @@ local function startGame(version)
   local frApply = FR.applyOptions
   FR.applyOptions = function() end
   local Game = require("src.core.Game")
+  -- ...and without mods: the preview is the cartridge's own menu, and a mod
+  -- loaded here would be loaded AGAIN by Play in the same process (see
+  -- Game:load). Cleared straight after, so Play loads them as always.
+  Game.loadWithoutMods = true
   local ok, err = pcall(Game.load, Game)
+  Game.loadWithoutMods = nil
   FR.applyOptions = frApply
   if not ok then
     pcall(CacheFs.unmountVersion, version)

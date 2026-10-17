@@ -10,7 +10,7 @@
 --   desktop  the browser flow for installed apps: PKCE, the browser opens
 --            Google's page, Google sends it back to http://127.0.0.1:<port>
 --            where a one-shot listener (LOVE's luasocket) takes the code.
---   Android  the "TVs and Limited Input devices" flow: the launcher shows a
+--   Android / iOS  the "TVs and Limited Input devices" flow: the launcher shows a
 --            short code and google.com/device; the player enters it on any
 --            device while the launcher polls. (Android pauses the launcher
 --            while the browser is up, so a listener there would miss Google.)
@@ -34,10 +34,12 @@ local function isAndroid() return love and love.system and love.system.getOS() =
 
 -- which flow this device uses, and its client, or nil + why
 function G.client()
-  if isAndroid() then
+  -- iOS too: Safari suspends the app, so the loopback listener the desktop
+  -- flow waits on never hears Google either; the code popup is the way in
+  if isAndroid() or (love and love.system and love.system.getOS() == "iOS") then
     local c = Clients.googleDevice()
     if c then return c, "device" end
-    return nil, "Google sign-in on Android needs the TV / limited-input client (cloud_clients.lua)"
+    return nil, "Google sign-in on phones needs the TV / limited-input client (cloud_clients.lua)"
   end
   local c = Clients.googleDesktop()
   if c then return c, "browser" end
@@ -147,7 +149,8 @@ function G.begin()
       headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
       body = Http.form({ client_id = client.id, scope = G.SCOPE }),
     }))
-    if status ~= 200 or not (doc and doc.device_code) then
+    if not status then return nil, "could not reach Google: " .. tostring(doc) end
+    if status ~= 200 or not (type(doc) == "table" and doc.device_code) then
       return nil, ("Google refused the sign-in request (%s)"):format(tostring(doc and doc.error or status))
     end
     return {

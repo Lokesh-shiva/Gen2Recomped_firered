@@ -1134,7 +1134,7 @@ Verified: talk, MAKE GROUP, name it; the line reads "The AAAAAAA group, huh?".
 **Small HGSS commands.**
 - 494 is `BufferECWord`, an Easy Chat word to a buffer.
 - 706 / 642 ask whether a Hall of Fame record exists.
-- 164 opens the PC Hall of Fame browser. It is still `pending`, as on Platinum.
+- 164 opens the PC Hall of Fame browser (below).
 - 289 sets the Union Room avatar (`save.player.avatar`).
 
 **Dark caves (both games).** The darkness is drawn now (`src/render/Gen4FlashDark.lua`). It is Platinum's DARK_FLASH weather task (ov5_021DB04C): an H-blank window centred at (128, 84).
@@ -1146,4 +1146,543 @@ Verified: talk, MAKE GROUP, name it; the line reads "The AAAAAAA group, huh?".
 
 Checked in Whirl Islands (D40R0101, HGSS) and Wayward Cave (D21R0101, Platinum).
 
-**Left in HGSS.** The Union Room (wireless), the PC Hall of Fame browser (both games), Pokéathlon courses, Pal Park migration (509/510; needs a GBA save), phone calls, the photo album and seals.
+**The PC's Hall of Fame browser (both games).** `src/ui/Gen4PcHallOfFame.lua`, from pokeplatinum's `pc_hall_of_fame` (display.c / manager.c). It opens from Platinum's `openpchalloffamescreen` and HGSS's 164.
+- Two standard windows: the title "HALL OF FAME No. n Month d, yyyy", and the chosen Pokémon (nickname, species, gender, level, OT). A swaps the second window to its moves.
+- The team is at the cartridge's six spots. The chosen Pokémon is solid and cries; the others are half-transparent.
+- Up / Down step through the team and over into the next entry. Left / Right step entries, wrapping. B leaves.
+- Text is Platinum bank 352 and HGSS bank 181.
+- The background is dendou_pc.narc (tiles 1, tilemap 0, palette 2), composed as `hof_pc` by `Gen4EndingArt`. Without a re-import it is a plain fill; HGSS's own art is not read.
+- Entries now store date, gender, form, OT and moves. Older entries show what they have.
+- Harness: `PARTY=... HOF_PARTY=n SCREEN=Gen4PcHallOfFame`.
+- The pending-row pins in gen4_trainer_message_check and gen4_underground_inventory_check drop from 5 to 4.
+
+**Left in HGSS.** The Union Room (wireless), Pokéathlon courses, Pal Park migration (509/510; needs a GBA save), phone calls, the photo album and seals.
+
+## Pass 35: HGSS water, surf mount
+
+**Walking on water (reported from play: walking onto the water east of New Bark Town and meeting a Doduo there).**
+- `Map.gen4WaterAt` and `Map:isWaterCell` skipped HGSS (`cameraFamily ~= "hgss"`), so HGSS sea and river cells were walkable.
+- The encounter check then counted the sea (a SURFABLE_ENCOUNTER behaviour) as an encounter cell and rolled the land table. That is where Route 27's Doduo came from.
+- HGSS uses the same surfable behaviours as Platinum (pokeheartgold metatile_behavior.c: 0x10–0x15, 0x19, 0x2A, 0x50–0x53, and the bridges 0x73 / 0x78 / 0x7C). The exclusion is gone.
+- Verified: walking east from New Bark stops at the shore. Pressing A there offers Surf, and surfing crosses onto Route 27. New Bark's own table (ENCDATA_T20 = 0) is surf and rods only.
+
+**The surf mount was invisible in HGSS.** The model (`sea_ride`, fldeff member 86) loaded and was placed as the cartridge does (ov01_021FE8C8: bob 1..4, sprite lifted 4 + bob and 4 toward the camera). But HGSS's sea surface (`sea_un`, height 8, the same as the plate the surfer stands on) hid all of it under the depth test.
+- On HGSS the mount is now drawn over the ground. The canopy and the sprites still go over it.
+- Side effect: where trees in the ground mesh stand right in front of the surfer, the mount's lower edge draws over them.
+
+**Same pass, related.**
+- Surf from the party menu (`useSurfFieldMove`) also skipped HGSS, falling through to the Gen 1/2 tile lists. It now takes the Gen 4 path.
+- HGSS's flags differ from Platinum's in four behaviours:
+  - 0x06: headbutt tree in HGSS, no encounter.
+  - 0x11: whirlpool, surfable with no encounter.
+  - 0x22: unnamed and walkable in HGSS (Tohjo Falls), surfable in Platinum. Excluded from HGSS water.
+  - 0x24: unnamed, no flags (Safari Zone areas).
+- **Encounter tables audited:** all 142 HeartGold tables match pokeheartgold's gs_enc_data.json slot for slot (morning, day, night, surf, three rods), read at hours 6, 12 and 22. Route 27's Doduo is a real day slot there; it was the walk-on-water bug that put it on the sea.
+
+**Ice and spin tiles (both DS games).**
+- Gen 4 had no ice at all: `checkGen2Ice` answered only Gen 2/3, and `Map:isIceCell` had no Gen 4 rule. TILE_BEHAVIOR_ICE (0x20) now slides the player the Gen 2/3 way, in the facing direction until off the ice or blocked. HGSS's movement table pairs IsIce with the slide.
+- This covers Mahogany Gym (T28GYM01xx), the Ice Path (D39), Seafoam Islands (D11), Snowpoint Gym (C09GYM0101) and D20 / D04.
+- **Viridian Gym's spin tiles** (HGSS, ov01_021F3114 / ViridianGymmick): arrows 0x40–0x43 carry the player their way over ordinary tiles. A new arrow turns them; STOP_SLIDING 0x4D or a blocked step ends it. Done in `checkHgssSpinTiles`.
+- Verified: Mahogany Gym (4,17) north onto the ice slides to the next obstacle. Viridian Gym (10,9) west onto an arrow slides to the STOP tile at (5,9).
+- The harness prints `[pos] map (x,y) facing surfing` at the end of a run.
+
+## Pass 36: an HGSS playthrough, and what it found
+
+`tools/gen4_playthrough/heartgold.lua` plays the story as 13 beats on the real input. Each beat checks pokeheartgold's own vars and flags:
+1. Mom (0x4106)
+2. Elm's starter machine (bg 10; 0x4108 = 1, flag 0x6A)
+3. The aide's Potions
+4. The Cherrygrove guide (0x4073)
+5. Mr. Pokémon (0x4108 = 3, Pokédex)
+6. The rival at Cherrygrove
+7. Back to Elm
+8. Elder Li (flag 0x76)
+9. Falkner (0x4074, 0x4108 = 6)
+10. The aide's Egg in Violet's mart (0x4108 = 7)
+11. Kurt (flag 0x77)
+12. Proton in the Slowpoke Well (flag 0x7B)
+13. Bugsy (flag 0x7F)
+
+Run it with `INSTALL=G:/Gen2Recomped/heartgold VERSION=heartgold MAP=T20R0202 X=6 Y=6 FACING=down PLAYTHROUGH=heartgold TICKS=500000`; `RESUME=n` starts from beat n's snapshot.
+- The gym battles use a declared cheat: the lead is rebuilt at level 50 with Body Slam first, because the runner always picks the first move.
+- Azalea Gym is entered past the Spinarak carts, which the runner cannot ride.
+- The Platinum playthrough still passes (5/5).
+
+**Fixed on the way:**
+- **Trainer IVs.** HGSS trainer records store `difficulty` as one byte; the next byte is `genderAbilityOverride`. Both were read as one u16 `ivScale`. 370 of HeartGold's 1,776 trainer Pokémon (Bugsy's among them) got IVs near 1,000. A level-17 Scyther took no damage from a level-50 Body Slam and hit back for about 100. Platinum has one such record.
+  - Gen4Trainers now reads the byte and keeps the override.
+  - Data.lua masks old caches to the low byte.
+  - The gender and ability overrides are not applied yet.
+- **Gen 4 GiveItem printed an extra box.** It went through the Gen 1/2 `give_item`, which printed "{PLAYER} got X!" with its own jingle ahead of the std script's own "Obtained the X!". `g4_give_item` is now silent, as scrcmd_item.c is, and reports success into the var. This applied to both DS games.
+- **Text after a scripted warp.** `g4_message` resolved entries against the CURRENT map's bank. On the cartridge, a script keeps the archive it loaded at start, so a script that warps and keeps talking printed `TEXT_Bnnnn` labels. `lineFor` now uses `ctx.mapId`'s bank.
+- A Gen 4 label with no text now logs a one-time warning naming the label and map.
+- The runner confirms a naming screen (START to OK, then A). Before, it only pressed START, which the cartridge treats as "move to OK".
+
+## Pass 37: the HGSS playthrough to the Mineral Badge
+
+`tools/gen4_playthrough/heartgold.lua` now has 24 beats and passes from a new game. After Bugsy:
+- **Rival in Azalea:** coord 1, 0x4075.
+- **Ilex Forest** (both Farfetch'd, then HM01 Cut, flag 0x80). The chase is the cartridge's script machine and needs the real solution:
+  - The first Farfetch'd: step on the sticks at (25,66), which sets its blind spot, then walk up from (25,61) facing south.
+  - The second, at (41,54): walk up facing north and it runs to (49,54). Step on the sticks at (52,53), which sets its blind spot and turns it right. Go round the sticks it has just armed ((50,49) and (45,53)): row 48, column 48, column 47. Then walk up from (48,54) facing east.
+- **Whitney:** she cries after the battle; talk to the lass (FLAG_UNK_0B7), then Whitney gives the Plain Badge and TM45 (0x85).
+- **Burned Tower:** Morty and Eusine at the door (0x40A2), the rival (coord 2, 0x40A6), then the beasts on B1F (0x40A1; 0x4079 → 2).
+- **Morty:** past the invisible floor; TM30 (0xA6).
+- **Jasmine at the lighthouse top:** D27R0107, 0x40A5 = 1.
+- **Chuck:** he does not notice you until the winch (sign 1, `CianwoodGymTurnWinch` into VAR_TEMP_x4000) stops the waterfall; TM01 (0xBA).
+- **The SecretPotion:** talk across the pharmacy counter; 0xB9.
+- **Amphy:** 0x40A5 = 2.
+- **Jasmine:** TM23 (0xC2).
+
+Every scene here ran on the port as it does on the cartridge. The failures were the runner's:
+- It picked a wall, or a person (Amphy), as the place to stand to talk.
+- Its new `talkany` step walked while dialogue was up.
+- Its lead's first move did not hit Ghost or Steel types. The cheat's move is per beat now: Psychic by default, Flamethrower for Jasmine. Level 75.
+
+Runner additions:
+- `talkany { ids }, behind = true` approaches from the side a person has their back to, and waits for one to appear.
+- `r:personAt(id)` for log lines.
+- Talk spots skip walls and occupied cells.
+
+## Pass 38: Mahogany, and map scripts after a battle
+
+**ON_LOAD / ON_RESUME run again when the field comes back (both DS games).**
+- The cartridge runs both from the field map's init (pokeheartgold fieldmap.c), which a battle's end rebuilds. Here they ran only on entering a map.
+- The Lake of Rage shows Lance through exactly that path: the red Gyarados's talk script sets FLAG_ENGAGING_STATIC_POKEMON, the battle ends, and the map's ON_LOAD (scr_seq_0938_T29 002) sees the flag, hides the Gyarados and shows Lance and his Dragonite, before the talk script resumes and clears the flag. Without it Lance never appeared and the Mahogany story stopped.
+- `Gen4ScriptVM` now contributes `onResume` (the ON_LOAD and ON_RESUME rows, run at once on a separate runner, not queued). `OverworldState:gen4FieldResumed` runs it:
+  - from a scripted battle's `onFinish`, before the script carries on;
+  - from `afterBattle` for any other battle, once per battle (`battle.g4FieldResumed`).
+
+**Playthrough: 31 beats**, through Pryce. After Jasmine:
+- **The red Gyarados:** the player is put on the water as a surfer, a declared cheat. Red Scale, 0xC9.
+- **Lance at the lake:** 0x40A8 = 1.
+- **The Mahogany shop scene:** 0x40A8 = 2.
+- **The Rocket hideout**, three beats on VAR_UNK_40AC 0 → 10. Each step is a coordinate trigger gated on the previous value, across B1F (D35R0102), B2F (D35R0103) and B3F (D35R0104). The hideout's own rules, all as the cartridge has them:
+  - B1F's (16,28) warps back to the start for good (VAR_UNK_40C2 is never set), so the route goes down the east side and along row 30.
+  - B3F's OnTransition sets 2 only once its two grunts are beaten, on coming back in.
+  - The door to Petrel (persons 10/11) slides open when spoken to.
+  - B2F and B3F are walled into sections reached by different stairs.
+  - A stair (WARP_STAIRS_EAST 0x5E / WEST 0x5F) fires on a press into it, not on standing on it.
+- **Pryce:** Glacier Badge and TM07, 0xD2.
+
+Runner: `warpto` picks the nearest warp for a destination, so a specific stair is taken by walking beside it and holding into it (`step dir 2`).
+
+## Pass 39: the HGSS playthrough to the Hall of Fame
+
+`tools/gen4_playthrough/heartgold.lua` now plays Johto's main story, 44 beats, from Mom's scene to the Hall of Fame. Each beat checks the cartridge's own vars and flags. After Pryce:
+
+- **The Radio Tower takeover** (VAR_SCENE_ROCKET_TAKEOVER 0x4077):
+  - Mahogany's frame table starts it (VAR_MIDGAME_BADGES 0x4134 == 4) → 2.
+  - The Goldenrod Underground costume scene (coord at x = 15) → 3.
+  - The grunt on the tower's 1F stairs stands on the rival's trigger and steps aside for a player in the costume. Then the rival → 4.
+  - Petrel as the fake director on 5F (person 0, revealed as person 2): the Basement Key, VAR_UNK_40E7 → 2.
+  - The real director in the warehouse (D37R0105 person 3): the Card Key, flag 0x1C1.
+  - Archer (D23R0106) → 5.
+  - The warehouse's switch gates and the 3F shutter are teleported past.
+- **Clair** is beaten and refuses the badge (FLAG_UNK_0D1).
+- **The Dragon's Den elder's five questions:** the shrine's frame script on 0x40C3 == 0; a wrong answer repeats the question. The right rows are ally, strategy, strong, love, both. Then the Rising Badge (0x40C3 → 1, VAR_SCENE_ELMS_LAB → 8).
+- **The Elite Four** (FLAG_DEFEATED_WILL..KAREN, 0xE4–0xE7), **Lance**, then the Hall of Fame. A record is saved, and the player wakes at home (T10R0701 sets VAR_SCENE_PLAYERS_HOUSE_1F 3).
+
+Every scene ran on the port as it does on the cartridge. The runner gained:
+- `answers { n, ... }`: the next menus are answered with these rows, checked every tick whatever step is running.
+- A per-beat cheat: `trainUpWith(move, level, species)`, for a level-100 lead in the League and a Mewtwo against Lance's six. A one-Pokémon, one-move runner is what is being propped up, not the port.
+
+## Pass 40 (BW playthrough)
+
+`tools/gen4_playthrough/black.lua` plays Black's main story as 74 beats, from
+the bedroom on a new game to N's Castle and the game clear (0x156). Every
+beat checks the cartridge's own vars and flags, read off the script pool
+(`setvarfromvalue(0x4081, 1)` in M0782's frame table, and so on): the
+bedroom (0x4081), Mom and Bianca's house (0x4085, 0x407F, 0x4078), the lab
+(0x4079/0x4080, flag 0x962), Route 1 (0x407C), Accumula (0x407A/0x407B),
+Route 2 (0x407D), the Trainers' School (flag 0x21A), Striaton's gym (0x4082),
+Fennel and the Dreamyard (0x4086/0x4087/0x4088/0x4094), the monkey (0x4083),
+Route 3 and Wellspring (0x407E, 0x4095), Nacrene and Lenora (0x4092, 0x4084,
+0x408A), Pinwheel Forest (0x408C, 0x408D, 0x40AA), Castelia and Burgh
+(0x40AF, 0x40D3, 0x40AD, 0x40D9, 0x40D7, 0x409C), Route 4 and Nimbasa
+(0x40AC, 0x40C2, 0x4089, 0x40B3, 0x40D6, 0x408E, the coaster, 0x4093),
+Route 5, Driftveil, Cold Storage and Clay (0x408F, 0x4090, 0x408B),
+Chargestone (0x409A, 0x409B), Mistralton, Celestial Tower and Skyla (0x4099,
+0x40E7, 0x40BA, flag 0x2AE), Twist Mountain (0x40B4, 0x4096, 0x40BB),
+Icirrus and Brycen (0x4097), Dragonspiral (0x40A7), Alder (0x409D), Relic
+Castle (0x4092), Opelucid and Drayden (0x40A8, flag 0x26C, 0x40A9, 0x40B8),
+the badge gates and Victory Road (0x40CF), the League (0x40A1, flags
+0x969..0x96C, 0x40A2) and N's Castle (0x40A5, 0x40A6, 0x40D4, 0x40D5,
+0x40DC, 0x40B6).
+
+Run it with
+`INSTALL=G:/Gen2Recomped/black VERSION=black MAP=Z391 X=5 Y=6 FACING=down PLAYTHROUGH=black REPEL=99999 TICKS=4000000 PT_SNAPSHOTS=G:/Gen2Recomped/scratch_claude/pt_bw OUT_DIR=G:/Gen2Recomped/scratch_claude/pt_bw/out "/c/Program Files/LOVE/lovec.exe" tools/gen4_hgss_overworld_harness`;
+`RESUME=n` starts from beat n's snapshot. OUT_DIR must exist (LÖVE crashes saving
+the final picture into a missing folder).
+
+Declared cheats, as heartgold.lua has them: the lead rebuilt at a high level
+with one move first (`trainUpWith`; a level-100 Mewtwo from Drayden on), Cut and Surf put in its second slot, the party healed between maps on
+the long dungeons, and N's dragon's battle answered "caught" (the runner
+cannot throw a ball; 0x245 then adds the dragon as the script says).
+Teleported past: Skyarrow Bridge (a rail map), Route 8 / the Moor / Tubeline
+Bridge, Victory Road's caves, Relic Castle's upper floors (below), and the
+climb inside Drayden's gym (below).
+
+**Fixed on the way (engine and import):**
+- **Script-spawned objects cross zone seams.** 0x069's temporary objects
+  belong to no zone; Nuvema's "step onto Route 1 together" walks Cheren and
+  Bianca (240, 250) over the seam into Route 1, whose entry 1 (Juniper's
+  demonstration) walks and removes them. The seamless hand-over
+  (`OverworldState:gen5ChunkHandoff`) dropped them; they now ride across with
+  their templates moved to the new zone. (src/world/OverworldController.lua)
+- **BW cells were read as Platinum water.** `Map:gen4WaterAt` ran on BW defs
+  (they are generation 4 in shape) and took BW behaviour 0x13 for Platinum's
+  WATERFALL and 0x51..0x53 for its surfable rows: the floor in front of
+  Lenora's bookshelves (Z018 row 19) was a wall and the books could not be
+  read. BW keeps its own `gen5WaterAt`. (src/world/Map.lua)
+- **Tall blockers rise north.** A BW blocker (sprite 185) wider and taller
+  than a cell covers `x .. x+w-1` and `y-h+1 .. y`: all 18 of Black's taller
+  ones stand at the foot of an open passage (the cells above all floor, the
+  cells below mostly wall), and Lenora's sliding bookcase (4 x 4 at (11,10))
+  covers the stairs behind it, not the floor in front of the last book.
+  (src/world/Collision.lua)
+- **GC chunks' second layer is a deck.** Its tiles have the first layer's
+  shape; where the first is solid or water and the second open ground, the
+  second is a bridge over it -- Pinwheel Forest's bridge (Z155 rows 50..53)
+  was river and bank, and the forest's north half (the last grunt, the Dragon
+  Skull) could not be reached. `Gen5Field.mergeLayers` takes the deck
+  (Drayden's gym, zone 121, keeps its layers apart: its statues' walkways are
+  the gym's own). 19 zones change (Z107, Z113, Z152, Z155, Z208, Z291, Z292,
+  Z300, Z306, Z309, Z311, Z313, Z337, Z353, Z354, Z365, Z370, Z378, Z387).
+  Black's install was re-extracted for it (see below). (src/import/Gen5Field.lua)
+- **A press into a doorway meets the person standing in it.** Chargestone's
+  mouth (Z194) has its guide on the way in at (11,19); the BW press-into-a-
+  solid-warp rule took the warp past him. (src/world/OverworldController.lua)
+- **A rail ride is not a map load.** Brycen's gym's rides (0x195) reloaded
+  the map, which cleared the gym's temporary vars -- the switch groups
+  (0x4001 + a) -- and put the block arms back after every ride. The player is
+  now carried within the field. (src/script/Gen4Commands.lua)
+- **BW's temporary vars are cleared on every map load.** Only Gen 4 ran
+  ClearTempFieldEventData; each Elite Four room's platform trigger runs while
+  its 0x4000 is 0 and sets 1 when it has lifted the player, so after
+  Shauntal's room Grimsley's platform never moved. Vars 0x4000..0x401F only:
+  BW's temp flag range is not established. (src/world/OverworldController.lua)
+- **0x1BB, the League statue.** Its handler (ov21 0x21CC544) starts the event
+  at ov10 0x216C204 -- sound 0x7A1, the platform's camera, then a warp
+  (0x21854B0) to zone 0x8A (138, the stair to the Champion) at that zone's
+  standing spot (30, 83). Stepped over, the League ended at the Elite Four.
+  (src/script/Gen4ScriptVM.lua)
+
+- **A temporary spawned twice under one id is removed twice.** Castelia's
+  gym door (Z031 M0062 S00B0) spawns 251, removes it, spawns 251 again and
+  removes it; the second `removeobject` found the first (already hidden)
+  body, and the second stood in the gym's doorway for the rest of the
+  session. `objectById` prefers a body still there, and `g4_hide_object`
+  hides the later template when the one found was already gone.
+  (src/script/Gen4Commands.lua)
+- **A rail-placed door on a grid map is taken by stepping onto it.** The
+  League's hall (Z137) puts each Elite Four door on its rail line; Marshal's
+  (38,32) lies on open floor the rasterised line runs through, and nothing
+  took it (the rail maps already had this rule). (src/world/OverworldController.lua)
+
+**Runner / harness:** `coord` takes a wider trigger's nearest open, reachable,
+unoccupied cell, treats "blocked" as not yet there, and is done when the
+trigger's scene takes the player off the map or its own var has moved on;
+talk spots skip cells under invisible blockers and cells that cannot be
+walked to, and `retarget = true` re-asks where to stand while people move;
+the planner waits 90 ticks for a way round other warps before crossing one;
+a beat that ends at home after a black-out does not pass; `warpto` accepts `done = fn`,
+picks the reachable cell of several leading to the destination, and with
+`avoidTriggers = true` walks round armed triggers; `PT_TRACE=1` logs every
+tick's step. The overworld harness's planner now plans for a surfer and
+searches up to 40,000 cells (Pinwheel Forest is 128 x 96).
+
+**Re-extracted (Black):** `data/generated/maps.lua`, `map_layouts.lua`,
+`gen4_map_permissions.lua` and `assets/generated/gen4/terrain/permissions.bin`
+from a scratch import (`STAGE_ONLY=extractScripts,extractField` into
+`G:/Gen2Recomped/scratch_claude/bwimp`); only those four files were copied,
+after a diff showed only the 19 zones' collision and heights changed. The
+originals are in `G:/Gen2Recomped/scratch_claude/pt_bw/install_backup/`.
+White's install has not been re-extracted.
+
+**Not modelled yet (found by the run):**
+- Relic Castle's quicksand: the funnels (behaviour 0x7C, sloped tiles) carry
+  a walker towards the centre and only standing in one sinks; here any step
+  onto the 5 x 5 trigger drops a floor at once, so 1F's stairs (behind the
+  first funnel) cannot be reached on foot.
+- Drayden's gym: three of the six floor switches are placed (by rail
+  position) on cells the rasterised walkways do not reach (21,27 / 33,27 are
+  wall).
+- The step-together walk: a scripted walker stepping off its map's box is
+  still refused before the player's hand-over (cosmetic: the companions end a
+  row short).
+- Nimbasa Gym's switches re-toggle on every step onto them (their trigger
+  var is a temp nothing sets) -- as on the cartridge; the route steps on each
+  once.
+
+## In-game trade cutscene (HGSS)
+
+HGSS's trade sequence is overlay 71 (TradeSequence_Init/_Main/_Exit, assembly).
+Compared against Platinum's decompiled `trade_sequence`:
+
+- `/a/0/8/9` (NarcID 0x59) is **byte-identical** to Platinum's demo_trade.narc
+  (all 28 members), loaded at the same call sites with the same member numbers.
+- Same phase table (flags 3,3,3,1,5,5,5), same SEs (0x6A7..0x6AF =
+  SEQ_SE_DP_KOUKAN01..10, 0x5E6 = SEQ_SE_DP_KON), same spark seed 0x035947D1,
+  same literals for bounce / cameras / FOVs / paths / wormhole scroll.
+- Differences, carried in `gen4_trade_art` (Gen4TradeArt.HGSS) and the screen:
+  BGM 0xFD<<2 = 1012 SEQ_GS_KOUKAN; fanfare 0x4A4 = 1188 SEQ_ME_SHINKAOME;
+  message bank 0xB3 = 179 (NewMsgDataFromNarc(0, 0x1B, 0xB3)); platforms
+  /a/0/0/7 members 266/267 (ov71_02247230: 0x10A / 0x148-0x3D); and the
+  fly-by's centre Y step is the literal 0x134C4 (79044) in ov71_022499A4 where
+  Platinum computes 79027.
+- NPC trade flow: Task_NPCTrade (asm/unk_0206793C.s) is Platinum's seven
+  states (create + receive, fade, leave overworld, trade app, restore, fade in).
+  `npctradeexec` lowers to the same `g4_trade_start`, which now plays it.
+- Verified end to end on Violet City's Bellsprout-for-Onix (T22R0601) with
+  `MODE=overworld tools/gen4_trade_harness`.
+
+## Pass 41 -- HGSS Kanto: the S.S. Aqua (playthrough beats 45-52)
+
+The HGSS playthrough (`tools/gen4_playthrough/heartgold.lua`) now runs past the
+Hall of Fame: Elm's S.S. Ticket (flag 0xF2), boarding at Olivine, the whole
+voyage (0x40CB 2 -> 7: the gentleman, Sailor Stanly, the captain's
+granddaughter, the Metal Coat, docking -- FLAG_BOAT_ARRIVED 0xEB) and
+landing on Vermilion's dock (P01R0104, VAR_BOAT_DIRECTION 0x40E1 back to 0).
+Engine fixes the voyage needed, each checked against pokeheartgold:
+
+* **ScrCmd_722 / 723** (`scrcmd_c.c`, asm-only `sub_020977CC` /
+  `sub_020979A8`) were unlowered, so the gangway seaman's script ended with the
+  player still on the dock. Read as `(u8 dir, u8, u16 header, u16 x, u16 z)`
+  and lowered to `g4_warp` (723 the ship, 722 the Magnet Train). The ride's
+  own cut-in is not drawn.
+* **HGSS ladders** (`field_control.c` `FieldSystem_CheckMapTransition`):
+  `TILE_BEHAVIOR_LADDER_NORTH` 0x3C / `LADDER_SOUTH` 0x3D take the warp
+  underfoot on a press north / south, asked first and with no wall ahead --
+  `OverworldState:checkHgssLadder`, called before the facing test because the
+  cell past a ladder is open. `LADDER_DOWN` 0x3E is an arrival warp
+  (`Map:gen4ArrivalWarpAt`, HGSS only). The ship's east stairs between 1F and
+  B1F are these; 1F is walled in two at x 39-40, so the captain's cabin is
+  only reachable through B1F.
+* **MoveWarp / MoveBgEvent left the cell index stale**: `moveEvent` moved the
+  row but `Map.warpAt` / `signAt` were built at load, so a moved warp still
+  answered at its old cell. 1F stacks the Olivine and Vermilion gangway
+  warps and its OnResume script moves the unused one aside; the Vermilion
+  exit went back to Olivine. The index is rebuilt after a move.
+* Playthrough runner: `warpto` avoids every other warp cell on the way (cabin
+  doors line the corridor), takes an optional cell (`{ "warpto", map, x, y }`)
+  for maps joined twice, and stands still when no path is found (a direction
+  left held from leaning into the previous door walked the player off).
+  `PT_WALKLOG=1` logs the planner. The overworld harness's stdout is line
+  buffered, so a hard crash shows its last line.
+* Regression note: a harness run whose `OUT_DIR` does not exist dies with a
+  segfault (LÖVE's error screen, headless) when it saves its final PNG --
+  create the folder first. Clair and Karen's beats now use level 100 /
+  Mewtwo (both lost once to battle variance, not an engine fault).
+
+Run (from the post-Lance snapshot): `RESUME=44` with the usual HGSS command.
+
+### Pass 41b -- Kanto's gyms, the Power Plant, Red (beats 53-66)
+
+The playthrough now ends at Red: 66 beats, a whole HeartGold from Mom's
+house to the credits on Mt. Silver.
+
+* Kanto's eight leaders (TM flags 0x181 Surge, 0x182 Sabrina, 0x124 Erika,
+  0x12D Janine, 0x180 Misty, 0x17F Brock, 0x17D Blaine, 0x17E Blue). Gym
+  puzzles are teleported past (`besideLeader`), as Johto's were.
+* Misty's absence is the real chain: the Power Plant manager (R10R0202
+  person 6, 0x411B 1) -> the officer's coordinate scene (0x411C 1) -> the
+  Rocket bolting out of Cerulean Gym (a FRAME-table scene, 0x4088 1) -> her
+  date on Route 25 (coordinate scene, 0x4088 2) -> back in her gym.
+* Blue's badge sets 0x4096 1; stepping out into Viridian (T02 frame script
+  011) has Oak phone, 0x4096 2 -- the value his lab line checks before he
+  hands over HM08 and FLAG_UNLOCKED_MT_SILVER (0x12B). A beat that teleported
+  from the gym straight to Pallet missed the call.
+* Red (D41R0108 person 0): 0x40FD 1, then HOFCredits.
+* HGSS ScrCmd_445 (previous map id -> var, = `getpreviousmapid`) and 814
+  (SetFlag99A) lowered.
+* Still decoded-but-not-lowered on this route: `setphonecall` /
+  `runphonecall` (the Pokegear phone) and `enablemassoutbreaks` -- HGSS's
+  outbreak table is not Platinum's `Gen4Swarms` and is not modelled yet.
+* Battle notes, not engine faults: the runner only ever uses the first move,
+  so Misty's beat uses Psychic (Quagsire is immune to Thunderbolt) and Red's a
+  party of six Mewtwo (`fullTeam`).
+* Runner: a FORCED SWITCH (the lead fainted) opens the battle party menu on
+  the fainted member; A there is "There's no will to fight!" and the menu
+  again, and with two members "down" lands on CANCEL (the menu is a
+  two-column grid), which closes it and the battle reopens it -- a hang the
+  engine is right about. `R:forcedSwitchKey` walks the cursor onto a healthy
+  member before pressing A, in `until` steps as well as busy text. The Elite
+  Four beats use `fullTeam` too (Will's Jynx resists Ice Beam).
+
+
+## BW in-game trades
+
+Seven records, five houses, both versions (the table is the same in Black and
+White; the Nacrene and Driftveil scripts pick by `0x0E0` version id, 21 = Black):
+
+| # | Black | White | Site (zone) | Pokémon (nickname / OT) | for | Lv | nature, ability slot, item | PID |
+|---|---|---|---|---|---|---|---|---|
+| 0 | yes | - | Nacrene City (Z023) | Petilil "Lillil" / Dye (F) | Cottonee | 15 | Modest, 1, Cheri Berry | 64000000 |
+| 1 | - | yes | Nacrene City (Z023) | Cottonee "Fluffee" / Dye (F) | Petilil | 15 | Modest, 1, Cheri Berry | 6400007E |
+| 2 | yes | - | Driftveil City (Z101) | Basculin (Red-Striped) "Redeye" / Kyle | Minccino | 25 | Adamant, 1, Sitrus Berry | 9400007F |
+| 3 | - | yes | Driftveil City (Z101) | Basculin (Blue-Striped, form 1) "Blueeye" / Kyle | Minccino | 25 | Adamant, 1, Sitrus Berry | 9400007F |
+| 4 | yes | yes | Route 7 (Z343) | Emolga "Minipete" / Manny | Boldore | 30 | Lax, 1, Lum Berry | D400007F |
+| 5 | yes | yes | Undella Town (Z415) | Munchlax "Gorge" / Ander | Cinccino | 60 | Serious, 2, Leftovers | 6200001F |
+| 6 | yes | yes | Route 15 (Z382) | Rotom "Eeks" / Lillian (F) | Ditto | 60 | Gentle, 1, Max Elixir | 2A000000 |
+
+Records 7-12 are level-50 placeholders with empty names; no script uses them.
+
+- **Table** (`src/import/Gen5Trades.lua`, written as `constants.gen5Trades` by
+  `RomExtractorGen5:extractConstants`): `/a/1/6/5`, 13 members of 27 u32 (field
+  map in the module header, read off the mon builder ov21 0x021CC098). Names are
+  system bank 35 (nickname entry +0x64, OT entry +0x68). The PID is not stored:
+  0x0201862C derives it from the OT id, gender ratio and gender (non-shiny for the
+  OT); `Gen5Trades.pid` reproduces it.
+- **Commands** (`Gen5ScriptLink` aliases, lowered by `src/script/Gen5TradeCommands.lua`,
+  installed from the last lines of `Gen4ScriptVM`): `0x1BF <dest, trade, slot>`
+  → `g5_trade_check` (0 ok, 1 Egg, 2 wrong species, 3 wrong gender; handler
+  ov21 0x021B647C); `0x1BE <trade, slot>` → `g5_trade_start` (builds theirs,
+  replaces YOUR SLOT in place, dex seen/owned, plays the demo, the script resumes
+  after); `0x120 <slot, index>` → `g5_trade_keep` (a copy of the given Pokémon in
+  `save.gen5TradedAway[index+1]` for the NPC's later battle). `0x107` (party
+  menu for a trade) was already lowered.
+- **Demo** (`src/import/Gen5TradeArt.lua` → `gen5_trade_art`,
+  `src/ui/Gen5TradeSequence.lua`): `0x1BE`'s task launches overlay 119 (proc
+  0x021E75A8, mode 4) whose NPC flow is overlay 117. It uses `/a/1/0/4`, the
+  infrared trade's scene: `ir_sean` (BMD/BCA/BTA, 660 frames), the baked camera
+  eye/target (members 11/12, identical to the `ir_ichi`/`ir_tyushiten` node
+  tracks), SPA member 10, sub-screen BG members 0-2. Timeline from ov117
+  0x021D4CE8 (sprite paling, the two Pokémon flights at 250/251, white fades at
+  130/180, emitters at 20/200/350/600, end at 616) and the SE table ov119
+  0x021E7794 (SEQ_SE_TDEMO_*, KON bounces). Text: system bank 159 #129 "Sending
+  {VAR1} to {VAR2}. Good-bye, {VAR1}!", #156 "{VAR1} sent over {VAR2}.", #49
+  "Take good care of {VAR2}!". BGM SEQ_BGM_KOUKAN.
+- **Approximated / not ported**: the MCSS sprites are flat pictures, their units
+  taken as pixels from the screen centre (calibrated by the intro's (0,-23) spot);
+  the FOV (30°) is chosen by eye (not found in the overlay); particles are drawn
+  in screen space; the intro is a 42-frame slide + message (ov117's tween tables
+  0x021D5220 / 0x021D53D0 are not read); the OBJ cell actor shown frames 3-598
+  (`/a/1/0/3` 0-3) is not drawn; the post-trade trade-evolution check (task state
+  3) is not run (none of the seven received species evolves by trade); the NPCs'
+  later rematch battle (`0x094`) is not lowered; Basculin form 1 is stored
+  (`mon.form = 1`) but shows the base sprite, as BW form pictures are not imported.
+- **Checks**: `python tools/run_lua_check.py tools/gen5_trades_check.lua` (339
+  checks: both ROMs' tables against PKHeX `Encounters5BW.cs` incl. PIDs, names,
+  every script site and the version branch). Harness `tools/gen5_trade_harness`
+  (decodes table, relinked script pool and demo art in memory, never writes the
+  install):
+  `INSTALL=G:/Gen2Recomped/black VERSION=black ROM="./Pokemon - Black Version (USA, Europe) (NDSi Enhanced).nds" MODE=overworld MAP=Z023 X=3 Y=4 FACING=up PARTY=501,546,495 PICK_SLOT=2 PRESS=20 TICKS=1600 OUT_DIR=G:/Gen2Recomped/scratch_claude/gen5trade "/c/Program Files/LOVE/lovec.exe" tools/gen5_trade_harness`
+  (other sites: Z101 3,6 party 572; Z343 4,6 / 525; Z415 4,6 / 573; Z382 7,4 / 132).
+  `MODE=screen TRADE=n SEND=species SHOTS=...` plays the demo alone.
+  Import marker bumped to `gen5-trades-v5`.
+
+### Pass 41c -- HGSS mass outbreaks, night fishing, a battle wait cap
+
+* **Mass outbreaks** (`src/world/HgssOutbreaks.lua`): `EnableMassOutbreaks`
+  sets `save.hgssOutbreak`; today's entry is `sSwarmMapLUT[rand % 20]`
+  (pokeheartgold src/unk_02097F6C.c -- 20 maps, land / surf / fish), with
+  rand the record-mixed daily word the port already advances
+  (`save.gen4Swarm.daily`). Substitutions per encounter_check.c: landSwarm
+  into land slots 1-2 (after the time-of-day table), surfSwarm into surf slot
+  1, fishSwarm into Old Rod {3}, Good Rod {1,3,4}, Super Rod {1..5}.
+  `ScrCmd_211` (GetSwarmInfoFromRand -> map header, species) lowered too.
+  Platinum's `Gen4Swarms` stays off on HGSS (only `enableswarms` enables it).
+* **Night fishing** (EncSlotArray_Update_NightFishing) was not applied at
+  all: 20:00-3:59 the Good Rod's slot 4 and the Super Rod's slot 2 are the
+  area's `nightFish` (e.g. area 2's Corsola -> Staryu). Applied before the
+  outbreak, the cartridge's order.
+* **Battle sound wait capped** (`BattleState`, WaitForSoundToFinish): the
+  queue waited on `src:isPlaying()` with no bound; a source that never reported
+  stopped held a double battle in "messages" with nothing on screen (seen once
+  late in a full HGSS run). Now at most 240 frames, with a warning logged.
+* A full HGSS playthrough from a new game passed all 66 beats in one run
+  (438k ticks).
+
+## Pass 42 -- HGSS scripted phone calls
+
+Nine scripts use `PhoneCall who, b, c` (asm/macros/script.inc). Elm calls
+from Route 30, Violet, Cianwood, Olivine, Mahogany and Blackthorn, Mom from
+Route 30, Oak from Viridian and Baoba from Olivine. The macro sets 0x8004-6
+and runs std_phone_call (scr_seq_0003): `SetPhoneCall`, then the PHONE0 ring
+twice, a fade to black, `RunPhoneCall`, `RestoreOverworld` (aliased to
+returntofield) and a fade back in. Before this pass `SetPhoneCall` and
+`RunPhoneCall` were decoded but not lowered, so none of these calls appeared.
+
+* **Lowering** (`src/script/HgssPhoneCallCommands.lua`, installed from the end
+  of Gen4ScriptVM). `setphonecall` stores `{caller, kind, id}` from the three
+  ScriptGetVar operands. A caller of 75 or more becomes 0xFF, the same rule as
+  GearPhoneRingManager_SetCallerParams. `runphonecall` pushes the call screen
+  and blocks until the Pokegear closes. `unsetphonecalltrigger` clears
+  `save.hgssPhoneCallTriggers[id]`. GetPhoneBookRematch and LoadPhoneDat
+  already had their no-phone answers in Gen4HgssScriptAliases (0 and 255), and
+  those answers are right while no rematch is ever "seeking". CheckRegisteredPhoneNumber
+  had one fix: `save.hgssPokegear` may hold only `{skin}` when the Pokegear
+  screen created it first. The record now gets its `cards` / `numbers` tables
+  back before they are indexed.
+* **Data from the ROM** (`src/import/Gen4HgssPhoneCall.lua` ->
+  `gen4_hgss_phone_call`, a RomExtractorGen4 `build(x)` stage in GEN4_PREFIXED):
+  * `tel/pmtel_book.dat`, which holds 75 PhoneBookEntry rows: type, map, and
+    greeting (unkC).
+  * gPhoneCallScriptDef, 456 rows of 6 bytes in overlay 101. It is located by
+    its first four rows.
+  * Elm's sPhoneCallData_ProfElm_MapScripts.
+  * sGreetingMsgIDs.
+  * The call-window ink: sub-BG palette slot 1 of pgphone_gra 4+skin.
+  * Bank 271's "Click!", "......" and savings-menu rows.
+
+  Each anchor is asserted to occur only once. The import marker for HGSS
+  caches is now `hgss-phone-call-v1:`.
+* **Choosing the script** follows PhoneCall_GetCallScriptId for
+  `isScriptedCall == 2` and keys on the phonebook TYPE. Elm (type 2) reads his
+  map-script table at index c: 0 -> PHONE_SCRIPT_002 ... 4 -> 006. Oak (3)
+  always gets 082, Baoba (13) gets 141, and Mom (1) runs GearPhoneCall_Mother.
+  The resulting entries:
+
+  | Call | Bank | Entries | Text |
+  |---|---|---|---|
+  | Elm, Route 30 | 716 | 33 / 34 | "H-hello? {player}?..." |
+  | Elm, Violet | 716 | 35 / 36 | |
+  | Elm, Cianwood / Olivine / Mahogany | 716 | 37 / 38 | |
+  | Elm, Blackthorn | 716 | 39 / 40 | |
+  | Oak, Viridian | 666 | 12 | |
+  | Baoba | 667 | 2 / 3 | |
+  | Mom | 664 | 22 | Then the savings menu (271:8/9), 25 or 26, and FLAG_SYS_MOMS_SAVINGS (0x986) set or cleared. Also sets 0xA7. |
+
+  None of these phonebook rows has a greeting (unkC is 0xFF), so no bank-640
+  line comes first. The code does handle a greeting when a row has one.
+* **The call screen** (`src/ui/HgssPhoneCall.lua`) follows PhoneCall_Main
+  from mainState 1, because a scripted launch is incoming.
+  * The top screen is the sub engine: frame_bottom and phone_bottom, with the
+    contact name at (32,128) and the 216x32 message window at (16,152) drawn
+    in ROM ink.
+  * The touch screen shows the contact list dimmed to 8/16 on SecondScreen.
+  * Text control codes follow render_text.c. 0x25BC (`\v`) waits, then clears
+    and returns to the top line. 0x25BD (`\f`) waits, then scrolls one line
+    at 4 px per frame and keeps printing on the same row. A down arrow shows
+    and SE_SELECT plays at each wait.
+  * After the last line it waits for A or B (SE_SELECT), then plays the hang-up:
+    SEQ_SE_GS_PHONE_OFF and the three "Click!" messages, 10 frames apart.
+  * PhoneCall_Exit returns to the contact list, so the screen is replaced by
+    HgssPokegear on its phone page. The player closes it with B, and the
+    script resumes there. The playthrough runner presses B on HgssPokegear.
+* **Approximated**:
+  * The fade into the Pokegear takes 6 frames.
+  * Text speed follows the options' 1/3/5 frames per character. Holding A
+    or B prints every frame.
+  * The savings list is a drawn box at the template's place. In single-screen
+    mode it is drawn over the call instead.
+  * The dim covers the whole touch screen. The cartridge skips palettes 11-13.
+  * The fast-forward touch sprite is not drawn.
+  * HgssPokegear draws its panels in the opposite screen order from the call,
+    so in a dual-screen mode the two screens swap at hang-up.
+  * The bank strings come from `data.text`. STRVAR slots 0 and 1 are the
+    player and the contact. The call fills them on a copy of the string
+    buffers, so the script's own buffers are left alone.
+* **Verify**:
+  * `HGSS_PHONE_ROM=<HG .nds>` on tools/gen4_hgss_overworld_harness reads the
+    data at the overworld push, so an install that has not been re-imported
+    can still run the calls.
+  * Elm: `MAP=R30 X=10 Y=20 SET_VARS=0x408C=2` gives var 0x408C 2->3 and sets
+    flag 0xEE.
+  * Oak: `MAP=T02 X=20 Y=20 SET_VARS=0x4096=1` gives 0x4096 1->2.
+  * Mom: `MAP=R30 X=9 Y=5 WALKSEQ=up:1 SET_VARS=0x4095=1 SECOND_SCREEN=vertical`
+    sets flags 0xA7 and 0x986 and gives 0x4095 -> 0.
+  * The HGSS playthrough from RESUME=63 passes all 66 beats, both with and
+    without HGSS_PHONE_ROM. Without it the call is skipped with a warning.
+  * gen4_hgss_import_check: 114/114.

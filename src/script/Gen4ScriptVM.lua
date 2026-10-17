@@ -914,7 +914,7 @@ end
 
 local PHASE_KEYS = {
   talk = { talk = true },
-  scenes = { onEnter = true, onStep = true, onFrame = true },
+  scenes = { onEnter = true, onStep = true, onFrame = true, onResume = true },
 }
 
 -- What a map contributes.  Gen 4 has no TEXT constant the way Gen 2 and Gen 3
@@ -1006,8 +1006,16 @@ local function contributionFor(data, mapId, entry)
   -- produces, because `MapScripts` declares `onEnter` and `onFrame` for Gen 3
   -- and the overworld already asks for both every frame; nothing above this
   -- file needs to learn a fourth generation's spelling.
-  local onEnter = {}
+  local onEnter, onResume = {}, {}
   for _, callback in ipairs(entry.callbacks or {}) do
+    -- ...AND ON_LOAD / ON_RESUME AGAIN EVERY TIME THE FIELD COMES BACK
+    -- (fieldmap.c runs both from the field's init, which a battle's end
+    -- rebuilds): the Lake of Rage's ON_LOAD shows Lance after the red
+    -- Gyarados while the talk script that started the battle is suspended
+    if callback.type == 3 or callback.type == 4 then
+      local rows = Gen4ScriptVM.compile(data, callback.script)
+      if rows then onResume[#onResume + 1] = rows end
+    end
     -- ON_LOAD, ON_TRANSITION and ON_RESUME all run once as the map comes up.
     -- The cartridge distinguishes them by how far through the load it is --
     -- ON_LOAD while the map is being built, ON_RESUME on coming back to the
@@ -1026,6 +1034,18 @@ local function contributionFor(data, mapId, entry)
     end
   end
 
+  if #onResume > 0 then
+    -- RUN AT ONCE, not queued: the script that started the battle is waiting
+    -- to carry on, and on the cartridge these finish before it does
+    contribution.onResume = function(game, overworld)
+      local Runner = require("src.script.ScriptRunner")
+      for _, rows in ipairs(onResume) do
+        local r = Runner.new(game, overworld)
+        local ok, err = pcall(r.run, r, rows, { mapId = mapId })
+        if not ok then require("src.core.Logger").warn("gen4 map resume script: %s", tostring(err)) end
+      end
+    end
+  end
   if #onEnter > 0 or #onFrame > 0 then
     contribution.onEnter = function(_, overworld)
       -- A fresh visit re-arms the frame table, for the reason Gen3ScriptVM
@@ -1117,9 +1137,15 @@ local function contributionFor(data, mapId, entry)
       if firedAt ~= here then firedAt, fired = here, {} end
       local Gen4Commands = require("src.script.Gen4Commands")
       local ctx = { save = game.save, game = game, overworld = overworld }
+      -- BLACK / WHITE'S QUICKSAND (behaviour 0x7C, Gen5Quicksand): on a sand
+      -- cell only a pit's own rule runs its event -- the centre, or a player
+      -- standing still
+      local Quicksand = require("src.world.Gen5Quicksand")
+      local sand = Quicksand.onSand(overworld, x, y)
       for i, coord in ipairs(coords) do
         local inside = x >= coord.x and x < coord.x + coord.width
                        and y >= coord.y and y < coord.y + coord.height
+        if inside and sand and not Quicksand.pitFires(overworld, coord, x, y) then inside = false end
         -- ONLY THE VAR SIDE IS RESOLVED.  `sub_0203CC14` is
         -- `TryGetVar(e.var) == e.value` -- the value is compared RAW, unlike
         -- the init frame table two functions up, where BOTH sides go through
@@ -1885,6 +1911,22 @@ L.scrcmd_494 = function(ins, s) emit(s, { "g4_buffer_message_word", ins.args[1],
 -- ScrCmd_706 / 642 <dest>: a Hall of Fame record loads / the extra save
 -- chunks exist -- both "the Hall of Fame has a team" here
 L.scrcmd_706 = function(ins, s) emit(s, { "g4_hof_exists", ins.args[1] }) end
+-- HGSS 722 / 723 (scrcmd_c.c: sub_020977CC / sub_020979A8, asm only): the
+-- travel cut-ins, read as (u8 direction, u8, u16 map header, u16 x, u16 z).
+-- 723 is the S.S. Aqua (Olivine and Vermilion docks -> ship 1F 307 at
+-- 24,19), 722 the Magnet Train (T11R0603 / T25R0503). Both end in the warp
+-- to that header and cell; the ride itself is not drawn.
+-- HGSS 445 (scrcmd_c.c): LocalFieldData_GetPreviousPosition's mapId into the
+-- var -- the same answer as Platinum's `getpreviousmapid` (the Olivine port
+-- seaman faces south when the player came off the dock, map 330).
+L.scrcmd_445 = function(ins, s) emit(s, { "g4_previous_map", ins.args[1] }) end
+-- HGSS 814: SetFlag99A -- system flag 0x99A, set as Cerulean Gym loads.
+L.scrcmd_814 = function(_, s) emit(s, { "set_flag", flagName(0x99A) }) end
+-- HGSS mass outbreaks (src/world/HgssOutbreaks.lua)
+L.enablemassoutbreaks = function(_, s) emit(s, { "g4_hgss_enable_outbreaks" }) end
+L.scrcmd_211 = function(ins, s) emit(s, { "g4_hgss_outbreak_info", ins.args[1], ins.args[2] }) end
+L.scrcmd_722 = function(ins, s) emit(s, { "g4_warp", ins.args[3], ins.args[4], ins.args[5] }) end
+L.scrcmd_723 = function(ins, s) emit(s, { "g4_warp", ins.args[3], ins.args[4], ins.args[5] }) end
 L.scrcmd_642 = function(ins, s) emit(s, { "g4_hof_exists", ins.args[1] }) end
 -- ScrCmd_164: HallOfFameShowcase_LaunchApp, the PC's record browser
 L.scrcmd_164 = function(_, s) emit(s, { "g4_open_hall_of_fame" }) end
@@ -2022,6 +2064,13 @@ L.bwelevatorwarp = function(_, s) emit(s, { "g4_bw_elevator_warp" }) end
 L.bwversionmsgbox = function(ins, s)
   emit(s, { "g4_bw_version_message", ins.args[1], ins.args[2], s.bankFor and s.bankFor(s.member) })
 end
+-- BLACK / WHITE 0x1BB: the League's statue, once the four are beaten (Z137's
+-- plaque, M0274 S007A). Its handler (ov21 0x21CC544) starts the event at
+-- ov10 0x216C204: the platform's sound (SE 0x7A1) and camera, then a warp
+-- (0x21854B0) to zone 0x8A -- 138, the stair to the Champion -- at that
+-- zone's own standing spot (its header's +0x24 / +0x2C: 30, 83). Stepped
+-- over, the plaque did nothing and the League ended at the Elite Four.
+L.bw_1BB = function(_, s) emit(s, { "g4_warp", 138, 30, 83 }) end
 L.bwspawnobject = function(ins, s)
   emit(s, { "g4_bw_spawn_object", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5], ins.args[6] })
 end
@@ -4089,5 +4138,11 @@ function Gen4ScriptVM.lower(instructions, state)
   end
   return s.out
 end
+
+-- Black / White's NPC trades (0x1BF / 0x1BE / 0x120): src/script/Gen5TradeCommands.lua
+require("src.script.Gen5TradeCommands").install(L)
+-- HGSS's scripted Pokegear calls (SetPhoneCall / RunPhoneCall / UnsetPhoneCallTrigger):
+-- src/script/HgssPhoneCallCommands.lua
+require("src.script.HgssPhoneCallCommands").install(L)
 
 return Gen4ScriptVM

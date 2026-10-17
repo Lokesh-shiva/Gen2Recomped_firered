@@ -59,7 +59,17 @@ function CloudCode.install(RI)
   end
 
   function RI:_ccCancel()
-    if self._cloudFlow then self:_sbCloudSignIn() end -- pressing it while waiting cancels
+    if self._cloudFlow then pcall(self._sbCloudSignIn, self) end -- pressing it while waiting cancels
+    -- ...and the popup goes even when that did not (the SERVICE row changed
+    -- under it, or the service's cancel raised): a popup that cannot be
+    -- closed by touch leaves a phone with no way out of it
+    local c = self._cloudFlow
+    if c then
+      pcall(c.auth.cancel, c.flow)
+      self._cloudFlow = nil
+      self._settingsRowCache = nil
+      self.settingsNotice = Strings("Sign-in cancelled.")
+    end
   end
 
   -- a filled button; returns its rect
@@ -100,8 +110,15 @@ function CloudCode.install(RI)
     col(P.bgBot, 0.78)
     g.rectangle("fill", 0, 0, W, H)
 
+    -- laid out in the SAFE AREA (notch, home indicator, cutouts) the way the
+    -- launcher's own chrome is; the scrim above still covers the whole window
+    local sx, sy, sw, sh = 0, 0, W, H
+    local okSA, ax, ay, aw, ah = pcall(function() return require("src.core.SafeArea").rect() end)
+    if okSA and type(aw) == "number" and aw > 0 and type(ah) == "number" and ah > 0 then
+      sx, sy, sw, sh = ax, ay, aw, ah
+    end
     local pad = 26 * s
-    local dw = math.min(W - 24 * s, 620 * s)
+    local dw = math.min(sw - 24 * s, 620 * s)
     local inner = dw - 2 * pad
     local titleF, stepF, codeF, smallF = font(26 * s), font(16 * s), font(64 * s), font(13 * s)
     -- the code shrinks to fit a narrow phone screen next to its COPY button
@@ -126,7 +143,7 @@ function CloudCode.install(RI)
     local btnH = 50 * s
     local dh = pad + titleF:getHeight() + 14 * s + stepsH + 16 * s + codeBoxH + 10 * s
              + smallF:getHeight() + 20 * s + btnH + 14 * s + smallF:getHeight() + pad
-    local dx, dy = (W - dw) / 2, math.max(8 * s, (H - dh) / 2)
+    local dx, dy = sx + (sw - dw) / 2, sy + math.max(8 * s, (sh - dh) / 2)
     local rr = 16 * s
 
     fillGradRounded(dx, dy, dw, dh, rr, P.slotBg or P.bgTop, P.slotBg or P.bgBot, 0.97, 0.97)

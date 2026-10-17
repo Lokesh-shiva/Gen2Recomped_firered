@@ -126,6 +126,47 @@ function L.send(st, entry, courseId)
   return true
 end
 
+-- the PC's slot count, by the save's own generation: the launcher has no game
+-- loaded, so the engine's Boxes (which asks the running game) cannot answer
+local function boxCapacity(version)
+  local okV, V = pcall(require, "src.core.GameVersion")
+  local gen = okV and V.generation and V.generation(version) or 1
+  return gen <= 2 and 20 or 30
+end
+
+-- Put a Pokemon back in a save's PC: its own slot if free, else the first free
+-- slot of its own box, else of any box. Returns { box = b, index = i } or nil.
+local function placeInBox(save, version, source, mon)
+  if type(mon) ~= "table" then return nil end
+  local boxes = save.boxes
+  if type(boxes) ~= "table" and type(save.box) == "table" then boxes = save.box.boxes or { save.box } end
+  if type(boxes) ~= "table" then return nil end
+  local cap = boxCapacity(version)
+  local function freeIn(b)
+    local list = boxes[b]
+    if type(list) ~= "table" then return nil end
+    list = list.mons or list
+    for i = 1, cap do if list[i] == nil then return list, i end end
+    return nil
+  end
+  local order = {}
+  if source and source.box then order[1] = source.box end
+  for b = 1, #boxes do if b ~= (source and source.box) then order[#order + 1] = b end end
+  for _, b in ipairs(order) do
+    local list, i = freeIn(b)
+    if list then
+      -- the very slot it left, when that is the first gap (send closed the gap)
+      if b == (source and source.box) and source.index and source.index <= i then
+        table.insert(list, source.index, mon)
+        return { box = b, index = source.index }
+      end
+      list[i] = mon
+      return { box = b, index = i }
+    end
+  end
+  return nil
+end
+
 -- write what came home into the source save's inbox
 local function deliver(version, slotId, parcel)
   local save, bytes = readSave(version, slotId)
@@ -135,8 +176,19 @@ local function deliver(version, slotId, parcel)
   local box = save.walkerInbox
   box.mons, box.items, box.returning = box.mons or {}, box.items or {}, box.returning or {}
   if parcel.mon then
+    -- STRAIGHT BACK INTO THE PC. Reported from play: "when sending a pokemon
+    -- home from the pokewalker they dont go back to their box". The walked
+    -- Pokemon only reached the inbox, and the inbox is unpacked when the game
+    -- next loads THIS save -- so the PC on disk, and the walker's own box list,
+    -- went on without it until the game was played and saved. It is put back
+    -- where it came from (or the first free slot) now; the inbox keeps only
+    -- what needs the game's data -- its steps as EXP and its friendship --
+    -- and says where the Pokemon is, so the load finds it in place.
+    local at = placeInBox(save, version, parcel.mon.source, parcel.mon.raw)
     box.returning[#box.returning + 1] = {
-      raw = parcel.mon.raw, steps = parcel.mon.steps or 0,
+      raw = (not at) and parcel.mon.raw or nil, placed = at,
+      species = parcel.mon.raw and parcel.mon.raw.species,
+      steps = parcel.mon.steps or 0,
       friendship = parcel.mon.friendship, course = parcel.course,
     }
   end

@@ -1605,6 +1605,16 @@ function Sidebar.install(RI)
     if self.walker and self.section == "walker" then pcall(self.walker.update, self.walker, dt)
     else
       self._walkerPumpT = (self._walkerPumpT or 0) + dt
+      -- NOT for a player who never opened the Pokewalker, and never while a
+      -- system picker / storage grant is in flight or Settings is up: on
+      -- Android each pump is a sensor read (syncHealthSteps), which asks for
+      -- ACTIVITY_RECOGNITION every time it is not granted. That runtime
+      -- prompt, popping up once a minute from the launcher itself, took the
+      -- place of -- and on Android 10 and older cancelled -- the storage
+      -- prompt GAME DATA FOLDER's Browse needs (docs/data-location.md).
+      local walkerUsed = love.filesystem.getInfo(require("src.pokewalker.Walker").FILE) ~= nil
+      local busy = self.pickPending or self.section == "settings" or self.settingsOpen
+      if self._walkerPumpT > 60 and (not walkerUsed or busy) then self._walkerPumpT = 0 end
       if self._walkerPumpT > 60 then
         self._walkerPumpT = 0
         pcall(function()

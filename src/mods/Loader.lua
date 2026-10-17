@@ -154,6 +154,9 @@ function Loader.new(opts)
     optionStatus = {}, imageCache = {},
     fs = (opts and opts.fs) or (love and love.filesystem),
     dev = dev,
+    -- the plain game: built-ins only, no mod discovered (the launcher's
+    -- backdrop -- see Game:load's `loadWithoutMods`)
+    noMods = (opts and opts.noMods) and true or nil,
   }, Loader)
   assert(self.fs, "Loader.new requires opts.fs when love is unavailable")
   for name, spec in pairs(Schemas.REGISTRIES) do
@@ -279,7 +282,7 @@ function Loader:_discover()
   if not self.fs.getDirectoryItems then return end
   -- POKEPORT_NO_MODS=1: a verification run against the plain game, without
   -- touching the user's saved enable flags
-  if os.getenv("POKEPORT_NO_MODS") == "1" then return end
+  if os.getenv("POKEPORT_NO_MODS") == "1" or self.noMods then return end
   local roots = { "mods" }
   -- THE SAME CONFINEMENT THE LAUNCHER APPLIES.  When the player has chosen a
   -- game-data folder, a mod counts only if it is in it -- and the game has to

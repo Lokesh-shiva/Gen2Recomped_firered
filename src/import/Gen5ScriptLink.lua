@@ -240,6 +240,14 @@ L.ALIASES = {
   -- scripts branch `if (var == 21)`
   [0x068] = { "getplayermappos", "ww" },
   [0x0E0] = { "bwgetversion", "w" },
+  -- THE IN-GAME TRADES (src/import/Gen5Trades.lua, handlers in ov21):
+  --   0x1BF <dest, trade, slot>  0 ok / 1 an Egg / 2 not the species asked
+  --         for / 3 not the gender asked for (0x021B647C)
+  --   0x1BE <trade, slot>        build theirs, play the demo, swap in place
+  --   0x120 <slot, index>        the Pokemon given away, kept in the save for
+  --         the NPC's later battle (Nacrene 0, Driftveil 1)
+  [0x1BF] = { "bwnpctradecheck", "www" }, [0x1BE] = { "bwnpctrade", "ww" },
+  [0x120] = { "bwkeeptradedmon", "ww" },
   -- 0x056 <slot, type>: a type's name into a buffer, byte first like 0x057 --
   -- the Striaton leaders' "the partner you first chose was {VAR1} type"
   [0x056] = { "buffertypename", "bw" },

@@ -398,6 +398,9 @@ function X:extractConstants()
     -- 0x232's table: Nimbasa's park visitor, by season x 2 + badges
     constants.gen5ParkVisitors = derived and require("src.import.Gen5ScriptOps").handlerTable(self.rom, derived, 0x232, 16) or nil
   end
+  -- the in-game trades, /a/1/6/5 + system bank 35 (src/import/Gen5Trades.lua)
+  local okTrades, trades = pcall(require("src.import.Gen5Trades").build, self)
+  if okTrades then constants.gen5Trades = trades end
   self:write("constants", constants)
   return constants
 end
@@ -631,7 +634,8 @@ function X:extractBattleSprites()
   -- ...and the screens whose importers follow the same `build(x)` shape
   -- (each optional until its module exists): the Pokedex, the PC
   for _, entry in ipairs({ { "src.import.Gen5DexArt", "gen5_dex_art" },
-                           { "src.import.Gen5BoxArt", "gen5_box_art" } }) do
+                           { "src.import.Gen5BoxArt", "gen5_box_art" },
+                           { "src.import.Gen5TradeArt", "gen5_trade_art" } }) do
     local okM, M = pcall(require, entry[1])
     if okM and type(M) == "table" and M.build then
       local okB, built = pcall(M.build, self)

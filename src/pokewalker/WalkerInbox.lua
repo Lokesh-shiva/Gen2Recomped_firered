@@ -80,7 +80,31 @@ function I.apply(save, data)
   for i = #(box.returning or {}), 1, -1 do
     local r = box.returning[i]
     local mon = r.raw
-    if type(mon) == "table" then
+    -- PUT BACK BY THE WALKER ALREADY (WalkerLink.deliver): find it where it
+    -- was placed -- or, if the player moved it about since, anywhere in the PC
+    -- by species -- and give it its steps and friendship there
+    if type(mon) ~= "table" and type(r.placed) == "table" then
+      local boxes = save.boxes or {}
+      local list = boxes[r.placed.box]
+      list = type(list) == "table" and (list.mons or list) or {}
+      local found = list[r.placed.index]
+      if not (type(found) == "table" and found.species == r.species) then
+        found = nil
+        for _, b in ipairs(boxes) do
+          for _, m in pairs((type(b) == "table" and (b.mons or b)) or {}) do
+            if type(m) == "table" and m.species == r.species and not found then found = m end
+          end
+        end
+      end
+      if found then
+        pcall(levelUp, data, found, r.steps)
+        if r.friendship then
+          if found.happiness ~= nil then found.happiness = r.friendship else found.friendship = r.friendship end
+        end
+        report.mons = report.mons + 1
+      end
+      table.remove(box.returning, i)
+    elseif type(mon) == "table" then
       pcall(levelUp, data, mon, r.steps)
       if r.friendship then
         if mon.happiness ~= nil then mon.happiness = r.friendship

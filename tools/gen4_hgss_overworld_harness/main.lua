@@ -14,6 +14,8 @@
 -- hands over to the overworld harness unchanged. Pictures land in this
 -- harness's own save folder (identity hgss_ow).
 
+-- every line out as it is printed, so a hard crash still shows where it was
+io.stdout:setvbuf("line")
 local install = assert(os.getenv("INSTALL"), "set INSTALL to the version's folder")
 
 local ffi = require("ffi")
@@ -265,6 +267,28 @@ if camTilt then
     Gen4Camera.setTilt(at)
     print(("[cam] tilt %s (row %d)"):format(tostring(Gen4Camera.TILTS[at]), at))
     return (table.unpack or unpack)(r)
+  end
+end
+
+-- HGSS_PHONE_ROM=<HeartGold/SoulSilver .nds>: data.gen4_hgss_phone_call read
+-- from the ROM as the overworld is pushed (src/import/Gen4HgssPhoneCall.lua),
+-- so the scripted Pokegear calls run on an install imported before it existed
+if os.getenv("HGSS_PHONE_ROM") then
+  local StateStack = require("src.core.StateStack")
+  local push, injected = StateStack.push, false
+  StateStack.push = function(self, state, ...)
+    local G = package.loaded["src.core.Game"]
+    if not injected and G and G.data then
+      injected = true
+      local path = os.getenv("HGSS_PHONE_ROM")
+      local rom = assert(require("src.import.NdsRom").open(path))
+      local X = assert(require("src.import.RomExtractorGen4").new(path, os.getenv("VERSION") or "heartgold"))
+      G.data.gen4_hgss_phone_call = require("src.import.Gen4HgssPhoneCall").read(rom,
+        function(bank, i) return X:string(bank, i) end)
+      X:close()
+      print(("[phone] gen4_hgss_phone_call from %s: %d phonebook rows"):format(path, G.data.gen4_hgss_phone_call.book.count))
+    end
+    return push(self, state, ...)
   end
 end
 

@@ -105,6 +105,12 @@ function HgssStartMenu.new(game, opts)
       rows[#rows + 1] = { id = id, label = self:word(def[2], id), hgssIcon = icon }
     end
   end
+  -- MODS (the port's, see Gen4StartMenu.modsRow) takes the next free button.
+  -- An ordinary field menu has seven entries and eight buttons; with RETIRE
+  -- up (Safari, Bug-Catching Contest) all eight are the cartridge's and MODS
+  -- waits until the game is over.
+  local mods = Gen4StartMenu.modsRow(game)
+  if mods and #rows < #SLOTS then rows[#rows + 1] = mods end
   self.rows = rows
   self.index = 1
   for i, row in ipairs(rows) do if row.id == game.gen4StartMenuCursor then self.index = i end end
@@ -226,6 +232,32 @@ function HgssStartMenu:menuImg(key)
   return self:imgAt(rec.path), rec
 end
 
+-- THE MODS BUTTON, out of the cartridge's own button art: the SAVE button's
+-- frame (grey rim, red when selected) with its picture covered by its own
+-- blank face -- a 6-pixel strip from left of the picture, stretched across --
+-- and four small tiles in the picture's ink where the picture was.
+function HgssStartMenu:drawModsButton(slot, selected)
+  local g = love.graphics
+  local icon, rec = self:menuImg(("icon_36_%d"):format(selected and 1 or 0))
+  local x, y = slot[1] + ((rec or {}).originX or 0), slot[2] + ((rec or {}).originY or 0)
+  if not icon then
+    g.setColor(selected and 0.78 or 0.2, 0.2, 0.2, 1)
+    g.rectangle("fill", x, y, 40, 26)
+    g.setColor(1, 1, 1, 1)
+    g.rectangle("fill", x + 2, y + 2, 36, 22)
+    return
+  end
+  g.draw(icon, x, y)
+  local iw, ih = icon:getDimensions()
+  self.modsFaceQuad = self.modsFaceQuad or g.newQuad(4, 2, 6, 22, iw, ih)
+  g.draw(icon, self.modsFaceQuad, x + 8, y + 2, 0, 26 / 6, 1)
+  g.setColor(0.33, 0.33, 0.33, 1)
+  for k = 0, 3 do
+    g.rectangle("fill", x + 13 + (k % 2) * 8, y + 5 + floor(k / 2) * 8, 6, 6)
+  end
+  g.setColor(1, 1, 1, 1)
+end
+
 function HgssStartMenu:drawPanel(whole)
   local g = love.graphics
   g.setColor(1, 1, 1, 1)
@@ -248,9 +280,13 @@ function HgssStartMenu:drawPanel(whole)
   for i, row in ipairs(self.rows) do
     local slot, lab = SLOTS[i], LABELS[i]
     if slot then
-      local icon, rec = self:menuImg(("icon_%d_%d"):format(row.hgssIcon, i == self.index and 1 or 0))
       g.setColor(1, 1, 1, 1)
-      if icon then g.draw(icon, slot[1] + (rec.originX or 0), slot[2] + (rec.originY or 0)) end
+      if row.id == "mods" then
+        self:drawModsButton(slot, i == self.index)
+      else
+        local icon, rec = self:menuImg(("icon_%d_%d"):format(row.hgssIcon, i == self.index and 1 or 0))
+        if icon then g.draw(icon, slot[1] + (rec.originX or 0), slot[2] + (rec.originY or 0)) end
+      end
       local label = row.label or ""
       Font.draw(label, lab[1] + floor((LABEL_W - Font.width(label)) / 2), lab[2])
     end

@@ -241,6 +241,15 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
   if not text and ctx.overworld then
     text = ctx.game.data:resolveText(ctx.overworld.map.def.label, textId)
   end
+  if not text and type(textId) == "string" and textId:match("^TEXT_B%d+_%d+$") then
+    -- A GEN 4 LABEL WITH NO TEXT prints as the label itself; say which, once
+    Commands._missingLabels = Commands._missingLabels or {}
+    if not Commands._missingLabels[textId] then
+      Commands._missingLabels[textId] = true
+      require("src.core.Logger").warn("gen4 text: %s has no text (map %s) -- shown as its label", textId,
+        tostring(ctx.overworld and ctx.overworld.map and ctx.overworld.map.id))
+    end
+  end
   if not text then
     -- LITERAL STRING FALLBACK for hand-ported scripts -- and for the map
     -- editor, whose `say` beat lowers to a show_text carrying the line the
@@ -759,6 +768,12 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- `reloadmapafterbattle` can tell that case from a real whiteout.
     ctx.lastBattleCanLose = battle.canLose and true or false
     ctx.lastCheck = result == "win"
+    -- THE FIELD COMES BACK BEFORE THE SCRIPT CARRIES ON (Gen 4): the map's
+    -- ON_LOAD / ON_RESUME scripts run now, as the cartridge's field init does
+    if ctx.overworld and ctx.overworld.gen4FieldResumed and not battle.g4FieldResumed then
+      battle.g4FieldResumed = true
+      pcall(ctx.overworld.gen4FieldResumed, ctx.overworld)
+    end
     if ctx.overworld then
       -- A map script often follows a trainer battle with its own text.
       -- Keep a level evolution behind that text: otherwise afterBattle

@@ -1231,15 +1231,29 @@ local MARKER_PATH = "rom-cache.complete"
 -- that version's ROM hash, so both a format bump and a swapped ROM invalidate.
 local function markerFor(version)
   local revision = version == "platinum" and "platinum-geometry-v17:" or ""
-  if version == "black" or version == "white" then revision = "gen5-juniper-v4:" end
-  if version == "emerald" then revision = "emerald-map-popup-v2:" end
+  -- gen5-trades-v5: constants.gen5Trades, gen5_trade_art and the trade
+  -- commands' operands in map_scripts (Gen5Trades / Gen5TradeArt)
+  if version == "black" or version == "white" then revision = "gen5-trades-v5:" end
+  -- emerald-trade-scene-v3 / firered-trade-scene-v1: the in-game trade
+  -- sequence's art (extractTradeScene, gen3_trade_art) -- without it special
+  -- 257 falls back to the bare swap, so both Gen 3 caches re-import once
+  if version == "emerald" then revision = "emerald-trade-scene-v3:" end
+  if version == "firered" then revision = "firered-trade-scene-v1:" end
   if version == "polishedcrystal" then revision = "polished-stored-unown-forms-v7:" end
   if version == "prism" then revision = "prism-events-art-v2:" end
-  if version == "heartgold" or version == "soulsilver" then revision = "hgss-opening-montage-v6:" end
+  -- hgss-phone-call-v1: gen4_hgss_phone_call (Gen4HgssPhoneCall), the
+  -- scripted Pokegear calls' phonebook / script defs / ink
+  if version == "heartgold" or version == "soulsilver" then revision = "hgss-phone-call-v1:" end
   -- Include version-specific field encounters, sleep, swarm and rate tables.
   -- Only these three caches need rebuilding; other markers remain stable.
+  -- v8: field.gen2TradeAnim, GSC's own trade movie art (Gen2TradeArt).
   if version == "gold" or version == "silver" or version == "crystal" then
-    revision = "gen2-field-encounters-v7:"
+    revision = "gen2-field-encounters-v8:"
+  end
+  -- field.tradeArt: the cable-trade movie's tiles out of the ROM
+  -- (Gen1TradeArt); without it the trade ran on drawn stand-ins.
+  if version == "red" or version == "blue" or version == "yellow" then
+    revision = "gen1-trade-art-v1:"
   end
   return CACHE_FORMAT .. revision .. GameVersion.info(version).sha1
 end
@@ -3280,6 +3294,16 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
   local actualHash = verified and verified.hash or sha1(data)
   local version = GameVersion.forSha1(actualHash)
   if not version then
+    -- A clean dump of ANOTHER retail revision (FireRed Rev 1, Crystal
+    -- Australia, Platinum Europe ...) is not a patched cart: say which
+    -- revision it is and that it is not supported yet (docs/rom-revisions.md).
+    local okRev, RomRevisions = pcall(require, "src.import.RomRevisions")
+    local found = okRev and RomRevisions.describe(data, actualHash) or nil
+    if found then
+      self:setError(("Unsupported ROM (SHA-1 %s). %s"):format(actualHash,
+        found.message))
+      return
+    end
     self:setError(("Unsupported ROM (SHA-1 %s). This needs a clean US Pokemon "
       .. "Red, Blue, Yellow, Gold, Silver, Crystal, FireRed, Emerald or "
       .. "Platinum dump; patched, "
@@ -3597,9 +3621,14 @@ function RomImporter:_scanRomSources(paths)
     elseif not isSupportedRomSize(#data) then
       rejects.unknown[#rejects.unknown + 1] = name
     else
-      local version = GameVersion.forSha1(sha1(data))
+      local hash = sha1(data)
+      local version = GameVersion.forSha1(hash)
       if not version then
-        rejects.unknown[#rejects.unknown + 1] = name
+        -- name the revision when the header says what it is (RomRevisions)
+        local okRev, RomRevisions = pcall(require, "src.import.RomRevisions")
+        local found = okRev and RomRevisions.describe(data, hash) or nil
+        rejects.unknown[#rejects.unknown + 1] =
+          found and (name .. ": " .. found.short) or name
       elseif self.ready[version] and not self.returning[version] then
         -- ALREADY IMPORTED IS NOT A FAILURE.  Pointing at the folder you keep
         -- your dumps in when you already have half of them is the normal case,
@@ -3648,7 +3677,7 @@ function RomImporter:_pollRomScan()
       local rejects={unknown={},present={},duplicate={},unreadable={}}
       for _,entry in ipairs(message.results) do
         if entry.unreadable then table.insert(rejects.unreadable,entry.name)
-        elseif not entry.version then table.insert(rejects.unknown,entry.name)
+        elseif not entry.version then table.insert(rejects.unknown,entry.revision and (entry.name..': '..entry.revision) or entry.name)
         elseif self.ready[entry.version] and not self.returning[entry.version] then
           table.insert(rejects.present,GameVersion.info(entry.version).displayName)
         elseif seen[entry.version] then table.insert(rejects.duplicate,entry.name)
@@ -11553,5 +11582,8 @@ RomImporter._ui = {
   chooseFolder = chooseFolder,
 }
 require("src.import.LauncherSidebar").install(RomImporter)
+-- Android's "All files access" for a chosen GAME DATA FOLDER, asked again
+-- whenever the folder is unusable for want of it (src/import/AndroidStorage.lua)
+require("src.import.AndroidStorage").install(RomImporter)
 
 return RomImporter

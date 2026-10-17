@@ -12,6 +12,7 @@
 --   { "warpto", "MAP" }         walk onto the warp in this map that leads there
 --   { "coord", n }              walk onto the map's coordinate trigger n (1-based)
 --   { "talk", localId }         walk next to that person, face them, press A
+--   { "talkany", { ids } }      the same for the first of them who is shown
 --   { "sign", n }               walk in front of sign n, face it, press A
 --   { "step", "dir", n }        hold a direction until n cells are walked
 --   { "face", "dir" }           turn without walking
@@ -20,6 +21,7 @@
 --   { "until", fn, ticks }      press A until fn(r) is true (or fail)
 --   { "teleport", "MAP", x, y, facing }   travel between beats
 --   { "do", fn }                run fn(r) once (a cheat, a log line)
+--   { "answers", { n, ... } }   the next menus are answered with these rows
 --
 -- While the game is BUSY -- a script running, a text box, a menu, a battle --
 -- the runner presses A on a rhythm (START on a naming screen, B for "give it
@@ -46,6 +48,16 @@ function R:flag(id) return ((self.game.save or {}).flags or {})[("FLAG_G4_%04X")
 function R:map() local ow = self.ow return ow and ow.map and ow.map.id end
 function R:pos() local p = self.ow and self.ow.player return p and p.cellX, p and p.cellY end
 function R:party() return (self.game.save or {}).party or {} end
+-- "(x,y) facing f shown|hidden" for a person on the map, for log lines
+function R:personAt(localId)
+  for _, n in ipairs((self.ow and self.ow.npcs) or {}) do
+    local lid = n.localId or (n.def and n.def.localId)
+    if lid == localId then
+      return ("(%s,%s) facing %s %s"):format(tostring(n.cellX), tostring(n.cellY), tostring(n.facing), n.hidden and "hidden" or "shown")
+    end
+  end
+  return "absent"
+end
 function R:top()
   local st = self.game.stack and self.game.stack.states
   return st and st[#st]
@@ -116,12 +128,54 @@ function R:fail(why)
     stateName(self:top()), self:screenText())
 end
 
+-- { "answers", {...} } queued: the next menus get their cursor put on these
+-- rows, one each, and A pressed (a quiz, a choice that matters). Asked every
+-- tick, whatever step is running -- `until` presses A on its own rhythm.
+function R:answerMenu()
+  if not (self.answers and #self.answers > 0) then return nil end
+  local top = self:top()
+  if stateName(top) ~= "Menu" or top == self.answeredMenu
+     or type(top.items) ~= "table" or not top.index then return nil end
+  top.index = math.max(1, math.min(#top.items, table.remove(self.answers, 1)))
+  self.answeredMenu = top
+  local labels = {}
+  for i, it in ipairs(top.items) do labels[i] = tostring(it.label) end
+  self:say("  answered row %d of [%s]", top.index, table.concat(labels, " | "))
+  return "a"
+end
+
+-- A FORCED SWITCH (the lead fainted): the party menu opens on the fainted
+-- one, and A on it is "There's no will to fight!" and the menu again --
+-- forever. A player moves the cursor; so does this. Answers whether the
+-- cursor is on a fainted one, and the key to press this tick.
+function R:forcedSwitchKey()
+  local top = self:top()
+  if type(top) == "table" and top.forceSwitch and type(top.index) == "number" and top.party then
+    local okP, party = pcall(top.party, top)
+    local mon = okP and type(party) == "table" and party[top.index]
+    if mon and (tonumber(mon.hp) or 0) > 0 then return false end
+    -- on a fainted one or on CANCEL (the menu is a two-column grid, so with
+    -- two members "down" from the first is CANCEL): try each way in turn
+    local dirs = { "right", "down", "left", "up" }
+    return true, (self.t % 12 == 0) and dirs[math.floor(self.t / 12) % 4 + 1] or nil
+  end
+  return false
+end
+
 -- the A rhythm while the game talks
 function R:busyInput()
   local top = self:top()
   local name = stateName(top)
+  local onFainted, key = self:forcedSwitchKey()
+  if onFainted then return nil, key end
   if name:find("NamingScreen") then
-    return nil, (self.t % 12 == 0) and "start" or nil
+    -- START puts the cursor on OK (ns.c 2568) and A presses it
+    local k = self.t % 24
+    return nil, (k == 0 and "start") or (k == 12 and "a") or nil
+  end
+  -- the Pokegear a scripted phone call leaves open (HGSS RunPhoneCall): B closes it
+  if name:find("HgssPokegear") then
+    return nil, ((self.t % self.mashEvery) == 0) and "b" or nil
   end
   if (self.t % self.mashEvery) == 0 then return nil, "a" end
   return nil, nil
@@ -131,9 +185,26 @@ end
 local function adjacentFree(r, tx, ty)
   local best, bestD
   local px, py = r:pos()
+  local map = r.ow and r.ow.map
   for dname, d in pairs(DIRS) do
     local cx, cy = tx - d[1], ty - d[2]     -- stand here, face dname
     local dist = math.abs(cx - (px or 0)) + math.abs(cy - (py or 0))
+    -- a wall beside the target is no place to stand (the Ilex Farfetch'd's
+    -- west side): ranked after every open side
+    local open = not (map and map.isWalkableCell) or map:isWalkableCell(cx, cy)
+    -- ...nor a cell someone is standing on (Amphy beside Jasmine)
+    for _, n in ipairs((r.ow and r.ow.npcs) or {}) do
+      if not n.hidden and n.cellX == cx and n.cellY == cy then open = false end
+    end
+    -- ...nor under an invisible blocker (Lenora's bookcase covers the floor
+    -- beside its last book until the book moves it)
+    local okC, Collision = pcall(require, "src.world.Collision")
+    if open and okC and Collision.occupied and r.ow and r.ow.entities
+       and Collision.occupied(r.ow.entities, cx, cy, r.ow.player) then open = false end
+    if not open then dist = dist + 10000 end
+    -- ...and one that can be walked to before one that cannot (Cold
+    -- Storage's grunt with an open cell boxed in behind the crowd)
+    if open and r.planStep and dist > 0 and not r.planStep(r.ow, cx, cy) then dist = dist + 5000 end
     if not bestD or dist < bestD then best, bestD = { cx, cy, dname }, dist end
   end
   return best
@@ -151,9 +222,21 @@ function R:walkTo(tx, ty)
     self.walkSame = 0
     return "blocked"
   end
-  local d = self.planStep(self.ow, tx, ty)
+  local d = self.planStep(self.ow, tx, ty, self.avoid)
+  -- the other warps are only avoided where a way round them exists
+  -- ...but not at the first tick there is none: a wandering person can stand
+  -- in the only way round for a moment (Castelia's gym street), and the way
+  -- over a warp leads off the map
+  if d then self.avoidWait = 0 elseif self.avoid then self.avoidWait = (self.avoidWait or 0) + 1 end
+  if not d and self.avoid and self.avoidWait > 90 then d = self.planStep(self.ow, tx, ty) end
+  if os.getenv("PT_WALKLOG") and self.t % 4 == 0 then
+    self:say("  walk %s (%s,%s) -> (%d,%d) %s", tostring(self:map()), tostring(x), tostring(y), tx, ty, tostring(d))
+  end
   if d == "here" then return true end
   if not d then
+    -- and stand still: a direction left held from the step before (leaning
+    -- into the door just come through) walked the player off somewhere else
+    self.held = nil
     self.stuck = (self.stuck or 0) + 1
     if self.stuck > 240 then return nil, ("no path to %d,%d"):format(tx, ty) end
     return false
@@ -164,7 +247,13 @@ end
 
 function R:runStep(s)
   local kind = s[1]
+  if kind ~= "warpto" then self.avoid = nil end
   if kind == "do" then s[2](self) return true end
+  if kind == "answers" then
+    self.answers = {}
+    for i, v in ipairs(s[2] or {}) do self.answers[i] = v end
+    return true
+  end
   if kind == "teleport" then
     local ok, err = pcall(self.ow.setMap, self.ow, s[2], s[3], s[4], s[5] or "down")
     if not ok then return nil, "teleport failed: " .. tostring(err) end
@@ -173,13 +262,19 @@ function R:runStep(s)
   if kind == "press" then self.key = s[2] return true end
   if kind == "mash" then
     if self.stepT >= s[2] then return true end
-    if self.stepT % self.mashEvery == 0 then self.key = "a" end
+    if self.stepT % self.mashEvery == 0 then
+      self.key = stateName(self:top()):find("HgssPokegear") and "b" or "a"
+    end
     return false
   end
   if kind == "until" then
     if s[2](self) then return true end
     if self.stepT > (s[3] or 12000) then return nil, "condition never came true" end
-    if self.stepT % self.mashEvery == 0 then self.key = s[4] or "a" end
+    local onFainted, key = self:forcedSwitchKey()
+    if onFainted then self.key = key return false end
+    -- (the Pokegear a scripted HGSS phone call leaves open closes on B)
+    local gear = stateName(self:top()):find("HgssPokegear")
+    if self.stepT % self.mashEvery == 0 then self.key = gear and "b" or s[4] or "a" end
     return false
   end
   if kind == "face" then
@@ -210,8 +305,43 @@ function R:runStep(s)
   end
   if kind == "warpto" then
     if self:map() == s[2] then self.onWarpT, self.leaning = 0, nil return true end
+    -- `done = fn`: the warp's own scene has already carried the player on
+    -- (Striaton's frame table warps straight on to Fennel's house)
+    if s.done and s.done(self) then self.onWarpT, self.leaning = 0, nil return true end
+    -- every OTHER warp is a wall on the way: a cabin corridor's doors sit
+    -- beside the one wanted, and walking over one goes somewhere else
+    self.avoid = {}
+    -- { "warpto", map, x, y }: that one warp, when two lead to the same map
+    -- by different ways (the S.S. Aqua's two stairs between 1F and B1F)
+    local function wanted(w)
+      return w.destMap == s[2] and (s[3] == nil or (w.x == s[3] and w.y == s[4]))
+    end
     for _, w in ipairs(def.warps or {}) do
-      if w.destMap == s[2] then
+      if not wanted(w) then self.avoid[w.x * 4096 + w.y] = true end
+    end
+    -- ...and so is an armed trigger, where a way round it exists (Relic
+    -- Castle's quicksand pits lie between the way in and the stairs)
+    if s.avoidTriggers then
+      for _, c in ipairs(def.coordEvents or {}) do
+        if c.var and self:var(c.var) == (c.value or 0) then
+          for yy = c.y, c.y + (c.height or 1) - 1 do
+            for xx = c.x, c.x + (c.width or 1) - 1 do self.avoid[xx * 4096 + yy] = true end
+          end
+        end
+      end
+    end
+    -- of several cells leading there, one the planner can reach without
+    -- crossing another warp (Celestial Tower 2F: the stairs up are (13,8),
+    -- (13,9) and (14,10), and only (14,10) has floor in front of it)
+    local reach
+    for _, w in ipairs(def.warps or {}) do
+      if not reach and wanted(w) then
+        local px, py = self:pos()
+        if (px == w.x and py == w.y) or self.planStep(self.ow, w.x, w.y, self.avoid) then reach = w end
+      end
+    end
+    for _, w in ipairs(def.warps or {}) do
+      if wanted(w) and (not reach or w == reach) then
         -- NEXT TO IT: push into it rather than re-plan (a door or an edge
         -- warp cannot be entered the way the planner would like)
         local px, py = self:pos()
@@ -268,6 +398,41 @@ function R:runStep(s)
     self.held = s[2]
     return false
   end
+  -- { "talkany", { id, id, ... } }: talk to the first of these people who is
+  -- on the map and shown (a chase: the Ilex Farfetch'd stands at one of two)
+  if kind == "talkany" then
+    local function shown(want)
+      for _, n in ipairs(self.ow.npcs or {}) do
+        local lid = n.localId or (n.def and n.def.localId)
+        if lid == want and not n.hidden then return true end
+      end
+      return false
+    end
+    -- the person chosen when the step began, while they stay on the map
+    if s.chosen and not shown(s.chosen[2]) then s.chosen = nil return true end
+    if not s.chosen then
+      for _, want in ipairs(s[2] or {}) do
+        if shown(want) then
+          s.chosen = { "talk", want, behind = s.behind, retarget = s.retarget }
+          for _, n in ipairs(self.ow.npcs or {}) do
+            local lid = n.localId or (n.def and n.def.localId)
+            if lid == want then self:say("  talkany -> %s at (%s,%s) facing %s", tostring(want), tostring(n.cellX), tostring(n.cellY), tostring(n.facing)) end
+          end
+          break
+        end
+      end
+      -- nobody shown: wait a little (the second Farfetch'd appears once the
+      -- first is home), then call the chase over
+      if not s.chosen then
+        s.waited = (s.waited or 0) + 1
+        return s.waited > 600
+      end
+      s.waited = nil
+    end
+    local ok, why = self:runStep(s.chosen)
+    if ok then s.chosen = nil end
+    return ok, why
+  end
   if kind == "talkto" then
     for _, n in ipairs(self.ow.npcs or {}) do
       local d = n.def or {}
@@ -279,24 +444,76 @@ function R:runStep(s)
     return nil, "nobody wearing " .. tostring(s[2]) .. " on " .. tostring(self:map())
   end
   if kind == "coord" then
+    -- a trigger whose scene takes the player off the map (Relic Castle's
+    -- quicksand drops them a floor) has done its work once the map changed
+    if self.stepT == 1 then self.coordFrom, self.coordCell = self:map(), nil end
+    if self.coordFrom and self:map() ~= self.coordFrom then return true end
     local c = (def.coordEvents or {})[s[2]]
     if not c then return nil, "no coordinate trigger " .. tostring(s[2]) end
-    local ok, why = self:walkTo(c.x, c.y)
+    -- ...or once its own condition no longer holds: its scene has run (it
+    -- fired on the way in, from a cell of its strip the runner was not
+    -- making for). Temp-var triggers (switches, pits) are left to the cell.
+    if self.stepT == 1 then self.coordArmed = c.var and self:var(c.var) == (c.value or 0) end
+    if self.coordArmed and c.var and c.var >= 0x4020 and self:var(c.var) ~= (c.value or 0) then return true end
+    -- a trigger wider than one cell: its nearest open cell (Castelia Gate's
+    -- 7 x 1 strip starts in the wall at (1,9))
+    local tx, ty = c.x, c.y
+    if (c.width or 1) > 1 or (c.height or 1) > 1 then
+      local px, py = self:pos()
+      local map, bestD = self.ow and self.ow.map, nil
+      for yy = c.y, c.y + (c.height or 1) - 1 do
+        for xx = c.x, c.x + (c.width or 1) - 1 do
+          local open = not (map and map.isWalkableCell) or map:isWalkableCell(xx, yy)
+          -- ...and nobody standing on it (Dragonspiral's grunts line up
+          -- across Z212's 1 x 5 trigger)
+          for _, n in ipairs((self.ow and self.ow.npcs) or {}) do
+            if not n.hidden and n.cellX == xx and n.cellY == yy then open = false end
+          end
+          local d = math.abs(xx - (px or 0)) + math.abs(yy - (py or 0))
+          -- ...that can be walked to (a pit's far side lies past its own
+          -- quicksand), asked once a step and then kept
+          if open and self.coordCell == nil and self.planStep and d > 0
+             and not self.planStep(self.ow, xx, yy) then open = false end
+          if open and (not bestD or d < bestD) then tx, ty, bestD = xx, yy, d end
+        end
+      end
+      if self.stepT == 1 or self.coordCell == nil then self.coordCell = { tx, ty } end
+      tx, ty = self.coordCell[1], self.coordCell[2]
+    end
+    local ok, why = self:walkTo(tx, ty)
     if ok == nil then return nil, why end
+    -- "blocked" is a string, not arrival: keep pushing, as walkto does (a
+    -- trigger behind somebody who steps aside), then give up with a reason
+    if ok == "blocked" then
+      self.blockedN = (self.blockedN or 0) + 1
+      if self.blockedN > 12 then self.blockedN = 0 return nil, ("blocked short of %d,%d"):format(c.x, c.y) end
+      return false
+    end
+    if ok then self.blockedN = 0 end
     return ok
   end
   if kind == "talk" or kind == "sign" then
-    local tx, ty
+    local tx, ty, facing
     if kind == "talk" then
       for _, n in ipairs(self.ow.npcs or {}) do
         local lid = n.localId or (n.def and n.def.localId)
-        if lid == s[2] and not n.hidden then tx, ty = n.cellX, n.cellY end
+        if lid == s[2] and not n.hidden then tx, ty, facing = n.cellX, n.cellY, n.facing end
       end
       if not tx then return nil, "no person " .. tostring(s[2]) .. " on " .. tostring(self:map()) end
     else
       local sg = (def.signs or def.bgEvents or {})[s[2]]
       if not sg then return nil, "no sign " .. tostring(s[2]) end
       tx, ty = sg.x, sg.y
+    end
+    -- `behind = true`: come up from the side the person has its back to (a
+    -- Farfetch'd notices whoever walks up in front of it)
+    if not self.talkSpot and s.behind and facing and DIRS[facing] then
+      local d = DIRS[facing]
+      local bx, by = tx - d[1], ty - d[2]
+      local map = self.ow and self.ow.map
+      if not (map and map.isWalkableCell) or map:isWalkableCell(bx, by) then
+        self.talkSpot = { bx, by, facing }
+      end
     end
     self.talkSpot = self.talkSpot or adjacentFree(self, tx, ty)
     local spot = self.talkSpot
@@ -306,6 +523,13 @@ function R:runStep(s)
       if ok == nil then
         -- that side is blocked: try the next one round
         self.talkTries = (self.talkTries or 0) + 1
+        -- `retarget = true`: the people round this one keep moving (Cold
+        -- Storage's grunts after their battles), so ask again where to stand
+        -- rather than walk the four sides once
+        if s.retarget and self.talkTries <= 40 then
+          self.talkSpot, self.stuck = nil, 0
+          return false
+        end
         if self.talkTries > 3 then return nil, why end
         local order = { "up", "down", "left", "right" }
         local d = DIRS[order[self.talkTries + 1]]
@@ -383,16 +607,25 @@ function R:tick(i, game, ow, planStep)
       tostring(busy), tostring(why), stateName(self:top()))
   end
   if self.beatT > (b.budget or 30000) then self:fail("beat ran out of time") return nil, nil end
+  local answer = self:answerMenu()
+  if answer then return nil, answer end
   local s = b.steps and b.steps[self.stepAt]
   if s then
     local walking = s[1] == "walkto" or s[1] == "warpto" or s[1] == "coord" or s[1] == "talk"
       or s[1] == "sign" or s[1] == "step" or s[1] == "activecoord" or s[1] == "walkedge" or s[1] == "talkto"
+      or s[1] == "talkany"
     if self:busy() and (walking or s[1] == "face") then
       return self:busyInput()
     end
     self.stepT = (self.stepT or 0) + 1
     local ok, why = self:runStep(s)
     if self.held then self.lastDir = self.held end
+    -- PT_TRACE=1: every tick's step, place and input (a beat that wanders)
+    if os.getenv("PT_TRACE") then
+      local x, y = self:pos()
+      self:say("  . step %d %s at %s (%s,%s) held=%s key=%s ok=%s", self.stepAt, tostring(s[1]),
+        tostring(self:map()), tostring(x), tostring(y), tostring(self.held), tostring(self.key), tostring(ok))
+    end
     if ok == nil then self:fail(("step %d (%s): %s"):format(self.stepAt, s[1], why)) return nil, nil end
     if ok then self.stepAt, self.stepT, self.stuck = self.stepAt + 1, 0, 0 end
     return self.held, self.key

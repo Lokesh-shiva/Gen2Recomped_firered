@@ -653,6 +653,17 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      # Cloud-save sign-in credentials: this job packs its OWN game.love, so it
+      # needs its own copy (the payload job's does not reach it).
+      - name: Write cloud-save credentials
+        env:
+          GOOGLE_DESKTOP_CLIENT_ID: ${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }}
+          GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
+          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+        run: bash scripts/write_cloud_clients.sh cloud_clients.lua
+
       # --package-only fetches the LOVE sources, zips game.love and applies the
       # plist overlay, then stops before xcodebuild -- which is what lets the
       # build below run with signing switched off entirely.
@@ -784,6 +795,17 @@ jobs:
           # (alias androiddebugkey, created 2026-08-02).  Every release from
           # here must print this digest or it cannot upgrade the last one.
           EXPECTED_CERT: 91ff1bad5d97a2cafd3da7ecf04a6b084792073dcd28df63db812a787cfb24ea
+
+      # Cloud-save sign-in credentials: this job packs its OWN game.love, so it
+      # needs its own copy (the payload job's does not reach it).
+      - name: Write cloud-save credentials
+        env:
+          GOOGLE_DESKTOP_CLIENT_ID: ${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }}
+          GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
+          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+        run: bash scripts/write_cloud_clients.sh cloud_clients.lua
 
       - name: Build APK
         run: |

@@ -6152,6 +6152,13 @@ function RomExtractorGen4:poketchEvolutionArt()
     self:write("gen4_evolution_art", save("evolution_art", evolution))
     self:write("gen4_evolution_ink", E.data(self.rom,config))
   end
+  -- THE IN-GAME TRADE CUTSCENE (src/import/Gen4TradeArt.lua): demo_trade.narc
+  -- in Platinum, the byte-identical /a/0/8/9 in HeartGold / SoulSilver
+  do
+    local okT, built = pcall(require("src.import.Gen4TradeArt").build, self)
+    if okT and built then self:write("gen4_trade_art", built)
+    elseif not okT then print("Gen4TradeArt failed: " .. tostring(built)) end
+  end
   if hgss then
     local O=require("src.import.Gen4HgssOptionsArt")
     local options=O.images(self.rom)
@@ -7164,7 +7171,10 @@ RomExtractorGen4.STAGE_CHAIN = {
                              -- Headbutt trees and Rock Smash item odds, per map
                              { "src.import.Gen4HgssFieldMoves", "gen4_hgss_field_moves" },
                              -- ShowCertificate's three diplomas
-                             { "src.import.Gen4HgssCertificates", "gen4_hgss_certificates" } }) do
+                             { "src.import.Gen4HgssCertificates", "gen4_hgss_certificates" },
+                             -- the Pokegear's scripted calls: phonebook, script
+                             -- defs, Elm's map scripts, call-window ink
+                             { "src.import.Gen4HgssPhoneCall", "gen4_hgss_phone_call" } }) do
       local okM, M = pcall(require, entry[1])
       if okM and type(M) == "table" and M.build then
         local okB, built = pcall(M.build, self)

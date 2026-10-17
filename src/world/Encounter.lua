@@ -338,6 +338,10 @@ function Encounter.forMap(data, mapDef, mapId, hour, save)
   -- ...AND THE TROPHY GARDEN'S / GREAT MARSH'S DAILY PAIR (Gen4DailySlots).
   local Gen4DailySlots = require("src.world.Gen4DailySlots")
   swarmKey = swarmKey .. "|" .. Gen4DailySlots.key(data, save, mapDef)
+  -- ...AND HGSS'S MASS OUTBREAK AND NIGHT FISHING (src/world/HgssOutbreaks.lua)
+  local HgssOutbreaks = require("src.world.HgssOutbreaks")
+  local mapCode = (mapDef and mapDef.id) or mapId
+  swarmKey = swarmKey .. HgssOutbreaks.key(def, save, mapCode, hour)
   local cached = gen4Views[def]
   if cached and cached.timedBand == band and cached.swarmKey == swarmKey then
     return cached
@@ -382,6 +386,9 @@ function Encounter.forMap(data, mapDef, mapId, hour, save)
     grassSlots = out
     view.swarmGrass = out
   end
+  -- HGSS: night fishing, then the day's outbreak (land 1-2, surf 1, rods)
+  local outbreak = HgssOutbreaks.apply(def, save, mapCode, hour, grassSlots)
+  if outbreak and outbreak.grass then grassSlots = outbreak.grass view.outbreakGrass = outbreak.grass end
   -- SLOTS 7 AND 8: the Trophy Garden's pair once the National Dex is had, or
   -- the Great Marsh's daily species during a Safari Game -- after the swarm,
   -- the cartridge's order.
@@ -397,14 +404,15 @@ function Encounter.forMap(data, mapDef, mapId, hour, save)
     view.dailyGrass = out
   end
   view.grass = Encounter.gen4Table(grassSlots, def.grassRate)
+  outbreak = outbreak or {}
   view.water = def.surf
-    and Encounter.gen4Table(def.surf.slots, def.surf.rate) or nil
+    and Encounter.gen4Table(outbreak.surf or def.surf.slots, def.surf.rate) or nil
   view.oldRod = def.oldRod
-    and Encounter.gen4Table(def.oldRod.slots, def.oldRod.rate) or nil
+    and Encounter.gen4Table(outbreak.oldRod or def.oldRod.slots, def.oldRod.rate) or nil
   view.goodRod = def.goodRod
-    and Encounter.gen4Table(def.goodRod.slots, def.goodRod.rate) or nil
+    and Encounter.gen4Table(outbreak.goodRod or def.goodRod.slots, def.goodRod.rate) or nil
   view.superRod = def.superRod
-    and Encounter.gen4Table(def.superRod.slots, def.superRod.rate) or nil
+    and Encounter.gen4Table(outbreak.superRod or def.superRod.slots, def.superRod.rate) or nil
   gen4Views[def] = view
   return view
 end

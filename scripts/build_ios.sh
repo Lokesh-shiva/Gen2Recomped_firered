@@ -330,6 +330,15 @@ pack_game_love() {
     -x 'data/generated/*' -x 'assets/generated/*' -x '*/generated/*' \
     -x 'mods/*/tests/*' -x 'mods/*/tools/*' -x 'mods/*/oxr/*' -x 'mods/*.zip' \
     -x 'mods/*/CHANGELOG.md' -x 'mods/*_PLAN.md' -x 'mods/*/.git*')
+  # The cloud-save sign-in credentials (git-ignored; release.yml writes them
+  # with scripts/write_cloud_clients.sh). Without them Google Drive / OneDrive
+  # sign-in says "not set up" and the code popup never appears.
+  if [ -f "$ROOT/cloud_clients.lua" ]; then
+    (cd "$ROOT" && zip -q -9 "$LOVE_FILE" cloud_clients.lua)
+    say "packed cloud_clients.lua (cloud-save sign-in)"
+  else
+    warn "no cloud_clients.lua: Google Drive / OneDrive sign-in will say 'not set up'"
+  fi
   local bundled
   for bundled in $BUNDLED_MODS; do
     unzip -Z1 "$LOVE_FILE" | grep -x "$bundled/manifest.json" >/dev/null \

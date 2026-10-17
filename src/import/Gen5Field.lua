@@ -54,6 +54,34 @@ function F.permissions(raw)
   return table.concat(out)
 end
 
+-- A GC CHUNK'S SECOND LAYER IS A SECOND FLOOR. Its 8-byte tiles have the
+-- first layer's shape (after the same 4-byte 32 x 32 header), and where the
+-- two differ the second is the deck over the first: Pinwheel Forest's bridge
+-- (Z155 (71..76, 50..53)) is river (0x3D) and bank wall in layer one and flat
+-- open ground at the approach's height in layer two. Read from layer one
+-- alone, the forest's north half -- the last grunt, the Dragon Skull -- could
+-- not be reached. The engine walks one grid, so a tile takes layer two's
+-- record where layer one is solid or water and layer two is open ground: the
+-- deck is walked, and the river under it is not surfed (not modelled).
+-- Drayden's gym keeps layer one (F.LAYERS_APART): its statues' walkways are
+-- opened and closed by the gym's own code.
+local BW_WATER = { [0x3D] = true, [0x3F] = true, [0x41] = true }
+F.LAYERS_APART = { [121] = true }
+function F.mergeLayers(raw, layer2)
+  if type(raw) ~= "string" or type(layer2) ~= "string"
+     or #raw < 4 + F.CHUNK * F.CHUNK * 8 or #layer2 < 4 + F.CHUNK * F.CHUNK * 8 then return raw end
+  local out, changed = { raw:sub(1, 4) }, 0
+  for t = 0, F.CHUNK * F.CHUNK - 1 do
+    local at = 4 + t * 8
+    local a, b = raw:sub(at + 1, at + 8), layer2:sub(at + 1, at + 8)
+    local aShut = a:byte(7) % 2 == 1 or BW_WATER[a:byte(5)]
+    local bOpen = b:byte(7) % 2 == 0 and not BW_WATER[b:byte(5)]
+    if aShut and bOpen and a ~= b then out[#out + 1] = b; changed = changed + 1 else out[#out + 1] = a end
+  end
+  out[#out + 1] = raw:sub(4 + F.CHUNK * F.CHUNK * 8 + 1)
+  return table.concat(out), changed
+end
+
 -- bigGrid(raw WB section) -> a whole map's grid for a chunk wider than 32
 -- (its header's width / height), or nil for an ordinary 32 x 32 one: the
 -- blocks in the shape the rails write (0xFF blocked), the behaviours, and the
@@ -292,8 +320,21 @@ function F.build(x, save)
   -- eight times a WB chunk's 64 -- so each spans 4,096 units, 256 tiles.
   -- A matrix made only of them is a RAIL map (Gen5Field's rails below).
   local ngChunks, rawPerms = {}, {}
+  -- the chunks of Drayden's gym (zone 121), whose second layer is the
+  -- statues' walkways that Gen5DragonGym opens and closes: kept apart
+  -- (F.mergeLayers)
+  local gimmickChunks = {}
+  for id, z in pairs(zones) do
+    local m = F.LAYERS_APART[id] and M.matrix(mxArc:get(z.matrix)) or nil
+    for _, c in ipairs(m and m.chunks or {}) do gimmickChunks[c] = true end
+  end
   for c = 0, chunkArc.count - 1 do
     local chunk = M.chunk(chunkArc:get(c))
+    if chunk and chunk.kind == "GC" and chunk.layer2 and not gimmickChunks[c] then
+      local merged, n = F.mergeLayers(chunk.permissions, chunk.layer2)
+      chunk.permissions = merged
+      if n and n > 0 then report.gcDecks = (report.gcDecks or 0) + n end
+    end
     if chunk and chunk.permissions then rawPerms[c] = chunk.permissions end
     local set = chunk and Nsbmd.parse(chunk.model)
     local model = set and set.models and set.models[1]

@@ -1742,6 +1742,15 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
       require("src.script.Gen4Commands").clearTempFieldEventData(Game.save)
     end)
   end
+  -- ...and Black / White's temporary vars, 0x4000..0x401F, which BW's maps
+  -- use the same way: each Elite Four room's platform trigger runs while its
+  -- 0x4000 is 0 and sets it to 1 when it has lifted the player. Kept from the
+  -- room before, Grimsley's platform never moved after Shauntal's (this was
+  -- Gen 4 only). The flags 0x00..0x3F are left alone here: BW's own temp
+  -- flag range is not established.
+  if GameVersion.isGen5() and Game and Game.save and Game.save.gen4Vars then
+    for id = 0x4000, 0x401F do Game.save.gen4Vars[id] = nil end
+  end
 
   -- fires before the onEnter chain so a listener sees the map in the same
   -- state the map script does
@@ -3491,6 +3500,10 @@ function OverworldState:update(dt)
       self.coordAskedSerial = self.cellSerial
       self:checkCoordEventHere(true)
     end
+    -- BW's quicksand sinks a player who stands still on it (Gen5Quicksand)
+    if self.map and self.map.def and self.map.def.gen5 and not self.runner:isRunning() then
+      require("src.world.Gen5Quicksand").tick(self)
+    end
     -- ...AND THE MAP'S SETUP DECIDES THE WEATHER, which is the last thing a
     -- cartridge map load does (DoCurrentWeather).
     --
@@ -4244,6 +4257,26 @@ end
 --
 -- Modelled on `checkGen3ArrowWarp` directly below: the same shape of rule one
 -- cartridge later, answered at the press rather than at the end of a step.
+-- HGSS LADDERS (pokeheartgold field_control.c FieldSystem_CheckMapTransition,
+-- asked FIRST and with no wall ahead): standing on TILE_BEHAVIOR_LADDER_NORTH
+-- (0x3C) a press north takes the warp underfoot, on LADDER_SOUTH (0x3D) a
+-- press south. The S.S. Aqua's east stairs between 1F and B1F are these.
+-- Asked before the facing test: the cell beyond a ladder is open, so the
+-- press that turns the player would otherwise walk them off it instead.
+function OverworldState:checkHgssLadder(dir)
+  local p, map = self.player, self.map
+  if not (map and map.cellBehaviour and p and not p.moving) then return false end
+  if (map.def and map.def.generation) ~= 4 or not isHgssData(Game and Game.data) then return false end
+  local b = map:cellBehaviour(p.cellX, p.cellY)
+  local want = (b == 0x3C and "up") or (b == 0x3D and "down") or nil
+  if not (want and dir == want) then return false end
+  local w = map:warpAtCell(p.cellX, p.cellY)
+  if not w then return false end
+  p.facing = dir
+  self:takeWarp(w.def)
+  return true
+end
+
 function OverworldState:checkGen4EntranceWarp(dir)
   local p = self.player
   local map = self.map
@@ -4277,6 +4310,10 @@ function OverworldState:checkGen4EntranceWarp(dir)
       end
     end
     local ahead = map:warpAtCell(tx, ty)
+    -- ...NOR A DOORWAY SOMEBODY STANDS IN: the press meets the person first
+    -- (Chargestone's mouth, Z194: person 0 stands on the way in at (11,19)
+    -- until spoken to; walking up to talk to him went straight past him)
+    if ahead and Collision.occupied(self.entities or {}, tx, ty, p) then ahead = nil end
     local here = map:warpAtCell(p.cellX, p.cellY)
     -- ...but not the SAME doorway: a side entrance is a strip of cells
     -- (Castelia's Z034 door to Z047 is 1 x 3), and arriving on its top cell
@@ -4366,9 +4403,40 @@ function OverworldState:gen5ChunkHandoff()
   local target = ("Z%03d"):format(zone)
   local tdef = data.maps and data.maps[target]
   if not (tdef and tdef.layout == def.layout) then return false end
+  -- A SCRIPT'S TEMPORARY OBJECTS CROSS WITH THE PLAYER. 0x069's spawns are
+  -- not the zone's own people, and a zone change does not take them away:
+  -- Nuvema's "step onto Route 1 together" (Z389 M0778 S02D9 spawns Cheren as
+  -- 240, S079D walks all three north over the seam) hands over to Route 1's
+  -- entry 1 (M0634 S0027), which walks and finally removes 240 and 250. They
+  -- were left behind here and Juniper's demonstration ran without them.
+  local riders = {}
+  for _, n in ipairs(self.npcs or {}) do
+    if n.def and n.def.gen5Temp and not n.hidden and not n.def.hidden then riders[#riders + 1] = n end
+  end
   self:setMap(target, wx - (tdef.originX or 0), wy - (tdef.originY or 0), p.facing,
               { seamless = true, keepMusic = true })
   self.pendingSeamMusic = target
+  if riders[1] then
+    local rdx, rdy = (def.originX or 0) - (tdef.originX or 0), (def.originY or 0) - (tdef.originY or 0)
+    tdef.objects = tdef.objects or {}
+    for _, e in ipairs(riders) do
+      e.cellX, e.cellY = e.cellX + rdx, e.cellY + rdy
+      if e.targetX and e.targetY then e.targetX, e.targetY = e.targetX + rdx, e.targetY + rdy end
+      e.px, e.py = (e.px or e.cellX * 16) + rdx * 16, (e.py or e.cellY * 16) + rdy * 16
+      -- the template moves too, so the new zone owns it (and the old one
+      -- no longer spawns it on the way back)
+      for i, o in ipairs(def.objects or {}) do
+        if o == e.def then table.remove(def.objects, i) break end
+      end
+      local maxIndex = 0
+      for _, o in ipairs(tdef.objects) do maxIndex = math.max(maxIndex, tonumber(o.index) or 0) end
+      e.def.index = maxIndex + 1
+      e.def.x, e.def.y = (e.def.x or 0) + rdx, (e.def.y or 0) + rdy
+      tdef.objects[#tdef.objects + 1] = e.def
+      self.npcs[#self.npcs + 1] = e
+      if self.entities then self.entities[#self.entities + 1] = e end
+    end
+  end
   return true
 end
 
@@ -5043,6 +5111,7 @@ function OverworldState:handleInput()
       -- looking.  There is no turn delay off the grid to pay for this.
       if not self.player.moving then self.player.facing = dir end
       if self:checkGen2Whirlpool(dir) then return end
+      if self:checkHgssLadder(dir) then return end
       if not self.player.moving and self.player.facing == dir then
         if self:checkGen2CarpetExit(dir) then return end
         if self:checkGen3ArrowWarp(dir) then return end
@@ -5074,6 +5143,7 @@ function OverworldState:handleInput()
       -- and `ret c`, so the eddy pre-empts turning, stepping, ledges and
       -- warps alike -- and, being a bump, it never lets the player in.
       if self:checkGen2Whirlpool(dir) then return end
+      if self:checkHgssLadder(dir) then return end
       if not self.player.moving and self.player.facing == dir then
         if self:checkGen2CarpetExit(dir) then return end
         -- ...and its Gen 3 counterpart, which is the only way off a Hoenn
@@ -9759,7 +9829,7 @@ function OverworldState:isIceCell(cx, cy)
 end
 
 function OverworldState:checkGen2Ice()
-  if not (GameVersion.isGen2() or GameVersion.isGen3()) then return false end
+  if not (GameVersion.isGen2() or GameVersion.isGen3() or GameVersion.isGen4()) then return false end
   local p = self.player
   if p.surfing or not self:isIceCell(p.cellX, p.cellY) then
     self.iceSlide = nil
@@ -9776,6 +9846,41 @@ function OverworldState:checkGen2Ice()
   end
   self.iceSlide = dir
   p.facing = dir
+  self:scriptMove(p, dir, 1, function() self:onStepComplete() end)
+  return true
+end
+
+-- VIRIDIAN GYM'S SPIN TILES (HeartGold / SoulSilver; overlay 1 ov01_021F3114,
+-- ViridianGymmick): an arrow tile (SLIDE_EAST 0x40, WEST 0x41, NORTH 0x42,
+-- SOUTH 0x43) spins the player and carries them its way. They keep going over
+-- ordinary tiles, turn on each arrow, and stop on STOP_SLIDING (0x4D) or when
+-- the next step is blocked. The spin is three quarter-turns a step.
+local HGSS_SPIN = { [0x40] = "right", [0x41] = "left", [0x42] = "up", [0x43] = "down" }
+local SPIN_TURN = { up = "left", left = "down", down = "right", right = "up" }
+function OverworldState:checkHgssSpinTiles()
+  local p = self.player
+  local def = self.map and self.map.def
+  if not (p and def and def.cameraFamily == "hgss" and self.map.cellBehaviour) or p.surfing then
+    self.spinSlide = nil
+    return false
+  end
+  local b = self.map:cellBehaviour(p.cellX, p.cellY)
+  local dir = HGSS_SPIN[b] or self.spinSlide
+  if b == 0x4D or not dir then
+    if self.spinSlide then p.facing = self.spinSlide end
+    self.spinSlide = nil
+    return false
+  end
+  if not self.spinSlide then
+    pcall(function() require("src.core.Sound").playSe(Game.data, "SEQ_SE_DP_F209") end)
+  end
+  if not Collision.canMove(self.map, self.cast or self.entities, p, dir) then
+    p.facing = dir
+    self.spinSlide = nil
+    return false
+  end
+  self.spinSlide = dir
+  p.facing = SPIN_TURN[SPIN_TURN[SPIN_TURN[dir]]]
   self:scriptMove(p, dir, 1, function() self:onStepComplete() end)
   return true
 end
@@ -10220,9 +10325,11 @@ function OverworldState:useSurfFieldMove()
   end
   -- BLACK / WHITE: the water is a behaviour (Map.gen5WaterAt), and no badge
   -- is asked; off the water is a step onto land.  PLATINUM the same, by its
-  -- own surfable behaviours (Map.gen4WaterAt; the badge is the menu's check)
+  -- own surfable behaviours (Map.gen4WaterAt; the badge is the menu's check),
+  -- and HEARTGOLD / SOULSILVER by the same rows (Surf from the party menu fell
+  -- through to the Gen 1/2 tile lists there and found no water)
   if GameVersion.isGen5() or (GameVersion.isGen4() and self.map and self.map.def
-                              and self.map.def.generation == 4 and self.map.def.cameraFamily ~= "hgss") then
+                              and self.map.def.generation == 4) then
     if p.surfing then
       return self:facingIsLandDismount() and "dismount" or "no_place"
     end
@@ -12812,6 +12919,20 @@ function OverworldState:onStepComplete()
                     and self.gen5ArrivalY == p.cellY
     if w and not arrived then self:takeWarp(w.def) return end
   end
+  -- ...AND A RAIL-PLACED DOOR ON A GRID MAP whose rails opened its cell: the
+  -- League's hall (Z137) puts each Elite Four door on its rail line (Marshal's
+  -- at (38,32), line 6), and the rasterised line runs on through it, so the
+  -- door was open floor that a walker crossed and nothing took.
+  if not warpFirst and self.map.def and self.map.def.gen5 and not self.map.def.gen5NoGrid
+     and self.map.warpAtCell and self.map.isWalkableCell then
+    local w = self.map:warpAtCell(p.cellX, p.cellY)
+    local arrived = self.gen5ArrivalMap == self.map.id and self.gen5ArrivalX == p.cellX
+                    and self.gen5ArrivalY == p.cellY
+    if w and w.def and w.def.rail and not arrived and self.map:isWalkableCell(p.cellX, p.cellY) then
+      self:takeWarp(w.def)
+      return
+    end
+  end
 
   -- A MAP'S OWN STEP RULE (HGSS: a button on Clair's platforms), which
   -- FieldSystem_ProcessStep asks before anything else
@@ -12888,6 +13009,7 @@ function OverworldState:onStepComplete()
   if self:checkGen3Forced() then return end
   if self:checkGen3Current() then return end
   if self:checkGen2Ice() then return end
+  if self:checkHgssSpinTiles() then return end
 
   -- the Safari game step counter (engine/events/hidden_events/safari_game.asm)
   if self:safariStep() then return end
@@ -13858,8 +13980,22 @@ function OverworldState:gen4RadarEncounter(encDef)
   return true
 end
 
+-- Gen 4's field coming back after a battle: the map's ON_LOAD / ON_RESUME
+-- scripts (Gen4ScriptVM's onResume contribution), once per return
+function OverworldState:gen4FieldResumed()
+  if not GameVersion.isGen4() or not self.map then return end
+  local hooks = mapScripts.get(self.map.id)
+  if hooks and hooks.onResume then hooks.onResume(Game, self) end
+end
+
 function OverworldState:afterBattle(result, battle)
   self.gen4EncounterAttempts = 0
+  -- a battle a script did not start (a wild one, a trainer's sight) comes
+  -- back to the field here; a scripted one already did in its onFinish
+  if battle and not battle.g4FieldResumed and GameVersion.isGen4() then
+    battle.g4FieldResumed = true
+    pcall(self.gen4FieldResumed, self)
+  end
   -- THE GAME RECORDS: battles fought, the score for a win or a catch, a
   -- Pokemon caught, a fish hooked (src/pokemon/Gen4GameRecords.lua)
   if GameVersion.isGen4() and battle and Game.save then

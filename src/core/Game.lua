@@ -39,7 +39,13 @@ function Game:load()
   -- data exists, so mods can register or override the same definitions that
   -- the rest of the game consumes.  A broken mod is reported and skipped by
   -- the loader without preventing the base game from booting.
-  self.mods = ModLoader.new()
+  -- THE LAUNCHER'S BACKDROP LOADS THE PLAIN GAME (src/import/LauncherBackdrop
+  -- sets `loadWithoutMods` around its own Game:load). It boots the real game
+  -- behind the launcher, and with mods on that made every game the player
+  -- then pressed Play on the SECOND mod load in the process -- a mod that
+  -- wraps engine functions once behind an "already wrapped" flag kept the
+  -- dead first load's wraps (DRAMATIC_SHAPE's 3D battles drew a white screen).
+  self.mods = ModLoader.new(self.loadWithoutMods and { noMods = true } or nil)
   self.mods:load(Data)
   self.modStatus = self.mods:status()
   -- AND THE MAP EDITOR'S OVERLAY AGAIN, ON TOP OF THE MERGE.

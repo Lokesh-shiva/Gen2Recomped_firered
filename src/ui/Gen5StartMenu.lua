@@ -49,6 +49,12 @@ function Gen5StartMenu.new(game, opts)
       rows[#rows + 1] = { id = id, label = self:word(id), bwIcon = icon }
     end
   end
+  -- the cartridge's tabs fill the grid; MODS (the port's, see
+  -- Gen4StartMenu.modsRow) is a half-height tab of its own in the strip
+  -- under it, left of the (x), and always the last row
+  self.gridCount = #rows
+  local mods = Gen4StartMenu.modsRow(game)
+  if mods then rows[#rows + 1] = mods end
   self.rows = rows
   self.index = 1
   for i, row in ipairs(rows) do if row.id == game.gen4StartMenuCursor then self.index = i end end
@@ -69,7 +75,13 @@ function Gen5StartMenu:word(id)
   return text
 end
 
+-- the MODS tab: the strip under the grid, the grid's left column wide
+local MODS_RECT = { 167, 189, 3, 125 }
+-- one cartridge tab in buttons_N (and the cyan cursor's height), squeezed to it
+local TAB_SRC = { 0, 24, 128, 43 }
+
 function Gen5StartMenu:rect(i)
+  if self.rows[i] and self.rows[i].id == "mods" then return MODS_RECT end
   local col, row = COLS[(i - 1) % 2 + 1], ROWS[floor((i - 1) / 2) + 1]
   return row and { row[1], row[2], col[1], col[2] }
 end
@@ -104,14 +116,22 @@ function Gen5StartMenu:update()
   if not input then return end
   local before = self.index
   local i = self.index - 1
+  -- the grid is the cartridge's tabs; a MODS tab (rows past gridCount) sits
+  -- below it and is reached by DOWN from the grid's last row
+  local grid = self.gridCount or count
   if input:wasPressed("up") then
-    if i >= 2 then self.index = self.index - 2 end
+    if i >= grid then
+      if grid > 0 then self.index = floor((grid - 1) / 2) * 2 + 1 end
+    elseif i >= 2 then self.index = self.index - 2 end
   elseif input:wasPressed("down") then
-    if i + 2 < count then self.index = self.index + 2 end
+    if i + 2 < grid then self.index = self.index + 2
+    elseif i < grid and grid < count and floor(i / 2) == floor((grid - 1) / 2) then
+      self.index = grid + 1
+    end
   elseif input:wasPressed("left") then
-    if i % 2 == 1 then self.index = self.index - 1 end
+    if i < grid and i % 2 == 1 then self.index = self.index - 1 end
   elseif input:wasPressed("right") then
-    if i % 2 == 0 and i + 1 < count then self.index = self.index + 1 end
+    if i % 2 == 0 and i + 1 < grid then self.index = self.index + 1 end
   elseif input:wasPressed("a") then
     self:se("SEQ_SE_DP_SELECT")
     return self:select()
@@ -158,6 +178,36 @@ function Gen5StartMenu:bwSprite(key, x, y)
   return true
 end
 
+-- THE MODS TAB, out of the cartridge's own art: one dark tab cut from
+-- buttons_6 and the cyan cursor_0, both squeezed to the strip's height, and
+-- the word centred on it in the tabs' ink.
+function Gen5StartMenu:drawModsTab(row, r, selected)
+  local g = love.graphics
+  local w, h = r[4] - r[3], r[2] - r[1] + 1
+  local tabs = self:bwImg("buttons_6")
+  local sy = h / TAB_SRC[4]
+  if tabs then
+    self.modsTabQuad = self.modsTabQuad or g.newQuad(TAB_SRC[1], TAB_SRC[2],
+      TAB_SRC[3], TAB_SRC[4], tabs:getDimensions())
+    g.setColor(1, 1, 1, 1)
+    g.draw(tabs, self.modsTabQuad, r[3] - 3, r[1], 0, 1, sy)
+  else
+    g.setColor(0.15, 0.15, 0.15, 1)
+    g.rectangle("fill", r[3], r[1], w, h)
+  end
+  if selected then
+    local cur, rec = self:bwImg("cursor_0")
+    if cur then
+      local cw, ch = cur:getDimensions()
+      g.setColor(1, 1, 1, 1)
+      g.draw(cur, floor((r[3] + r[4]) / 2) + 1 - cw / 2, r[1] + (h - ch * sy) / 2, 0, 1, sy)
+    end
+  end
+  g.setColor(1, 1, 1, 1)
+  local label = row.label or ""
+  Font.draw(label, r[3] + floor((w - Font.width(label)) / 2), r[1] + floor((h - 16) / 2) + 1)
+end
+
 function Gen5StartMenu:drawPanel(whole)
   local g = love.graphics
   g.setColor(1, 1, 1, 1)
@@ -166,13 +216,17 @@ function Gen5StartMenu:drawPanel(whole)
     local back = self:bwImg("backdrop")
     if back then g.draw(back, 0, 0) end
   end
+  -- the grid art counts the cartridge's tabs only; MODS draws its own
+  count = self.gridCount or count
   local layout = count >= 6 and 6 or count == 5 and 5 or 4
   local tabs = self:bwImg("buttons_" .. layout)
   if tabs and count >= 4 then g.draw(tabs, 0, 0) end
   Font.pushStyle({ text = INK[1], shadow = INK[2] })
   for i, row in ipairs(self.rows) do
     local r = self:rect(i)
-    if r then
+    if r and row.id == "mods" then
+      self:drawModsTab(row, r, i == self.index)
+    elseif r then
       if not tabs or count < 4 then
         g.setColor(0.15, 0.15, 0.15, 1)
         g.rectangle("fill", r[3], r[1], r[4] - r[3], r[2] - r[1])

@@ -48,10 +48,29 @@ For both code flows, the launcher shows a popup over everything (`src/import/Lau
 `cloud_clients.lua` is git-ignored. `cloud_clients.example.lua` shows its shape.
 
 - **Locally:** copy the example and fill it in.
-- **In release builds:** `.github/workflows/release.yml` writes it with `scripts/write_cloud_clients.sh` from these repository secrets:
+- **In CI builds:** `release.yml` (every platform job), `ios.yml` and `build-ios.yml` write it with `scripts/write_cloud_clients.sh` from these repository secrets:
   - `GOOGLE_DESKTOP_CLIENT_ID`, `GOOGLE_DESKTOP_CLIENT_SECRET`
   - `GOOGLE_DEVICE_CLIENT_ID`, `GOOGLE_DEVICE_CLIENT_SECRET`
   - `MICROSOFT_CLIENT_ID`
 - `scripts/pack_love.sh` packs the file when it is present.
 
 A Google "installed app" secret is not confidential (Google says so), but GitHub's secret scanning flags it. That is why it lives outside the source tree.
+
+## Phones: why the code popup did not appear (fixed 2026-10-17)
+
+On Android and iOS, pressing SIGN IN for Google Drive or OneDrive showed only a one-line notice and never the code popup. The popup itself (`LauncherCloudCode`) was fine. It draws and takes taps through the same `RomImporter:draw` / `mousepressed` path that `main.lua` forwards touches into. It opens only once `Auth.begin()` returns a device flow, and on phones `begin()` never got that far:
+
+- **Credentials were never packed for phones.** `scripts/build_android.sh` and `scripts/build_ios.sh` each zip their own `game.love`. The `Write cloud-save credentials` step ran only in the `payload` job, so the APK and IPA had no `cloud_clients.lua`, and every sign-in stopped at "not set up". The fix:
+  - the `android` and `ios` jobs in `release.yml` now write the file too;
+  - both build scripts pack it when it is present (and warn when it is not).
+- **iOS took the desktop flow.** `GoogleAuth.client()` gave iOS the loopback browser flow, which cannot work there (Safari suspends the app), and that flow has no code to show. iOS now uses the device-code flow, as Android does.
+- **iOS had no HTTP transport.** It has no `httpRequest` bridge and no curl. `src/cloud/Http.lua` now uses LÖVE 12's built-in `require("https")` (lua-https) on iOS, and anywhere curl cannot run.
+- A network failure now reads "could not reach Google/Microsoft: <why>" instead of "refused the sign-in request (nil)".
+
+Popup changes:
+
+- The popup is laid out inside `SafeArea.rect()`, clear of notches and the home indicator.
+- CANCEL now always closes it, even when the SERVICE row has changed underneath it.
+- COPY calls `love.system.setClipboardText`. OPEN WEBSITE calls `love.system.openURL`.
+
+Verified with a phone-sized probe that fakes `getOS()` as Android or iOS: 1080x2340 and 2340x1080, plus 1170x2532 for iOS. Taps are routed exactly the way `main.lua` routes them, and COPY, OPEN WEBSITE and CANCEL each call the right function. Two things need a real device: the lua-https transport (desktop LÖVE here is 11.5) and a real sign-in round trip.

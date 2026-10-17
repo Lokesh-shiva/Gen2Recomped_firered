@@ -13,6 +13,8 @@
 --            from -w -- so nothing is ever put on a command line but names.
 --   Android  love.system.httpRequest(json) -> GameActivity.httpRequest, which
 --            answers {"status": n, "body": "..."} (HttpURLConnection).
+--   iOS      LOVE 12's built-in lua-https (require "https"), also the
+--            fallback wherever curl cannot be run.
 --
 -- Bodies here are text (JSON, form data, Lua save files); nothing binary.
 
@@ -68,8 +70,34 @@ local function viaBridge(method, url, opts)
   return tonumber(doc.status), doc.body or ""
 end
 
+-- iOS (and any LOVE 12 build): the engine's own lua-https module. iOS has no
+-- curl to spawn and no httpRequest bridge, so without this every Google
+-- Drive / OneDrive request there failed before the code popup could open.
+local httpsMod
+local function luaHttps()
+  if httpsMod == nil then
+    local ok, m = pcall(require, "https")
+    httpsMod = (ok and type(m) == "table" and type(m.request) == "function") and m or false
+  end
+  return httpsMod or nil
+end
+
+local function viaLuaHttps(method, url, opts)
+  local https = luaHttps()
+  local ok, code, body = pcall(https.request, url, {
+    method = method, headers = opts.headers or {}, data = opts.body,
+  })
+  if not ok then return nil, "network error: " .. tostring(code) end
+  code = tonumber(code)
+  if not code or code == 0 then return nil, "network error: no response" end
+  return code, body or ""
+end
+
+local function isIOS() return love and love.system and love.system.getOS and love.system.getOS() == "iOS" end
+
 function H.available()
   if love and love.system and type(love.system.httpRequest) == "function" then return true end
+  if isIOS() and luaHttps() then return true end
   local ok, HostShell = pcall(require, "src.core.HostShell")
   return ok and HostShell.haveCurl and HostShell.haveCurl() or false
 end
@@ -79,7 +107,10 @@ function H.request(method, url, opts)
   if love and love.system and type(love.system.httpRequest) == "function" then
     return viaBridge(method, url, opts)
   end
-  return viaCurl(method, url, opts)
+  if isIOS() and luaHttps() then return viaLuaHttps(method, url, opts) end
+  local status, body = viaCurl(method, url, opts)
+  if not status and luaHttps() then return viaLuaHttps(method, url, opts) end
+  return status, body
 end
 
 -- application/x-www-form-urlencoded

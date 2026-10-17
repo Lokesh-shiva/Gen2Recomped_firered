@@ -494,6 +494,21 @@ function love.load()
       for i = 1, rosters do Game.save.hallOfFame[i] = {} end
       print(("[hof] %d roster(s)"):format(#Game.save.hallOfFame))
     end
+    -- HOF_PARTY=n: n Hall of Fame entries made of the PARTY (with PARTY=...),
+    -- for the PC's browser (SCREEN=Gen4PcHallOfFame)
+    if os.getenv("HOF_PARTY") and Game.save then
+      Game.save.hallOfFame = {}
+      for e = 1, tonumber(os.getenv("HOF_PARTY")) or 1 do
+        local entry = { date = { year = 2026, month = 10, day = 10 + e } }
+        for _, mon in ipairs(Game.save.party or {}) do
+          local moves = {}
+          for i, mv in ipairs(mon.moves or {}) do moves[i] = type(mv) == "table" and mv.id or mv end
+          entry[#entry + 1] = { species = mon.species, level = mon.level + e, nickname = mon.nickname,
+            gender = require("src.pokemon.Pokemon").genderOf(Data, mon), otName = "LYRA", moves = moves }
+        end
+        Game.save.hallOfFame[e] = entry
+      end
+    end
     -- SECOND_SCREEN=vertical (or any SecondScreen mode): both screens in shot
     if os.getenv("SECOND_SCREEN") and Game.save then
       Game.save.options = Game.save.options or {}
@@ -616,7 +631,9 @@ function love.load()
     end
     local Collision = require("src.world.Collision")
     local DIRS = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
-    local function planStep(ow, tx, ty)
+    -- `avoid`: cells (x * 4096 + y) never stepped on unless they are the
+    -- goal -- the other warps on the way to the one wanted
+    local function planStep(ow, tx, ty, avoid)
       local p, map = ow.player, ow.map
       if not (p and map and p.cellX) then return nil end
       local sx, sy = p.cellX, p.cellY
@@ -624,14 +641,16 @@ function love.load()
       local key = function(x, y) return x * 4096 + y end
       local prev, q, head = { [key(sx, sy)] = false }, { { sx, sy } }, 1
       local ents = ow.cast or ow.entities or ow.npcs or {}
-      while head <= #q and head < 6000 do
+      -- (a cap past the biggest map: Pinwheel Forest is 128 x 96)
+      while head <= #q and head < 40000 do
         local c = q[head]; head = head + 1
         for dname, d in pairs(DIRS) do
           local nx, ny = c[1] + d[1], c[2] + d[2]
           local k = key(nx, ny)
           if prev[k] == nil then
-            local mover = { cellX = c[1], cellY = c[2], elevation = p.elevation, facing = dname }
+            local mover = { cellX = c[1], cellY = c[2], elevation = p.elevation, facing = dname, surfing = p.surfing }
             local ok = Collision.canMove(map, ents, mover, dname)
+            if ok and avoid and avoid[k] and not (nx == tx and ny == ty) then ok = false end
             if ok or (nx == tx and ny == ty) then
               prev[k] = { c[1], c[2], dname }
               if nx == tx and ny == ty then
@@ -957,6 +976,11 @@ function love.load()
     -- step inside that and paints into a surface nobody had set up.  A
     -- harness that skips it is not testing what the player sees.
     print("party after:  " .. partyHp())
+    -- where the player ended up (map, cell, facing)
+    if OW and OW.player then
+      print(("[pos] %s (%s,%s) facing=%s surfing=%s"):format(tostring(OW.map and OW.map.id), tostring(OW.player.cellX),
+        tostring(OW.player.cellY), tostring(OW.player.facing), tostring(OW.player.surfing)))
+    end
     -- SHOW_VARS=0x40D7,0x40D9: the story vars a scene was meant to set
     for v in (os.getenv("SHOW_VARS") or ""):gmatch("[^,]+") do
       local G4 = require("src.script.Gen4Commands")

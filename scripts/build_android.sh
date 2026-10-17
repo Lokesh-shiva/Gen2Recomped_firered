@@ -469,6 +469,22 @@ pack_game_love() {
   # remove it (it can be switched off). Pokewalker ships as an importable
   # .zip instead, which gives it a real install/upgrade/delete lifecycle.
   pack_love_archive "$LOVE_FILE" "$ROOT" "$MANIFESTS"
+  # The cloud-save sign-in credentials (git-ignored; release.yml writes them
+  # with scripts/write_cloud_clients.sh). This packer builds its OWN game.love,
+  # not the payload job's, so without this the APK had none and Google Drive /
+  # OneDrive sign-in on Android stopped at "not set up" -- no code popup.
+  if [ -f "$ROOT/cloud_clients.lua" ]; then
+    local pybin
+    pybin="$(command -v python3 || command -v python || command -v py)"
+    "$pybin" - "$LOVE_FILE" "$ROOT/cloud_clients.lua" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "a", zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[2], "cloud_clients.lua")
+PY
+    say "packed cloud_clients.lua (cloud-save sign-in)"
+  else
+    warn "no cloud_clients.lua: Google Drive / OneDrive sign-in will say 'not set up'"
+  fi
   local archive_entries
   archive_entries="$(archive_list "$LOVE_FILE")"
   if grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/' <<< "$archive_entries"; then
