@@ -34,7 +34,7 @@ local Sidebar = {}
 Sidebar.SECTIONS = {
   { id = "news",     label = "News" },
   { id = "games",    label = "Games" },
-  { id = "walker",   label = "Pokewalker" },
+  { id = "walker",   label = "Monster Walker" },
   { id = "mods",     label = "Mods" },
   { id = "tools",    label = "Tools" },
   { id = "settings", label = "Settings" },
