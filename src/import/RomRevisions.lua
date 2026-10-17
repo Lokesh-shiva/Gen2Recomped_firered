@@ -356,9 +356,11 @@ function RomRevisions.describe(bytes, sha1)
       return { game = h.game, label = label, known = false,
                short = label .. " - modified or bad dump",
                message = ("The header says %s, which is supported, but the file "
-                 .. "does not match the clean dump (%s). It has been patched, "
-                 .. "trimmed, overdumped or \"fixed\" (tagged [b] or [BF]); use "
-                 .. "an unmodified dump."):format(label, row.label) }
+                 .. "does not match the clean dump (%s). It may be patched, "
+                 .. "incomplete, overdumped or \"fixed\" (tagged [b] or [BF]); use "
+                 .. "an unmodified dump. Padding-only trimming is supported "
+                 .. "for HeartGold, SoulSilver, Black and White when all game "
+                 .. "data matches exactly."):format(label, row.label) }
     end
   end
   return { game = h.game, label = label, known = false,

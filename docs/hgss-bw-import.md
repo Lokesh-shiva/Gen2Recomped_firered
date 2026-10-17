@@ -1,5 +1,37 @@
 # HeartGold, SoulSilver, Black and White: import status
 
+## DS import size/worker regression: October 17, 2026
+
+- The launcher still admitted only 128-MiB DS cartridges. BW's clean
+  256-MiB dumps were rejected before extraction, as were padding-trimmed
+  HGSS dumps such as the reported 122.89-MiB file. Shared `RomVerification`
+  now serves manual imports, Android pending picks, and foreground/background
+  batch scans. Error messages include HGSS/BW and distinguish an unsupported
+  DS region/revision from a cartridge-size failure.
+- Supported USA HGSS and USA/Europe BW can be trimmed **only by removing
+  trailing FF padding**. `NdsTrimIdentity` covers every retained game byte
+  with SHA-1 chunks derived from the already verified full-ROM hashes.
+  Retained padding must also be FF. No header-only acceptance, ROM rewriting,
+  or large padded memory copy is used. A missing game byte, changed content,
+  or non-FF trailer fails verification. Other revisions are not enabled.
+  `tools/build_nds_trim_identity.py` reproduces the identities and refuses
+  source files whose full hashes differ from the supported cartridges.
+- The import worker had a second BW-only failure: generation 5 reached the
+  byte-buffer constructor branch even though its extractor opens a filename.
+  Both DS generations now use the path constructor. BW verification also
+  stops sending the entire cartridge back to the launcher thread.
+- Validation: `nds_import_verification_check.lua` **25 passed**; native LOVE
+  `nds_import_verification_harness` **30 passed** using all four actual full
+  ROMs, minimum trims, partially retained padding (122.89 MiB for HGSS),
+  corruption/truncation rejection, real verification/scan threads, and the
+  real BW constructor reading its text archive through the worker path.
+  Existing checks: ROM revisions **133**, batch import **51**, Android pick
+  **9**, Android pick errors **28**, import recovery/worker failures **32**.
+  Updated an obsolete Android error-message assertion to check the system
+  Files/BROWSE instructions instead of recommending inaccessible Android/data.
+- This fix requires an updated app build. Previously failed imports can then
+  be retried; existing working caches do not need to be rebuilt for it.
+
 ## BW Juniper introduction: October 16, 2026
 
 - NEW GAME now opens `Gen5JuniperIntro` before the bedroom, using system

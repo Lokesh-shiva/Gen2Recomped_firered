@@ -1987,14 +1987,6 @@ local function blockedImportReason(version, manifest)
   return nil
 end
 
-local function sha1(data)
-  local digest = love.data.hash("sha1", data)
-  if type(digest) == "userdata" and digest.getString then
-    digest = digest:getString()
-  end
-  return love.data.encode("string", "hex", digest)
-end
-
 local function readExternalPath(path)
   local file, openError = io.open(path, "rb")
   if not file then return nil, openError end
@@ -2075,26 +2067,12 @@ end
 -- is 16 MiB, and this predicate rejecting it is why a perfectly good dump came
 -- back as "Expected a 1 MiB ... Game Boy ROM; this file is 16.00 MiB."
 --
--- The other GBA sizes are listed too.  Only 16 MiB is reachable today, but a
--- size table that admits exactly one cartridge is the same trap this one was:
--- it looks like a check and behaves like a hardcoded constant.
-local ROM_SIZES = {
-  [1024 * 1024] = true,        -- Game Boy
-  [2 * 1024 * 1024] = true,    -- Game Boy Color
-  [4 * 1024 * 1024] = true,    -- Game Boy Advance, from here down
-  [8 * 1024 * 1024] = true,
-  [16 * 1024 * 1024] = true,   -- Emerald
-  [32 * 1024 * 1024] = true,
-  -- ...and up here, a NINTENDO DS cartridge.  Platinum is 128 MiB, four times
-  -- the largest Game Boy Advance cart, and the jump is why this is listed
-  -- rather than folded into a range: the size table exists so a file that
-  -- cannot be a cartridge is refused before it is hashed, and a range would
-  -- wave through every truncated dump in between.
-  [128 * 1024 * 1024] = true,  -- Platinum, and Diamond/Pearl after it
-}
+-- Include BW's 256-MiB capacity and known trimmed DS candidates. Verification
+-- still requires exact supported content; a size or header is never enough.
+local ROM_SIZES = require('src.import.RomVerification').SIZES
 
-local function isSupportedRomSize(byteLength)
-  return ROM_SIZES[byteLength] == true
+local function isSupportedRomSize(byteLength,data)
+  return require('src.import.RomVerification').isCandidate(byteLength,data)
 end
 
 -- One test, used everywhere a file is judged by its name.  There were five
@@ -2250,8 +2228,8 @@ local function findPendingRom(ready, skip)
   for _, name in ipairs(pendingRomPaths()) do
     if not (skip and skip[name]) then
       local data = love.filesystem.read(name)
-      if type(data) == "string" and isSupportedRomSize(#data) then
-        local version = GameVersion.forSha1(sha1(data))
+      if type(data) == "string" and isSupportedRomSize(#data,data) then
+        local version = require('src.import.RomVerification').identify(data).version
         if version and not ready[version] then
           return name, data, realPathFor(name)
         end
@@ -2275,8 +2253,8 @@ local function consumePickedRomError(self)
   if self.failedRoms and self.failedRoms[preferred] then return false end
   if not love.filesystem.getInfo(preferred, "file") then return false end
   local data = love.filesystem.read(preferred)
-  if type(data) == "string" and isSupportedRomSize(#data) then
-    local version = GameVersion.forSha1(sha1(data))
+  if type(data) == "string" and isSupportedRomSize(#data,data) then
+    local version = require('src.import.RomVerification').identify(data).version
     if version and self.ready[version] then return false end
   end
   love.filesystem.remove(preferred)
@@ -3286,13 +3264,27 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
     self:setError("The selected file could not be read.")
     return
   end
-  if not isSupportedRomSize(verified and verified.size or #data) then
-    self:setError(("Expected a 1 MiB (Red/Blue/Yellow), 2 MiB (Gold/Silver), "
-      .. "16 MiB (Emerald) or 128 MiB (Platinum) cartridge; this file is "
-      .. "%.2f MiB."):format(#data / 1024 / 1024))
+  if not (verified and verified.version and GameVersion.forSha1(verified.hash)==verified.version)
+      and not isSupportedRomSize(verified and verified.size or #data,data) then
+    local size=verified and verified.size or #data
+    -- A trimmed unsupported region/revision needs its real explanation,
+    -- rather than suggesting every DS dump must have a power-of-two size.
+    local revisions=require('src.import.RomRevisions')
+    local header=revisions.header(data)
+    local found=header and header.platform=='nds' and revisions.describe(data,verified and verified.hash)
+    if found then
+      self:setError('Unsupported or incomplete Nintendo DS ROM. '..found.message)
+      return
+    end
+    self:setError(("Unrecognized cartridge size: %.2f MiB. Supported sizes include "
+      .. "1 MiB (Game Boy), 2 MiB (Game Boy Color), and 4-32 MiB (Game Boy Advance). DS cartridges are "
+      .. "128 MiB (Platinum/HeartGold/SoulSilver) or 256 MiB (Black/White). "
+      .. "Trimmed HeartGold/SoulSilver and Black/White dumps are accepted only "
+      .. "when their game data exactly matches a supported clean ROM."):format(size / 1048576))
     return
   end
-  local actualHash = verified and verified.hash or sha1(data)
+  local identity=verified or require('src.import.RomVerification').identify(data)
+  local actualHash = identity.hash
   local version = GameVersion.forSha1(actualHash)
   if not version then
     -- A clean dump of ANOTHER retail revision (FireRed Rev 1, Crystal
@@ -3306,9 +3298,8 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
       return
     end
     self:setError(("Unsupported ROM (SHA-1 %s). This needs a clean US Pokemon "
-      .. "Red, Blue, Yellow, Gold, Silver, Crystal, FireRed, Emerald or "
-      .. "Platinum dump; patched, "
-      .. "trimmed or "
+      .. "Red, Blue, Yellow, Gold, Silver, Crystal, FireRed, Emerald, "
+      .. "Platinum, HeartGold, SoulSilver, Black or White dump; patched or "
       .. "\"fixed\" dumps "
       .. "(tagged [b] or [BF]) never verify."):format(actualHash))
     return
@@ -3619,10 +3610,10 @@ function RomImporter:_scanRomSources(paths)
     end
     if type(data) ~= "string" then
       rejects.unreadable[#rejects.unreadable + 1] = name
-    elseif not isSupportedRomSize(#data) then
+    elseif not isSupportedRomSize(#data,data) then
       rejects.unknown[#rejects.unknown + 1] = name
     else
-      local hash = sha1(data)
+      local hash = require('src.import.RomVerification').identify(data).hash
       local version = GameVersion.forSha1(hash)
       if not version then
         -- name the revision when the header says what it is (RomRevisions)
