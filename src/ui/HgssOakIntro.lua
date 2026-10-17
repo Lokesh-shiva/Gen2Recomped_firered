@@ -26,7 +26,8 @@ function Oak:text(id)
   text=text:gsub('{STRVAR_1 %d+[, ]+(%d+)[, ]+%d+}',function(slot)
     return tonumber(slot)==0 and ((self.game.save.player or {}).name or '') or ''
   end)
-  return text:gsub('{YESNO %d+}',''):gsub('{ALN_CENTER}','')
+  -- one value: gsub's count would ride into {text(44),text(45),text(46)}
+  return (text:gsub('{YESNO %d+}',''):gsub('{ALN_CENTER}',''))
 end
 function Oak:say(id,phase)
   self.message=id;self.phase=phase;self.page=1;self.pages={};self.choice=1;self.bottom=nil
@@ -101,8 +102,9 @@ function Oak:choices()
     return {self:text(47),self:text(48)}
   end
 end
-function Oak:update()
-  self.frame=self.frame+1
+function Oak:update(dt)
+  local ticks=require('src.ui.HgssClock').step(self,self.game,dt)
+  self.frame=self.frame+ticks
   local i=self.game.input;local tap=self.tap;self.tap=nil
   if i:wasPressed('l') or i:wasPressed('select') then
     local current=self.bottom
@@ -110,12 +112,12 @@ function Oak:update()
     self.bottom=not current
   end
   if self.phase=='release' then
-    self.elapsed=self.elapsed+1
-    if self.elapsed==50 then pcall(require('src.core.Sound').playCry,self.game.data,183) end
+    local previous=self.elapsed;self.elapsed=self.elapsed+ticks
+    if previous<50 and self.elapsed>=50 then pcall(require('src.core.Sound').playCry,self.game.data,183) end
     if self.elapsed>=90 then self:say(35,'alongside') end
     return
   elseif self.phase=='shrink' then
-    self.elapsed=self.elapsed+1
+    self.elapsed=self.elapsed+ticks
     if self.elapsed>=30+5*9 then self:finish() end
     return
   end
@@ -204,7 +206,7 @@ function Oak:panel(sub)
   end
 end
 function Oak:draw()
-  local dual=SecondScreen.combined(self.game) or SecondScreen.mode(self.game)=='display'
+  local dual=SecondScreen.separate(self.game)
   -- Automatically show the controls when a choice is needed. L/SELECT also
   -- exposes the other panel; all choices accept directions and A.
   local sub=self.bottom

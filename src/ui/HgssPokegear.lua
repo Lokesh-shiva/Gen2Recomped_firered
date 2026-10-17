@@ -69,7 +69,7 @@ function Gear:panel(sub)
   if not sub then self:picture('frame_top') end
 end
 function Gear:draw()
-  local dual=SecondScreen.combined(self.game) or SecondScreen.mode(self.game)=='display'
+  local dual=SecondScreen.separate(self.game)
   self:panel(not dual and self.bottom)
   if dual then SecondScreen.draw(self.game,function() self:panel(true) end) end
 end

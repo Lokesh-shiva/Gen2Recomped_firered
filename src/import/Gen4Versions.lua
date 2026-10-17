@@ -141,7 +141,7 @@ V.MEMBER_NAMES = {
 
 -- the stages each family runs today (nil: every stage, the Platinum list)
 V.STAGES = {
-  hgss = { "text", "species", "moves", "items", "trainers", "gen4_trainer_messages", "encounters", "maps", "events", "regions", "tilesets", "constants", "overworld", "species_sprites", "trainer_sprites", "heights", "field", "scripts", "link", "terrain", "models", "frames", "fonts", "battle_graphics", "follow_mon", "hgss_screens" },
+  hgss = { "text", "species", "moves", "items", "trainers", "gen4_trainer_messages", "encounters", "maps", "events", "regions", "tilesets", "constants", "overworld", "species_sprites", "trainer_sprites", "heights", "field", "scripts", "link", "terrain", "models", "frames", "fonts", "battle_graphics", "follow_mon", "hgss_screens", "battle_music" },
 }
 
 function V.family(version) return V.FAMILY[version] or "platinum" end

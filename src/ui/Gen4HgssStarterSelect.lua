@@ -357,7 +357,7 @@ function Screen:drawPreview()
 end
 
 function Screen:draw()
-  local dual=SecondScreen.combined(self.game) or SecondScreen.mode(self.game)=='display'
+  local dual=SecondScreen.separate(self.game)
   if dual then
     self:drawPreview()
     SecondScreen.draw(self.game,function() self:drawTurntable() end)

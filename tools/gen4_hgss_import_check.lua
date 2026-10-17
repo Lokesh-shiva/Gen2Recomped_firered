@@ -53,6 +53,20 @@ local platinumPersonal = X.PATH.personal
 local h = extract(hg, 'heartgold')
 check(h ~= nil, 'HeartGold: the core stages run')
 if h then
+  local opening=h.gen4_models and h.gen4_models.sets.hgssOpening
+  check(opening and #opening.models==3 and #opening.animations==6,
+    'three native opening city models retain joint and texture animations')
+  check(h.gen4_hgss_boot_art and h.gen4_hgss_boot_art.scene4
+    and #h.gen4_hgss_boot_art.emitters==9 and h.gen4_hgss_boot_art.opening_particle_0,
+    'starter-scene SPA resources survive the importer build/cache boundary')
+  check(h.gen4_hgss_boot_art and h.gen4_hgss_boot_art.sky_top
+    and h.gen4_hgss_boot_art.trainers_back and h.gen4_hgss_boot_art.sequences.sky_actor[1],
+    'HGSS opening imports versioned sky, trainer layers and native legendary affine animation')
+  check(h.gen4_menus and h.gen4_menus.hgss and h.gen4_menus.layout.optionWidth==23
+    and h.gen4_menus.rows[2].lines==2 and h.gen4_menus.continueRows[4].value=='ownedCount',
+    'HGSS main menu keeps native geometry and owned-Pokedex summary')
+  check(h.gen4_main_menu_art and h.gen4_main_menu_art.frame_focused and h.gen4_main_menu_art.scroll_down,
+    'HGSS main menu frames and arrows extracted from native archives')
   local mons = h.pokemon or {}
   check(h.gen4_move_anims and h.gen4_move_anims.count == 501 and h.gen4_move_anims.skipped == 5,
     '496 HGSS animation programs decode; five using HGSS-only opcodes remain unsupported')
@@ -167,7 +181,7 @@ if h then
   -- the boot: sLocation_PlayerRoom and sSpawnMaps (pret), found together
   local field = h.field or {}
   local boot = field.boot or {}
-  check(boot.startMap == 'T20R0202' and boot.startX == 6 and boot.startY == 6 and boot.startFacing == 1,
+  check(boot.startMap == 'T20R0202' and boot.startX == 6 and boot.startY == 6 and boot.startFacing == 'down',
     "a new game starts in the player's bedroom, 6,6, facing down (location_backup.c)")
   check(boot.lastHeal and boot.lastHeal.map == 'T20R0201' and boot.lastHeal.x == 6 and boot.lastHeal.y == 8
     and #(field.healLocations or {}) == 30,
@@ -809,10 +823,33 @@ end
 
 do
   local art=h.gen4_hgss_oak_art
+  local title=h.gen4_hgss_title_art
+  check(title and title.heartgold_logo and title.soulsilver_logo and title.prompt:find('START',1,true),
+    'HGSS title imports both native logos and the cartridge start prompt')
+  check(h.field.boot.screens.title=='HgssTitle' and h.field.boot.screens.newGame=='HgssOakIntro',
+    'HGSS boot routes to its own title and professor screens')
+  local titleSet=((h.gen4_models or {}).sets or {}).hgssTitle
+  local named={}
+  for _,record in ipairs(titleSet and titleSet.models or {}) do named[record.name]=record end
+  check(named.houou_test and named.lugia01_10t and named.houou_efct and named.lugia_efct,
+    'HGSS title imports Ho-Oh, Lugia and their native effects')
+  check(named.houou_test and named.houou_test.inverseBind and named.houou_test.scalingRule==1,
+    'Ho-Oh cache retains native Maya scaling and envelope matrices')
   check(art and art.oak and art.gender and art.boy_cursor and art.girl_cursor
     and art.sequences[1][1].scaleX~=nil,'Oak art includes gender avatars and native Marill SRT frames')
   check(art and art.text[6]:find('Oak',1,true) and art.text[43]:find('adventure',1,true),
     'Oak introduction uses HGSS bank 219')
+  local boot=h.gen4_hgss_boot_art
+  check(boot and boot.copyright_top and boot.copyright_bottom and boot.studio_top and boot.studio_bottom,
+    'HGSS opening credits import both physical DS panels')
+  local Intro=require('src.ui.HgssIntro')
+  local stopped=0
+  local intro=Intro.new({data={gen4_hgss_boot_art=boot},stack={pop=function() stopped=stopped+1 end},
+    input={wasPressed=function(_,key) return key=='a' end}})
+  for tick=1,109 do intro:update(1/30) end
+  check(stopped==0,'HGSS copyright cannot be skipped before the native 110-frame gate')
+  intro:update(1/30)
+  check(stopped==1,'HGSS studio credit accepts A once skipping is allowed')
   local Oak=require('src.ui.HgssOakIntro')
   local Screens=require('src.ui.Screens');local push=Screens.push
   local refresh,pops,done,naming=0,0,0,0
@@ -827,10 +864,10 @@ do
   local screen=Oak.new(game,function() done=done+1 end)
   screen:enter();screen.choice=3;screen:advance()
   for n=1,60 do if screen.phase=='gender' then break end
-    if screen.phase=='release' then for j=1,90 do screen:update() end else screen:advance() end
+    if screen.phase=='release' then for j=1,90 do screen:update(1/30) end else screen:advance() end
   end
   check(screen.phase=='gender','Oak main path reaches gender selection without skipping dialogue')
-  screen.choice=2;screen:advance();screen:advance()
+  screen.choice=2;screen:advance()
   screen.choice=2;screen:advance()
   check(screen.phase=='genderQuestion','declining gender returns to the ROM gender question')
   for n=1,10 do if screen.phase=='gender' then break end;screen:advance() end
@@ -840,7 +877,7 @@ do
   check(naming==1 and game.save.player.name=='Lyra' and game.save.player.gender=='girl'
     and refresh==1 and game.save.player.rival=='Silver','Oak saves gender/name and refreshes avatar without renaming rival')
   for n=1,30 do if screen.phase=='shrink' then break end;screen:advance() end
-  for n=1,75 do screen:update() end
+  for n=1,75 do screen:update(1/30) end
   check(done==1 and pops==1,'Oak shrink animation finishes New Game exactly once')
   local SS=require('src.ui.SecondScreen');local draw=SS.draw;local panels={}
   SS.draw=function(_,body) body() end

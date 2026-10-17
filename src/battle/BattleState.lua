@@ -1514,6 +1514,7 @@ function BattleState.newPokedudeDemo(game, lesson)
   local savedParty = game.save.party
   local party = {}
   for _, spec in ipairs(def.player) do party[#party + 1] = pokedudeMon(game, spec) end
+  require("src.pokemon.PartyAside").hold(game.save, savedParty)  -- kept in the save too
   game.save.party = party
 
   local self = newBattle(game)
@@ -3196,6 +3197,13 @@ function BattleState:gen3MusicKind()
 end
 
 function BattleState:computeMusicKind()
+  -- THE DS CARTRIDGES PICK BY TRAINER CLASS (and Kanto, and a few legendary
+  -- species) from their own tables -- src/import/Gen4BattleMusic.lua. The
+  -- answer is the sequence number itself; Music.playBattle plays a number.
+  if require("src.core.GameVersion").isNds() and self.data.gen4_battle_music then
+    local seq = require("src.import.Gen4BattleMusic").choose(self.data, self)
+    if seq then return seq end
+  end
   -- Gen2 first: data/scripts/victories is the hand-authored Gen1 badge table
   -- and no Gen2 trainer id is in it, which is why Bugsy opened on the plain
   -- trainer theme instead of the gym theme.
@@ -5128,6 +5136,7 @@ function BattleState:restorePokedudeParty()
   local pd = self.pokedudeDemo
   if not (pd and not pd.partyRestored) then return end
   if pd.savedParty then self.game.save.party = pd.savedParty end
+  require("src.pokemon.PartyAside").release(self.game.save)
   pd.partyRestored = true
 end
 
@@ -8961,7 +8970,11 @@ function BattleState:enemyMonFainted()
     -- the class's byte (sTrainerClassPrizeMul, Gen4TrainerPrize) x 2 for an
     -- Amulet Coin on the field, x 2 again for one trainer's double battle; two
     -- trainers who walked up together are a tag battle and each pays its own.
-    if require("src.core.GameVersion").isGen4() and self.data.gen4_trainer_prize then
+    -- (Black / White: the same formula, the class byte riding on each trainer
+    -- record as `moneyRate`)
+    local GV = require("src.core.GameVersion")
+    if (GV.isGen4() and self.data.gen4_trainer_prize)
+       or (GV.isGen5() and self.trainer and self.trainer.moneyRate) then
       local P = require("src.import.Gen4TrainerPrize")
       local opts = { amuletCoin = self.amuletCoin, double = self.double, tag = self.trainerB ~= nil }
       prize = P.prize(self.data, self.trainer, opts)
@@ -10464,6 +10477,11 @@ function BattleState:playVictoryMusic()
   -- covers the Kanto leaders, the Elite Four and the Champion -- and
   -- MUSIC_DEFEATED_TRAINER for everyone else, the rival and Team Rocket
   -- included.  Map the eleven battle themes back onto those three.
+  -- ...and a DS battle's jingle by class too (Gen4BattleMusic.victory)
+  if type(self.musicKind) == "number" then
+    local seq = require("src.import.Gen4BattleMusic").victory(self.data, self)
+    if seq then require("src.core.Music").playVictory(self.data, seq) return end
+  end
   local kind = GEN2_VICTORY_KIND[self.musicKind or "wild"]
     or (self.musicKind or "wild")
   require("src.core.Music").playVictory(self.data, kind)

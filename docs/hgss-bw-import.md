@@ -1,5 +1,257 @@
 # HeartGold, SoulSilver, Black and White: import status
 
+## BW Juniper introduction: October 16, 2026
+
+- NEW GAME now opens `Gen5JuniperIntro` before the bedroom, using system
+  message bank 44: welcome, Pokémon explanation, gender/name confirmation,
+  Cheren and Bianca introductions, and the journey speech. Rejected gender
+  and name choices return to their prompts; completing the flow returns to
+  the bedroom once. Cheren and Bianca retain their cartridge names.
+- Added `Gen5JuniperArt`. `/a/1/7/0` supplies the stage backgrounds, player
+  portraits, smaller player/friend cells and Juniper's multi-cell actor.
+  The existing `Gen5MonAnim` decoder bakes Juniper's idle/blink and ball
+  release from NCER/NANR/NMCR/NMAR, preserving the 116/148-tick sequences.
+  Minccino's front art comes from `/a/0/0/4`.
+- Original-ROM captures identified the intro's rounded nine-tile message
+  frame: `/a/0/0/5[11]`, palette 0 (native BG1 character 16, palette 8).
+  It differs from the field's eighteen-tile frame. Screenshot inspection
+  also corrected Juniper's vertical origin and Minccino's placement. Native
+  BG1's font palette matches `/a/0/2/3[5]`; both ink and shadow are imported.
+- Gender selection now carries into the field. The sprite table's IDs
+  1/2/3 are male walk/run/bike; 4/5/6 are female walk/run/bike. Both walking
+  and bicycle forms are configured, with the correct female walking sheet
+  at model member 9. Selecting a name refreshes the live player form.
+- Directions/A and scaled upper-panel taps operate the choices. The lower
+  panel explicitly shows its native blank backdrop in combined/display
+  modes. Single-screen users keep the introduction on the primary panel;
+  naming uses the existing keyboard controller.
+- **Parity limits:** BW's native naming keyboard is still unported (the
+  shared naming screen remains functional). Gender-band geometry, portrait
+  transitions, friend staging, shrink timing, music and Minccino animation
+  still need native controllers/calibration. These captures verify the
+  imported actors/frame and working flow, not full opening-scene parity.
+  The Game Freak animation and coronation/opening movie remain pending.
+- Validation: full Black/White import **99/99**, Juniper checks **186 passed**,
+  boot **104 passed**, main menu **45 passed**. App screenshots inspected:
+  `%APPDATA%/LOVE/hgss_ow/ow_bw_juniper_dual.png`,
+  `ow_bw_juniper_gender_verified.png`, `ow_bw_juniper_minccino_verified.png`,
+  `ow_bw_juniper_naming_verified.png`, `ow_bw_white_juniper_verified.png`.
+  `tmp/bw_juniper_comparison.png` pairs the original ROM and app welcome.
+- BW cache revision is `gen5-juniper-v4`; **re-import Black/White** to receive
+  the new assets, new-game routing and female avatar configuration.
+
+## BW native main menu: October 16, 2026
+
+- Added `Gen5MainMenu` and `Gen5MainMenuArt`. The menu now uses BW's
+  shared `/a/0/3/5` graphics: background map 2 / tiles 3 / palette 4;
+  option and Continue frames 7/6; idle/focus palette rows 1/2/3. The unused
+  `/a/0/2/7` editor layouts do not supply the live menu's window geometry.
+  Labels and save-summary formats are system text bank 179. Text uses the
+  shared window palette's row 5, roles 1/2, including its muted white ink.
+- Verified the menu against **both original ROMs** in a temporary DeSmuME
+  Libretro runner. Live native BG maps establish the option rectangle
+  `(32,16,192,24)` and its 24-pixel row spacing. The lower screen is blank;
+  the app now paints it explicitly instead of leaving the field panel there.
+  Single-screen mode keeps all controls on the primary panel.
+- Native registers also establish `BLDCNT=0x0844`, `BLDALPHA=0x0310`:
+  BG2 adds 3/16 of BG3 to its frame colours in 5-bit channels. A dedicated
+  frame shader reproduces this, including White's lighter frames and the
+  red tint over the Poké Ball. Palette pulse endpoints come from the ROM;
+  pulse phase timing remains reconstructed.
+- New Game / Continue callbacks, B to title, OPTION, EXIT GAME, save
+  summaries, scrolling and scaled pointer input work. OPTION/EXIT GAME are
+  app additions. Native network/Mystery Gift/microphone applications remain
+  unported and are omitted rather than shown as working options.
+- The original ROM captures also corrected the boot-card order: Nintendo's
+  company card precedes the copyright card. Their timing remains reconstructed;
+  the Game Freak animation, opening movie and Juniper flow are still pending.
+- Added optional `tools/ds_rom_reference.py` to run an externally supplied
+  Libretro core, copy the ROM into an isolated output folder, capture frames
+  and save/load test states. It never opens the app's saves. No emulator,
+  ROM, firmware or generated capture is committed. Reference dependencies
+  used here: [official Libretro core build](https://buildbot.libretro.com/nightly/windows/x86_64/latest/desmume_libretro.dll.zip),
+  [Libretro API](https://github.com/libretro/libretro-common/blob/master/include/libretro.h),
+  [DeSmuME state layout](https://github.com/libretro/desmume/blob/master/desmume/src/saves.cpp).
+- Validation: full BW import **97/97**, boot checks **104 passed**, main-menu
+  checks **45 passed**. Native captures and app screenshots were inspected
+  for both versions, Continue, and title-to-menu navigation. The sampled
+  background columns match the original ROMs at **4,992/4,992 5-bit pixels
+  per version**. This is a background comparison, not a claim of whole-screen
+  parity (supported options differ, and the pulse is at a different phase).
+  Final app captures: `%APPDATA%/LOVE/hgss_ow/ow_bw_black_menu_verified.png`,
+  `ow_bw_white_menu_verified.png`, `ow_bw_summary_verified.png`.
+  Reference captures and `tmp/bw_menu_comparison.png` remain local and ignored.
+- BW cache revision is now `gen5-menu-v3`; re-import Black/White to apply.
+  Native camera choreography, title effect actors/eye patterns, audio/timing,
+  coronation/opening movie and Juniper/gender/naming remain open work.
+
+## BW retail title assets and boot wiring: October 15, 2026
+
+- Black and White now import their own international title logo, patterned
+  backdrop, PRESS START cell, developer credit and boot cards from `/a/0/2/6`
+  and `/a/1/6/4`. Dedicated `Gen5Intro` / `Gen5Title` states replace the
+  Platinum splash/title fallback. Card timings are reconstructed.
+- The retail animated title dragons are `/a/1/6/0` members 227/235, with
+  joint animations 226/234. Both articulated meshes and every joint frame
+  are imported. `/titledemo.narc` contains prototype meshes and an unused
+  Japanese logo; these are **not** used by this implementation.
+- Native screenshot inspection caught a shifted logo caused by forwarding
+  `palette()`'s secondary return into `compose()`'s tile-base argument. It
+  also caught the prototype model and White's inadequate background contrast;
+  all three issues were corrected before the verified captures.
+- Both panels work in combined layouts. L/SELECT switches the full panel in
+  single-screen mode; A/START/tap opens the existing menu with its original
+  New Game / Continue callbacks. Existing BW caches must be re-imported for
+  the new `gen5-boot-v2` revision.
+- Verification: full Black/White import **97/97**, dedicated boot checks
+  **104 passed**, native Black and White title renders, White single-screen
+  render, copyright/studio cards and title-to-menu transition inspected.
+  Captures are in `%APPDATA%/LOVE/hgss_ow/`:
+  `ow_bw_title_native.png`, `ow_bw_white_title_verified.png`,
+  `ow_bw_white_single_verified.png`, `ow_bw_copyright_verified.png`,
+  `ow_bw_studio_cards.png`, `ow_bw_title_menu_verified.png`.
+- **Remaining:** the coronation/opening movie, Juniper/gender/naming flow,
+  BW's native main menu (currently the shared fallback), native title camera
+  choreography, background/effect actors, eye texture patterns and exact
+  lighting/audio/timing. The current title camera is reconstructed and the
+  dragon joint tracks run at 30 Hz. This pass does not establish full boot
+  ROM parity; NEW GAME still enters the bedroom.
+
+## Five-scene HGSS opening path: October 15, 2026
+
+- Added scene 3's dedicated New Bark, Goldenrod and Ecruteak NSBMD models,
+  NSBCA joints and NSBTA texture animation from opening members 97–105.
+  The fixed camera uses the source's target, distance, angle and projection.
+- Screenshot inspection caught the miniature characters lying flat. Native
+  SBC billboard commands now survive extraction and accept a camera transform
+  during posing; city characters retain their position/scale and face the view.
+  Both SBC parsers also consume optional billboard store/restore operands.
+  Operand widths were cross-checked against actual city bytecode and the
+  [NNS-G3D renderer implementation](https://github.com/magcius/noclip.website/blob/master/src/nns_g3d/render.ts).
+- Added rival panel/silhouette reveals, the three beast strips, Eusine, Unown
+  flybys and Rocket executives. Layers retain separate scrolls and windows,
+  including the 254-tick expansion/pan at the end of scene 3.
+- Added scene 4's hand animations and all three native starter sprites. The
+  opening imports `/a/0/5/9` member 4's nine SPL resources and texture art.
+  Grass/fire/water groups are 6–8 / 3–5 / 0–2; each waits for live particles
+  to finish before swapping panels. The emitter-position callback uses a copy
+  of resource fields, preserving the cached originals.
+- Added the sparkle and scene 5's separate foreground/background maps, native
+  scrolling directions and sequential panel reveal. All five scenes now run
+  through to the title. Single-screen mode follows the active scene/attack;
+  L/SELECT still changes panels, including the city/rival handoff.
+- Corrected the opening/title/professor application clock to 30 Hz after checking
+  `main.c`'s two-VBlank main loop. A fractional accumulator keeps it independent
+  of the engine's 60 Hz update rate; checks cover 30, 60 and 120 Hz callers.
+  Native camera holds and movie/particle timings now run at the proper speed.
+  Title audio fading uses 120 engine ticks for the source's 60 application ticks.
+
+Verified native screenshots under `C:/Users/cedri/AppData/Roaming/LOVE/hgss_ow/`:
+`ow_hgss_newbark_billboards.png`, `ow_hgss_opening_goldenrod.png`,
+`ow_hgss_opening_ecruteak.png`, `ow_hgss_opening_rival.png`,
+`ow_hgss_opening_beasts.png`, `ow_hgss_opening_rockets.png`,
+`ow_ss_opening_hands.png`, `ow_hgss_opening_chikorita.png`,
+`ow_hgss_opening_cyndaquil.png`, `ow_ss_opening_totodile_single.png`,
+`ow_hgss_opening_final.png`, `ow_ss_full_opening_complete.png`.
+The corrected application clock was also verified in `ow_ss_city_30hz.png`
+and `ow_ss_full_opening_30hz.png`; earlier snapshots show the same native poses
+but were taken before the clock correction.
+
+Validation: HGSS import **114/114**, BW import **97/97**, cache/Platinum
+particle round trip **30/30**, opening/resource/lifecycle checks, billboard
+geometry checks, title/menu/camera checks and the 25-slot Giratina round trip.
+Re-import HGSS for `hgss-opening-montage-v6`.
+
+**Parity limits:** source state-dispatch overhead is omitted from movie timing;
+the two numbered panel-wipe effects currently use brightness reveals; city
+global lighting and title material-colour animation are not calibrated to the
+hardware. Starter particles reuse the existing SPL simulator's 2D projection,
+not the original perspective camera. The five-scene path is playable, but this
+does not claim frame/pixel-exact movie parity. BW boot/professor flow and the
+service/UI gaps below remain outstanding.
+
+## Opening movie and title motion: October 15, 2026
+
+- Extended HGSS beyond the studio card with the first two native movie scenes:
+  HeartGold sunrise / SoulSilver sunset, independently scrolling foregrounds,
+  animated sun and approaching legendary, flowers crossing both panels, and
+  the Ethan-to-Lyra pan with its foreground masks and scanline wipe.
+- Opening sprites use the ROM's NCER origins and NANR translation, rotation,
+  scale and durations. One-shot flybys clamp to their final frame. Large
+  backgrounds keep all four 256-pixel screen blocks and wrap at native size.
+- The opening selects `SEQ_GS_TITLE`. Single-screen mode automatically brings
+  the active scene forward; L/SELECT still changes panels. Skip remains locked
+  until the studio card, and completion/skip invokes the boot callback once.
+- Title cameras now follow the four version-specific source targets, with
+  `duration * 30` holds and five-unit movement per axis. After the source's
+  2340-tick idle period (following the 30-tick lockout), the title fades audio
+  for 60 ticks, fades the screen for six, and replays the opening. Returning
+  from replay resets the title camera and clock without growing the stack.
+
+Validation: HGSS import **112/112**, BW import **97/97**, cache/Platinum particle
+round trip **30/30**, opening resource/timeline/input checks and title camera/
+idle-replay checks passed. Native LOVE screenshots were inspected for both
+versioned skies, the legendary flybys, Ethan, Lyra, single-screen sunset,
+opening-to-title completion, the closer title camera and idle replay:
+`C:/Users/cedri/AppData/Roaming/LOVE/hgss_ow/ow_hgss_sunrise.png`,
+`ow_hgss_bird_flyby.png`, `ow_hgss_ethan.png`, `ow_ss_sunset_flyby.png`,
+`ow_ss_lyra.png`, `ow_ss_opening_complete.png`, `ow_hgss_title_camera.png`,
+`ow_hgss_idle_replay.png`.
+
+**Still incomplete:** movie scenes 3–5 (3D city flyovers, rival/beasts/Rocket
+montage, starter particles and final legendary layers), title material-colour
+lighting, BW's boot/professor flow and the service/UI gaps below. Scene timing
+uses the source's animation durations but omits application state-transition
+overhead; this is not a claim of complete frame-exact movie parity.
+Re-import HGSS for `hgss-opening-scenes-v5` and its additional movie assets.
+
+## Opening continuation: October 15, 2026
+
+- HGSS New Game now uses `HgssOakIntro`, with bank 219 dialogue, time-of-day
+  greetings, Marill's native cell animation, gender/name confirmation, avatar
+  refresh and the cartridge shrink pictures. Rival naming remains in the later
+  story event. Tutorial pages currently use a simplified controller rather than
+  reproducing every interactive DS hardware demonstration.
+- Added native HGSS copyright and Game Freak credits from `/a/2/6/2`, including
+  the 30-frame hold, 60-frame fade, 20-frame delay and 110-frame studio hold.
+  Both panels render in dual-screen mode. Single-screen mode automatically
+  brings the Game Freak credit forward; L/SELECT switches full panels.
+- Fixed displaced starter-preview tiles: `palette()` returns a second value,
+  which had accidentally become `compose()`'s base-tile offset. Screenshot
+  verification now shows the native preview background, Chikorita and the
+  separate 3D turntable correctly.
+- Cache-wiring verification now recognizes the HGSS `{module, output}` build
+  dispatch and uses ripgrep on Windows instead of the unavailable grep command.
+- HGSS now boots into its own title: native logos and backgrounds, animated
+  Ho-Oh above the clouds or Lugia underwater, native prompt and title music.
+  Both panels render together; L/SELECT exposes the legendary on one screen.
+- Fixed shared DS geometry decoding: VTX_DIFF uses signed 4.12 register deltas;
+  inherited transforms remain distinct from matrix slot zero; each shape keeps
+  the matrix palette present when it was issued. Added envelope blending with
+  inverse-bind matrices and Maya segment-scale compensation for the title actors.
+- HGSS main menu now imports its own frames, arrows, message-bank 442 labels,
+  23-tile window width and four-tile option height. Continue reports caught
+  Pokemon. Touch works on the lower panel in dual layouts and the scaled primary
+  panel on single-screen devices. OPTION and EXIT GAME remain app additions;
+  DS connectivity services are not offered as working features.
+
+Validation: HGSS import/services/intro **111/111**, BW import **97/97**, cache
+wiring and Platinum particle round trip **30/30**, PC/main-menu/mart **33/33**,
+new title/menu input and geometry checks passed, as did the native cursor and
+Giratina round trip (25 joint slots). OBJ composition checks passed. Native
+screenshots were inspected for Oak's speech, the starter preview/turntable,
+copyright, Game Freak credits, both legendary title scenes, title-to-menu
+transition and SoulSilver's single-screen legendary view at frame 180.
+Screenshots: `C:/Users/cedri/AppData/Roaming/LOVE/hgss_ow/ow_hgss_title_hg_fixed.png`,
+`ow_hgss_title_ss_fixed.png`, `ow_hgss_title_menu.png`, `ow_hgss_ss_title_single.png`.
+Re-import HGSS for new art/boot routing (`hgss-title-models-v4`); Platinum and BW
+markers also change to rebuild their geometry with the corrected decoder.
+
+**Not complete at this checkpoint:** the remaining HGSS opening movie scenes,
+title attract loop and material-colour lighting animation, BW opening/professor flow and the
+service/UI gaps listed below. The older ignored title experiment files are
+stale; the verified title implementation now lives in `src/ui/HgssTitle.lua`.
+
 ## HGSS field/service repair pass: October 14, 2026
 
 - `ReleaseAll` now unpauses the walking Pokémon, including Elm's starter
@@ -481,3 +733,380 @@ Positions were measured against Bulbapedia's capture. Stand-ins: the buttons are
 - **Words:** bank 9 (wallpapers from 41) and bank 10 (messages, mapped from Platinum's numbers).
 
 Follow-up: the BW summary's SKILLS top now uses its own art: screen 73 on char 10 (the stat columns and ability box), plus screen 74 for a move's details, with the «STATS» (75) and «BATTLE MOVES» (76) title strips. These replace the drawn stand-ins. The page icons in the foot are still not found.
+
+## Trainer pictures and battle music (all three DS games)
+
+- **Map-local flags reset on every map load (Gen 4).** `Gen4Commands.clearTempFieldEventData` clears flags 0x00–0x3F and vars 0x4000–0x401F. It runs from the map-load seam in OverworldController, as pokeheartgold's `ClearTempFieldEventData` (field_warp_tasks.c) does.
+  - Without it, Twinleaf Mom's `checkflag 2` heal branch stuck forever. She never gave the Journal, so flag 143 was never set and Dawn's Route 202 trigger kept saying "did you tell your family?".
+- **BW trainer pictures:** `src/import/Gen5TrainerPics.lua`, run from `extractTrainers`.
+  - `/a/0/7/2` holds 95 pictures of 8 members each. +0 is an 80×80 still made of 1D blocks (64x64, 16x64, 32x16, 32x16, 16x16); +7 is the palette.
+  - Class → picture comes from an ARM9 u8 table (Black 0x9C23C). It is found by content: 0..46, then 40.
+  - The backs are in `/a/0/7/3` (6 pictures). They are drawn from RECN cell 0 over the linear 256×128 parts bitmap (+1), read as a 32-tile-wide grid, which gives a 56×128 standing pose. They are stamped as `field.playerForms.boy/girl.back`.
+- **BW audio:** `src/import/Gen5Audio.lua` reads `/wb_sound_data.sdat` (SYMB names intact) and writes `audio`.
+  - Zone music is 4 u16 per zone, one per season. The month cycles Jan=spring … Apr=winter.
+  - NitroAudio plays the sequences unchanged.
+- **Battle themes by class:** `src/import/Gen4BattleMusic.lua` writes `gen4_battle_music`, read through `BattleState:computeMusicKind`. A number is played as is.
+  - **Platinum:** 35 `{transition, seq}` rows. The class switch at ARM9 0x02051C20 (class−62, 41 cases, default row 33) is decoded from its jump table.
+  - **HGSS:** 45 rows (pokeheartgold asm/unk_020517A4.s). They are preceded by 32 `class|row<<10` and 11 `species|row<<10` entries. Wild/trainer themes swap to the Kanto ones when the map header's region is nonzero.
+  - **HGSS jingles:** WIN3 for leaders, Elite Four and Champion; WINBRAIN for the Frontier Brains; WIN1 for other trainers; WIN2 for wild battles.
+  - **BW:** overlay 21 0x021CF748 reads ARM9 0x0209FEE4 (28 u16 `class | index<<7`). An index below 11 picks from overlay 21's list (rival ×2, gym, Elite Four, champion, N, N, N2, Ghetsis, Plasma, Cynthia); any other class gets VS_TRAINER. BW victory jingles (WIN3 for leaders, Elite Four and Champion) are inferred, not traced.
+- **Eyes-meet themes:**
+  - **HGSS:** `{class, Johto, Kanto}` rows; default EYE_J_SHOUNEN.
+  - **BW:** `{class, theme}` rows at ARM9 0x0A35A8.
+  - Both are written as `gen4_trainer_music` (with a `default`). The sighting sting now runs for every DS game (`isNds`).
+- `audio.battle` for HGSS now uses the `SEQ_GS_VS_*` / `SEQ_GS_WIN*` names. It was empty, so HGSS battles had no music.
+
+## Openings (boot → title → professor → bedroom)
+
+- **Harness:** `BOOT=1` on tools/gen4_overworld_harness runs the engine's own splash → title chain (Game:makeTitleState). Other options:
+  - `SHOTS="t1,t2"` saves frames mid-run.
+  - `MENU_PICK=new` puts the main-menu cursor on NEW GAME.
+  - `TOPIC_PICK=3` answers HGSS Oak's topic menu.
+- **Platinum** plays through: copyright, ESRB, Game Freak, the opening movie, the title, then Rowan's speech, naming and the TV scene in the bedroom.
+- **HeartGold** plays through: copyright, Game Freak, the opening montage, the HgssTitle logo, the HGSS main menu, then Oak (topics, Marill, gender, naming, shrink) into the bedroom. Fixes in this pass:
+  - The stale cache booted Platinum's `Gen4Title`; a full re-import fixed it.
+  - `startFacing` was the cartridge's number. It reached `Collision.target` and crashed right after Oak's speech; it is now a name.
+  - `HgssOakIntro:text` returned gsub's count, which put a number into the topic list and crashed the draw. The same bug existed in `Gen5JuniperIntro:text`.
+- **Black/White** plays through: boot cards, the title, the main menu, then Juniper (Minccino, gender, naming, Cheren/Bianca) into the bedroom scene.
+  - **The title is driven by ROM data from `/a/1/6/0`.** Each part has its BCA0 just before it:
+    - **dragon:** 227 (`title_b_01`, 5,620 frames); White 235 (`title_w_01`)
+    - **stage:** 232 (`title_b_03`: check_b / glow / rays); White 240
+    - **camera track:** Black 233, White 241. Format: u32 frame count, u32 0x00010100, then six floats per frame (look-at, eye) in model units. 224 is the 451-frame riza_bridge scene, not the title.
+  - The field of view is still 42° by assumption.
+  - `fx_rays1` is left out: its translucent texture needs DS blending plus a material fade not yet read.
+  - PRESS START sits on the top screen (rows 164–170).
+  - Music: `SEQ_BGM_TITLE`; Juniper plays `SEQ_BGM_STARTING`.
+  - **Not ported:** BW's opening movie between the copyright card and the title (its camera tracks are 233/241's siblings) and the Game Freak logo animation.
+
+## Black/White opening movies and HGSS prize money
+
+- **BW boot order (ARM9 state machine at 0x0202F9F8):**
+  1. Overlay 88 boot cards (proc 0x021BD8E8).
+  2. Overlay 179 mode 0.
+  3. Mode 1, unless skipped.
+  4. Mode 2.
+  5. Overlay 88 title (proc 0x021BD574).
+- **Overlay 179** is `cdemo_main.c`, a scripted movie player.
+  - **Movie records:** 12-byte entries of `u16 archive, u16 frames, u32 bytes, u32 VRAM offset`. Each frame is one LZ11 member: a 256-wide RGB555 bitmap, shown at 15 fps (ticks against 66,667 µs).
+  - **Scripts:** ops of a size from the overlay's own table: 0 wait, 1/2 fade, 5 wait for fade, 14 BGM, 18 play movie, 20 end.
+  - **Mode 0:** `/a/2/2/5`, 151 frames, Game Freak logo, `SEQ_BGM_GF_LOGO`.
+  - **Mode 1:** `/a/1/3/4`, 670 frames, N's coronation, `SEQ_BGM_TITLE`. It is 170 lines placed 11 lines down, and starts 80 frames after the music.
+  - **Mode 2:** `/a/2/2/6`, 174 frames, the "Hopes! Dreams! Discoveries!" reel, `SEQ_BGM_TITLE01`.
+- **Import:** `src/import/Gen5OpeningArt.lua` finds the overlay by its string and reads the records, scripts and op sizes. It copies the three archives into the cache (`bw_opening/movie_N.narc`, about 26 MB).
+- **Playback:** `src/ui/Gen5Opening.lua` decodes a frame at a time (about 5 ms each). `Gen5Intro` pushes it before the title, and A/START skips to the title.
+- **Title music:** the title proc plays 0x3EF, `SEQ_BGM_POKEMON_THEME`.
+- `/a/1/6/0`'s `cdemo_*` 3D scene is not the opening. It is the cruise ship arriving in Castelia (an in-game cutscene).
+- **HGSS prize money:** `Gen4TrainerPrize.parseHgss` reads `sPrizeMoneyTbl` from overlay 12 (0x81 `{class, multiplier}` rows; unknown classes use the Youngster row). It is written with the `battle_music` stage. Falkner pays 13×4×30 = $1,560.
+- **BW prize money:** BW pays by the same formula, using each trainer's `moneyRate`.
+
+## Mystery Gifts after the Hall of Fame (all three DS games), and White
+
+- **White** imports in full, and its opening plays: the same ROM-read movies (overlay 179 matches Black's) through to the White title.
+- **Platinum:** unchanged. One gift per Hall of Fame entry, delivered by the Poké Mart deliveryman.
+- **HGSS:** now gets the offer too (it was skipped before). The list is `Gen4MysteryGift.HGSS`, with the deliveryman's text from bank 209. Each gift opens the cartridge's own event check:
+  - **shiny Pichu** — `FollowerPokeIsEventTrigger EVENT_SPIKY_EARED_PICHU` at the Ilex shrine.
+  - **Celebi** — `EVENT_CELEBI`.
+  - **Arceus** — `PlayerHasSpecies` (Ruins of Alph), which leads to Sinjoh Ruins.
+  - **Shaymin** — `GetPartySlotWithFatefulEncounter 492`, the Gracidea in Goldenrod.
+  - **Enigma Stone (536)** — Latias/Latios in Pewter.
+  - **Manaphy Egg.**
+- **Gift Pokémon** carry `fatefulEncounter`. `g4_follower_event_trigger` follows pokeheartgold's `MonMetadataMatchesEvent` plus the per-event species check (the Pichu must be shiny).
+- **HGSS start gift:** the shiny Pichu is queued from the start (`start = true`). It waits at the first Poké Mart and does not count against the post-HoF picks.
+- **`GiveSpikyEarPichu`** (pokeheartgold `scrcmd_pokemon_misc.c`) gives Pichu form 1, level 30, Naughty, female, with Helping Hand / Volt Tackle / Swagger / Pain Split and a Zap Plate. Verified: the whole Ilex shrine event plays and the Spiky-eared Pichu joins.
+- **Stand-ins (cutscenes not ported):**
+  - `scrcmd_810` (the Celebi time-travel task) becomes a pause.
+  - The Sinjoh Ruins visuals (`cinematic`, `unowncircle`, 815/817/819/820, `MystriStageGymmickInit`) become pauses or no-ops, so the event's commands still run.
+- **HGSS item IDs:** Explorer Kit (428) has no data in HGSS, so data members from 406 on are the item ID minus 23 (`Gen4Items.itemId(member, hgss)`). Items from 429 up had their neighbour's record, and Enigma Stone (536) was missing.
+- **BW** (`src/pokemon/Gen5MysteryGift.lua`): one gift per game clear (op 0x156, kinds 0 and 1), delivered at once to the bag, party or PC:
+  - Liberty Pass (`checkitem 574`, Castelia harbor) — Victini.
+  - Celebi — Castelia's Zorua scene.
+  - shiny Entei / Raikou / Suicune — Lostlorn Forest's Zoroark.
+- **BW op 0x220** `<species, 0, slotVar, resultVar>` is `bwpartyhaseventmon` (a fateful Pokémon of that species in the party). Verified: with a fateful Celebi the Zorua scene plays; without one it does not.
+
+## Second screen consistency, the Pokétch gate, single-screen titles
+
+- **`SecondScreen.separate(game)` / `separateMode(mode)`:** "the bottom screen has a panel of its own" (display, inset, vertical, horizontal). 29 screens asked this four different ways. The party menu, for one, drew its lower screen only in display/inset, so top/bottom mode showed the Pokétch fallback beneath it.
+- **The field's lower screen:**
+  - **Platinum:** shows the Pokétch only once it is owned (`Gen4PoketchState.owned`: `enablepoketch`, or for older saves a registered app or any badge); before that it is blank. L no longer opens the watch early.
+  - **HGSS:** keeps its field panel.
+  - **BW:** blank (the C-Gear is not built), where it used to show Platinum's Pokétch.
+- **Single-screen titles** (HGSS, BW, White) compose both screens. The legendary's 3D scene sits behind a smaller logo near the top (0.62×), shrunk through `src/render/SmoothScale.lua` (a 4× nearest upscale, then linear sampling down).
+- **BW unnamed ops:** the large clusters are side content (Battle Subway, Nimbasa's stations, Musical Theater, Royal Unova, White Forest). Those on story maps (Nacrene, Castelia, Opelucid, the League, N's Castle) are non-blocking helpers the story runs already passed through.
+
+## Save import / export (Platinum, HGSS, Black/White) and emulator saves
+
+- `src/save_convert/NdsSave.lua`: shared CRC16-CCITT, PK4/PK5 crypto (block
+  shuffle + PRNG), Gen 4 charmap / Gen 5 UTF-16 text, engine mon <-> record,
+  and emulator wrappers: raw 512 KiB (melonDS, DraStic), DeSmuME `.dsv`
+  (122-byte footer), no$gba (plain and run-length), 1 MiB padded images.
+- `src/save_convert/Gen4Save.lua` (Pt / HGSS) and `src/save_convert/Gen5Save.lua`
+  (BW): offsets from pokeplatinum / pokeheartgold structs and PKHeX
+  (SAV4Pt, SAV4HGSS, SaveBlockAccessor5BW). Trainer flags: Pt/HGSS 0x550 + id,
+  BW 0x58C + id (ov10 0x0215A4EC). Imports keep `save.rawImport` and each
+  mon's record (`mon.ndsRaw`), so exports patch only what the port models.
+- Exports write both partitions / both BW copies with fresh footers and CRCs;
+  the launcher writes `exports/*.sav` and a DeSmuME `*.dsv` beside it.
+- Verified: empty encrypted box/party slots match a save Black wrote byte for
+  byte; a port save written onto that cartridge image re-imports with the
+  Mystery Gift / Entralink / extra regions untouched; an exported Platinum
+  save boots in the harness (`IMPORT_SAV=<file>`). Unplayed saves are refused.
+- Check: `python tools/run_lua_check.py tools/nds_save_check.lua <version> <cache> [realSave]`.
+- Not verified on real hardware: Pt/HGSS images (no cartridge save on hand);
+  blank BW exports (no template) reproduce the init values seen in a fresh
+  save but not every block's.
+
+## The Kimono Girls' dance (Ho-Oh / Lugia legendary cutscene)
+
+- Ported from pokeheartgold `src/field/legend_cutscene_camera.c`:
+  `src/import/Gen4HgssLegendArt.lua` reads `/a/1/7/4` (demo/legend.narc):
+  clear bell rise/idle/shimmer, corner bells, Lugia's eye glimmer, the bird's
+  ring, SoulSilver's waves (models + BCA/BTA/BTP/BMA), HeartGold's leaves
+  (BG2/BG3 tilemaps 41..52 on 53/54) -> `gen4_legend_art` (hgss_screens stage).
+- `src/world/HgssLegendCutscene.lua` runs the bell state machine, the camera
+  set-ups and linear translation paths (camera_translation.c), the leaves /
+  waves, the eye glimmer and the bird's final approach; the script ops lower to
+  `g4_legend <op>` (blocking ops hold through `runner.waitingCheck`).
+- Engine seams: `Gen4View.scripted` (a script's camera: distance, pitch,
+  half-FOV, look-at offset, clip planes), `Gen4Camera.setCutsceneField3d`
+  (real 3D view while it runs), `Gen4Ground:drawFree` draws the parts,
+  `drawFieldWeather` draws the leaves; `Gen4TexAnim` now plays BMA0 alpha.
+- `cinematic` rebuilds the field (the camera returns, the bell objects go),
+  as it does on the cartridge. The flying-legendary movie itself
+  (sub_02097BE0, undecompiled, time-of-day variants) is still a pause.
+- Verified in the harness on HeartGold Bell Tower (D17R0110, var 0x40FA = 1,
+  CLEAR_FLAGS=0x244): leaves, shimmering corner bells, camera pans, Ho-Oh's
+  descent. SoulSilver's Whirl Islands path needs a SoulSilver cache to test.
+- Also lowered: getfossilpokemon, getsealquantity, getpartymonform2,
+  buffersealnameplural (msg 16), scrcmd_420 (game stat), submoneyvar,
+  checknationaldexcomplete (HGSS's nine mythicals), checkseenallletterunown.
+
+## BW message banks, stack expressions; Platinum odds and ends
+
+- BW 0x3D / 0x3C open with a u16 BANK SELECTOR (read as two bytes before):
+  0x0400 = the script's own bank; otherwise a var holding the bank. Only
+  0x0400 and 0x8006 occur in Black. 0x0CC <dest> stores the running script's
+  bank into a var (ov10 0x0215AADC reads ctx+0x18, set by 0x0215A760's message
+  load), which is how NPCs hand the shared item-gift script (common 2800,
+  member 862) their own lines -- those printed `TEXT_B` before.
+- Stack expressions the jumping-code rewrite cannot spell (ORs of ANDs on the
+  false branch, nested sums) are kept as postfix programs on `bwevalgoto` and
+  run by `g4_bw_eval` (0 < 1 == 2 > 3 <= 4 >= 5 != 6 OR 7 AND). Black now has
+  no unlowered 0x08 / 0x09 / 0x11 / 0x1F rows.
+- Platinum: getpartymonconteststat, choosetwocustommessagewords (two Easy
+  Chat picks), checkheapmemory (no-op probe).
+- Re-link after these: STAGE_ONLY=extractScripts,extractField per BW version.
+
+## HGSS Safari Zone
+
+- `src/import/Gen4HgssSafari.lua` reads `/a/2/3/0` (12 areas: base slots x
+  3 times of day per land / surf / 3 rods, bonus slots and their block
+  unlock conditions) -> `gen4_hgss_safari` (hgss_screens stage).
+- `src/world/HgssSafariZone.lua`: two area sets in `save.hgssSafari`, set 0
+  seeded with default arrangement `rand % 10` (rand = TID | SID << 16, as
+  overlay_36.c uses the same random for both); matrix 212's six 0xFFFF
+  cells become land 652 + area (PlaceSafariZoneAreas) in the ground grid and
+  the collision (MapLoader, with a rebuild when the arrangement changes);
+  encounters by the area under the player (ov02_0224E31C) and time band,
+  bonus slots over slot 0 upward; HGSS counts no steps, only balls (band
+  `safari` entries 3 balls-out / 4 storage-out).
+- Script ops: safarizoneaction, natdexflagaction, updatesafarizoneigt,
+  checksafarizonechallengecompleted (Geodude / Sandshrew met in the zone),
+  scrcmd_247 (dummy). Harness: HGSS_SAFARI=1.
+- Not yet: Baoba's block placement (objects = 0, so bonus slots stay
+  locked, like a fresh cartridge), area-level day growth, linked layouts.
+
+## Platinum small commands (batch from pokeplatinum)
+
+getpartymonlevel, getpartymonnature, buffernaturename (bank 202),
+buffermonnicknamefrompc, checkhasseenspecies, countrepeatedspeciesinparty,
+checkhasalllegendarytitansinparty, getrotomformsinsave, setrotomform (form
+move swap, Thunder Shock fallback), countpartyribbons,
+checkpartycombeegendercount, checkshouldshowghost, getdailyrandomlevel /
+initdailyrandomlevel (VAR 0x4041, 2..99), checkispartymonoutsider,
+turnonpokedexlanguagedetection, judgestats (BattleTower messages
+122/123/124/127/125/126), getcurrentbgm, checkabpress, getgbacartridgeversion
+(0), setfavoritemon, buffertrainername, Jubilife lottery (VAR 0x403C; the
+cartridge's setter writes the HIGH half into the LOW var -- kept; synced daily
+from the record-mixed RNG * 0x41C64E6D + 12345), checkalltoughwordsunlocked,
+trybufferandunlockrandomtoughword. Daily upkeep in Gen4Daily.onDays.
+Not yet: footprint types (Dr. Footprint table), size contest, Catching Show,
+dress-up photos, rankings, link features.
+
+## Platinum: size contest, event legendaries
+
+- Route 222 size contest (size_contest.c): init (33280) / buffer record /
+  buffer party size / result / update, record in VAR 0x4035, maths shared
+  with HgssSizeRecord. Platinum constants now carry `dexHeights`
+  (zukan_data.narc member 0, via extractConstants).
+- StartFatefulEncounter (Shaymin) -> a legendary wild battle whose Pokemon
+  carries `fatefulEncounter` (Commands.start_battle opts.fateful).
+- DrawPokemonPreview / RemovePokemonPreview (Cresselia): the framed front
+  sprite at tile (10, 5), species marked seen; `waitabpress` now waits for a
+  press while a picture is up (it stays a no-op after messages).
+- ShakeObject / FlickerObject: held for times x speed frames (no visual yet).
+
+## Platinum: Jubilife TV passwords, Battleground, massage girl
+
+- GetWallpaperFromCustomMessageWords (wallpaper_passwords.c): word indices
+  in the password word bank (pms_aikotoba.narc member 0 -> constants
+  `passwordWords`, 351 words), diffs, RotateBits x5, nibble XOR, RotateBits by
+  the key, then trainer id / 0x6 tag / checksum. 0xFF wrong, 0 already
+  unlocked, else wallpaper + 1; unlocked mask in `save.gen4UnlockedWallpapers`.
+  Round-trip checked against a constructed password.
+- CheckIsMysteryGiftPhrase: the four words laid out as bank 372 entry 1 and
+  compared with entry 0 ("EVERYONE HAPPY / WI-FI CONNECTION").
+- GetRandomBattlegroundTrainers: OBJ_EVENT_GFX ids, leaders 126..133, stat
+  trainers 141..145, 0xFFF for none, with the cartridge's retry loop.
+- TryGetRandomMassageGirlAccessory: accessories 34..49 the case can fit
+  (they stack to 9), else 0xFFFF.
+- Smaller queries: CountPartyMonsBelowLevelThreshold, GetPlayer3DPos
+  (Distortion World: Gen4DistSurface.position), CheckBackdrop +
+  AddContestBackdrop (save.gen4Backdrops), GetCapturedFlagCount
+  (save.underground.capturedFlags), CheckIsTodayPlayerBirthday
+  (save.player.birthday), GiveBag (FLAG 0x960; the menu is not gated on it),
+  UndergroundNPCMessage (bank 636), DrawPokemonPreviewFromPartySlot,
+  Wi-Fi / Chatot-recording queries answer "none", IsCommGameCodePlatinum 1.
+- Dr. Footprint: constants `footprintTypes` from overlay 5's sFootprintTypes
+  (signature = Bulbasaur..Metapod records; type + 8 * hasPrint; Origin
+  Giratina has no print).
+- Veilstone 4F decor counters (PokeMartDecor): constants `martDecor`
+  (Gen4Mart.decor, ARM9 pointer pair) and `goodPrices` (sGoodData, 28-byte
+  ARM9 records found by goods 1..20's footprints). Gen4ShopMenu `goods.single`
+  buys one at a time with the room check first; `goods.thanks` gives the
+  "We'll send the X to your PC" line. Goods go to the Underground PC.
+- Not yet: Floaroma's berry-priced accessory shop (its own UI), dress-up
+  photos, Catching Show, rankings, scratch-off cards, Union Room / link.
+
+## Characters occluded by the world (Platinum, HGSS, BW)
+
+- Cartridge (pokeplatinum): map objects are FULL billboards
+  (generic_32x32.nsbmd SBC `node billboard(XY) shape`, quad x -16..16,
+  y 0..32 from the feet), so one depth per sprite -- the origin's: tile
+  centre + jump/sprite/terrain offsets (ov5_021ECDA0) + `z += 6`
+  (ov5_021EDEB4), through the map's own depth buffer.
+- Port: on the cartridge camera the live pass's depth buffer is kept after
+  its blit (`Gen4Ground:noteLiveFrame`); the overworld's entity pass
+  re-binds that target with depth kept (`beginSprites`), draws each
+  character through the depth-sprite shader at `billboardDepth` (shadows
+  tested but not written), and composites it back (`endSprites`). The
+  canopy height-cut overlay is skipped on such frames. Free cameras
+  (`freeEntity`) take depth at the same +6 origin.
+- Checked: Twinleaf sign / table hide legs from behind and not from in
+  front; a door's front cell is unclipped; HG New Bark sign; BW Striaton
+  trees; third person. Platinum playthrough beats 1-5 pass.
+- Not covered: neighbour-map ghosts and the "!" emote are still drawn flat.
+
+## HGSS: field moves, small queries, Ruins of Alph puzzles
+
+- Field-move script (scr_seq_0146: Cut, Rock Smash, Strength...): 183 ->
+  the HM cut-in, 560 <kind, var> -> the obstacle animation (writes its var;
+  the script spins `Wait 1` until it is nonzero, so leaving it out could
+  hang Cut), 598 / 734 follower motion (no-op), 733 follower check (0),
+  GetPartySlotWithMove (= FindPartySlotWithMove), GetPlayerState (0 walk,
+  1 bike, 2 surf; also Platinum 0x0CA). Route 2's cut tree checked.
+- BufferItemNameIndef (msg_0223), CountAliveMonsAndPC, PartyCountEgg,
+  CountTranformedRotomsInParty, SetObjectFacing (= SetObjectEventDir),
+  MonAddContestValue (cap 255, untouched at max Sheen).
+- AlphPuzzle <n> (src/ui/HgssAlphPuzzle.lua over gen4_alph_puzzle from
+  src/import/Gen4HgssAlphPuzzle.lua): /a/1/7/2 found by shape; the four
+  layouts read from overlay 110 by shape (+0x15C4; the Ho-Oh board repeats
+  tile 5 and the later cell wins, as InitTileData does); touch-only rules,
+  rotation by tap (8 x 0x800), drag with drop marks, solved check, glow via
+  a white mask of OBJ colours 0x2B..0x2F, FLAG_SYS_ALPH_PUZZLE_* (0x977+n).
+  All four boards solved by a simulated-touch test.
+- Not yet: OpenAlphHiddenRoom (the wall inscription screen, asm-only),
+  Pal Park, Pokeathlon, Union Room / link, Frontier (scrcmd_412).
+
+## BW: what is left unlowered
+
+97% of Black's 89,551 script instructions lower. The rest is mostly
+facility dispatchers: 0x15A <function, arg, arg, resultVar> (591 uses, zones
+75/76) and 0x1F3 / 0x1F5 / 0x1F6 (Nimbasa's stadium and court, zones 81+).
+Each 0x15A function id needs its own handler reversed out of ov21.
+
+## HGSS: field moves from the overworld, Headbutt, Rock Smash items
+
+- Pressing A now reaches HGSS's field-move script the way
+  field_control.c GetInteractedMetatileScript does (Gen4TileScripts.
+  hgssFieldMoveRow, band `field_move`, std_field_* = 10000 + n): Headbutt
+  behaviour 0x06 -> 14, Rock Climb 0x4B/0x4C by facing -> 3, Surf (not
+  surfing, Fog Badge, a Surf user) -> 4, and only while surfing Waterfall
+  0x13 -> 5 / Whirlpool 0x11 -> 16. The Platinum Waterfall row stands down
+  on HGSS. (The chunk-model-0xD0 Headbutt test is not ported.)
+- Surf / Waterfall / RockClimb lower to Platinum's tasks (gen4Climb now runs
+  on HGSS maps: same behaviour numbers); Whirlpool carries across its 0x11
+  run; StrengthFlagAction = Platinum's; CheckEscortMode 0 (never true in
+  HGSS); Capitalize; follower-only 728 / 731 no-op, 829 answers 0.
+- Headbutt (field/headbutt.c): /a/2/5/2 per map header (60 maps), tree
+  cells, tree type by index and trainer id's last digit (sRareTreeLUT_*),
+  slots 50/15/15/10/5/5, level in range, Repel honoured. Route 1 tree ->
+  wild Hoothoot Lv2.
+- Rock Smash (field/rock_smash_item.c): the map's rock smash encounter
+  (rate, slots 80/20) first, else /a/2/5/3 odds (17 maps; +5 Suction Cups /
+  Magnet Pull / Keen Eye / follower), 25/20/10x5/5 draw, Serene Grace /
+  Super Luck +1, HG / SS tables. Checked statistically (2,000 smashes).
+- Data: src/import/Gen4HgssFieldMoves.lua -> gen4_hgss_field_moves
+  (hgss_screens stage).
+
+## Pass 33: HGSS std scripts, Day Care, tutors, certificates, weather
+
+**Audit gap.** The map-based audit (scratch `audit.lua`) only walks scripts that a map references. The std scripts reached through `CallStd` were never scanned, and that is where most of what was left lives. `audit_all.lua` (`ONLYM=Mxxxx` for one file) scans them.
+
+**Day Care (`std_daycare`, scr_seq_0265).** HGSS's names now map onto Platinum's Day Care handlers; the buffer slots and return values are the same (get_egg.c).
+- New handler: `GetTailDaycareMonSpeciesAndNick` (`g4_daycare_tail`).
+- `DaycareSanitizeMon` is `TryRevertPokemonForm`.
+- 551 / 552 are the party menu and its result.
+- Verified on Route 34 (R34R0101): with three Pokémon, the lady takes the first.
+- The ROM refuses a deposit that would leave fewer than two Pokémon across the party and PC.
+
+**Battle Frontier move tutors (`std_frontier_move_tutor_*`, scr_seq_0002).**
+- 652 gives the page count.
+- `MoveTutorChooseMove` builds the menu: seven moves to a page when they fit, otherwise six plus NEXT (0xFFFD), then QUIT (0xFFFE). The labels are msg_0748 #0/#2/#3.
+- `TutorMoveGetPrice`, `TutorMoveTeachInSlot`, and 556 (spend BP) are lowered.
+- Data: the existing HGSS rows in `gen4_move_tutor`.
+- Verified in D32R0103: Pikachu is offered ThunderPunch 64 BP / Knock Off 40 BP.
+
+**Certificates (`ShowCertificate`).**
+- New import `src/import/Gen4HgssCertificates.lua` (/a/1/2/6, ov78_021E5EA4 member table) writes `gen4_hgss_certificates`, in the `hgss_screens` stage.
+- The ink comes from NARC_graphic_font (/a/0/1/6) member 7.
+- The screen is `src/ui/HgssCertificate.lua`: msg_0004 text at the ROM's positions.
+- In two-screen modes the sheet slides from the top screen to the bottom one. The Shiny Leaf sheet's 3D Pokémon is not drawn.
+- Harness: `SCREEN=HgssCertificate CERT=0|1|2`.
+
+**Pokéathlon numbers.**
+- Give/Take/CheckAthletePoints use `save.hgssAthletePoints`, the value the points box already shows.
+- 724 / 725 read and adjust `save.hgssPokeathlonRecords`.
+- 712 (the record viewers) is a no-op.
+
+**Goldenrod Underground (D37R0102/0103).**
+- Accessory lottery: 830–833 (overlay_02_02251E74.c, 39 accessories / 14 backdrops) and 553 (percent roll).
+- Fashion Case commands 403–407.
+- 622: an object's facing.
+- The dress-up portrait studio (154 / 155 / 255, overlay 41) is not ported: no portrait is ever saved.
+
+**Professor Oak's rating (scr_seq_0148).**
+- `GetDexEvalResult` uses the ROM's bands from unk_0205BB1C.s:
+  - Johto: ≤9 … ≤253 → msg_0666 #28–45.
+  - National: ≤100 … ≤483 → #46–56.
+- A completed dex gives #22/23 or #24/25 by gender, with SEQ_ME_HYOUKA6; otherwise the fanfare is HYOUKA1.
+- The Johto/National seen/owned counts and `CheckJohtoDexComplete` (≥ 254 owned, excluding Mew and Celebi) are lowered.
+
+**Flash and small std commands.**
+- `FlashAction` uses the flash flag; `FlashEffect` sets weather 12.
+- `SurvivePoisoning`, `GetMonTypes`, `PartyLegalCheck` (always FALSE), and `BufferTrainerClassNameIndef` are lowered.
+
+**HGSS weather ids.** `Gen4Weather.nameFor` now reads HGSS headers through `HGSS_NAMES` (pokeheartgold weather.h):
+- 1 is RAIN. Route 33 and T29 were reading as CLOUDY.
+- 11 is the dark caves' Flash darkness: D03 / D05 / D40 / D42, nine maps. These were reading as HAILING and snowing.
+- 13 is low light.
+- The darkness mask itself is still not drawn, on Platinum as well as HGSS.
+
+**Left in HGSS's std scripts.**
+- `scrcmd_465` (std_group, 458 uses).
+- Pokéathlon courses.
+- Phone calls: owned by the Pokégear work.
+- Photo album and seals.
+- Save-screen stats.
+- `martsell` and the egg-hatch / whiteout std scripts. The engine does these natively, so those scripts never run.
+
+**BW.** 97.0% of instructions are lowered. The largest remaining ops are 0x15A (356), 0x1F3–0x1F7 (Nimbasa stadium) and 0x169/16A/16B.

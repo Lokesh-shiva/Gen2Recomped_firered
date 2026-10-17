@@ -320,6 +320,16 @@ function Shop:choose()
   if self.max < 1 then self.message = self:poorLine(); return end
   se(self, "SEQ_SE_DP_SELECT")
   self.item, self.transaction, self.qty, self.mode = id, 'buy', 1, 'quantity'
+  -- ONE AT A TIME (MART_TYPE_DECOR): no dial -- the room check first, then
+  -- straight to the price (Shop_SelectBuyMenu -> Shop_ShowPurchaseMessage)
+  if self.goods and self.goods.single then
+    if not self.goods.canAdd(id, 1) then
+      self.mode, self.item = 'buy', nil
+      self.message = self.goods.fullMessage or 'There is no more room.'
+      return
+    end
+    return self:choose()
+  end
   if self.frontier then
     self.message = self:line(33, (def.name or '') .. '? OK.\nHow many would you like?', def.name)
   else
@@ -336,7 +346,8 @@ function Shop:transact()
     elseif self.goods then
       self.goods.add(self.item, self.qty)
       se(self, "SEQ_SE_DP_REGI")
-      self:pay(cost); self.message = 'Thank you!'
+      self:pay(cost)
+      self.message = self.goods.thanks and self.goods.thanks(self.item) or 'Thank you!'
     elseif not Bag.add(save, self.item, self.qty, self.game.data) then self.message = self:line(7, 'Your Bag is full.')
     else self:pay(cost)
       -- the till (Shop_SelectConfirmPurchase, on YES)
