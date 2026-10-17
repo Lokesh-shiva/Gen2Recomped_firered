@@ -89,7 +89,8 @@ function M.begin()
   if not client then return nil, why end
   local status, doc = post("/devicecode", { client_id = client.id, scope = M.SCOPE })
   if not status then return nil, "could not reach Microsoft: " .. tostring(doc) end
-  if status ~= 200 or not (type(doc) == "table" and doc.device_code) then
+  if status ~= 200 or not (type(doc) == "table" and type(doc.device_code) == "string" and doc.device_code ~= ""
+      and type(doc.user_code) == "string" and doc.user_code ~= "") then
     return nil, ("Microsoft refused the sign-in request (%s)"):format(tostring(doc and (doc.error_description or doc.error) or status))
   end
   return {

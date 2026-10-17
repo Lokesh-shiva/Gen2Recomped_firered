@@ -1117,44 +1117,68 @@ function Sidebar.install(RI)
   end
 
   -- signing in: start the flow, show its instructions, poll it from update
+  function RI:_sbCloudCancel()
+    local c=self._cloudFlow
+    if not c then return end
+    if c.task then c.task:cancel() end
+    pcall(c.auth.cancel,c.flow)
+    self._cloudFlow=nil;self._settingsRowCache=nil
+    self.settingsNotice=Strings('Sign-in cancelled.')
+  end
+
   function RI:_sbCloudSignIn()
+    if self._cloudFlow then self:_sbCloudCancel();return end
     local def = Sidebar.CLOUD_SERVICES[self:_sbCloudService()]
     if not def then return end
     local Auth = require(def.auth)
-    if self._cloudFlow then
-      pcall(self._cloudFlow.auth.cancel, self._cloudFlow.flow)
-      self._cloudFlow = nil
-      self._settingsRowCache = nil
-      self.settingsNotice = Strings("Sign-in cancelled.")
-      return
-    end
-    if Auth.signedIn() then
-      Auth.signOut()
-      self.settingsNotice = Strings("Signed out of ") .. def.name .. "."
-      self._settingsRowCache = nil
-      return
-    end
-    local flow, why = Auth.begin()
-    if not flow then self.settingsNotice = tostring(why); return end
-    self._cloudFlow = { auth = Auth, flow = flow, name = def.name }
+    local signingOut=Auth.signedIn()
+    local task,why=require('src.cloud.Task').new(function()
+      if signingOut then return Auth.signOut() end
+      return Auth.begin()
+    end)
+    if not task then self.settingsNotice=tostring(why);return end
+    self._cloudFlow = {auth=Auth,flow={kind='pending'},name=def.name,task=task,
+      phase=signingOut and 'signOut' or 'begin',signingOut=signingOut,
+      hint=Strings('Contacting the sign-in service...')}
     self._settingsRowCache = nil
+    self.settingsNotice=self._cloudFlow.hint
+  end
+
+  function RI:_sbCloudInstructions(c)
+    local flow=c.flow
     if flow.kind == "device" then
       -- the code popup (LauncherCloudCode) shows the code and opens the site
       self._cloudFlow.hint = ("Go to %s and enter the code  %s"):format(flow.url, flow.code)
-      self.settingsNotice = ("%s: go to %s and enter the code  %s"):format(def.name, flow.url, flow.code)
+      self.settingsNotice = ("%s: go to %s and enter the code  %s"):format(c.name, flow.url, flow.code)
     else
       self._cloudFlow.hint = Strings("Finish in your browser. If Google shows an error, press CANCEL.")
-      self.settingsNotice = Strings("Finish signing in to ") .. def.name .. Strings(" in your browser...")
+      self.settingsNotice = Strings("Finish signing in to ") .. c.name .. Strings(" in your browser...")
     end
   end
 
   function RI:_sbCloudPoll()
     local c = self._cloudFlow
     if not c then return end
-    local now = love.timer and love.timer.getTime() or 0
-    if c.flow.kind == "device" and now - (c.last or 0) < 1 then return end
-    c.last = now
-    local state, why = c.auth.poll(c.flow)
+    if not c.task then
+      local now = love.timer and love.timer.getTime() or 0
+      if c.flow.kind == "device" and now - (c.last or 0) < 1 then return end
+      c.last=now;c.phase='poll'
+      local why
+      c.task,why=require('src.cloud.Task').new(function() return c.auth.poll(c.flow) end)
+      if not c.task then self:_sbCloudCancel();self.settingsNotice=tostring(why);return end
+    end
+    local result=c.task:poll()
+    if not result then return end
+    c.task=nil
+    if result.kind=='error' then self:_sbCloudCancel();self.settingsNotice=result.error;return end
+    if c.phase=='begin' then
+      if not result.first then self:_sbCloudCancel();self.settingsNotice=tostring(result.second);return end
+      c.flow=result.first;self:_sbCloudInstructions(c);self._settingsRowCache=nil;return
+    elseif c.phase=='signOut' then
+      self._cloudFlow=nil;self._settingsRowCache=nil
+      self.settingsNotice=Strings('Signed out of ')..c.name..'.';return
+    end
+    local state,why=result.first,result.second
     if state == "waiting" then return end
     self._cloudFlow = nil
     self._settingsRowCache = nil
@@ -1627,7 +1651,11 @@ function Sidebar.install(RI)
         end)
       end
     end
-    if self._cloudFlow then pcall(self._sbCloudPoll, self) end
+    require('src.cloud.Task').reap()
+    if self._cloudFlow then
+      local ok,why=pcall(self._sbCloudPoll,self)
+      if not ok then self:_sbCloudCancel();self.settingsNotice=Strings('Sign-in failed: ')..tostring(why) end
+    end
     if self.sidebarMode and not self._handedOff then
       -- held still while Settings is open (Backdrop.setPaused)
       Backdrop.setPaused(self.section == "settings" or self.settingsOpen == true)
@@ -1781,8 +1809,7 @@ function Sidebar.install(RI)
     local id = entry and entry.row and entry.row.id
     if id == "cloudService" or id == "cloudFolder" then
       if id == "cloudService" and self._cloudFlow then
-        pcall(self._cloudFlow.auth.cancel, self._cloudFlow.flow)
-        self._cloudFlow = nil
+        self:_sbCloudCancel()
       end
       pcall(function() saveOptions(self, options(self)) end)
       self._settingsRowCache = nil

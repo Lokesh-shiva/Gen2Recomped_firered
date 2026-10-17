@@ -19,6 +19,7 @@
 -- Bodies here are text (JSON, form data, Lua save files); nothing binary.
 
 local H = {}
+H.async=setmetatable({},{__mode='k'})
 
 local function tmpPath(tag)
   local dir = love.filesystem.getSaveDirectory()
@@ -104,6 +105,10 @@ end
 
 function H.request(method, url, opts)
   opts = opts or {}
+  local co=coroutine.running()
+  if co and H.async[co] then
+    return coroutine.yield({kind='http',method=method,url=url,opts=opts})
+  end
   if love and love.system and type(love.system.httpRequest) == "function" then
     return viaBridge(method, url, opts)
   end

@@ -41,30 +41,28 @@ function CloudCode.install(RI)
 
   function RI:_ccVisible()
     local c = self._cloudFlow
-    return c and c.flow and c.flow.kind == "device" and c.flow.code and true or false
+    return c and c.flow and (c.flow.kind == "pending" or (c.flow.kind == "device" and c.flow.code)) and true or false
   end
 
   function RI:_ccCopy()
     local c = self._cloudFlow
-    if not c then return end
+    if not c or not c.flow.code then return end
     pcall(love.system.setClipboardText, c.flow.code)
     c.copiedAt = love.timer and love.timer.getTime() or 0
   end
 
   function RI:_ccOpen()
     local c = self._cloudFlow
-    if not c then return end
+    if not c or not c.flow.url then return end
     pcall(love.system.openURL, c.flow.url)
     c.opened = true
   end
 
   function RI:_ccCancel()
-    if self._cloudFlow then pcall(self._sbCloudSignIn, self) end -- pressing it while waiting cancels
-    -- ...and the popup goes even when that did not (the SERVICE row changed
-    -- under it, or the service's cancel raised): a popup that cannot be
-    -- closed by touch leaves a phone with no way out of it
+    if self._sbCloudCancel then self:_sbCloudCancel(); return end
     local c = self._cloudFlow
     if c then
+      if c.task then c.task:cancel() end
       pcall(c.auth.cancel, c.flow)
       self._cloudFlow = nil
       self._settingsRowCache = nil
@@ -73,8 +71,8 @@ function CloudCode.install(RI)
   end
 
   -- a filled button; returns its rect
-  local function button(self, x, y, w, h, label, kind)
-    local s, P, g = self._s or 1, PAL(), love.graphics
+  local function button(self, x, y, w, h, label, kind, scale)
+    local s, P, g = scale or self._s or 1, PAL(), love.graphics
     local r = { x = x, y = y, width = w, height = h, pinned = true }
     local hot = self:_hover(r)
     local rad = 10 * s
@@ -117,14 +115,31 @@ function CloudCode.install(RI)
     if okSA and type(aw) == "number" and aw > 0 and type(ah) == "number" and ah > 0 then
       sx, sy, sw, sh = ax, ay, aw, ah
     end
+    -- Bound the entire card to short landscape windows and narrow phones.
+    s = math.min(s, sw / 400, sh / 700)
+    if c.flow.kind == "pending" then
+      local dw, dh = math.min(sw - 24 * s, 620 * s), 210 * s
+      local dx, dy = sx + (sw - dw) / 2, sy + (sh - dh) / 2
+      fillGradRounded(dx, dy, dw, dh, 16*s, P.slotBg or P.bgTop, P.slotBg or P.bgBot, 0.97, 0.97)
+      g.setFont(font(24*s)); col(P.ink)
+      g.printf(Strings(c.signingOut and "Signing out of " or "Sign in to ") .. c.name, dx+20*s, dy+20*s, dw-40*s, "center")
+      g.setFont(font(16*s)); col(P.detail)
+      g.printf(c.hint or Strings("Contacting the sign-in service..."), dx+20*s, dy+70*s, dw-40*s, "center")
+      local cancelR = button(self, dx+20*s, dy+130*s, dw-40*s, 50*s, "CANCEL", "cancel", s)
+      g.pop(); self._cc = {cancel=cancelR}; return r
+    end
     local pad = 26 * s
     local dw = math.min(sw - 24 * s, 620 * s)
     local inner = dw - 2 * pad
     local titleF, stepF, codeF, smallF = font(26 * s), font(16 * s), font(64 * s), font(13 * s)
     -- the code shrinks to fit a narrow phone screen next to its COPY button
     local copyW, gap = 120 * s, 14 * s
-    while codeF:getWidth(c.flow.code) > inner - copyW - gap - 20 * s and codeF:getHeight() > 24 do
-      codeF = font(codeF:getHeight() * 0.9)
+    local codePx = math.max(8, math.floor(64 * s))
+    for _ = 1, 32 do
+      if codeF:getWidth(c.flow.code) <= inner - copyW - gap - 20*s or codePx <= 8 then break end
+      -- Font height includes line spacing; shrinking that can grow the font.
+      codePx = math.max(8, math.floor(codePx * 0.85))
+      codeF = font(codePx)
     end
     local steps = {
       "1.  Press COPY to copy your code.",
@@ -177,7 +192,7 @@ function CloudCode.install(RI)
     col(P.white)
     bold(c.flow.code, x, y + 14 * s, boxW, "center", 3)
     local copied = c.copiedAt and now - c.copiedAt < 2
-    local copyR = button(self, x + boxW + gap, y, copyW, codeBoxH, copied and "COPIED!" or "COPY", "copy")
+    local copyR = button(self, x + boxW + gap, y, copyW, codeBoxH, copied and "COPIED!" or "COPY", "copy", s)
     y = y + codeBoxH + 10 * s
 
     g.setFont(smallF)
@@ -186,8 +201,8 @@ function CloudCode.install(RI)
     y = y + smallF:getHeight() + 20 * s
 
     local bw = (inner - gap) / 2
-    local openR = button(self, x, y, bw, btnH, c.opened and "OPEN AGAIN" or "OPEN WEBSITE", "go")
-    local cancelR = button(self, x + bw + gap, y, bw, btnH, "CANCEL", "cancel")
+    local openR = button(self, x, y, bw, btnH, c.opened and "OPEN AGAIN" or "OPEN WEBSITE", "go", s)
+    local cancelR = button(self, x + bw + gap, y, bw, btnH, "CANCEL", "cancel", s)
     y = y + btnH + 14 * s
 
     g.setFont(smallF)
@@ -206,8 +221,8 @@ function CloudCode.install(RI)
     if not self:_ccVisible() then return origPress(self, x, y, button, ...) end
     local cc = self._cc
     if button ~= 1 or not cc then return end
-    if inside(cc.copy, x, y) then self:_ccCopy()
-    elseif inside(cc.open, x, y) then self:_ccOpen()
+    if cc.copy and inside(cc.copy, x, y) then self:_ccCopy()
+    elseif cc.open and inside(cc.open, x, y) then self:_ccOpen()
     elseif inside(cc.cancel, x, y) then self:_ccCancel() end
   end
 

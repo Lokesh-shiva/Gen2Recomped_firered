@@ -56,9 +56,9 @@ For both code flows, the launcher shows a popup over everything (`src/import/Lau
 
 A Google "installed app" secret is not confidential (Google says so), but GitHub's secret scanning flags it. That is why it lives outside the source tree.
 
-## Phones: why the code popup did not appear (fixed 2026-10-17)
+## Earlier phone configuration and transport fixes (2026-10-17)
 
-On Android and iOS, pressing SIGN IN for Google Drive or OneDrive showed only a one-line notice and never the code popup. The popup itself (`LauncherCloudCode`) was fine. It draws and takes taps through the same `RomImporter:draw` / `mousepressed` path that `main.lua` forwards touches into. It opens only once `Auth.begin()` returns a device flow, and on phones `begin()` never got that far:
+On Android and iOS, pressing SIGN IN for Google Drive or OneDrive showed only a one-line notice and never the code popup. The initial fixes covered configuration and transport; the additional layout and blocking-request faults are documented below. It draws and takes taps through the same `RomImporter:draw` / `mousepressed` path that `main.lua` forwards touches into. It opens only once `Auth.begin()` returns a device flow, and on phones `begin()` never got that far:
 
 - **Credentials were never packed for phones.** `scripts/build_android.sh` and `scripts/build_ios.sh` each zip their own `game.love`. The `Write cloud-save credentials` step ran only in the `payload` job, so the APK and IPA had no `cloud_clients.lua`, and every sign-in stopped at "not set up". The fix:
   - the `android` and `ios` jobs in `release.yml` now write the file too;
@@ -74,3 +74,13 @@ Popup changes:
 - COPY calls `love.system.setClipboardText`. OPEN WEBSITE calls `love.system.openURL`.
 
 Verified with a phone-sized probe that fakes `getOS()` as Android or iOS: 1080x2340 and 2340x1080, plus 1170x2532 for iOS. Taps are routed exactly the way `main.lua` routes them, and COPY, OPEN WEBSITE and CANCEL each call the right function. Two things need a real device: the lua-https transport (desktop LÖVE here is 11.5) and a real sign-in round trip.
+
+## Popup freezes and missing desktop configuration (2026-10-17)
+
+The code font fit loop used line height as the next requested font size. With fonts whose line height exceeds their point size, a narrow code box caused the loop to increase font sizes indefinitely. It now shrinks an explicit point size with a fixed iteration limit. The card also scales to the safe area in portrait and landscape.
+
+`src/cloud/Task.lua` runs auth control flow in a main-state coroutine and yields HTTP requests to `src/cloud/http_worker.lua`. Starting sign-in, polling tokens, fetching the account, and revoking a sign-in no longer block launcher rendering. A pending popup appears immediately and remains cancellable. Workers have a 30-second UI deadline; cancelled or timed-out responses cannot resume auth code. In-flight workers are retained until they exit so garbage collection cannot block Cancel by joining them. Browsers, token persistence, and callbacks stay on the main state. Ordinary cloud file synchronization still uses its existing transport path.
+
+The local Windows packer omitted `cloud_clients.lua`; the existing local `game.love` also lacked it. `scripts/build-windows-exe-script.ps1` now includes the file. The credentials writer preserves existing local configuration when no environment is supplied, and fails CI with an explicit setup error rather than silently generating an entirely blank configuration. CI secrets remain required for the providers you publish; no credentials are committed.
+
+Validation: `tools/cloud_signin_check/tests.lua` covers asynchronous completion, cancellation, deadlines, worker errors, font metrics that previously caused the infinite loop, modal input isolation, and controls in four viewport sizes (47 checks). `tools/cloud_signin_check/build_tests.py` covers missing CI credentials, preservation of local configuration, generation, and invalid multiline values (4 checks). `tools/cloud_signin_check` verifies a real LOVE worker against a delayed local HTTP server and checks render-thread poll duration. `tools/launcher_shot` supports `CLOUD_CODE` and `CLOUD_PENDING` for isolated screenshots. Real Android/iOS sign-in and provider authorization still require device testing.

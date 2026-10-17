@@ -18,6 +18,12 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item $stage -ItemType Directory | Out-Null
 
 Copy-Item main.lua, conf.lua $stage
+# Keep local Windows packages consistent with CI/mobile payloads.
+if (Test-Path -LiteralPath "cloud_clients.lua") {
+    Copy-Item -LiteralPath "cloud_clients.lua" -Destination $stage
+} else {
+    Write-Warning "No cloud_clients.lua: cloud sign-in is unavailable in this package."
+}
 Copy-Item -Recurse src, data, assets $stage
 
 # Strip generated ROM caches

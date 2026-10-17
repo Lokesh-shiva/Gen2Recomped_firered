@@ -208,8 +208,8 @@ jobs:
       - uses: actions/checkout@v7
 
       # Cloud-save sign-in credentials from repository secrets
-      # (Settings -> Secrets and variables -> Actions); an empty one just leaves
-      # that service "not set up" in the build.
+      # (Settings -> Secrets and variables -> Actions). The writer fails when
+      # all providers are missing, rather than publishing a blank config.
       - name: Write cloud-save credentials
         env:
           GOOGLE_DESKTOP_CLIENT_ID: ${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }}

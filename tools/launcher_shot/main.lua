@@ -78,6 +78,11 @@ function love.load()
       auth = { poll = function() return "waiting" end, cancel = function() end },
       flow = { kind = "device", code = os.getenv("CLOUD_CODE"), url = "https://www.google.com/device" } }
   end
+  if os.getenv("CLOUD_PENDING") then
+    Importer._cloudFlow = { name="Google Drive", flow={kind="pending"},
+      auth={cancel=function() end}, hint="Contacting the sign-in service...",
+      task={poll=function() end, cancel=function() end} }
+  end
   if os.getenv("TOOL") then
     local Sidebar = require("src.import.LauncherSidebar")
     for _, t in ipairs(Sidebar.TOOLS) do

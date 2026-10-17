@@ -150,7 +150,8 @@ function G.begin()
       body = Http.form({ client_id = client.id, scope = G.SCOPE }),
     }))
     if not status then return nil, "could not reach Google: " .. tostring(doc) end
-    if status ~= 200 or not (type(doc) == "table" and doc.device_code) then
+    if status ~= 200 or not (type(doc) == "table" and type(doc.device_code) == "string" and doc.device_code ~= ""
+      and type(doc.user_code) == "string" and doc.user_code ~= "") then
       return nil, ("Google refused the sign-in request (%s)"):format(tostring(doc and doc.error or status))
     end
     return {
