@@ -1110,3 +1110,40 @@ Each 0x15A function id needs its own handler reversed out of ov21.
 - `martsell` and the egg-hatch / whiteout std scripts. The engine does these natively, so those scripts never run.
 
 **BW.** 97.0% of instructions are lowered. The largest remaining ops are 0x15A (356), 0x1F3–0x1F7 (Nimbasa stadium) and 0x169/16A/16B.
+
+## Pass 34: HGSS Groups, text names, dark caves
+
+**Groups (`std_group`, scr_seq_0143; `ScrCmd_465`, 458 uses).** These are HGSS's record-mixing groups, made and joined at the Pokémon Center NPC on T22R0301 (13, 8). Lowered to `g4_hgss_group`. `save.hgssGroups` has six slots (friend_group.h):
+- 0 is the group the player made.
+- 1 is the group they are in.
+- 2–5 are groups met over record mixing. These are never filled, since there's no wireless.
+
+The modes:
+- 0: the slot is filled.
+- 1: the slot is the joined group.
+- 2 / 3: the group's name / leader's name to a buffer.
+- 4: the naming screen (msg_0249 #5). Returns 0 for a name, 1 for blank, 2 for a name already in use.
+- 5: join a group.
+- 6: lead and join slot 0.
+- 7: four or more other groups exist.
+
+Verified: talk, MAKE GROUP, name it; the line reads "The AAAAAAA group, huh?".
+
+**Text names.** HGSS fills `STRVAR_3`, `STRVAR_4` and `STRVAR_34` the same way as `STRVAR_1` (`MsgArray_ControlCodeIsStrVar`). These were printed as braces. That affected 208 lines, the Groups among them. Fixed in `Commands.gen4Markup`.
+
+**Small HGSS commands.**
+- 494 is `BufferECWord`, an Easy Chat word to a buffer.
+- 706 / 642 ask whether a Hall of Fame record exists.
+- 164 opens the PC Hall of Fame browser. It is still `pending`, as on Platinum.
+- 289 sets the Union Room avatar (`save.player.avatar`).
+
+**Dark caves (both games).** The darkness is drawn now (`src/render/Gen4FlashDark.lua`). It is Platinum's DARK_FLASH weather task (ov5_021DB04C): an H-blank window centred at (128, 84).
+- On the map's load, the radius closes from 256 to 32 over 30 frames.
+- When the weather ends on the same map (Flash: Platinum clears it, HGSS's FlashEffect switches to 12), it opens back to 256.
+- Leaving a dark map does not play the opening.
+- It is drawn a span per row, black outside, as the cartridge does. It replaces the uniform Hoenn veil these maps wore.
+- Frame-timed from the overworld's weather clock.
+
+Checked in Whirl Islands (D40R0101, HGSS) and Wayward Cave (D21R0101, Platinum).
+
+**Left in HGSS.** The Union Room (wireless), the PC Hall of Fame browser (both games), Pokéathlon courses, Pal Park migration (509/510; needs a GBA save), phone calls, the photo album and seals.

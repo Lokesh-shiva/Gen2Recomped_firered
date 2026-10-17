@@ -581,8 +581,9 @@ Gen4Weather.HGSS_NAMES = {
   [5] = "SNOWING", [6] = "BLIZZARD", [7] = "SANDSTORM", [8] = "DIAMOND_DUST",
   [11] = "DARK_FLASH", [12] = "FLASH_LIT", [13] = "LOW_LIGHT",
 }
--- the HGSS-only names: nothing drawn for them yet (the flash darkness, the
--- lit cave and low light are BG-window masks this port does not draw)
+-- the HGSS-only names. The flash darkness is drawn by
+-- src/render/Gen4FlashDark (for DARK_FLASH, ahead of these looks); the lit
+-- cave and low light draw nothing
 Gen4Weather.LOOK.DIAMOND_DUST = nil
 Gen4Weather.LOOK.FLASH_LIT = false
 
