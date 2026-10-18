@@ -606,6 +606,21 @@ function realLoad(args)
   BootTrace.booted()
 end
 
+-- THE MONSTER WALKER'S PASSIVE WATTS (src/pokewalker/WalkerEconomy.lua): 5 W
+-- an hour while the app is open, in the launcher or in a game alike, so the
+-- time is fed here, ahead of the hand-off to either. pcall'd: never this
+-- frame's problem.
+local walkerEconomy
+local function walkerTick(fn, ...)
+  if walkerEconomy == false then return end
+  if not walkerEconomy then
+    local ok, E = pcall(require, "src.pokewalker.WalkerEconomy")
+    walkerEconomy = ok and E or false
+    if not ok then return end
+  end
+  pcall(walkerEconomy[fn], ...)
+end
+
 function love.update(dt)
   -- Unwind anything the previous frame left on the graphics stack before this
   -- one starts building on top of it.
@@ -617,6 +632,7 @@ function love.update(dt)
   -- The report deliberately runs nothing else: the boot path it is reporting on
   -- is the code that just died.
   if bootReport then return end
+  walkerTick("tick", dt)
   if editorMode then return EditorApp.update(dt) end
   if TouchEditor then return TouchEditor.update(dt) end
   if Importer then return Importer:update(dt) end
@@ -828,6 +844,8 @@ end
 -- unfocused, so reset input on either transition rather than trust it.
 function love.focus(f)
   if bootReport then return end
+  -- a phone stops the frames in the background: the walker credits the gap
+  walkerTick("focus", f)
   if editorMode or TouchEditor then return end
   if Importer then
     if Importer.focus then Importer:focus(f) end
@@ -1150,6 +1168,7 @@ function love.quit()
   if editorMode and EditorApp.quit then
     return EditorApp.quit() -- return true to abort quit
   end
+  walkerTick("quit")
   -- Marks the trace as an orderly shutdown.  A trace that ends mid-boot with
   -- no "clean exit" and no crash.txt beside it is the signature of a native
   -- abort rather than a Lua error -- which is exactly the distinction that is
