@@ -154,6 +154,7 @@ local function isFireRed(game)
 end
 
 function Gen3StartMenu.new(game, opts)
+  if game.overworld then game.overworld.mapNameSign=nil end
   opts = opts or {}
   local self = setmetatable({}, Gen3StartMenu)
   self.game = game
@@ -491,6 +492,8 @@ function Gen3StartMenu:choose(row)
     return self:close()
   end
   self:close()
+  -- start_menu.c: GAME_STAT_CHECKED_POKEDEX
+  if row.key == "pokedex" and self.game.save then require("src.pokemon.Gen3GameStats").increment(self.game.save, 41) end
   local onCancel = function() self:reopen() end
   Screens.push(self.game, row.screen, { onCancel = onCancel })
 end
@@ -572,6 +575,7 @@ function Gen3StartMenu:startSave()
       game.stack:push(TextBox.new(game,
         Strings("SAVING...\nDON'T TURN OFF THE POWER."), function()
           local ok, err = pcall(function()
+            require("src.pokemon.Gen3GameStats").increment(game.save, 0)  -- GAME_STAT_SAVED_GAME
             if game.writeSave then game:writeSave()
             else require("src.core.SaveData").save(game.save) end
           end)

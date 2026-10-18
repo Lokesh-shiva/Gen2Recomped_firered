@@ -1,6 +1,7 @@
 
 
 local Font = require("src.render.Font")
+local Theme = require("src.ui.Theme")
 local Screens = require("src.ui.Screens")
 local Sound = require("src.core.Sound")
 local Strings = require("src.core.Strings")
@@ -251,7 +252,7 @@ function PokegearMenu:tile(id, tx, ty)
     G.setColor(1, 1, 1, 1)
     return
   end
-  if id == BLANK_TILE then
+  if id == (self.gfx.blankTile or BLANK_TILE) then
     G.setColor(0, 0, 0, 1)
     G.rectangle("fill", tx * 8, ty * 8, 8, 8)
     G.setColor(1, 1, 1, 1)
@@ -275,12 +276,14 @@ end
 
 -- Pokegear_FinishTilemap: 2x2 icons for each owned card
 function PokegearMenu:drawStrip()
-  for x = 0, SCREEN_W - 1 do
-    self:tile(BLANK_TILE, x, 0)
-    self:tile(BLANK_TILE, x, 1)
+  -- The icon strip occupies the left eight columns. Clearing the entire
+  -- header erased the clock plate and the phone panel's upper border.
+  for x = 0, 7 do
+    self:tile(self.gfx.blankTile or BLANK_TILE, x, 0)
+    self:tile(self.gfx.blankTile or BLANK_TILE, x, 1)
   end
   for _, card in ipairs(self.cards) do
-    local n, x = card.icon, card.iconX
+    local n, x = card.icon+(self.gfx.cardIconOffset or 0), card.iconX
     self:tile(n, x, 0)
     self:tile(n + 1, x + 1, 0)
     self:tile(n + 0x10, x, 1)
@@ -781,13 +784,26 @@ function PokegearMenu:drawPhone()
 
     if i == self.contact then
       selectedName = name
-      -- Inverted selection: black row + cream glyphs via Font tint shader
-      -- (atlas is black-on-transparent; setColor alone cannot lighten it)
+      -- THE CURSOR IS A GLYPH, NOT THE LETTER ">".
+      --
+      -- Reported from play: "Gen2 games are missing the symbol next to the
+      -- selected options".  This drew `"> " .. name` as text, and Gen 2's
+      -- charmap HAS NO ">" -- 92 sequences and that is not one of them -- so
+      -- the arrow was two blank columns on every cartridge this screen runs
+      -- on.  Nothing failed: an unmapped byte draws nothing.
+      --
+      -- `PokegearPhone_UpdateCursor` (pokecrystal engine/pokegear/pokegear.asm)
+      -- blanks column 1 on every row and then writes a single '\xED' there on
+      -- the cursor's row, with the names starting at column 2 -- so the marker
+      -- is its own column rather than a prefix, and the names do not shift
+      -- when the cursor moves.  `Theme.cursor` is that glyph, and it is the
+      -- same one every other menu in the port already draws.
       love.graphics.setColor(0, 0, 0, 1)
       love.graphics.rectangle("fill", 16, ty * 8, 128, 8)
+      Font.drawCode(Theme.cursor, 8, ty * 8)
       love.graphics.setColor(230 / 255, 255 / 255, 164 / 255, 1)
       if Font.beginTint then Font.beginTint() end
-      Font.draw(Strings("> " .. name), 18, ty * 8)
+      Font.draw(Strings(name), 18, ty * 8)
       if Font.endTint then Font.endTint() end
       love.graphics.setColor(1, 1, 1, 1)
     else

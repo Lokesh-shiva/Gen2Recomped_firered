@@ -207,6 +207,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Cloud-save sign-in credentials from repository secrets
+      # (Settings -> Secrets and variables -> Actions). The writer fails when
+      # all providers are missing, rather than publishing a blank config.
+      - name: Write cloud-save credentials
+        env:
+          GOOGLE_DESKTOP_CLIENT_ID: ${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }}
+          GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
+          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+        run: bash scripts/write_cloud_clients.sh cloud_clients.lua
+
       - name: Pack payload
         run: |
           set -euo pipefail
@@ -253,6 +265,14 @@ jobs:
         run: echo "::add-mask::$HOME"
 
       - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build offline translation helper
+        run: |
+          python -m pip install -r tools/translation/requirements.txt
+          python tools/translation/build_desktop.py
 
       - name: Import signing certificate into a temporary keychain
         if: vars.APPLE_SIGNING == 'true'
@@ -359,6 +379,8 @@ jobs:
           # notarize separately below so it uses secret credentials, not a
           # login-keychain profile.
           bash scripts/build.sh mac --version "${{ needs.version.outputs.version }}" --no-notarize
+          [ -f .bazinga/work/Gen2Recomped.app/Contents/Resources/translation/rom-translate ] \
+            || { echo "::error::rom-translate is missing from the macOS app"; exit 1; }
 
       - name: Notarize & staple macOS app
         if: vars.APPLE_SIGNING == 'true'
@@ -423,17 +445,96 @@ jobs:
   # bills macOS minutes at 10x), and -- the point of the split -- a broken
   # Xcode image or a disabled Homebrew cask can no longer stop the Windows
   # build from happening.
+  # The offline translator is a PyInstaller one-file build, and PyInstaller
+  # does not cross-compile: rom-translate.exe can only be made on Windows.
+  # The macOS and Linux jobs build their own helper in place; the win64 job
+  # runs on Linux, so it had none -- build.sh skips a missing helper without
+  # a word, and every Windows release shipped "Offline translator is missing
+  # from this build".  Build it here and hand it over.
+  windows-translator:
+    name: Windows offline translator
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build offline translation helper
+        run: |
+          python -m pip install -r tools/translation/requirements.txt
+          python tools/translation/build_desktop.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rom-translate-win
+          path: translation/rom-translate.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  # The Linux helper, for both architectures, built inside Debian bullseye:
+  # glibc 2.31 is the oldest the AppImages promise (scripts/linux-arm64/
+  # Dockerfile), and a PyInstaller binary carries the glibc of the machine it
+  # was built on -- ubuntu-latest's would not start on a bullseye or 20.04
+  # system.  arm64 feeds the arm64 AppImage and the RG34XXSP port, neither of
+  # which had any helper at all.
+  linux-translator:
+    name: Linux offline translator (${{ matrix.arch }})
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: python:3.12-slim-bullseye
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build offline translation helper
+        run: |
+          set -eu
+          # PyInstaller reads shared-library dependencies with objdump
+          apt-get -o Acquire::Retries=3 update
+          apt-get install -y --no-install-recommends binutils
+          python -m pip install -r tools/translation/requirements.txt
+          python tools/translation/build_desktop.py
+          ls -l translation/rom-translate
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rom-translate-linux-${{ matrix.arch }}
+          path: translation/rom-translate
+          if-no-files-found: error
+          retention-days: 1
+
   windows:
     name: Windows (win64)
-    needs: version
+    needs: [version, windows-translator]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: rom-translate-win
+          path: translation
 
       - name: Build Windows (win64)
         run: |
           set -euo pipefail
           bash scripts/build.sh win --version "${{ needs.version.outputs.version }}"
+
+      # build.sh packs the helper only if it is there; a release must have it
+      - name: Verify the offline translator is packed
+        run: |
+          set -euo pipefail
+          listing="$(unzip -l dist/win/Gen2Recomped-win64.zip)"
+          grep -q "translation/rom-translate.exe" <<<"$listing" \
+            || { echo "::error::rom-translate.exe is missing from the Windows zip"; exit 1; }
 
       - name: Stage the Windows archive
         run: |
@@ -467,10 +568,17 @@ jobs:
   # business needing it.
   linux:
     name: Linux (x86_64 AppImage)
-    needs: version
+    needs: [version, linux-translator]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: rom-translate-linux-x86_64
+          path: translation
+      - name: Mark the translator executable
+        run: chmod +x translation/rom-translate
 
       # Never run `apt-get update` unconditionally: GitHub's
       # azure.archive.ubuntu.com mirror stalls for 10-60 minutes at random
@@ -497,6 +605,8 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/build.sh linux --version "${{ needs.version.outputs.version }}"
+          [ -f .bazinga/work/linux-appdir/translation/rom-translate ] \
+            || { echo "::error::rom-translate is missing from the Linux AppImage"; exit 1; }
 
       - name: Stage the Linux archive
         run: |
@@ -542,6 +652,17 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+
+      # Cloud-save sign-in credentials: this job packs its OWN game.love, so it
+      # needs its own copy (the payload job's does not reach it).
+      - name: Write cloud-save credentials
+        env:
+          GOOGLE_DESKTOP_CLIENT_ID: ${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }}
+          GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
+          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+        run: bash scripts/write_cloud_clients.sh cloud_clients.lua
 
       # --package-only fetches the LOVE sources, zips game.love and applies the
       # plist overlay, then stops before xcodebuild -- which is what lets the
@@ -675,6 +796,17 @@ jobs:
           # here must print this digest or it cannot upgrade the last one.
           EXPECTED_CERT: 91ff1bad5d97a2cafd3da7ecf04a6b084792073dcd28df63db812a787cfb24ea
 
+      # Cloud-save sign-in credentials: this job packs its OWN game.love, so it
+      # needs its own copy (the payload job's does not reach it).
+      - name: Write cloud-save credentials
+        env:
+          GOOGLE_DESKTOP_CLIENT_ID: ${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }}
+          GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
+          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+        run: bash scripts/write_cloud_clients.sh cloud_clients.lua
+
       - name: Build APK
         run: |
           set -euo pipefail
@@ -744,11 +876,19 @@ jobs:
   # on Linux is both faster and independently failable.
   rg34xxsp:
     name: Anbernic RG34XXSP (PortMaster)
-    needs: version
+    needs: [version, linux-translator]
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
+
+      # the handheld is aarch64: the arm64 helper, not this runner's
+      - uses: actions/download-artifact@v7
+        with:
+          name: rom-translate-linux-arm64
+          path: translation
+      - name: Mark the translator executable
+        run: chmod +x translation/rom-translate
 
       # zip, unzip, curl and file are ALL preinstalled on the ubuntu-latest
       # runner image, so this step only has to cover a future image that
@@ -777,7 +917,7 @@ jobs:
           set -euo pipefail
           # Payload comes from scripts/pack_love.sh, same as every other
           # platform, so this pack cannot drift from the desktop build.
-          bash ./build-rg34xxsp.sh --version "${{ needs.version.outputs.version }}"
+          REQUIRE_TRANSLATOR=1 bash ./build-rg34xxsp.sh --version "${{ needs.version.outputs.version }}"
 
       - name: Stage the pack
         run: |
@@ -969,11 +1109,18 @@ jobs:
   # ------------------------------------------------------------------ arm64
   arm64:
     name: Linux ARM64 AppImage
-    needs: [version, payload]
+    needs: [version, payload, linux-translator]
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: rom-translate-linux-arm64
+          path: translation
+      - name: Mark the translator executable
+        run: chmod +x translation/rom-translate
 
       - uses: actions/download-artifact@v7
         with:

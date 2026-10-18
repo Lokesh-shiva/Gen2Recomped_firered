@@ -90,6 +90,7 @@ local UV_UNITS = 16
 -- every model in the game off at the waist.
 local SHADER = [[
 varying float vModelY;
+varying float vModelZ;
 #ifdef VERTEX
 uniform mat4 mvp;
 // x = how much a unit of HEIGHT spreads; y = THE HEIGHT IT SPREADS ABOUT.
@@ -139,6 +140,7 @@ vec4 position(mat4 transform_projection, vec4 vertex_position)
 {
     vec4 turned = turnToCamera(vertex_position);
     vModelY = turned.y;
+    vModelZ = turned.z;
     vec4 p = mvp * turned;
     // THE ONE PERSPECTIVE TERM, and the reason it is here and not in `mvp`.
     //
@@ -165,9 +167,20 @@ vec4 position(mat4 transform_projection, vec4 vertex_position)
 uniform vec4 uvRotScale;
 uniform vec2 uvTranslate;
 uniform float yCut;
+// (lo, hi] in model z: a band of the cut pass that is left unpainted -- the
+// ground just BEHIND the player, see Gen4Ground:livePass. Empty by default.
+uniform vec2 zKeep;
+// THE DS'S DEPTH FOG (Gen4DepthFog): x = how the depth turns back into eye
+// distance (0 off, 1 linear a + z * b, 2 perspective near a far b, 3 ortho),
+// w = the cartridge camera is orthographic; B = that camera's near / far, the
+// fog offset and the depth one table entry spans; C = the colour
+uniform vec4 depthFogA;
+uniform vec4 depthFogB;
+uniform vec3 depthFogC;
 vec4 effect(vec4 colour, Image tex, vec2 uv, vec2 screen)
 {
     if (vModelY <= yCut) { discard; }
+    if (vModelZ > zKeep.x && vModelZ <= zKeep.y) { discard; }
     vec2 t = vec2(uvRotScale.x * uv.x + uvRotScale.y * uv.y,
                   uvRotScale.z * uv.x + uvRotScale.w * uv.y) + uvTranslate;
     vec4 texel = Texel(tex, t);
@@ -176,7 +189,30 @@ vec4 effect(vec4 colour, Image tex, vec2 uv, vec2 screen)
     // occludes whatever is behind it.  Discarding is what makes that correct
     // rather than merely usually correct.
     if (texel.a < 0.5) { discard; }
-    return texel * colour;
+    vec4 c = texel * colour;
+    if (depthFogA.x > 0.5) {
+        float zn = gl_FragCoord.z * 2.0 - 1.0;
+        float d;
+        if (depthFogA.x < 1.5) {
+            d = depthFogA.y + zn * depthFogA.z;
+        } else if (depthFogA.x < 2.5) {
+            d = 2.0 * depthFogA.y * depthFogA.z / (depthFogA.z + depthFogA.y - zn * (depthFogA.z - depthFogA.y));
+        } else {
+            d = depthFogA.y + (zn * 0.5 + 0.5) * (depthFogA.z - depthFogA.y);
+        }
+        float rn = depthFogB.x;
+        float rf = depthFogB.y;
+        float dz;
+        if (depthFogA.w > 0.5) {
+            dz = (d - rn) / (rf - rn) * 2.0 - 1.0;
+        } else {
+            dz = (rf + rn) / (rf - rn) - 2.0 * rf * rn / ((rf - rn) * max(d, 1.0));
+        }
+        float depth = (dz * 0.5 + 0.5) * 32767.0;
+        float dens = clamp((depth - depthFogB.z) / depthFogB.w * 4.0 / 127.0, 0.0, 124.0 / 127.0);
+        c.rgb = mix(c.rgb, depthFogC, dens);
+    }
+    return c;
 }
 #endif
 ]]
@@ -859,7 +895,8 @@ local function grassCutout(path)
   img:setWrap("repeat", "repeat")
   grassCutouts[path] = img
   return img
-end
+end
+
 -- One standing card per TILE, not per triangle: a chunk's grass is merged into
 -- quads that span two tiles as often as one, so the triangles are grouped back
 -- onto the tile grid the cartridge measured (`tileUnits`, 16).
@@ -1010,7 +1047,8 @@ local function addGrassCards(self, shape, vertices, positions, tileUnits)
     lo = lo, hi = hi,
   }
   return true
-end
+end
+
 -- ---------------------------------------------------------------------------
 -- SPLITTING A WALL COURSE INTO ITS SIDING AND ITS GLASS
 -- ---------------------------------------------------------------------------
@@ -1831,6 +1869,7 @@ function Gen4Model.new(record)
   local self = setmetatable({}, Gen4Model)
   self.name = record.name
   self.posScale = record.posScale or 1
+  self.scalingRule = record.scalingRule
   self.bounds = record.bounds
   self.shapes = {}
   -- The model's own node transforms and the bytecode that arranges them.  A
@@ -1838,6 +1877,7 @@ function Gen4Model.new(record)
   -- and costs nothing; the briefcase's do the work.
   self.nodes = record.nodes or {}
   self.ops = record.ops or {}
+  self.inverseBind = record.inverseBind
 
   for _, shape in ipairs(record.shapes) do
     local image
@@ -1849,7 +1889,10 @@ function Gen4Model.new(record)
         -- will be drawn several times their own size, and smoothing them turns
         -- a Poke Ball's seam into a smear.
         image:setFilter("nearest", "nearest")
-        image:setWrap("repeat", "repeat")
+        -- the material's own edge mode (Gen4ModelPack.wrapOf); repeat when
+        -- the cache says nothing, which is what every model assumed before
+        local wrap = shape.wrap
+        image:setWrap(wrap and wrap[1] or "repeat", wrap and wrap[2] or "repeat")
       end
     end
 
@@ -1893,17 +1936,44 @@ function Gen4Model.new(record)
     -- (which knows the map) and by screens that have no map at all, and a
     -- model with no light must keep drawing exactly as it did.
     local shade = record.shade
+    -- ...and the map's fog, which paints every shape that has not opted out
+    -- (Gen4ModelPack `noFog`) in its colour
+    local fog = record.fog
     -- The shape's own box, kept while the vertices are still here.  It is what
     -- `framing` works from: the header states a bounding box too, but it does
     -- not agree with the geometry on two thirds of this cartridge's models, so
     -- the measured one is the one to trust.
     local lo = { math.huge, math.huge, math.huge }
     local hi = { -math.huge, -math.huge, -math.huge }
+    -- A CACHE OLDER THAN THE `unlit` FLAG still has lightmapped shapes, and
+    -- they are the ones whose vertices carry BAKED COLOURS. Reported from
+    -- play: "the indoors of buildings are missing their lighting and appear
+    -- dark in platinum". Every shape of the Jubilife Pokemon Center's room
+    -- issues COLOR and no NORMAL (vertex colours 132..255), and shaded with
+    -- the decoder's resting normal its floor came out at 0.61 x 0.774 of its
+    -- texture -- under half. A shape lit by NORMAL commands issues no COLOR,
+    -- so its vertices stay pure white: a non-white vertex is the lightmap.
+    local unlit = shape.unlit
+    -- A CACHE THAT CARRIES THE FLAG says lit by leaving it off (Gen4Ground
+    -- sets `lightKnown`): the DS replaces a vertex's colour when a NORMAL
+    -- lights it, so whatever colour such a shape packed is not drawn
+    local litByNormal = (unlit == nil and shape.lightKnown and not Gen4Model.legacyLight) and true or false
+    if litByNormal then unlit = false end
+    if unlit == nil and shade and lit then
+      for i = 0, count - 1 do
+        local at = i * stride
+        local r, g, b = shape.vertices:byte(at + 11, at + 13)
+        if (r and r < 255) or (g and g < 255) or (b and b < 255) then unlit = true; break end
+      end
+    end
     for i = 0, count - 1 do
       local at = i * stride
       local r, g, b = shape.vertices:byte(at + 11, at + 13)
       r, g, b = r or 255, g or 255, b or 255
-      if shade and lit then
+      if litByNormal and shade and lit then r, g, b = 255, 255, 255 end
+      -- ...not on a shape with no NORMALs (Gen4ModelPack `unlit`):
+      -- its vertex colours ARE its lighting
+      if shade and lit and not unlit then
         -- The normal, back out of its three signed bytes.  Absent on a cache
         -- imported before the stride changed, and `s8` answers nil there --
         -- which leaves the colour alone rather than multiplying it by a
@@ -1917,6 +1987,9 @@ function Gen4Model.new(record)
           g = g * (lg or 1)
           b = b * (lb or 1)
         end
+      end
+      if fog and not shape.noFog then
+        r, g, b = (fog[1] or 0) * 255, (fog[2] or 0) * 255, (fog[3] or 0) * 255
       end
       local x = s16(shape.vertices, at) / FX16 * self.posScale
       local y = s16(shape.vertices, at + 2) / FX16 * self.posScale
@@ -2234,7 +2307,8 @@ function Gen4Model.new(record)
                     if b.area > (wallBand and wallBand.area or 0) then
                       wallBand = b
                     end
-                  end                end
+                  end
+                end
               end
             end
           end
@@ -2355,7 +2429,7 @@ function Gen4Model:restPose()
     self.rest = Gen4Nsbmd.pose(self.ops, function(index)
       local node = nodes[index + 1]
       return node and node.matrix
-    end)
+    end,self.inverseBind,self.scalingRule)
   end
   return self.rest
 end
@@ -2367,12 +2441,14 @@ end
 -- to the model's own.  That fallback is not a nicety -- an animation with
 -- fewer joints than the model has nodes would otherwise collapse the rest to
 -- the origin, which reads as geometry gone missing rather than as a mismatch.
-function Gen4Model:posed(matrixOf)
+-- Optional billboardOf(worldMatrix, yOnly) supplies the active camera's
+-- orientation; callers without a camera keep the ordinary node transform.
+function Gen4Model:posed(matrixOf, billboardOf)
   if not matrixOf then return self:restPose() end
   local nodes = self.nodes
   return Gen4Nsbmd.pose(self.ops, function(index)
     return matrixOf(index) or (nodes[index + 1] and nodes[index + 1].matrix)
-  end)
+  end,self.inverseBind,self.scalingRule,billboardOf)
 end
 
 -- draw(viewProjection, pose) -- into whatever canvas is set.
@@ -2478,6 +2554,11 @@ local NO_SPREAD = { 0, 0 }
 -- so a caller that never touches it renders exactly as it did.  `Gen4Ground`
 -- sets it immediately before its chunk draws and puts it back to zero after.
 Gen4Model.billboardYaw = 0
+-- G4OLDLIGHT=1: the guess from packed colours alone, for comparing
+Gen4Model.legacyLight = (os.getenv and os.getenv("G4OLDLIGHT")) and true or nil
+-- A model-z band the height cut leaves unpainted, or nil. Set per chunk by
+-- the canopy pass; see `Gen4Ground:livePass`.
+Gen4Model.zKeep = nil
 
 -- `depthCompare` defaults to "less", which is right for every pass that draws
 -- a piece of geometry ONCE.
@@ -2510,23 +2591,44 @@ function Gen4Model:draw(viewProjection, pose, materials, yCut, spread, depthComp
   -- overdrawn pixels.
   g.setMeshCullMode("none")
   g.setColor(1, 1, 1, 1)
-  if shaderCuts then shader:send("yCut", tonumber(yCut) or NO_CUT) end
+  if shaderCuts then
+    shader:send("yCut", tonumber(yCut) or NO_CUT)
+    -- Only meaningful with a cut, and cleared otherwise -- an unset uniform
+    -- reads as (0, 0), an empty band, but stating it is what keeps a stale
+    -- band from one pass out of the next.
+    local band = yCut and Gen4Model.zKeep
+    shader:send("zKeep", band and { band[1], band[2] } or { 1.0e9, -1.0e9 })
+  end
   shader:send("heightSpread", spread or NO_SPREAD)
+  -- THE DEPTH FOG (Gen4DepthFog), off unless a pass has turned it on
+  if shaderCuts then
+    local fog = Gen4Model.depthFog
+    shader:send("depthFogA", fog and fog.a or { 0, 0, 0, 0 })
+    if fog then
+      shader:send("depthFogB", fog.b)
+      shader:send("depthFogC", fog.c)
+    end
+  end
   -- SENT ON EVERY DRAW, for the reason `yCut` and `heightSpread` are: an unset
   -- uniform reads as zero, and relying on that is how the texture matrix once
   -- collapsed every model to a single texel.
   shader:send("billboardYaw", tonumber(Gen4Model.billboardYaw) or 0)
+  -- a caller's TINT (Gen4Model.drawTint, set around one draw): Giratina's
+  -- shadow is the field-effect model drawn as a dark translucent silhouette
+  local tint = Gen4Model.drawTint
   for _, shape in ipairs(self.shapes) do
     -- Per shape, because a model mixes opaque walls with a translucent shadow
     -- and one colour for the whole model would make one of them wrong.
-    g.setColor(1, 1, 1, shapeAlpha(shape))
+    if tint then g.setColor(tint[1], tint[2], tint[3], shapeAlpha(shape) * (tint[4] or 1))
+    else g.setColor(1, 1, 1, shapeAlpha(shape)) end
     local place = pose[shape.index]
-    if shape.matrixSlots and pose.stack then
+    local palette=(pose.stacks and pose.stacks[shape.index]) or pose.stack
+    if shape.matrixSlots and palette then
       -- A display list can restore a different joint for every vertex.
       -- Giratina's tentacles share shapes but use separate matrix slots.
       for i,v in ipairs(shape.bindVertices) do
         local slot=shape.matrixSlots:byte(i)
-        local m=pose.stack[slot] or place
+        local m=palette[slot] or place
         local x,y,z=v[1],v[2],v[3]
         if m then
           x,y,z=m[1]*x+m[2]*y+m[3]*z+m[4],
@@ -2540,6 +2642,11 @@ function Gen4Model:draw(viewProjection, pose, materials, yCut, spread, depthComp
     shader:send("mvp", place and multiply(viewProjection, place) or viewProjection)
 
     local state = materials and shape.material and materials[shape.material]
+    -- a material-colour animation's alpha (Gen4TexAnim, BMA0)
+    if state and state.alpha then
+      local r, gg, b, a0 = g.getColor()
+      g.setColor(r, gg, b, a0 * state.alpha)
+    end
     local uv = state and state.uv
     if uv then
       shader:send("uvRotScale", { uv[1], uv[2], uv[3], uv[4] })

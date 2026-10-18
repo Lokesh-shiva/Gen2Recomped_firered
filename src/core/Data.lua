@@ -165,12 +165,137 @@ local GEN4_MODULES = {
 local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         "gen4_naming", "gen4_dex", "gen4_models",
                         "gen4_terrain", "gen4_distortion_world",
-                        "gen4_species_sprites",
+                        "gen4_weather_sys", "gen4_mail_gra", "gen4_voltorb_flip", "gen4_follow_mon", "gen5_battle_ui", "gen5_battle_scene", "gen5_evolution", "gen4_hgss_menu_art", "gen4_hgss_bag_art", "gen4_hgss_summary_art", "gen5_menu_art", "gen5_bag_art", "gen5_summary_art", "gen4_hgss_dex_art", "gen4_hgss_box_art", "gen5_dex_art", "gen5_box_art", "gen4_hgss_pokegear_art", "gen4_legend_art", "gen4_hgss_safari", "gen4_alph_puzzle", "gen4_hgss_field_moves", "gen4_hgss_certificates",
+                        "gen4_species_sprites", "gen4_hgss_starter_art", "gen4_hgss_oak_art", "gen4_hgss_boot_art", "gen4_hgss_title_art", "gen5_boot_art", "gen5_main_menu_art", "gen5_juniper_art", "gen5_opening",
                         "gen4_move_anims", "gen4_particles",
                         "gen4_cellactors",
+                        -- HGSS scripted Pokegear calls (Gen4HgssPhoneCall)
+                        "gen4_hgss_phone_call",
                         -- the name -> archive member hop for `var_0`..`var_f`;
                         -- see the paragraph above for what its absence cost
                         "gen4_overworld",
+                        -- ...AND THE FIFTH INSTANCE OF THE SAME BUG, moved here
+                        -- for the same reason `gen4_overworld` was.
+                        --
+                        -- It really was extractor input: the stage lowers a
+                        -- behaviour grid into the 302 map defs that carry one.
+                        -- The other 291 -- every OUTDOOR map, and so every cave
+                        -- mouth and every bike slope in Sinnoh -- keep theirs
+                        -- only in the land chunk's permission block, which is
+                        -- this module and nothing else.
+                        --
+                        -- `Gen4Ground:behaviourAt` reads it now. Without it the
+                        -- directional cave entrances and the bike slopes have
+                        -- no data at all and silently do nothing -- which is
+                        -- exactly how it was reported: *"walking directly into
+                        -- the cave entrance still doesnt work"*.
+                        "gen4_map_permissions",
+                        -- THE MATRICES, for their ALTITUDE section -- how far up
+                        -- each chunk is drawn (`Gen4Ground:chunkLift`). Written
+                        -- on every import and loaded by nothing, so the lift was
+                        -- zero in the game while a harness that loaded the file
+                        -- itself showed it working. Reported twice: *"map
+                        -- boundaries arent at the proper height"*, then *"i
+                        -- reloaded the game and the borders still looks the same"*.
+                        "gen4_map_matrices",
+                        -- MT. CORONET'S FEEBAS TILES (Gen4Feebas, Gen4Fishing).
+                        -- A cache imported before the stage existed has none,
+                        -- and Feebas simply never bites -- as before.
+                        "gen4_feebas",
+                        -- THE "!" OVER A TRAINER WHO HAS SEEN YOU (Gen4Emotes).
+                        "gen4_emotes",
+                        -- THE MOVE BUTTONS' TYPE COLOURS, MASKS AND PP PALETTE
+                        -- (Gen4MoveButtons) -- what the battle menu's buttons
+                        -- carry besides their names.
+                        "gen4_move_buttons", "gen4_encounter_effects",
+                        -- THE TROPHY GARDEN AND GREAT MARSH DAILY LISTS
+                        -- (Gen4SpecialEncounters).
+                        "gen4_special_encounters",
+                        -- PLATINUM'S TOWN MAP: its sprites, name blocks and
+                        -- fly locations (Gen4TownMap).
+                        "gen4_town_map",
+                        -- ...and its bottom screen: the zoomed map, zoom
+                        -- button, signposts and descriptions (Gen4TownMapArt).
+                        "gen4_town_map_art", "gen4_town_map_ink",
+                        -- THE AREA-NAME SIGNS and the per-header label data
+                        -- (Gen4AreaPopup).
+                        "gen4_area_popup",
+                        -- THE SHARD MOVE TUTORS' moves, costs and masks
+                        -- (Gen4MoveTutor).
+                        "gen4_move_tutor",
+                        -- `sEggMoves` from overlay 5 (Gen4EggMoves).
+                        "gen4_egg_moves",
+                        -- the Game Corner's prize table (Gen4GameCorner).
+                        "gen4_game_corner",
+                        -- the seal table and the daily seal stocks (Gen4Seals).
+                        "gen4_seals",
+                        -- each berry's flavors and smoothness (Gen4BerryData).
+                        "gen4_berry_flavors",
+                        -- each trainer class's eyes-meet theme (Gen4TrainerMusic).
+                        "gen4_trainer_music",
+                        "gen4_battle_music",
+                        -- contest_data.narc: contestants, judges, dress-ups, themes.
+                        "gen4_contest", "gen4_contest_art", "gen4_dressup", "gen4_journal_art",
+                        -- the Battle Tower's trainers and Pokemon sets (Gen4BattleTowerData).
+                        "gen4_battle_tower",
+                        -- the Battle Frontier's scene scripts (Gen4FrontierScripts).
+                        "gen4_frontier_scripts",
+                        -- ...and their backdrops (Gen4FrontierArt).
+                        "gen4_frontier_art",
+                        -- the Poffin cooking, case and icon art (Gen4PoffinArt).
+                        "gen4_poffin_art",
+                        -- the Options screen's backdrop and cursor (Gen4OptionsArt).
+                        "gen4_options_art",
+                        -- the mining game's buttons, sheets and sprites
+                        -- (Gen4MiningArt) and the menus' cursor and
+                        -- Underground icons (Gen4MenuArt).
+                        "gen4_mining_art", "gen4_menu_art",
+                        -- the party screen's panels, sprites and colours (Gen4PartyArt).
+                        "gen4_party_art", "gen4_party_ink",
+                        -- the battle's cursor, party balls and party gauge
+                        -- with their frame timings (Gen4BattleArt).
+                        "gen4_battle_art", "gen4_battle_anims",
+                        -- the bag's sprites, blits and touch screen (Gen4BagArt)
+                        -- and the trainer case in Platinum's colours
+                        -- (Gen4TrainerCardArt).
+                        "gen4_bag_art", "gen4_trainer_card_art",
+                        -- the naming screen's sprites and entry colours (Gen4Naming).
+                        "gen4_naming_art", "gen4_naming_ink",
+                        -- the PC storage screen's layers, sprites and ink
+                        -- (Gen4BoxArt), the main menu's two frames and
+                        -- colours (Gen4MainMenuArt) and the Poke Mart
+                        -- counter's art (Gen4ShopArt).
+                        "gen4_box_art", "gen4_box_ink",
+                        "gen4_main_menu_art", "gen4_main_menu_ink",
+                        "gen4_shop_art",
+                        -- the summary screen's sprites, bars, bottom screen
+                        -- and window colours (Gen4SummaryArt).
+                        "gen4_summary_art", "gen4_summary_ink",
+                        -- the Hall of Fame and credits art and staff roll (Gen4EndingArt).
+                        "gen4_ending_art", "gen4_ending",
+                        -- the Poketch apps' sprites (against each app's own OBJ
+                        -- VRAM), BG tile sheets, animations and tilemaps
+                        -- (Gen4PoketchArt); the evolution scene's particles
+                        -- (Gen4EvolutionArt).
+                        "gen4_poketch_art", "gen4_poketch_ink",
+                        "gen4_evolution_art", "gen4_evolution_ink",
+                        -- the in-game trade cutscene's backgrounds, sprites and
+                        -- Poke Ball (Gen4TradeArt; Platinum and HGSS alike).
+                        "gen4_trade_art",
+                        -- Black / White's NPC trade demo (Gen5TradeArt)
+                        "gen5_trade_art",
+                        -- Black / White's gift box starter app (Gen5StarterArt)
+                        "gen5_starter_art",
+                        -- Black / White's field effects: phenomena, the rod's
+                        -- lure, ripples (Gen5FieldEffects, /a/0/7/5)
+                        "gen5_field_effects",
+                        -- the field start menu's icons in both palettes and
+                        -- their swell/wiggle animations (Gen4StartMenuArt).
+                        "gen4_start_menu_art", "gen4_start_menu_ink",
+                        -- each trainer class's prize multiplier (Gen4TrainerPrize).
+                        "gen4_trainer_prize",
+                        -- each trainer class's front picture (the Hall of Fame's player).
+                        "gen4_trainer_sprites",
                         -- `/data/arealight.narc`: four members of fifteen
                         -- time-of-day templates, selected by the `lighting` byte
                         -- that `gen4_terrain`'s `maps` table has carried on all
@@ -180,6 +305,14 @@ local GEN4_PREFIXED = { "gen4_menus", "gen4_graphics", "gen4_intro",
                         -- world is drawn unlit -- which is how the four above it
                         -- were found, one report at a time.
                         "gen4_arealight",
+                        -- WHICH OF BANK 617'S 2,497 LINES EACH TRAINER SPEAKS.
+                        -- The lines themselves are in `text` and always were;
+                        -- this is the index, and without it loaded
+                        -- `g4_print_trainer_dialogue` has nothing to look a
+                        -- trainer up in, which is the fifth instance of
+                        -- "written on every import, loaded by nothing" waiting
+                        -- to happen. Listed from the day the stage was added.
+                        "gen4_trainer_messages",
                         -- the 71 per-area prop allow-lists: a chunk object's
                         -- model id is a GLOBAL build_model.narc member, and one
                         -- outside its area's list draws `dmybox00` rather than
@@ -225,7 +358,12 @@ local GEN3_BORROWED = {}
 local OPTIONAL = { "audio", "palettes", "icons", "unown_puzzle", "unown_dex",
                    "trainer_headers", "font", "sprites", "field",
                    "battle_anims", "map_layouts", "map_tilesets",
-                   "map_scripts", "scenes", "save_layout", "songs" }
+                   "map_scripts", "scenes", "save_layout", "songs",
+                   -- the Battle Frontier trainers' easy chat lines (Emerald)
+                   "gen3_frontier_speech",
+                   -- the in-game trade sequence's art and tables
+                   -- (Emerald/FireRed, src/import/Gen3TradeArt.lua)
+                   "gen3_trade_art" }
 
 -- Vanilla defaults for rules exposed through the constants registry.  A
 -- value has to exist before a mod can patch it; each one matches the
@@ -875,6 +1013,9 @@ local function ensureGen2HomeTextFallbacks(self)
 end
 
 function Data:applyVersionedFieldData()
+  if require("src.core.GameVersion").get()=="polishedcrystal" and self.audio then
+    self.audio.gen2Dialect="polishedcrystal"
+  end
   if require("src.core.GameVersion").isYellow() then
     self.field.trades = copy(YELLOW_TRADES)
     -- The old man's catch demo is a RATTATA in Yellow
@@ -1388,7 +1529,10 @@ function Data:seedDefaults()
               slot.moves = (#real > 0) and real or nil
             end
             if slot.dvs == nil and slot.ivScale ~= nil then
-              local iv = math.floor((tonumber(slot.ivScale) or 0) * 31 / 255)
+              -- ONE BYTE: a cache that read it as a u16 carries the gender /
+              -- ability override above it (370 of HeartGold's 1,776 party
+              -- members), so only the low byte is the scale
+              local iv = math.floor(((tonumber(slot.ivScale) or 0) % 256) * 31 / 255)
               slot.dvs = { hp = iv, attack = iv, defense = iv,
                            speed = iv, spatk = iv, spdef = iv,
                            -- the Gen 1/2 formula reads one `special`; harmless
@@ -1593,7 +1737,11 @@ function Data:seedDefaults()
     then
       local defByHeader, keyByHeader = {}, {}
       for key, def in pairs(self.maps or {}) do
-        if type(def) == "table" and def.header then
+        -- the cartridge's spelling over an `aliasMap` copy (which carries
+        -- `sourceId` and the same header), or the lifts land on whichever
+        -- of the two `pairs` reached last
+        if type(def) == "table" and def.header
+           and not (def.sourceId and defByHeader[def.header]) then
           defByHeader[def.header] = def
           keyByHeader[def.header] = key
         end
@@ -1680,6 +1828,88 @@ function Data:seedDefaults()
           Logger.warn("gen4 distortion world: %d lift(s) had no map or no "
                       .. "offsets and %d had no partner; those floors stay "
                       .. "unreachable", refused, #orphans)
+        end
+      end
+      -- ...AND THE PLATFORMS ARE DRAWN. Reported from play: "the distortion
+      -- world in platinum is all glitched out" -- the player stood in the
+      -- dark on cells that are walkable, because what they stand on there is
+      -- not land but a PROP the overlay places: the lifts' platforms and the
+      -- floor's simple props (overlay 9's tables). Each is a field-effect
+      -- model, member 124 + its prop kind (`sProp3DModelNARCIndexByKind`, a
+      -- straight run 124..148 in the overlay: d33_step01 .. d33_step18, the
+      -- waterfall, tree and rock), at world tile (x, y, z) less the floor's
+      -- offsets (tw_arc's map info) -- 1F's lift at (40, 289, 54) is map tile
+      -- (19, 44), one tile up, exactly the pocket the player went dark in.
+      do
+        local byHeader = {}
+        for _, def in pairs(self.maps or {}) do
+          if type(def) == "table" and def.header and not (def.sourceId and byHeader[def.header]) then
+            byHeader[def.header] = def
+          end
+        end
+        local placed = 0
+        local function place(header, list)
+          local info = dw.maps and (dw.maps[header] or dw.maps[tostring(header)])
+          local def = byHeader[tonumber(header)]
+          if not (info and def and type(list) == "table") then return end
+          def.gen4RuntimeProps = def.gen4RuntimeProps or {}
+          for _, p in ipairs(list) do
+            local kind = tonumber(p.propKind)
+            if kind and kind >= 0 and kind < 25 and p.x and p.z then
+              local props = def.gen4RuntimeProps
+              -- a MOVING platform (it has an index) gets a live record the
+              -- runtime drives -- rafts, lifts (src/world/Gen4DistPlatforms.lua)
+              local live = (p.index or p.group) and { template = p, group = p.group } or nil
+              -- sPropInitialPosOffsetByKind: the model sits 25 units under
+              -- the tile's centre height and 6 back, and the three large lifts
+              -- 8 west and 8 or 16 further south
+              local ox, oy, oz = 0, -25, -6
+              if kind == 8 or kind == 16 then ox, oz = -8, 2
+              elseif kind == 18 then ox, oz = -8, 10
+              elseif kind >= 20 and kind <= 23 then oy = -32
+              elseif kind == 24 then oy, oz = -14, 8 end
+              props[#props + 1] = { model = 124 + kind, archive = "fldeff",
+                distWorld = true, live = live,
+                x = (p.x - (info.offsetX or 0)) * 16 + 8 + ox,
+                y = ((p.y or 0) - (info.offsetAltitude or 0)) * 16 + 8 + oy,
+                z = (p.z - (info.offsetZ or 0)) * 16 + 8 + oz }
+              if live and p.index then
+                def.gen4DistLive = def.gen4DistLive or {}
+                def.gen4DistLive[p.index] = live
+              elseif live then
+                -- a ghost prop: shown or hidden with its group
+                def.gen4DistGhosts = def.gen4DistGhosts or {}
+                table.insert(def.gen4DistGhosts, live)
+              end
+              placed = placed + 1
+            end
+          end
+        end
+        -- IDEMPOTENT: `seedDefaults` runs again after the mod merge, and a
+        -- second pass would stack a second copy of every platform
+        for _, def in pairs(byHeader) do
+          if type(def.gen4RuntimeProps) == "table" then
+            for i = #def.gen4RuntimeProps, 1, -1 do
+              if def.gen4RuntimeProps[i].distWorld then table.remove(def.gen4RuntimeProps, i) end
+            end
+          end
+          def.gen4DistLive, def.gen4DistGhosts = nil, nil
+        end
+        -- every floor takes the overlay's own camera (Gen4Camera.DISTORTION_WORLD)
+        for header in pairs(dw.maps or {}) do
+          local def = byHeader[tonumber(header)]
+          if def then
+            def.gen4DistWorld = (tonumber(header) == 582) and "giratina" or true
+          end
+        end
+        for header, list in pairs(dw.movingPlatforms or {}) do place(header, list) end
+        for header, list in pairs(dw.simpleProps or {}) do place(header, list) end
+        -- the ghost props (the floating stepping stones), from each floor's file
+        for header, info in pairs(dw.maps or {}) do
+          if type(info.ghostProps) == "table" then place(header, info.ghostProps) end
+        end
+        if placed > 0 then
+          Logger.info("gen4 distortion world: %d platform / prop model(s) placed", placed)
         end
       end
     elseif self.isGen4Cache then
@@ -1978,6 +2208,15 @@ function Data:applyMapEditorOverlay(why)
 end
 
 function Data:load()
+  -- THE KEYS THIS TABLE HAD BEFORE ANY GAME WAS LOADED INTO IT, recorded once.
+  -- `unloadGenerated` strips everything else, so the next game starts from
+  -- them. See the comment there for why `_pristineKeys` could not do this.
+  if not rawget(self, "_bootKeys") then
+    local keys = {}
+    for key in pairs(self) do keys[key] = true end
+    keys._bootKeys = true
+    self._bootKeys = keys
+  end
   local dir = os.getenv("POKEPORT_DATA_DIR")
   local required, isGen3Cache, isGen4Cache = requiredModules(dir)
   self.isGen3Cache = isGen3Cache
@@ -2067,6 +2306,23 @@ function Data:load()
   -- Optional, each one, and each says so in the log: a cache imported before
   -- a stage existed must boot and lose that screen's art, not refuse to start.
   if isGen4Cache then
+    -- WHICH GEN 4 CARTRIDGE. A HeartGold or SoulSilver cache writes
+    -- gen4_version with family "hgss"; its script ids dispatch through HGSS's
+    -- own bands and its menus read HGSS's bank (Gen4ScriptBands.setFamily).
+    -- Platinum's cache has no such file and keeps Platinum's tables.
+    do
+      local okV, ver = loadModule(dir, "gen4_version")
+      self.gen4_version = okV and ver or nil
+      local family = okV and type(ver) == "table" and ver.family or "platinum"
+      -- Black and White write gen5_version, with the cartridge's script id table
+      local rows
+      if not okV then
+        local ok5, v5 = loadModule(dir, "gen5_version")
+        if ok5 and type(v5) == "table" and v5.family == "bw" then family, rows = "bw", v5.scriptBands end
+      end
+      local okB, Bands = pcall(require, "src.import.Gen4ScriptBands")
+      if okB then Bands.setFamily(family, rows) end
+    end
     for _, name in ipairs(GEN4_PREFIXED) do
       local ok, mod = loadModule(dir, name)
       self[name] = ok and mod or nil
@@ -2183,6 +2439,26 @@ function Data:load()
                     .. "so the back pic keeps its own palette", marked)
       end
     end
+
+    -- A PLATINUM TM CARRIES NO `machine` RECORD, and that one absent field is
+    -- what made every TM and HM answer "This isn't the time to use that!".
+    -- `ItemEffects.markGen4Machines` has the whole story; it derives the record
+    -- from the cartridge's own `fieldUseFunc` and `constants.tmhmMoves` and
+    -- refuses to stamp anything if the two disagree.  Here rather than in the
+    -- extractor for the same reason as the line above: an existing cache is
+    -- fixed without a re-import.
+    do
+      local okM, stamped = pcall(function()
+        return require("src.inventory.ItemEffects").markGen4Machines(self)
+      end)
+      if okM and (stamped or 0) > 0 then
+        Logger.info("gen4 items: %d TM/HM machine record(s) derived, so the "
+                    .. "bag can teach them", stamped)
+      elseif not okM then
+        Logger.warn("gen4 items: the machine records could not be derived (%s)",
+                    tostring(stamped))
+      end
+    end
   end
   -- Hand the cartridge's own battle tables to the two modules that would
   -- otherwise have to approximate them.  Both are no-ops on a Gen 1/Gen 2
@@ -2247,6 +2523,23 @@ end
 --     those modules to a subsequent Play (see CacheFs.unmountVersion, which
 --     clears the matching read-path overlay).
 function Data:unloadGenerated()
+  -- THE LAST GAME'S DATA, ALL OF IT. `_pristineKeys` is taken at the END of a
+  -- load, so it holds that game's own modules and only a mod's additions were
+  -- ever stripped here. Data:load assigns what the NEXT game has and clears the
+  -- shared optional list, but a Gen 4 / Gen 5 game's own modules
+  -- (gen4_hgss_menu_art, gen4_main_menu_art, gen4_start_menu_art, ...) are read
+  -- in a branch a Gen 2 or Gen 3 load never enters -- so after exiting
+  -- HeartGold to the launcher, Crystal booted with HeartGold's menu art on its
+  -- table, and every screen that asks "is there Gen 4 art here?" drew the wrong
+  -- game's: "i loaded crystal and i see emeralds main menu", "gen2 is loading
+  -- the start menu for gen4". tools/version_switch_check reproduces it. Back to
+  -- the keys the table had before its first load.
+  local boot = rawget(self, "_bootKeys")
+  if boot then
+    for key in pairs(self) do
+      if not boot[key] then self[key] = nil end
+    end
+  end
   local pristine = self._pristineKeys
   if pristine then
     for key in pairs(self) do
@@ -2260,8 +2553,14 @@ function Data:unloadGenerated()
   -- and on every version switch.  A module left in package.loaded is the
   -- other half of that bug: the next Play would be served the PREVIOUS game's
   -- tables, which is exactly what this function exists to prevent.
+  -- ...AND THE GEN 4 / GEN 5 ONES, MARKER INCLUDED. requiredModules decides
+  -- the generation by whether `gen4_map_headers` loads, through `require` --
+  -- so with Platinum's (or HeartGold's, or Black's) still in package.loaded a
+  -- Gen 2 game picked next was read as a Gen 4 cache and refused to boot for
+  -- want of map_layouts. Reported from play on Prism after a Gen 4 session.
+  local extra = { "gen4_map_headers", "gen5_version", "gen4_version" }
   for _, list in ipairs({ SHARED_MODULES, CLASSIC_MODULES, GEN3_MODULES,
-                          OPTIONAL }) do
+                          GEN4_MODULES, GEN4_PREFIXED, OPTIONAL, extra }) do
     for _, name in ipairs(list) do
       package.loaded["data.generated." .. name] = nil
     end

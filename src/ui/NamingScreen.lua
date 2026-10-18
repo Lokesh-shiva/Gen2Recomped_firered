@@ -333,6 +333,7 @@ function NamingScreen.new(game, opts)
   -- species' party icon) -- see the icon helpers above
   self.kind = opts.kind
   self.species = opts.species or (opts.mon and opts.mon.species)
+  self.mon = opts.mon
   self.glyphs = {} -- typed glyphs; multi-byte cells (<PK>, ♂, ×) count as 1
   self.row, self.col = 1, 1
   self.lower = false
@@ -452,13 +453,38 @@ function NamingScreen:jumpToEnd()
   self.row, self.col = edRow, edCol
 end
 
+-- GBA names have a separate three-button column. Crossing either edge of
+-- a key row reaches that column; vertical movement wraps within its column.
+function NamingScreen:moveGen3Cursor(dir)
+  local grid = self:grid()
+  local keys, buttons = #self.pages[self.page].cells, 3
+  local first = keys + 1
+  local inButtons = self.row >= first
+  if dir == "up" or dir == "down" then
+    local delta = dir == "up" and -1 or 1
+    if inButtons then self.row = first + (self.row - first + delta) % buttons
+    else self.row = (self.row - 1 + delta) % keys + 1 end
+  elseif inButtons then
+    local keyRows = { 1, 1, 4 }
+    self.row = keyRows[self.row - first + 1]
+    self.col = dir == "left" and #grid[self.row] or 1
+  else
+    local width = #grid[self.row]
+    local nextCol = self.col + (dir == "left" and -1 or 1)
+    if nextCol < 1 or nextCol > width then
+      local buttonRows = { 0, 1, 1, 2 }
+      self.row, self.col = first + buttonRows[self.row], 1
+    else self.col = nextCol end
+  end
+end
+
 function NamingScreen:update(dt)
   self.blink = (self.blink or 0) + 1
   local GRID = self:grid()
   local caseRow, edRow, edCol, backRow = findMeta(GRID, self.switchLabels)
   local input = self.game.input
   if input:wasPressed("start") then
-    self:confirm()
+    if self.pages then self:jumpToEnd() else self:confirm() end
     return
   end
   if input:wasPressed("select") then -- SELECT also walks the pages
@@ -466,18 +492,22 @@ function NamingScreen:update(dt)
     return
   end
   if input:wasPressed("up") then
+    if self.pages then return self:moveGen3Cursor("up") end
     -- wrapping up from the top row lands on the case-switch cell
     self.row = self.row > 1 and self.row - 1 or caseRow
     self.col = math.min(self.col, #GRID[self.row])
   elseif input:wasPressed("down") then
+    if self.pages then return self:moveGen3Cursor("down") end
     self.row = self.row < #GRID and self.row + 1 or 1
     self.col = math.min(self.col, #GRID[self.row])
   elseif input:wasPressed("left") then
+    if self.pages then return self:moveGen3Cursor("left") end
     -- no horizontal movement on the case-switch row
     if self.row ~= caseRow then
       self.col = self.col > 1 and self.col - 1 or #GRID[self.row]
     end
   elseif input:wasPressed("right") then
+    if self.pages then return self:moveGen3Cursor("right") end
     if self.row ~= caseRow then
       self.col = self.col < #GRID[self.row] and self.col + 1 or 1
     end
@@ -736,7 +766,8 @@ end
 -- its fill, the three sprite plates in the column at x 204, the bracket
 -- cursor at sPageColumnXPos + 38, the underscores and the input arrow.
 function NamingScreen:frlgImage(key)
-  local r = (self.game.data.constants or {}).gen3FRLGNaming
+  local constants = self.game.data.constants or {}
+  local r = constants.gen3EmeraldNaming or constants.gen3FRLGNaming
   local path = r and r.images and r.images[key]
   if not path then return nil end
   self._img = self._img or {}
@@ -781,21 +812,43 @@ function NamingScreen:drawFireRed(rec)
   }
   local faced = Font.hasFace and Font.hasFace("small") and Font.pushFace("small")
   local width = 0
-  for _, h in ipairs(help) do width = width + 8 + Font.width(h[2]) end
-  local hx = 240 - 4 - width
-  for _, h in ipairs(help) do
-    g.setColor(1, 1, 1, 1)
-    if h[1] then g.draw(h[1], hx, 0) end
-    hx = hx + 8
-    text(h[2], hx, 0, white, darkGray, false)
-    hx = hx + Font.width(h[2])
+  if help[1][1] then
+    for _, h in ipairs(help) do width = width + 8 + Font.width(h[2]) end
+    local hx = 240 - 4 - width
+    for _, h in ipairs(help) do
+      g.setColor(1, 1, 1, 1)
+      if h[1] then g.draw(h[1], hx, 0) end
+      hx = hx + 8
+      text(h[2], hx, 0, white, darkGray, false)
+      hx = hx + Font.width(h[2])
+    end
+    if faced then Font.popFace() end
+  else
+    -- no keypad icons in the constants (Emerald's naming screen): boxed hints
+    local hints = { { "+", Strings("MOVE") }, { "A", Strings("OK") }, { "B", Strings("BACK") } }
+    for _, h in ipairs(hints) do width = width + 12 + Font.width(h[2]) + 4 end
+    if faced then Font.popFace() end
+    local hx = 240 - 4 - width + 4
+    if (self.game.data.constants or {}).gen3EmeraldNaming then hx = 2 end
+    for _, h in ipairs(hints) do
+      g.setColor(white)
+      g.rectangle("line", hx + 0.5, 2.5, 10, 9, 3, 3)
+      text(h[1], hx + 2, 0, white, darkGray, true)
+      text(h[2], hx + 12, 0, white, darkGray, true)
+      local f2 = Font.hasFace and Font.hasFace("small") and Font.pushFace("small")
+      hx = hx + 12 + Font.width(h[2]) + 4
+      if f2 then Font.popFace() end
+    end
   end
-  if faced then Font.popFace() end
 
   -- the question and the typed name, on the plate BG3 already draws
   local entryInk = cc.entry and rgb(cc.entry[2]) or darkGray
   local entryShadow = cc.entry and rgb(cc.entry[3]) or { 0.84, 0.84, 0.81, 1 }
-  text(self.title, 72 + 1, 32 + 1, entryInk, entryShadow)
+  local title = self.title
+  if (self.game.data.constants or {}).gen3EmeraldNaming and self.kind == "mon" then
+    title = ((self.game.data.pokemon[self.species] or {}).name or "") .. Strings("'s nickname?")
+  end
+  text(title, 72, 33, entryInk, entryShadow)
   local base = math.floor((240 - self.maxLen * 8) / 2) + 6
   local underscore, arrow = self:frlgImage("underscore"), self:frlgImage("arrow")
   for i = 1, self.maxLen do
@@ -804,7 +857,12 @@ function NamingScreen:drawFireRed(rec)
     if glyph then text(Strings(glyph), x, 48 + 1, entryInk, entryShadow) end
     if underscore then g.draw(underscore, x + 3 - 4, 60 - 4) end
   end
-  if arrow then
+  if arrow and (self.game.data.constants or {}).gen3EmeraldNaming then
+    local at = math.min(#self.glyphs + 1, self.maxLen)
+    if math.floor((self.blink or 0) / 30) % 2 == 0 then
+      g.draw(arrow, base + (at - 1) * 8 - 4, 56 - 4)
+    end
+  elseif arrow then
     -- CreateTextEntrySprites puts this sprite at centre (base-5, 56), and it
     -- stays there regardless of how many letters are already typed.  Its
     -- callback cycles x2={0,-4,-2,-1} every eight frames; it does not blink.
@@ -923,10 +981,13 @@ function NamingScreen:drawIcon()
 end
 
 function NamingScreen:draw()
-  local frlg = self.layout and (self.game.data.constants or {}).gen3FRLGNaming
+  local constants = self.game.data.constants or {}
+  local frlg = self.layout and (constants.gen3EmeraldNaming or constants.gen3FRLGNaming)
   if frlg and frlg.images and frlg.images.bg then
+    local faced = Font.hasFace and Font.hasFace("normal") and Font.pushFace("normal")
     self:drawFireRed(frlg)
     self:drawIcon()
+    if faced then Font.popFace() end
     return
   end
   if self.layout then

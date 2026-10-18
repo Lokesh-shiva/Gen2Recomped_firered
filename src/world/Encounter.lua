@@ -33,6 +33,17 @@ function Encounter.fromSlot(slot, rng)
     if hi < lo then lo, hi = hi, lo end
     level = (hi > lo) and (rng or love.math.random)(lo, hi) or lo
   end
+  -- ...AND GEN 4'S SPELLING OF THE SAME RANGE. Sinnoh's water and rod slots
+  -- carry `minLevel`/`maxLevel` and no `level`, so every surf and fishing
+  -- encounter in Platinum came out with NO level at all. `GetWildMonLevel`
+  -- (src/overlay006/wild_encounters.c) swaps a reversed pair and rolls
+  -- `min + LCRNG_Next() % (max - min + 1)` -- uniform, ends included.
+  if level == nil and slot.minLevel ~= nil then
+    local lo = tonumber(slot.minLevel) or 1
+    local hi = tonumber(slot.maxLevel) or lo
+    if hi < lo then lo, hi = hi, lo end
+    level = (hi > lo) and (rng or love.math.random)(lo, hi) or lo
+  end
   return { species = slot.species, level = level }
 end
 
@@ -48,7 +59,9 @@ end
 -- rateOverride: a rate to use INSTEAD of the table's own, which is how Gen
 -- II's CLEANSE TAG halves it.  Applied before the modifier, so an ability
 -- that doubles the rate and a Cleanse Tag in the bag cancel.
-function Encounter.rollTable(grass, rng, rateMod, rateOverride)
+-- `chooser`, when given, picks the slot once the rate has passed -- Sinnoh's
+-- lead-ability rules (Gen4WildLead) -- and may answer nil for "no encounter".
+function Encounter.rollTable(grass, rng, rateMod, rateOverride, chooser)
   rng = rng or love.math.random
   if not grass or grass.rate == 0 then return nil end
   -- HOW OFTEN, AND OUT OF WHAT.
@@ -69,6 +82,14 @@ function Encounter.rollTable(grass, rng, rateMod, rateOverride)
     if rate > rateMax then rate = rateMax end
   end
   if rate <= 0 or rng(0, rateMax - 1) >= rate then return nil end
+  if chooser then return chooser(grass, rng) end
+  return Encounter.chooseTable(grass, rng)
+end
+
+-- Field moves choose a slot without the walking encounter-rate roll.
+function Encounter.chooseTable(grass, rng)
+  if not grass or not grass.slots then return nil end
+  rng = rng or love.math.random
   -- ...and the same for WHICH slot: Gen 1's thresholds are out of 256 and
   -- Gen 3's are percentages.  A table with twelve slots and ten thresholds
   -- can never reach its last two, and on this cartridge those are the rare
@@ -86,9 +107,9 @@ function Encounter.rollTable(grass, rng, rateMod, rateOverride)
   return nil
 end
 
-function Encounter.roll(encounterDef, rng, rateMod, rateOverride)
+function Encounter.roll(encounterDef, rng, rateMod, rateOverride, chooser)
   if not encounterDef then return nil end
-  return Encounter.rollTable(encounterDef.grass, rng, rateMod, rateOverride)
+  return Encounter.rollTable(encounterDef.grass, rng, rateMod, rateOverride, chooser)
 end
 
 -- Platinum checks a movement roll before the map's rate, and suppresses
@@ -189,15 +210,36 @@ end
 --     and never will be, so the cartridge's own answer is the base slots.
 --   RADAR -- slots 5, 6, 11 and 12, and only when the radar's `shakeType` is 1.
 --     Needs the Poke Radar and its chain, which the port does not model.
---   GREAT MARSH -- replaces the whole table from a daily rotation.
---   `formRates` -- not a slot substitution at all: only the first two entries
---     are read, and only to choose Shellos/Gastrodon's form.
---   `unownTable` -- picks Solaceon Ruins' letter distribution, also not a slot.
+--   GREAT MARSH -- slots 7 and 8 from the day's marsh value, during a Safari
+--     Game. APPLIED: src/world/Gen4DailySlots.lua.
+--   `formRates` -- APPLIED at wild creation: the first two entries choose
+--     Shellos/Gastrodon's form; these are selectors, not percentages.
+--   `unownTable` -- APPLIED at wild creation: Solaceon Ruins' letter group.
 --
 -- Each of the unapplied ones needs SAVE STATE the port does not keep yet, so
 -- they are listed here with their measured indices ready rather than left to be
 -- rediscovered.
 local GEN4_SPAN = 100
+
+-- overlay006/wild_encounters.c: room tables use zero-based MON_DATA_FORM.
+local UNOWN_FORMS = {
+  [0]={0,1,2,6,7,9,10,11,12,14,15,16,18,19,20,21,22,23,24,25},
+  [1]={5},[2]={17},[3]={8},[4]={13},[5]={4},[6]={3},[7]={26,27},
+}
+function Encounter.gen4Form(def, species, rng)
+  if not def then return nil end
+  local id=require('src.pokemon.Gen4Forms').species(species)
+  if id==422 or id==423 then
+    local selector=(def.formRates or {})[id==422 and 1 or 2]
+    if selector==nil then return nil end
+    return tonumber(selector)==0 and 0 or 1
+  elseif id==201 then
+    local tableId=tonumber(def.unownTable)
+    -- InitEncounterFieldParams converts the archive's 1..8 IDs to 0..7.
+    local forms=tableId and UNOWN_FORMS[tableId==0 and 0 or tableId-1]
+    if forms then return forms[(rng or love.math.random)(0,65535)%#forms+1] end
+  end
+end
 
 -- Keyed on the slot array itself, which lives as long as the dataset.
 local gen4Tables = setmetatable({}, { __mode = "k" })
@@ -244,11 +286,44 @@ local gen4Views = setmetatable({}, { __mode = "k" })
 -- and what shape they arrive in.  Gen 1, 2 and 3 fall through it unchanged:
 -- they have no `map.encounters`, so the id is still `mapId`, and no
 -- `grassRate`, so the table is returned exactly as it was.
-function Encounter.forMap(data, mapDef, mapId, hour)
+function Encounter.forMap(data, mapDef, mapId, hour, save)
   local all = data and data.encounters
   if not all then return nil end
   local def = all[(mapDef and mapDef.encounters) or mapId]
+  if data.field and data.field.gen2Swarms then
+    def=require("src.world.Gen2Swarms").forMap(data,save,mapDef,mapId,def)
+  end
   if not isGen4Shaped(def) then return def end
+  -- BLACK / WHITE: seasons, dark grass, phenomena, rippling water (src/world/Gen5WildTables.lua)
+  if def.family == "bw" then return require("src.world.Gen5WildTables").view(def, save) end
+  -- HEARTGOLD / SOULSILVER'S SAFARI ZONE: the area under the player, by time
+  -- of day (src/world/HgssSafariZone.lua)
+  do
+    local Safari = require("src.world.HgssSafariZone")
+    local area, tod = Safari.view(data, save, mapDef, def, hour)
+    if area then
+      local key = ("safari|%d|%d|%s"):format(area, tod, Safari.key(save))
+      local cachedSafari = gen4Views[mapDef]
+      if cachedSafari and cachedSafari.safariKey == key then return cachedSafari end
+      local view = {}
+      for k, v in pairs(def) do view[k] = v end
+      view.safariKey = key
+      view.safariGrass = Safari.slots(data, save, area, 0, tod)
+      view.grass = Encounter.gen4Table(view.safariGrass, def.grassRate)
+      local function water(kind, base)
+        if not base then return nil end
+        local slots = Safari.slots(data, save, area, kind, tod)
+        view["safariSlots" .. kind] = slots
+        return Encounter.gen4Table(slots, base.rate)
+      end
+      view.water = water(1, def.surf)
+      view.oldRod = water(2, def.oldRod)
+      view.goodRod = water(3, def.goodRod)
+      view.superRod = water(4, def.superRod)
+      gen4Views[mapDef] = view
+      return view
+    end
+  end
 
   -- REQUIRED LAZILY, INSIDE THE GEN 4 BRANCH.  `Gen4Encounters` has no requires
   -- of its own so this cannot fail, but Gen 1, 2 and 3 return above and must not
@@ -259,8 +334,20 @@ function Encounter.forMap(data, mapDef, mapId, hour)
   -- THE CACHE IS KEYED ON THE BAND AS WELL AS THE MAP, and it has to be: a view
   -- built at noon holds the DAY species, and returning it after dark is exactly
   -- the bug this substitution exists to fix. Three rebuilds a day per map.
+  -- ...AND ON TODAY'S SWARM, which rewrites slots 1 and 2 on one map a day.
+  local Gen4Swarms = require("src.world.Gen4Swarms")
+  local swarmKey = Gen4Swarms.key(save, mapDef, def)
+  -- ...AND THE TROPHY GARDEN'S / GREAT MARSH'S DAILY PAIR (Gen4DailySlots).
+  local Gen4DailySlots = require("src.world.Gen4DailySlots")
+  swarmKey = swarmKey .. "|" .. Gen4DailySlots.key(data, save, mapDef)
+  -- ...AND HGSS'S MASS OUTBREAK AND NIGHT FISHING (src/world/HgssOutbreaks.lua)
+  local HgssOutbreaks = require("src.world.HgssOutbreaks")
+  local mapCode = (mapDef and mapDef.id) or mapId
+  swarmKey = swarmKey .. HgssOutbreaks.key(def, save, mapCode, hour)
   local cached = gen4Views[def]
-  if cached and cached.timedBand == band then return cached end
+  if cached and cached.timedBand == band and cached.swarmKey == swarmKey then
+    return cached
+  end
 
   -- COPIED RATHER THAN `__index`-ed ONTO THE ORIGINAL, and the difference is
   -- the whole correctness of the refusal below.
@@ -285,15 +372,49 @@ function Encounter.forMap(data, mapDef, mapId, hour)
   -- `timedGrass` returns nil in the morning, which is the cartridge's own
   -- "leave it alone", so the base array flows straight through.
   view.timedGrass = band and Gen4Encounters.timedGrass(def, hour or tonumber(os.date("%H"))) or nil
-  view.grass = Encounter.gen4Table(view.timedGrass or def.grass, def.grassRate)
+  -- THE SWARM, after the day/night swap and on top of it -- the cartridge's
+  -- order (`WildEncounters_ReplaceSwarmEncounters` runs second). Slots 1 and
+  -- 2 are the two 20% slots, so a swarm species is 40% of the grass.
+  view.swarmKey = swarmKey
+  local grassSlots = view.timedGrass or def.grass
+  local swarm = Gen4Swarms.slotsFor(save, mapDef, def)
+  if swarm and type(grassSlots) == "table" then
+    local out = {}
+    for i, slot in ipairs(grassSlots) do
+      out[i] = { level = slot.level, species = slot.species, chance = slot.chance,
+                 minLevel = slot.minLevel, maxLevel = slot.maxLevel }
+    end
+    for n = 1, 2 do if out[n] then out[n].species = swarm[n] end end
+    grassSlots = out
+    view.swarmGrass = out
+  end
+  -- HGSS: night fishing, then the day's outbreak (land 1-2, surf 1, rods)
+  local outbreak = HgssOutbreaks.apply(def, save, mapCode, hour, grassSlots)
+  if outbreak and outbreak.grass then grassSlots = outbreak.grass view.outbreakGrass = outbreak.grass end
+  -- SLOTS 7 AND 8: the Trophy Garden's pair once the National Dex is had, or
+  -- the Great Marsh's daily species during a Safari Game -- after the swarm,
+  -- the cartridge's order.
+  local daily = Gen4DailySlots.slotsFor(data, save, mapDef)
+  if daily and type(grassSlots) == "table" then
+    local out = {}
+    for i, slot in ipairs(grassSlots) do
+      out[i] = { level = slot.level, species = slot.species, chance = slot.chance,
+                 minLevel = slot.minLevel, maxLevel = slot.maxLevel }
+    end
+    for n = 7, 8 do if out[n] and daily[n] then out[n].species = daily[n] end end
+    grassSlots = out
+    view.dailyGrass = out
+  end
+  view.grass = Encounter.gen4Table(grassSlots, def.grassRate)
+  outbreak = outbreak or {}
   view.water = def.surf
-    and Encounter.gen4Table(def.surf.slots, def.surf.rate) or nil
+    and Encounter.gen4Table(outbreak.surf or def.surf.slots, def.surf.rate) or nil
   view.oldRod = def.oldRod
-    and Encounter.gen4Table(def.oldRod.slots, def.oldRod.rate) or nil
+    and Encounter.gen4Table(outbreak.oldRod or def.oldRod.slots, def.oldRod.rate) or nil
   view.goodRod = def.goodRod
-    and Encounter.gen4Table(def.goodRod.slots, def.goodRod.rate) or nil
+    and Encounter.gen4Table(outbreak.goodRod or def.goodRod.slots, def.goodRod.rate) or nil
   view.superRod = def.superRod
-    and Encounter.gen4Table(def.superRod.slots, def.superRod.rate) or nil
+    and Encounter.gen4Table(outbreak.superRod or def.superRod.slots, def.superRod.rate) or nil
   gen4Views[def] = view
   return view
 end

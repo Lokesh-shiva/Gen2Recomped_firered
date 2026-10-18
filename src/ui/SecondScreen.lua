@@ -52,7 +52,53 @@ local SecondScreen = {}
 -- different layout.
 local W, H = 256, 192
 
-SecondScreen.MODES = { "swap", "inset", "display", "off" }
+SecondScreen.MODES = { "swap", "inset", "display", "vertical", "horizontal", "off" }
+
+function SecondScreen.combined(game)
+  local mode=SecondScreen.mode(game)
+  return mode=='vertical' or mode=='horizontal'
+end
+
+-- WHETHER THE BOTTOM SCREEN HAS A PANEL OF ITS OWN THAT IS SHOWING -- the
+-- device's second display, the corner inset, or either half of the window
+-- (vertical / horizontal). One answer for every screen: they were asking it
+-- four different ways (display-or-inset, combined-or-display, ...), so the
+-- party menu drew its own lower screen in the corner and left the Pokétch in
+-- the bottom half of top/bottom mode.
+function SecondScreen.separateMode(mode)
+  return mode == "display" or mode == "inset" or mode == "vertical" or mode == "horizontal"
+end
+function SecondScreen.separate(game)
+  return SecondScreen.separateMode(SecondScreen.mode(game))
+end
+
+function SecondScreen.mainSize(game,w,h)
+  local mode=SecondScreen.mode(game)
+  if mode=='vertical' then return w,h/2 end
+  if mode=='horizontal' then return w/2,h end
+  return w,h
+end
+
+function SecondScreen.windowRect(game)
+  local w,h=love.graphics.getDimensions()
+  local mode=SecondScreen.mode(game)
+  local x,y,aw,ah=0,0,w,h
+  if mode=='vertical' then y,ah=h/2,h/2
+  elseif mode=='horizontal' then x,aw=w/2,w/2
+  else return nil end
+  local s=math.min(aw/W,ah/H)
+  return x+(aw-W*s)/2,y+(ah-H*s)/2,s,x,y,aw,ah
+end
+
+function SecondScreen.composeWindow(game)
+  local canvas=SecondScreen.canvas(game)
+  if not (canvas and SecondScreen.combined(game)) then return end
+  local x,y,s,ax,ay,aw,ah=SecondScreen.windowRect(game)
+  local g=love.graphics
+  g.push('all');g.origin();g.setScissor();g.setShader()
+  g.setColor(0,0,0,1);g.rectangle('fill',ax,ay,aw,ah)
+  g.setColor(1,1,1,1);g.draw(canvas,x,y,0,s,s);g.pop()
+end
 
 -- How big the inset panel is, as a fraction of the window.  The brief asks for
 -- this to be adjustable, so it is a setting and not a constant; these are the
@@ -183,6 +229,7 @@ function SecondScreen.rect(game)
   -- answer `swap` gives, for an entirely different reason.  Callers do not have
   -- to know which: `draw` below is where the two part company.
   if mode == "display" then return 0, 0, 1 end
+  if mode=='vertical' or mode=='horizontal' then return 0,0,1 end
   local scale = SecondScreen.scale(game)
   local w = W * scale
   return W - w - MARGIN, MARGIN, scale
@@ -220,14 +267,22 @@ end
 -- once in the field left `secondScreenUp` false behind them, and every battle
 -- afterwards came up with the menu stowed for no reason they could see.
 function SecondScreen.stowed(game)
-  if SecondScreen.mode(game) == "off" then return true end
-  return options(game).secondScreenStowed and true or false
+  local mode = SecondScreen.mode(game)
+  if mode == "off" then return true end
+  local v = options(game).secondScreenStowed
+  -- SINGLE-SCREEN PLAY (SWAP) STARTS WITH THE BATTLE MENU AS THE STRIP.
+  -- Requested from play: on one screen a swap hides the whole battle every
+  -- time the menu comes up, so until the player asks for the full bottom
+  -- screen (L, or BATTLE MENU: 2ND) the menu sits in the strip under the
+  -- battle. An explicit answer either way is kept.
+  if v == nil then return mode == "swap" end
+  return v and true or false
 end
 
 function SecondScreen.stow(game, away)
   if not (game and game.save and game.save.options) then return false end
   if SecondScreen.mode(game) == "off" then return true end
-  game.save.options.secondScreenStowed = away and true or nil
+  game.save.options.secondScreenStowed = away and true or false
   return SecondScreen.stowed(game)
 end
 
@@ -350,7 +405,7 @@ function SecondScreen.draw(game, body)
   -- restore to.  A live scissor is the one that bites hardest if forgotten: it
   -- is in WINDOW space, and left set it clips the canvas to wherever the
   -- renderer happened to be drawing.
-  if SecondScreen.mode(game) == "display" then
+  if SecondScreen.mode(game) == "display" or SecondScreen.combined(game) then
     local canvas = surface(game)
     if canvas then
       local previous = g.getCanvas()
@@ -358,6 +413,11 @@ function SecondScreen.draw(game, body)
       g.setCanvas(canvas)
       g.origin()
       g.setScissor()
+      -- This target has no world stencil/depth buffer or palette shader.
+      -- Inheriting those from the top screen can hide the watch shell.
+      if g.setShader then g.setShader() end
+      if g.setStencilTest then g.setStencilTest() end
+      if g.setDepthMode then g.setDepthMode() end
       g.setColor(1, 1, 1, 1)
       g.clear(0, 0, 0, 1)
       if game.secondScreenNativePanel then
@@ -519,7 +579,12 @@ function SecondScreen.injectTouch(game, method, id, x, y)
     local sw, sh = surfaceSize(game)
     x, y = x * lw / sw, y * lh / sh
   end
-  if not (x and y) or x < 0 or y < 0 or x >= lw or y >= lh then return false end
+  if not (x and y) then return false end
+  local captured=game.pointerOwners and game.pointerOwners[id]
+  if (x<0 or y<0 or x>=lw or y>=lh)
+     and not (captured and (method=='touchmoved' or method=='touchreleased')) then
+    return false
+  end
   local handler = game[method]
   if type(handler) ~= "function" then return false end
   local was = game.secondScreenInjecting
@@ -530,6 +595,12 @@ function SecondScreen.injectTouch(game, method, id, x, y)
 end
 
 function SecondScreen.toLocal(game, px, py)
+  if SecondScreen.combined(game) then
+    local x,y,s=SecondScreen.windowRect(game)
+    local lx,ly=(px-x)/s,(py-y)/s
+    if lx<0 or ly<0 or lx>=W or ly>=H then return nil end
+    return lx,ly
+  end
   if SecondScreen.mode(game) == "display"
      and not (game and game.secondScreenInjecting) then
     return nil

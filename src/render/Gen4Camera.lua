@@ -77,8 +77,68 @@ Gen4Camera.TYPES = {
 
 Gen4Camera.DEFAULT_TYPE = 0
 
-function Gen4Camera.forType(id)
-  return Gen4Camera.TYPES[tonumber(id) or -1] or Gen4Camera.TYPES[Gen4Camera.DEFAULT_TYPE]
+-- HEARTGOLD AND SOULSILVER'S SEVENTEEN, which are NOT Platinum's.
+--
+-- Same struct, same count -- FieldCamera_Create (pokeheartgold
+-- asm/overlay_01_021EABA8.s) indexes a 0x24-byte table, ov01_02206478, and
+-- asserts the type is below 0x11 -- but other numbers: HGSS's DEFAULT keeps
+-- Platinum's distance and field of view and leans 48.7 degrees rather than
+-- 59.1, with its far plane at 1200 rather than 900, and several types offset
+-- the look-at point. The rows are the overlay's bytes as pret has them, and
+-- they are decoded exactly as the asm reads them:
+--
+--   00 fx32 distance            04 u16 CameraAngle.x (stored negated)
+--   0C u16 projection (0 perspective, 1 orthographic)
+--   0E u16 perspective angle (the half fov)
+--   10 fx32 near   14 fx32 far   18 VecFx32 look-at offset
+--
+-- Selected by `def.cameraFamily`, which the HGSS extractor writes on every
+-- map; the controls, the tilt ladder and the renderer are Platinum's.
+Gen4Camera.HGSS_ROWS = {
+  "c1ae290062dd0000000000000000c1050060090000004b00000000000000000000000000",
+  "5c46190083e3000000000000000081090060080000004b0000000000005002000010ffff",
+  "c1ae2900c2e30000000000000000c1050060090000004b00000000000000000000000000",
+  "c1ae290042f20000000000000000c1050060090000004b0000000000c5e90100373fffff",
+  "9bb8610082dc000000000000010081020060090000706c00000000000000000000000000",
+  "f6191d00a2dd00000000000000008108006009000080480000000000000000000080feff",
+  "c1ae2900e2df0000000000000000c1050060090000c05d00000000000000000000000000",
+  "c1ae2900e2e10000000000000000c1050060090000004b00000000005b7c0100e295feff",
+  "4c37200022d9000000000000000070070060090000403800000000000000000000000000",
+  "c1be290082d50000000000000000c1050060090000004b00000000000000000000000000",
+  "05c8130042df0000000000000000810c0060090000406a0000000000f1c500008ca3fdff",
+  "295c2100c2e3000000000000000041070060090000004b00000000000080ffff00000000",
+  "c1ae2900e2df0000000000000000c1050060090000406a0000000000000000000000feff",
+  "c1ae290042f20000000000000000c1050060090000406a0000000000c5e90100371ffeff",
+  "c1ae2900c2d40000000000000000c1050060090000004b00000000000000000000000000",
+  "9bb8610082dc000000000000010081020060090000706c0000000000000000000020fdff",
+  "c1ae290002d60000000000000000c1050060090000403800000000000000000000000000",
+}
+local function hgssType(hex, i)
+  local b = {}
+  for k = 1, #hex, 2 do b[#b + 1] = tonumber(hex:sub(k, k + 1), 16) end
+  local function u16(o) return b[o + 1] + b[o + 2] * 256 end
+  local function s32(o)
+    local v = u16(o) + u16(o + 2) * 65536
+    return v >= 2147483648 and v - 4294967296 or v
+  end
+  local fx = function(o) return s32(o) / 4096 end
+  local angle = u16(4)
+  return {
+    id = ("hgss_%d"):format(i), family = "hgss",
+    distance = fx(0),
+    pitch = (65536 - angle) % 65536 * 360 / 65536,
+    projection = u16(0x0C) == 1 and "orthographic" or "perspective",
+    halfFov = u16(0x0E) * 360 / 65536,
+    near = fx(0x10), far = fx(0x14),
+    offset = { x = fx(0x18), y = fx(0x1C), z = fx(0x20) },
+  }
+end
+Gen4Camera.HGSS_TYPES = {}
+for i, hex in ipairs(Gen4Camera.HGSS_ROWS) do Gen4Camera.HGSS_TYPES[i - 1] = hgssType(hex, i - 1) end
+
+function Gen4Camera.forType(id, family)
+  local types = family == "hgss" and Gen4Camera.HGSS_TYPES or Gen4Camera.TYPES
+  return types[tonumber(id) or -1] or types[Gen4Camera.DEFAULT_TYPE]
 end
 
 -- Half the screen height in WORLD UNITS at the target plane: tan(fovY) * d.
@@ -285,25 +345,93 @@ end
 -- ---------------------------------------------------------------------------
 --
 -- "CARTRIDGE" is the map header's own camera type, which is the answer this
--- file exists to give; the fixed angles are there because a player who wants
--- the old flat view, or more lean than Sinnoh ever uses, should not have to
--- edit a file for it.  90 is exactly the straight-down bake.
--- 30 is the steepest rung, and it is the clamp above that decides that rather
--- than taste: at the DEFAULT camera's ground scale it puts the height scale at
--- 1.485, a hair under MAX_HEIGHT_SCALE, and a 42-unit tree at 63 screen pixels
--- against the cartridge's 22.
+-- file exists to give; the fixed angles are there because a player who wants a
+-- different lean should not have to edit a file for it.
+--
+-- THE NUMERIC RUNGS STAY INSIDE THE PITCH RANGE THE CARTRIDGE ACTUALLY USES.
+--
+-- Reported from play, three times across three fixes: *"changing the tilt
+-- seems to be stretching the buildings rather than changing the tilt of the
+-- camera"*, then *"the tilted camera seems to be stretching things again"*,
+-- and then *"the vertical stretching with the different camera angles when i
+-- press 3 its stretiching things"*.
+--
+-- The first two were faults in how the rung reached the renderer -- `mode`
+-- answering `field3d`, and `heightPitch` doing double duty -- and both are
+-- fixed. The camera matrix is now exact at every rung: measured through
+-- `Gen4View:project`, one world unit is 1.0000 screen pixels across the ground
+-- and cos(pitch) up it, at every rung and on both projection kinds. So the
+-- third report is not the renderer. It is the LADDER.
+--
+-- MEASURED over all 17 rows of `sCameraTypes[]`: Platinum's pitch runs from
+-- 40.5890 degrees (row 9) to 78.3765 (row 14, HALL_OF_ORIGIN). The ladder
+-- offered 90 and 80 -- both STEEPER than anything the cartridge draws -- and
+-- 30, shallower than anything it draws.
+--
+-- That matters because the world's on-screen height is cos(pitch) while an
+-- overworld character is a camera-facing BILLBOARD and is not foreshortened at
+-- all. The billboard is ROM PARITY rather than a bug: the cartridge uses the
+-- same unforeshortened sprite art across its whole 40.6..78.4 degree range, so
+-- scaling sprites by pitch would BREAK parity, not restore it. What a rung
+-- really moves is the sprite-to-world height ratio, and outside the
+-- cartridge's range that ratio leaves every picture the ROM has behind:
+--
+--   rung 90 -> cos 0.0000 -- the world has ZERO height. Every building, tree
+--              and sign collapses to nothing while a character stands full
+--              size on top of it.
+--   rung 80 -> cos 0.1736 -- below the ROM's own floor of 0.2015 (row 14).
+--
+-- And "3" CYCLES the ladder, so those two were the first two things a player
+-- saw on pressing it, which is exactly when it was reported.
+--
+-- The RANGE is the ROM's, read off the rows rather than written out again. The
+-- even spacing between the ends is the ladder's own, because a ladder should
+-- step evenly -- so every rung lies inside a range the cartridge uses and the
+-- two ends are exactly its own.
+local function ladder(count)
+  local steepest, shallowest
+  for _, row in pairs(Gen4Camera.TYPES or {}) do
+    local p = tonumber(row and row.pitch)
+    if p then
+      if not steepest or p > steepest then steepest = p end
+      if not shallowest or p < shallowest then shallowest = p end
+    end
+  end
+  -- A table this cannot read costs a LADDER, not a camera: the cartridge's own
+  -- angle is still reachable on the CARTRIDGE rung either way.
+  if not (count > 1 and steepest and shallowest and steepest > shallowest) then
+    return { 78, 72, 66, 60, 53, 47, 41 }
+  end
+  local hi, lo = math.floor(steepest + 0.5), math.floor(shallowest + 0.5)
+  local out = {}
+  for i = 0, count - 1 do
+    out[#out + 1] = math.floor(hi - (hi - lo) * i / (count - 1) + 0.5)
+  end
+  return out
+end
+
 -- ...AND THE TWO FREE MODES ON THE END OF THE SAME LADDER.
 --
 -- Requested: *"have first and third person as an option within the tilt"*.
 -- They belong here rather than on a control of their own because they answer
 -- the same question every other rung does -- how much of the world's height do
--- I want to see -- and a player who has walked the ladder from CARTRIDGE down
--- to 30 is already asking for more of it.
+-- I want to see -- and a player who has walked the ladder down to its
+-- shallowest rung is already asking for more of it.
 --
 -- A string rung carries no pitch, so `forMap` leaves the map header's own in
 -- place and `Gen4Ground` reads the MODE instead; every consumer that asks this
--- table for a number still gets one for the eight numeric rungs.
-Gen4Camera.TILTS = { "cartridge", 90, 80, 70, 60, 50, 40, 30, "third", "first" }
+-- table for a number still gets one for the seven numeric rungs.
+--
+-- SEVEN numeric rungs, unchanged in COUNT, and that is deliberate:
+-- `save.options.gen4CameraTilt` stores the chosen INDEX, so a ladder of a
+-- different length would silently move every saved choice onto another angle.
+Gen4Camera.TILTS = (function()
+  local t = { "cartridge" }
+  for _, p in ipairs(ladder(7)) do t[#t + 1] = p end
+  t[#t + 1] = "third"
+  t[#t + 1] = "first"
+  return t
+end)()
 
 -- THE CLOSEST THE CARTRIDGE EVER PUTS THE CAMERA: HALL_OF_ORIGIN, row 14 of
 -- sCameraTypes[], distance 169.462158203125 at a 78.38 degree pitch.
@@ -326,6 +454,24 @@ local SHALLOWEST = (function()
   return least or 30
 end)()
 
+-- The steepest numeric rung, from the ladder for the same reason SHALLOWEST is
+-- taken from it.
+--
+-- `forMap` used the LITERAL 90 as the top of the parallax interpolation, which
+-- was the top of the ladder only while the ladder started at 90. Clamping the
+-- rungs to the cartridge's range left `t` unable to reach 0, so the steepest
+-- rung would have started with parallax the map header never asks for -- and an
+-- orthographic room, whose whole point is that it has none, would have got some
+-- on every rung.
+local STEEPEST = (function()
+  local most
+  for _, rung in ipairs(Gen4Camera.TILTS) do
+    local n = tonumber(rung)
+    if n and (most == nil or n > most) then most = n end
+  end
+  return most or 90
+end)()
+
 -- Which rungs hand the frame to `Gen4View` rather than to the oblique matrix.
 local FREE = { third = true, first = true }
 
@@ -335,6 +481,11 @@ local FREE = { third = true, first = true }
 -- ladder stays the single source of truth about which view is up.
 function Gen4Camera.mode()
   local chosen = Gen4Camera.externalTilt or Gen4Camera.TILTS[Gen4Camera.chosen]
+  -- ON A DISTORTION WORLD WALL OR CEILING the cartridge's camera wins over
+  -- first and third person too: those follow the player's facing, and on a
+  -- rolled plane that facing is the sprite's, not a heading -- the view and
+  -- the controls spun with every step (reported from play).
+  if Gen4Camera.forceField3d == "surface" then return "field3d" end
   if FREE[chosen] then return chosen end
   -- A NUMERIC RUNG IS A CAMERA ANGLE, not a stretch.
   --
@@ -358,7 +509,31 @@ function Gen4Camera.mode()
   -- answers nil, which keeps the oblique pass for the one rung that asks for
   -- the cartridge's own framing.
   if tonumber(chosen) then return "field3d" end
+  -- THE DISTORTION WORLD IS DRAWN BY A REAL CAMERA even on the cartridge
+  -- rung: its walls and ceilings are planes the oblique pass cannot show, and
+  -- its camera turns (src/world/Gen4DistSurface.lua) -- from the map's own
+  -- pitch, which is what `cartridge` asks for.
+  if Gen4Camera.forceField3d then return "field3d" end
+  -- a script's cutscene camera (HgssLegendCutscene) needs the real 3D view;
+  -- its own switch, since Gen4DistSurface rewrites `forceField3d` each frame
+  if Gen4Camera.cutsceneField3d then return "field3d" end
   return nil
+end
+function Gen4Camera.setCutsceneField3d(on)
+  on = on and true or nil
+  if on ~= Gen4Camera.cutsceneField3d then
+    Gen4Camera.cutsceneField3d = on
+    Gen4Camera.generation = (Gen4Camera.generation or 0) + 1
+  end
+end
+
+-- Set by src/world/Gen4DistSurface.lua while a Distortion World floor is up.
+function Gen4Camera.setForceField3d(on)
+  if on ~= "surface" then on = on and true or nil end
+  if on ~= Gen4Camera.forceField3d then
+    Gen4Camera.forceField3d = on
+    Gen4Camera.generation = (Gen4Camera.generation or 0) + 1
+  end
 end
 
 -- HELD HERE RATHER THAN READ FROM THE SAVE, because the thing that needs it --
@@ -416,8 +591,29 @@ end
 
 -- The camera a map is drawn with: its header's type, with the OPTIONS row's
 -- pitch substituted when the player has chosen one.
+-- THE DISTORTION WORLD'S OWN CAMERA.  Its map headers say type 4, the
+-- orthographic interior, but overlay 9's `CameraInit` replaces the camera
+-- outright: distance 0x29AEC1, angle -10750, fovY 1473, perspective, clip
+-- 150..1700 -- and widens the fov by 0x681 - 0x5C1 everywhere but Giratina's
+-- room (DISTORTION_WORLD_NON_GIRATINA_ROOM_FOV_ADJUST).  Angles are u16 turns.
+Gen4Camera.DISTORTION_WORLD = {
+  id = "distortion_world", distance = 0x29AEC1 / 4096,
+  pitch = 10750 * 360 / 65536, projection = "perspective",
+  halfFov = (1473 + 0xC0) * 360 / 65536, near = 150, far = 1700,
+}
+Gen4Camera.DISTORTION_WORLD_GIRATINA = {
+  id = "distortion_world_giratina", distance = 0x29AEC1 / 4096,
+  pitch = 10750 * 360 / 65536, projection = "perspective",
+  halfFov = 1473 * 360 / 65536, near = 150, far = 1700,
+}
+
 function Gen4Camera.forMap(def)
-  local config = Gen4Camera.forType(def and def.cameraType)
+  -- Black / White carry their camera record on the def (Gen5Field: the
+  -- zone's index into /a/0/6/0, decoded at import)
+  local config = def and def.gen5Camera
+                 or (def and def.gen4DistWorld == "giratina" and Gen4Camera.DISTORTION_WORLD_GIRATINA)
+                 or (def and def.gen4DistWorld and Gen4Camera.DISTORTION_WORLD)
+                 or Gen4Camera.forType(def and def.cameraType, def and def.cameraFamily)
   local chosen = Gen4Camera.externalTilt or Gen4Camera.TILTS[Gen4Camera.chosen]
   if chosen == "cartridge" then return config end
   local copy = {}
@@ -430,7 +626,34 @@ function Gen4Camera.forMap(def)
   -- the blit, the sprite placement, `unprojectGround` turning a screen row
   -- back into a tile row -- still gets the map's own answer and needs no
   -- second thought about which pitch it is holding.
-  copy.heightPitch = tonumber(chosen) or config.pitch
+  -- THE RUNG'S ANGLE GOES IN ITS OWN FIELD, AND NOT IN `heightPitch`.
+  --
+  -- Reported from play, twice now: *"changing the tilt seems to be stretching
+  -- the buildings rather than changing the tilt of the camera"*, and again
+  -- after it was supposedly fixed: *"the tilted camera seems to be stretching
+  -- things again"*.
+  --
+  -- It never stopped. The fix was made in `Gen4Camera.mode`, which now answers
+  -- `field3d` for a numeric rung so the ladder selects a REAL camera at that
+  -- angle -- and this line, the thing that did the stretching, was left as it
+  -- was. So a rung did both: it built a 3D camera AND went on exaggerating
+  -- `heightPitch`, which is the one number that says how tall to draw whatever
+  -- stands on the ground. `scales()` reads it as `cot(heightPitch)`, so rung 30
+  -- draws a 42-unit tree at nearly three times its height. The two halves of
+  -- one decision were written in two files and never met.
+  --
+  -- It could not simply be deleted, because `heightPitch` was doing DOUBLE
+  -- DUTY: `Gen4Ground:applyCamera` passes it to `Gen4View:useConfig` as the
+  -- pitch for the 3D camera, so it was also the only way the rung's angle
+  -- reached the view. One field meaning two things is why removing the stretch
+  -- would have flattened the ladder instead -- every rung the same picture.
+  --
+  -- So the angle now travels as `rungPitch`, which nothing else reads, and
+  -- `heightPitch` keeps the map header's own answer. The oblique pass draws
+  -- heights exactly as the cartridge does at every rung; the ladder's angle
+  -- reaches the camera that is actually drawing the frame.
+  copy.rungPitch = tonumber(chosen) or nil
+  copy.heightPitch = config.heightPitch or config.pitch
   copy.chosen = true
 
   -- AND HOW MUCH PARALLAX, which is the other half of *"make the tilt show 3d
@@ -458,8 +681,8 @@ function Gen4Camera.forMap(def)
   -- `projection` are all left alone for the same reason.
   local rung = tonumber(chosen)
   if rung then
-    local span = 90 - SHALLOWEST
-    local t = span > 0 and (90 - rung) / span or 0
+    local span = STEEPEST - SHALLOWEST
+    local t = span > 0 and (STEEPEST - rung) / span or 0
     if t < 0 then t = 0 elseif t > 1 then t = 1 end
     -- INTERPOLATE THE RECIPROCAL, because the spread IS proportional to 1 over
     -- the distance.  Two things follow, and both are the reason it is written

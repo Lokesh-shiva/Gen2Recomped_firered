@@ -59,7 +59,7 @@ package.loaded['src.core.Strings']=function(s) return s end
 local BagMenu=require('src.ui.Gen4BagMenu')
 local used,pops,rebuilds=0,0,0
 package.loaded['src.ui.BagMenu']={useItem=function(_,_,_,list) used=used+1; list:close() end}
-local bag=setmetatable({game={stack={pop=function() pops=pops+1 end}},rows={{id=4}},index=1,
+local bag=setmetatable({game={stack={pop=function() pops=pops+1 end}},battle={},rows={{id=4}},index=1,
  rebuild=function() rebuilds=rebuilds+1 end},BagMenu)
 bag:choose();bag:choose();bag:close()
 check(used==1 and pops==1 and rebuilds==0,'one use closes battle bag and blocks repeated action')
@@ -76,7 +76,9 @@ check(not dex:touchpressed(1,20,20),'dex rejects letterbox pointer')
 local Party=require('src.ui.Gen4PartyMenu')
 local party=Party.new(uiGame)
 check(party:touchpressed(1,140,80) and party.submenu==1,'scaled pointer opens party actions')
-party:touchpressed(1,470,344)
+-- ITEM adds a fourth action; Switch is still row 2 in the taller popup.
+check(#party:actions()==4 and party:actions()[2]=='switch','field party includes Item without moving Switch order')
+party:touchpressed(1,470,326)
 check(party.switchFrom==1,'party pointer selects Switch action')
 party:touchpressed(1,396,90)
 check(uiGame.save.party[1].species==390 and uiGame.save.party[2].species==387,'party pointer swaps selected members')

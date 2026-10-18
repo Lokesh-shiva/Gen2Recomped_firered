@@ -307,6 +307,9 @@ function Font.split(text)
         end
       end
       span = { from = i, to = last }
+      if text:byte(i)>=128 then
+        span.code=require("src.translation.UnicodeFont").code(text:sub(i,last))
+      end
     end
     spans[#spans + 1] = span
     i = span.to + 1
@@ -346,7 +349,7 @@ function Font.encode(text)
           if nb < 0x80 or nb > 0xBF then break end
           j = j + 1
         end
-        codes[#codes + 1] = string.byte("?")
+        codes[#codes + 1] = require("src.translation.UnicodeFont").code(text:sub(i,j-1)) or string.byte("?")
         i = j
       end
     end
@@ -580,6 +583,20 @@ local function blitCode(code, x, y)
 end
 
 function Font.drawCode(code, x, y)
+  if FALLBACK.enabled and code and code>=32 and code<=126
+      and require("src.translation.UnicodeFont").active() then
+    code=require("src.translation.UnicodeFont").code(string.char(code))
+  end
+  if code and code<0 then
+    local paint=borderPaint or (activeStyle and activeStyle.text) or {0,0,0,1}
+    local _,_,_,alpha=love.graphics.getColor()
+    love.graphics.push("all")
+    love.graphics.setShader()
+    love.graphics.setColor(paint[1],paint[2],paint[3],(paint[4] or 1)*(alpha or 1))
+    require("src.translation.UnicodeFont").draw(code,x,y,Font.glyphHeight())
+    love.graphics.pop()
+    return
+  end
   local style = activeStyle
   local paint = borderPaint or (style and style.text)
   if not paint then return blitCode(code, x, y) end
@@ -658,6 +675,12 @@ end
 -- TextBox's own wrapping via spansFitting -- so one answer keeps the layout
 -- and the drawing agreeing.  A page with no width table is unchanged.
 function Font.advanceOf(code)
+  if FALLBACK.enabled and code and code>=32 and code<=126
+      and require("src.translation.UnicodeFont").active() then
+    return require("src.translation.UnicodeFont").width(
+      require("src.translation.UnicodeFont").code(string.char(code)),Font.glyphHeight())
+  end
+  if code and code<0 then return require("src.translation.UnicodeFont").width(code,Font.glyphHeight()) end
   local page = pageFor(code)
   if not page then return GLYPH end
   local widths = page.widths
@@ -672,7 +695,19 @@ end
 -- Pixel width of a string (glyph advances, not UTF-8 byte length).
 -- Multi-byte charmap entries like "¥" are one glyph; callers that
 -- right-align with `#text * 8` mis-place them.
+-- An engine literal drawn whole ("SAVE", "CANCEL", a status tag) in the
+-- player's language when a translation is installed; anything else as is.
+local translationService
+local function localize(text)
+  if type(text) ~= "string" then return text end
+  translationService = translationService or package.loaded["src.translation.Service"]
+  if not (translationService and translationService.engineKeys) then return text end
+  return translationService.display(text)
+end
+Font.localize = localize
+
 function Font.width(text)
+  text = localize(text)
   local w = 0
   for _, code in ipairs(Font.encode(text)) do
     w = w + Font.advanceOf(code)
@@ -688,6 +723,7 @@ end
 -- name beside a level -- the healthbox, the party screen -- needs this, and
 -- two copies of it would drift.
 function Font.fit(text, pixels)
+  text = localize(text)
   local spans = Font.split(text or "")
   local n = Font.spansFitting(spans, pixels)
   if n >= #spans then return text or "" end
@@ -701,7 +737,8 @@ end
 -- Draw a plain single-line string at pixel (x, y).  Returns the width
 -- drawn, which is #codes * 8 for every fixed-width page.
 function Font.draw(text, x, y)
-  if FALLBACK.enabled then
+  text = localize(text)
+  if FALLBACK.enabled and not require("src.translation.UnicodeFont").active() then
     love.graphics.setFont(FALLBACK.font)
     love.graphics.print(text, x, y)
     return #text * GLYPH
@@ -974,7 +1011,9 @@ local function gen4DialogueBox(rec, tx, ty, tw, th)
   do
     local ok, Game = pcall(require, "src.core.Game")
     local options = ok and Game and Game.save and Game.save.options
-    frame = math.floor(tonumber(options and options.gen3Frame) or 1)
+    -- a screen with a frame of its own (Black and White's battle box) asks
+    -- for it by number for as long as it is drawing
+    frame = math.floor(tonumber(Font.frameOverride) or tonumber(options and options.gen3Frame) or 1)
     if frame < 1 then frame = 1 end
     if frame > count then frame = count end
   end
@@ -1026,9 +1065,28 @@ local function gen4DialogueBox(rec, tx, ty, tw, th)
   end
 end
 
+-- the dialogue frame a cartridge's BATTLE box uses, when its record names one
+-- (Black and White: the dark message frame)
+function Font.battleFrame()
+  local def = state and state.def
+  return def and def.dialogueFrame and def.dialogueFrame.battleFrame or nil
+end
+
 function Font.hasDialogueFrame()
   local def = state and state.def
   return not FALLBACK.enabled and def ~= nil and def.dialogueFrame ~= nil
+end
+
+-- Dock the full painted ROM frame, including caps beyond the conventional
+-- interior-plus-one-border rectangle. Otherwise only the middle moves.
+function Font.dialogueBoxBounds(tx, ty, tw, th)
+  local rec = Font.hasDialogueFrame() and state.def.dialogueFrame
+  if rec and rec.layout == 'gen4' and tw >= 3 and th >= 3 then
+    return (tx-1)*8, ty*8, (tw+3)*8, th*8
+  elseif rec and rec.layout ~= 'gen4' and th >= 4 then
+    return (tx-1)*8, ty*8, (tw+2)*8, th*8
+  end
+  return tx*8, ty*8, tw*8, th*8
 end
 
 local function prepareFrameStrip(rec)
