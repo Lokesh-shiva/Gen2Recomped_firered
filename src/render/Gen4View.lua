@@ -264,7 +264,7 @@ local ORBIT_BASE = atan2(ORBIT_RISE, Gen4View.FOLLOW_DISTANCE)
 -- along the view line and the framing angle does not change -- which is what
 -- stops a zoom from sliding into the ground or over the roof.
 Gen4View.ZOOM_STEP = 1.15
-Gen4View.ZOOM_MIN = 0.45
+Gen4View.ZOOM_MIN = 0.08
 Gen4View.ZOOM_MAX = 2.60
 
 -- zoomBy(notches) -> zoom.  Positive pulls back, negative moves in.
@@ -356,6 +356,22 @@ function Gen4View:follow(x, z, facing, baseY)
              or self.yaw or 0
   kept.heading = self.yaw
   local rise = (self.orbiting and self.userRise) or 0
+  -- A SCRIPT'S CAMERA (HgssLegendCutscene): the cartridge's Camera_SetDistance
+  -- / SetAnglePos / OffsetLookAtPosAndTarget, in whatever mode the player
+  -- chose -- the target is the player plus the scene's offset and the eye sits
+  -- due south of it at the scene's angle, the way every Gen 4 field camera
+  -- does (yaw 0)
+  local scripted = Gen4View.scripted
+  if scripted then
+    local d = tonumber(scripted.distance) or 666.9
+    local e = rad(tonumber(scripted.pitch) or 45)
+    local o = scripted.offset or { 0, 0, 0 }
+    local tx, ty, tz = x + (o[1] or 0), baseY + (o[2] or 0), z + (o[3] or 0)
+    self.yaw = 0
+    self.x, self.y, self.z = tx, ty + sin(e) * d, tz + cos(e) * d
+    self.pitch = deg(e)
+    return
+  end
   if self.mode == "field3d" then
     -- WHERE THE CARTRIDGE PUTS IT: `Camera_AdjustPositionAroundTarget` swings
     -- the eye around the target at the row's own distance, at the angle the
@@ -363,7 +379,7 @@ function Gen4View:follow(x, z, facing, baseY)
     -- third-person camera, and a tilt rung is asking for the map's framing at
     -- a different angle, not for a different framing.
     local cfg = self.config
-    local d = (cfg and tonumber(cfg.distance)) or 512
+    local d = ((cfg and tonumber(cfg.distance)) or 512)*(self.zoom or 1)
     local e = rad(self.fieldPitch or 60)
     local horizontal = cos(e) * d
     -- FIXED HEADING.  The cartridge's field camera does not turn, and a tilt
@@ -372,6 +388,16 @@ function Gen4View:follow(x, z, facing, baseY)
     -- what keeps `screenToWorld` an identity, so a direction key means the
     -- same world direction it always did.
     self.yaw = 0
+    -- ...EXCEPT IN THE DISTORTION WORLD, whose camera records swing it round
+    -- a wall (src/world/Gen4DistSurface.lua).  `Camera_AdjustPositionAround-
+    -- Target` puts the eye at +sin(angleY) on x, this yaw's -sin, so the sign
+    -- turns; angleX lifts the eye's base angle towards the horizon.
+    local surface = Gen4View.surfaceAngles
+    if surface then
+      self.yaw = -rad(surface.yaw or 0)
+      e = rad((self.fieldPitch or 60) - (surface.pitch or 0))
+      horizontal = cos(e) * d
+    end
     self.x = x - sin(self.yaw) * horizontal
     self.z = z + cos(self.yaw) * horizontal
     self.y = baseY + sin(e) * d
@@ -412,6 +438,9 @@ function Gen4View:follow(x, z, facing, baseY)
     self.x = x - sin(f) * horizontal
     self.z = z + cos(f) * horizontal
     self.y = baseY + pivotY + sin(e) * radius
+    -- what the eye looks at, kept so the ground can pull the eye in along
+    -- this line when a wall stands on it (Gen4Ground:clearCameraLine)
+    self.pivotX, self.pivotY, self.pivotZ = x, baseY + pivotY, z
     -- LOOK AT THE PIVOT, which is what puts the player in the middle.
     --
     -- Reported from play: *"players not centered on the screen in third
@@ -470,14 +499,21 @@ function Gen4View:matrix(vw, vh)
   -- describes the cartridge's own field camera; first and third person are
   -- this port's cameras and are always perspective.
   local cfg = (self.mode == "field3d") and self.config or nil
+  if Gen4View.scripted then cfg = nil end -- a cutscene camera is perspective
   local proj
   if cfg and cfg.projection == "orthographic" then
-    proj = Gen4Model.orthographic(vh / 2, vw / vh,
+    -- Dolly alone cannot magnify an orthographic map. Keep its visible box
+    -- in step with the dolly so tilted indoor views zoom like outdoor views.
+    proj = Gen4Model.orthographic(vh / 2 * (self.zoom or 1), vw / vh,
                                   tonumber(cfg.near) or Gen4View.NEAR,
                                   tonumber(cfg.far) or Gen4View.FAR)
   else
+    -- a script's camera brings its own clip planes (Camera_SetPerspective-
+    -- ClippingPlane): past the far one the cartridge shows its backdrop
+    local sc = Gen4View.scripted
     proj = Gen4Model.perspective(rad(self:effectiveFovY(vh)), vw / vh,
-                                 Gen4View.NEAR, Gen4View.FAR)
+                                 (sc and tonumber(sc.near)) or Gen4View.NEAR,
+                                 (sc and tonumber(sc.far)) or Gen4View.FAR)
   end
   -- negate the clip-space y
   proj[5], proj[6], proj[7], proj[8] = -proj[5], -proj[6], -proj[7], -proj[8]
@@ -513,6 +549,9 @@ local CLOCK_INDEX = { up = 1, right = 2, down = 3, left = 4 }
 -- "away from the eye" would always be "forward" -- tank controls, and a change
 -- to how the game plays for someone who only wanted a camera angle.
 function Gen4View:screenToWorld(dir)
+  -- the FIELD camera never orbits (its yaw is the Distortion World's record,
+  -- not the player's), so a kept orbit from third person must not turn keys
+  if self.mode == "field3d" then return dir end
   if not (self.orbiting and CLOCK_INDEX[dir]) then return dir end
   -- Yaw is 0 north and grows clockwise, so the number of quarter turns the
   -- camera has taken is the number the input takes with it.
@@ -532,6 +571,7 @@ end
 -- Turning the input one way and the artwork the other is not a coincidence:
 -- they are inverses because the camera sits between them.
 function Gen4View:worldToScreen(dir)
+  if self.mode == "field3d" then return dir end
   if not (self.orbiting and CLOCK_INDEX[dir]) then return dir end
   local quarters = math.floor((self.yaw or 0) / (math.pi / 2) + 0.5) % 4
   return CLOCKWISE[((CLOCK_INDEX[dir] - 1 - quarters) % 4) + 1]
@@ -586,7 +626,7 @@ function Gen4View:project(x, y, z, vw, vh)
          -- One world unit is one screen pixel under the orthographic box this
          -- view builds, at every distance -- which is the whole difference
          -- between the two projections and the number a billboard needs.
-         ortho and 1 or self:pixelsPerUnitAt(w, vh),
+         ortho and 1 / (self.zoom or 1) or self:pixelsPerUnitAt(w, vh),
          cz / w
 end
 
@@ -610,6 +650,9 @@ end
 -- The orthographic branch in `matrix` does the same thing by construction with
 -- `halfHeight = vh / 2`, so the two projections agree about scale.
 function Gen4View:effectiveFovY(vh)
+  -- a script's camera brings its own perspective angle (the half field)
+  local scripted = Gen4View.scripted
+  if scripted and tonumber(scripted.halfFov) then return 2 * scripted.halfFov end
   local cfg = self.config
   local d = cfg and tonumber(cfg.distance)
   if self.mode == "field3d" and d and d > 1e-6 then

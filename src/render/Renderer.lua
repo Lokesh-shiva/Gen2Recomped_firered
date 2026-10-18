@@ -101,6 +101,10 @@ local function displayMetrics()
   end
   if dpiX < 1e-6 then dpiX = 1 end
   if dpiY < 1e-6 then dpiY = 1 end
+  if Renderer.splitViewport then
+    ww,wh=Renderer.splitViewport.w,Renderer.splitViewport.h
+    pw,ph=ww*dpiX,wh*dpiY
+  end
   return ww, wh, pw, ph, dpiX, dpiY
 end
 
@@ -281,42 +285,32 @@ function Renderer:worldViewSize()
     local g = Tilt.viewGrowth()
     vw, vh = math.ceil(vw * g), math.ceil(vh * g)
   end
-  -- ...AND A MAP SMALLER THAN THE VIEW DOES NOT FILL THE REST WITH SCENERY.
-  --
-  -- Reported from play: "petalburg gym in emerald still showing as a black
-  -- background when i warp through the rooms even with no mods on".
-  --
-  -- Every measurement said the gym renders correctly, and it does. The gym is
-  -- ONE map nine blocks wide, and `data/layouts/PetalburgCity_Gym/border.bin`
-  -- on the cartridge is metatile 0x208 four times over -- a block whose 256
-  -- pixels are, every one of them, pure black. Nine blocks is 144 world
-  -- pixels. The Game Boy Advance shows 240, so even the cartridge draws three
-  -- columns of black either side; this window pass shows `pw / scale`, which
-  -- on a phone in landscape is several times that, and every extra column is
-  -- more of the same black. The void was being filled with more void.
-  --
-  -- So the view never exceeds what there is to see: the map's own extent, or
-  -- the screen the generation was drawn for, whichever is larger. It can only
-  -- ever REDUCE the view, and never below the cartridge's own framing, so a
-  -- map at least as big as that screen -- which is very nearly all of them,
-  -- in every generation -- comes out at exactly the size it did before.
+  -- Gen4 retains its bounded 3D terrain framing. Earlier generations use
+  -- the full selected view and draw native border/neighbor tiles around it.
   local bw, bh = self.worldBoundsW, self.worldBoundsH
-  if bw and bh then
+  -- Gen 1-3 render native border tiles beyond the map. Capping their view
+  -- here and enlarging it during presentation silently changes the user's
+  -- zoom on every building/route transition and makes small-map zoom inert.
+  if bw and bh and require("src.core.GameVersion").isGen4() then
     local uw, uh = self:uiSize()
-    if require("src.core.GameVersion").isGen4() then
-      -- Cap finite rooms without changing the viewport aspect ratio.
-      local cap = math.min(1, math.max(uw, bw) / vw, math.max(uh, bh) / vh)
-      vw, vh = math.floor(vw * cap), math.floor(vh * cap)
-    else
-      vw = math.min(vw, math.max(uw, bw))
-      vh = math.min(vh, math.max(uh, bh))
-    end
+    -- Never below the screen the generation was drawn for, so a map at least
+    -- that big comes out exactly the size it did before.
+    local availW = math.max(uw, bw)
+    local availH = math.max(uh, bh)
+    local cap = math.min(1, availW / vw, availH / vh)
+    vw, vh = math.floor(vw * cap), math.floor(vh * cap)
     if vw % 2 ~= 0 then vw = vw + 1 end
     if vh % 2 ~= 0 then vh = vh + 1 end
   end
   return vw, vh
 end
 
+-- Gen4's bounded terrain canvas fills the window. Gen1-3 keep the selected
+-- zoom scale; enlarging a small-map canvas would undo the user's zoom.
+--
+-- Tilt is excluded because it grows the view on purpose (Tilt.viewGrowth) to
+-- keep the projected ground plane covering the receded corners; filling with
+-- it would undo the growth it just asked for.
 function Renderer:worldPresentationScale(sp, pw, ph, vw, vh)
   if self.worldBoundsW and require("src.core.GameVersion").isGen4() and not Tilt.active() then
     return math.max(sp, pw / vw, ph / vh)
@@ -854,7 +848,7 @@ function Renderer:endFrame(zones, worldZones)
   -- GB pixel stops being a whole number of screen pixels, which is the trade
   -- the setting exists to offer.  Clamped on the horizontal too, so a narrow
   -- window scales to fit instead of overflowing off both sides.
-  if self.uiFill then
+  if self.uiFill or self.splitViewport then
     Up = math.min(ph / uih, pw / uiw)
   end
   local Ux, Uy = Up / dpiX, Up / dpiY
@@ -932,7 +926,8 @@ function Renderer:endFrame(zones, worldZones)
   -- frames so there is a texture we can snapshot before the wipe; reading the
   -- texture that is also the active render target is undefined on GPUs.
   local battleNeedsSource = self.battleWipe
-                            and self.battleWipe.style == "frlg_swirl"
+                            and (self.battleWipe.style == "frlg_swirl"
+                                 or self.battleWipe.needsSource)
                             and self.battleWipe.screenDraw
   local needPresent = GBCFX.active() or Pipelines.wantsPresent()
                       or battleNeedsSource
@@ -1307,6 +1302,9 @@ function Renderer:endFrame(zones, worldZones)
     -- the full surface, so rect() answers 0, 0, ww, wh and every number below
     -- is what it has always been.  Which is exactly why only mobile saw this.
     local sax, say, saw, sah = require("src.core.SafeArea").rect()
+    if self.splitViewport then
+      saw=math.max(0,math.min(saw,ww-sax));sah=math.max(0,math.min(sah,wh-say))
+    end
     local saRight, saBottom = sax + saw, say + sah
     for _, a in ipairs(anchors) do
       local dw, dh = a.w * Ux, a.h * Uy

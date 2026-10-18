@@ -20,6 +20,7 @@ check(watch:touchpressed(1, 114, 128) and game.save.poketch.counter == 1, 'count
 watch:touchreleased(1)
 watch:touchpressed(1, 240, 120)
 check(watch.index == 2, 'next bezel button')
+watch:touchreleased(1)
 watch:calculate('8'); watch:calculate('/'); watch:calculate('2'); watch:calculate('=')
 check(game.save.poketch.calculator.display == '4', 'calculator divide')
 watch:calculate('/'); watch:calculate('0'); watch:calculate('=')
@@ -34,6 +35,8 @@ game.input = { wasPressed = function() return false end }
 watch:update(0.5)
 require('src.pokemon.Gen4PoketchState').tick(game, 0.5)
 check(game.save.poketch.stopwatch == 0.5, 'stopwatch advances')
+-- the cartridge's START does nothing on 00:00 (StartTimer returns 0), so a time is set first
+game.save.poketch.timerDuration = 60
 watch.index = 5; watch:activate(); watch:update(1)
 require('src.pokemon.Gen4PoketchState').tick(game, 1)
 check(game.save.poketch.timer == 59, 'timer counts down')
@@ -45,12 +48,21 @@ local shop = Shop.new(game, {4,17})
 shop:choose(); shop:choose(); shop.qty = 10; shop:choose(); shop:choose()
 check(game.save.inventory[4] == 10 and game.save.money == 3000, 'numeric item purchase')
 check(game.save.inventory[12] == 1, 'Premier Ball bonus')
-shop:back(); shop.cursor = 2; shop:choose(); shop.cursor = 1; shop:choose()
-shop.qty = 2; shop:choose(); shop:choose()
+-- SELL is Platinum's Bag (BAG_MODE_SELL_ITEMS): the shop opens the Bag in pick
+-- mode and sells what it hands back, so the item arrives through sellItem
+-- rather than a list drawn on the counter
+local bagOpened
+local realScreens = package.loaded['src.ui.Screens']
+package.loaded['src.ui.Screens'] = { push = function(_, id, opts) bagOpened = { id = id, opts = opts } end }
+shop:back(); shop.cursor = 2; shop:choose()
+package.loaded['src.ui.Screens'] = realScreens
+check(shop.mode == 'sell' and bagOpened and bagOpened.id == 'BagMenu' and bagOpened.opts.pick,
+ 'SELL opens the Bag to pick from')
+shop:sellItem(4); shop.qty = 2; shop:choose(); shop:choose()
 check(game.save.inventory[4] == 8 and game.save.money == 3200, 'sell transaction')
 game.save.inventory[428] = 1
-shop.cursor = #shop:rows(); shop:choose()
-check(shop.mode == 'sell', 'key item cannot be sold')
+shop:sellItem(428)
+check(shop.mode == 'sell' and shop.item ~= 428, 'key item cannot be sold')
 local VM = require('src.script.Gen4ScriptVM')
 local rows = VM.lower({{name='messagevar',args={32772}}, {name='playpokecenterhealinganimation',args={32774}}},
  {member=211,bankFor=function() return 361 end})
@@ -62,7 +74,11 @@ game.stack.push = function(_, screen) pushed = screen end
 local Screens = require('src.ui.Screens')
 local screen = Screens.push(game, 'ShopMenu', {4,17}, function() quit = true end)
 check(screen == pushed and screen.screenId == 'Gen4ShopMenu', 'Platinum shop alias')
+-- SEE YA! says "Please come again!" first (shop_menu.c); the counter ends,
+-- and the script resumes, at finish
 screen:close()
+check(not quit and screen.mode == 'exit', 'SEE YA! shows the parting line before the counter closes')
+screen:finish()
 check(quit, 'positional shop callback preserved so script resumes')
 local scissors = {}
 love.graphics = { setColor=function() end, rectangle=function() end, setLineWidth=function() end,
@@ -82,7 +98,7 @@ local machine = Archives.find('/fielddata/build_model/build_model.narc', 'pokece
 local ball = Archives.find('/fielddata/build_model/build_model.narc', 'pokecenter_healing_machine_mini_pokeball.nsbmd')
 check(machine ~= nil and ball ~= nil, 'native healing models are indexed')
 local dropped = 0
-local ground = setmetatable({ grid={land={10}}, terrain={chunks={ [10]={objects={
+local ground = setmetatable({ def={}, grid={land={10}}, terrain={chunks={ [10]={objects={
   {model=machine,x=20,y=30,z=40} }}}},
   dropBakes=function() dropped=dropped+1 end,
   signpostsFor=function() return {} end }, {__index=Ground})
@@ -153,6 +169,7 @@ commands.g4_pokemart({game=game,save=game.save,runner={
  yield=function() yielded=yielded+1 end,resume=function() resumed=resumed+1 end}},0x8004,'specialty')
 check(pushed.stock[1]==17 and yielded==1, 'specialty clerk resolves variable stock ID and waits')
 pushed:close()
+pushed:finish()
 check(resumed==1, 'specialty clerk resumes after closing shop')
 local seal = VM.lower({{name='pokemartseal',args={0x8004}}},{})
 check(seal[1][3]=='seal', 'seal inventory is not treated as specialty bag items')
@@ -164,16 +181,23 @@ package.loaded['src.render.Renderer']={uiPresentation={x=100,y=50,w=512,h=384,sc
 local touchShop=Shop.new(game,{17})
 local function tap(x,y) return touchShop:touchpressed(1,100+x*2,50+y*2) end
 check(not touchShop:touchpressed(1,90,60),'shop rejects touches outside presented UI')
-tap(120,20)
+-- BUY / SELL / SEE YA! is the framed window at tile (1, 1) over the field
+tap(40,12)
 check(touchShop.mode=='buy','scaled touch selects buy')
+-- the counter takes input once the field camera has slid over (Shop_MoveCamera)
+check(not touchShop:counterUp(),'the counter waits for the camera')
+touchShop.camStep=touchShop:cameraTarget()
+check(touchShop:counterUp(),'the counter is up once the camera arrives')
 tap(120,20)
 check(touchShop.mode=='quantity','scaled touch selects stock item')
-tap(200,80)
+-- the cartridge's own windows (shop_menu.c): the quantity window at (19, 13)
+-- with its up/down marks at x 162, then YES / NO at (23, 13)
+tap(160,104)
 check(touchShop.qty==2,'touch quantity plus')
-tap(120,104)
+tap(200,112)
 check(touchShop.mode=='confirm','touch quantity confirmation')
 local money=game.save.money
-tap(120,104)
+tap(200,104)
 check(game.save.money==money-600 and touchShop.mode=='buy','touch purchase completes once')
 tap(220,176)
 check(touchShop.mode=='menu','touch back returns to shop menu')
@@ -279,24 +303,35 @@ check(game.save.poketch.calculator.display=='10','calculator painted keys work t
 app('Memo Pad'); game.save.poketch.memo={}; game.save.poketch.memoErasing=false
 tap(100,100); local memo=game.save.poketch.memo
 check(next(memo)~=nil,'memo drawing accepts mouse click')
-tap(112,152); tap(100,100)
+-- memo_pad/main.c: the eraser (180-204, 24-88) and pencil (180-204, 104-168) buttons
+tap(192,56); tap(100,100)
 check(next(memo)==nil,'memo eraser deletes touched pixels')
-tap(112,152); tap(100,100); tap(176,152)
-check(next(game.save.poketch.memo)==nil,'memo clear touch empties drawing')
+tap(192,136); tap(100,100)
+check(next(game.save.poketch.memo)~=nil,'memo pencil draws again')
 app('Dot Artist'); game.save.poketch.dots={}
 tap(20,20); tap(20,20)
 check(game.save.poketch.dots[0]==2,'dot artist repeated clicks cycle pixel shades')
 app('Stopwatch'); game.save.poketch.stopwatch=5; game.save.poketch.stopwatchRunning=false
 tap(112,112); check(game.save.poketch.stopwatchRunning,'stopwatch start text is clickable')
-tap(112,144); check(game.save.poketch.stopwatch==0 and not game.save.poketch.stopwatchRunning,'stopwatch reset text is clickable')
+-- stopwatch/main.c: tapping Voltorb again stops it; holding it 75 ticks starts the
+-- reset sequence (90 ticks blinking, 60 exploding) that zeroes it
+tap(112,112); check(not game.save.poketch.stopwatchRunning and game.save.poketch.stopwatch==5,'stopwatch tap stops it')
+watch:touchpressed('mouse',112,112); for _=1,160 do watch:updatePresentation(1/60) end; watch:touchreleased('mouse')
+for _=1,320 do watch:updatePresentation(1/60) end
+check(game.save.poketch.stopwatch==0 and not game.save.poketch.stopwatchRunning,'held Voltorb resets the stopwatch')
 app('Kitchen Timer'); game.save.poketch.timerDuration=60; game.save.poketch.timerRunning=false
-tap(88,104); tap(136,104)
+game.save.poketch.timerFinished=false; game.save.poketch.timerPaused=false
+-- kitchen_timer/main.c hit boxes: digit arrows above (y 80-96) and below, START
+-- (16-80, 144-176), STOP (80-144)
+tap(96,88); tap(144,88)
 check(game.save.poketch.timerDuration==121,'timer digits adjust minutes and seconds')
-tap(112,144); check(game.save.poketch.timerRunning,'timer start label is clickable')
-tap(112,144); check(not game.save.poketch.timerRunning,'timer stop label is clickable')
+tap(48,160); check(game.save.poketch.timerRunning,'timer START is clickable')
+tap(112,160); check(not game.save.poketch.timerRunning,'timer STOP is clickable')
 app('Alarm Clock'); game.save.poketch.alarmHour=0; game.save.poketch.alarmMinute=0; game.save.poketch.alarmEnabled=false
-tap(88,112); tap(136,112); tap(112,152)
-check(game.save.poketch.alarmHour==1 and game.save.poketch.alarmMinute==1 and game.save.poketch.alarmEnabled,'alarm digits and on/off text are clickable')
+-- alarm_clock/main.c: hour/minute up arrows (64-80 / 112-128, y 112-128), the
+-- switch's upper half (176-208, 72-104) sets the alarm
+tap(72,120); tap(120,120); tap(192,88)
+check(game.save.poketch.alarmHour==1 and game.save.poketch.alarmMinute==1 and game.save.poketch.alarmEnabled,'alarm arrows and switch are clickable')
 app('Move Tester'); game.save.poketch.moveTester={1,1,18}
 tap(28,128); tap(116,128); tap(108,40); tap(196,40); tap(108,72); tap(196,72)
 check(game.save.poketch.moveTester[1]==1 and game.save.poketch.moveTester[2]==1
@@ -312,13 +347,13 @@ check(game.save.poketch.color==7,'color slider responds to mouse dragging')
 local cries={}; package.loaded['src.core.Sound']={playCry=function(_,species) cries[#cries+1]=species end}
 app('Pokémon List'); tap(48,48)
 app('Pokémon History'); tap(32,32)
-app('Friendship Checker'); tap(32,40)
+app('Friendship Checker'); tap(48,52)
 check(#cries==3 and watch.friendshipTouch,'Pokemon icon apps accept clicks and give feedback')
 app('Calendar')
 local now=os.date('*t'); local first=((now.wday-1)-(now.day-1)%7)%7
 local cell=first+now.day-1; local dateKey=('%04d-%02d-%02d'):format(now.year,now.month,now.day)
 game.save.poketch.calendar={}
-tap(33+(cell%7)*20,43+math.floor(cell/7)*14)
+tap(32+(cell%7)*24+8,40+math.floor(cell/7)*24+8)
 check(game.save.poketch.calendar[dateKey],'calendar date cell accepts click')
 app('Roulette'); tap(112,96)
 check(type(game.save.poketch.roulette)=='number','roulette accepts click')

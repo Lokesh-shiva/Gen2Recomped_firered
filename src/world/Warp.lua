@@ -56,6 +56,11 @@ local Warp = {}
 function Warp.onArrive(map, cx, cy, dir)
   local w = map:warpAtCell(cx, cy)
   if not (w and map:isWarpTileCell(cx, cy)) then return nil end
+  -- A DISTORTION WORLD LIFT rides first, or is not there at all
+  -- (src/world/Gen4DistPlatforms.lua takes the warp when the ride ends).
+  if w.def and w.def.distortionLift then
+    return require("src.world.Gen4DistPlatforms").arrive(map, w)
+  end
   -- ...AND THE BEHAVIOUR HAS TO BE ONE THAT OPENS, which on this cartridge
   -- is a separate question from whether a warp event is here.
   --
@@ -76,6 +81,26 @@ function Warp.onArrive(map, cx, cy, dir)
   -- behaviours are deliberately left out of IsWarpMetatileBehavior -- and it
   -- is kept separate because it is directional and this one is not.
   if map.isStepWarpCell and not map:isStepWarpCell(cx, cy) then return nil end
+  -- GEN 4 TAKES A WARP FROM A STEP ONLY WHERE THE CARTRIDGE DOES.
+  --
+  -- `Field_CheckTransition` (pokeplatinum src/overlay005/field_control.c) is
+  -- the arrival path, and it opens a warp event for exactly five behaviours:
+  -- the two escalators, WARP_ENTRANCE_NORTH, WARP_NORTH and WARP_PANEL -- see
+  -- `Map:gen4ArrivalWarpAt`. Everything else is reached by a PRESS into the
+  -- wall ahead (`OverworldState:checkGen4EntranceWarp`) or not at all.
+  --
+  -- Reported from play inside Mt. Coronet: the exit off Route 208 is (27,20),
+  -- WARP_EAST, and stepping onto it from the tile above or below threw the
+  -- player out. In the cartridge that step just lands on the exit; the press
+  -- right that follows is what leaves.
+  --
+  -- A whitelist rather than a list of refusals, because the refusals were how
+  -- this went wrong: they named the entrance mats and the door, and every
+  -- other directional warp fell through to "fire".
+  if map.gen4ArrivalWarpAt then
+    local arrival = map:gen4ArrivalWarpAt(cx, cy)
+    if arrival ~= nil then return arrival and w or nil end
+  end
   local Map = require("src.world.Map")
   local GameVersion = require("src.core.GameVersion")
   -- GEN 3'S CARPET IS AN ARROW, and it is the paragraph above one cartridge
@@ -237,6 +262,33 @@ local GEN4_WARP_NONE = 0xFFFF
 
 local function resolve(data, warpDef, lastMap, backupWarp, save)
   local destMap = warpDef.destMap
+
+  -- TURNBACK CAVE REPOINTS ITS OWN EXITS, every time a room loads.
+  --
+  -- `ScrCmd_InitTurnbackCave` rewrites the loaded room's warp events so that
+  -- every exit except the one you came in by leads to a freshly chosen room;
+  -- that is the whole maze, and without it every room's four warps lead back to
+  -- the entrance as shipped and Giratina cannot be reached.
+  --
+  -- READ HERE RATHER THAN WRITTEN INTO THE DEF. `MapLoader` caches one def per
+  -- map and hands the same table to the renderer, the editor and the next
+  -- visit, so a destination written into it would outlive the visit that chose
+  -- it. Same reason `gen4SpecialLocation` above is consulted rather than baked.
+  --
+  -- MATCHED BY TABLE IDENTITY, which is what makes this safe without changing
+  -- every caller's signature to pass the source map: `warpDef` came out of some
+  -- def's `warps` list, and it is this room's warp N only if that def's slot N
+  -- IS this table. A warp of the same index on another map is a different
+  -- table and does not match.
+  local turnback = save and save.gen4Turnback
+  if turnback and turnback.dest and turnback.map then
+    local src = data and data.maps and data.maps[turnback.map]
+    local index = tonumber(warpDef.index)
+    if src and src.warps and index and src.warps[index] == warpDef
+       and index ~= turnback.keep then
+      destMap = turnback.dest
+    end
+  end
   if destMap == GEN4_DYNAMIC_MAP then
     local spot = save and save.gen4SpecialLocation
     if spot and spot.map and data.maps[spot.map] then

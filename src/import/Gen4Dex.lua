@@ -101,7 +101,8 @@ Gen4Dex.LAYOUT = {
 -- Which entry of the Pokedex's own label bank is which.  From
 -- `res/text/pokedex.json`: 0 seen, 1 obtained, 5 switch, 7 search, 9 HT,
 -- 10 WT, 11 ft, 12 lbs.
-Gen4Dex.LABEL = { seen = 0, obtained = 1, height = 9, weight = 10 }
+Gen4Dex.LABEL = { seen = 0, obtained = 1, switch = 5, search = 7,
+  height = 9, weight = 10 }
 
 -- How far to walk the three per-species banks.  493 is the national dex and
 -- the banks carry a few entries past it for the forms; walking to a fixed
@@ -116,7 +117,10 @@ function Gen4Dex.orders(rom)
   local arc=bytes and require('src.import.NarcArchive').parse(bytes)
   if not arc then return nil end
   local out={}
-  for i,key in ipairs({'national','sinnoh','alphabetical','heaviest','lightest','tallest','smallest'}) do
+  -- NUMSTATFILES + PokedexDataSortIndex, including the native membership
+  -- lists: names/types/body shapes must not be guessed from display strings.
+  local keys=require('src.ui.Gen4DexSearch').DATA_KEYS
+  for i,key in ipairs(keys) do
     local list=arc:get(10+i)
     if list then
       local ids={}
@@ -126,5 +130,320 @@ function Gen4Dex.orders(rom)
   end
   return out
 end
+
+-- Native entry graphics share one tile sheet and full Sinnoh BG palette.
+-- National mode replaces only palette row zero (32 bytes), on both screens.
+function Gen4Dex.images(rom)
+  local G=require('src.import.Gen4Graphics')
+  local A=require('src.import.Gen4Archives')
+  local bytes=rom:read(Gen4Dex.PATH)
+  local arc=bytes and require('src.import.NarcArchive').parse(bytes)
+  if not arc then return {} end
+  local function member(name)
+    local id=A.find(Gen4Dex.PATH,name)
+    local b=id and arc:get(id)
+    if b and G.isCompressed(b) then b=G.decompress(b) end
+    return b
+  end
+  local function palette(name) local b=member(name);return b and G.palette(b) end
+  local function tiles(name) local b=member(name);return b and G.tiles(b) end
+  local function map(name) local b=member(name);return b and G.tilemap(b) end
+  local base=palette(Gen4Dex.PALETTE)
+  local national=palette(Gen4Dex.PALETTE_NATIONAL)
+  local sheet=tiles(Gen4Dex.TILES)
+  if not (base and national and sheet) then return {} end
+  local nationalPalette={}
+  for i,color in ipairs(base) do nationalPalette[i]=color end
+  for i=1,16 do nationalPalette[i]=national[i] end
+  local canvas=G.canvas(32,24)
+  for _,layer in ipairs(Gen4Dex.ENTRY_LAYERS) do
+    local tilemap=map(layer.name)
+    if not tilemap then return {} end
+    G.stamp(canvas,tilemap,layer.x,layer.y)
+  end
+  local banner=map(Gen4Dex.BANNER_MAP)
+  local panel=map('page_panel.NSCR.lz')
+  local sub=tiles('entry_sub.NCGR.lz')
+  local out={}
+  local cryColors={}
+  for i,color in ipairs(base) do cryColors[i]=color end
+  local cryPalette=palette('cry_sub.NCLR')
+  if cryPalette then for i=1,16 do cryColors[112+i]=cryPalette[16+i] end end
+  local cryMap=map('cry_sub.NSCR.lz')
+  local cryWheelMap=map('cry_wheel.NSCR.lz')
+  local cryWheelSheet=tiles('cry_wheel.NCGR.lz')
+  if cryMap and sub then out['dex/cry_panel']=G.compose(cryMap,sub,cryColors) end
+  if cryWheelMap and cryWheelSheet then
+    local pic=G.compose(cryWheelMap,cryWheelSheet,cryColors)
+    if pic then
+      -- Native BG scroll is (-48,-16). Bake the offset into a bounded screen
+      -- layer so inset rendering cannot spill beyond the DS viewport.
+      local rows={};local empty=string.rep('\0',256*4)
+      for y=0,191 do
+        if y<16 or y-16>=pic.height then rows[#rows+1]=empty
+        else
+          local width=math.min(208,pic.width);local at=(y-16)*pic.width*4+1
+          rows[#rows+1]=string.rep('\0',48*4)..pic.rgba:sub(at,at+width*4-1)..string.rep('\0',(208-width)*4)
+        end
+      end
+      out['dex/cry_wheel']={width=256,height=192,rgba=table.concat(rows)}
+    end
+  end
+  local scrollBase=palette('background_scroll_default.NCLR')
+  local scrollSheet=tiles('scroll_sub_background.NCGR.lz')
+  local scrollMap=map('scroll_sub.NSCR.lz')
+  local wheelSheet=tiles('scroll_wheel.NCGR.lz')
+  local wheelMap=map('scroll_wheel.NSCR.lz')
+  if scrollBase and scrollSheet and scrollMap then
+    for _,mode in ipairs({'sinnoh','national'}) do
+      local colors={}
+      for i,color in ipairs(scrollBase) do colors[i]=color end
+      -- Native unfiltered Sinnoh uses default; National overwrites row 3.
+      if mode=='national' then
+        local replacement=palette('background_scroll_national.NCLR')
+        if replacement then for i=1,16 do colors[48+i]=replacement[i] end end
+      end
+      out['dex/list_panel_'..mode]=G.compose(scrollMap,scrollSheet,colors)
+    end
+    if wheelSheet and wheelMap then out['dex/list_wheel']=G.compose(wheelMap,wheelSheet,scrollBase) end
+    local searchPanel=map('search_main.NSCR.lz')
+    if searchPanel then out['dex/search_panel']=G.compose(searchPanel,scrollSheet,scrollBase) end
+    local colors={}
+    for i,color in ipairs(scrollBase) do colors[i]=color end
+    local replacement=palette('background_scroll_sinnoh.NCLR')
+    if replacement then for i=1,16 do colors[48+i]=replacement[i] end end
+    out['dex/list_panel_filtered']=G.compose(scrollMap,scrollSheet,colors)
+    local searchColors={}
+    for i,color in ipairs(scrollBase) do searchColors[i]=color end
+    local replacement=palette('search.NCLR')
+    if replacement then for i=1,16 do searchColors[i]=replacement[i] end end
+    local searchSheet=tiles('scroll_main_background.NCGR.lz')
+    local searchMap=map('search_filter.NSCR.lz')
+    if searchSheet and searchMap then
+      for i,filter in ipairs({'order','name','type','form'}) do
+        local canvas=G.canvas(32,24);G.stamp(canvas,searchMap,0,0)
+        local patch=map('search_filter_'..filter..'.NSCR.lz')
+        if patch then G.stamp(canvas,patch,6,({6,9,12,17})[i]) end
+        out['dex/search_'..filter]=G.compose(canvas,searchSheet,searchColors)
+      end
+    end
+  end
+  for _,mode in ipairs({'sinnoh','national'}) do
+    local colors=mode=='national' and nationalPalette or base
+    out['dex/entry_'..mode]=G.compose(canvas,sheet,colors)
+    if banner then out['dex/banner_'..mode]=G.compose(banner,sheet,colors) end
+    if panel and sub then out['dex/panel_'..mode]=G.compose(panel,sub,colors) end
+  end
+  local C=require('src.import.Gen4Cells')
+  local Anim=require('src.import.Gen4CellAnim')
+  local crySheet=tiles('cry_dials.NCGR.lz')
+  local cryBank=C.parse(member('cry_dials_cell.NCER.lz'),G)
+  local cryAnim=Anim.parse(member('cry_dials_anim.NANR.lz'),G)
+  local cryColors=palette('cry_dials.NCLR')
+  if crySheet and cryBank and cryAnim and cryColors then
+    for i=0,6 do
+      local frames=Anim.frames(cryAnim,i)
+      -- Resting buttons/switches use the end of their native sequence.
+      local frame=frames and frames[#frames]
+      local cell=frame and cryBank.cells[frame.cell+1]
+      local pic=cell and C.assemble(cell,crySheet,cryColors,cryBank,G)
+      if pic then pic.originX,pic.originY=C.extent(cell);out[('dex/cry_control_%02d'):format(i)]=pic end
+    end
+  end
+  -- Search buttons encode normal/selected/pressed as frames in each sequence.
+  for _,name in ipairs({'search_buttons','search_button_forms'}) do
+    local pixels=tiles(name..'.NCGR.lz')
+    local cells=C.parse(member(name..'_cell.NCER.lz'),G)
+    local anim=Anim.parse(member(name..'_anim.NANR.lz'),G)
+    local pal=palette('buttons.NCLR')
+    if pixels and cells and anim and pal then
+      for i=0,(name=='search_buttons' and 6 or 13) do
+        for j,frame in ipairs(Anim.frames(anim,i) or {}) do
+          local cell=cells.cells[frame.cell+1]
+          local pic=cell and C.assemble(cell,pixels,pal,cells,G)
+          if pic then
+            pic.originX,pic.originY=C.extent(cell)
+            out[('dex/%s_%02d_%02d'):format(name,i,j-1)]=pic
+          end
+        end
+      end
+    end
+  end
+  local buttonSheet=tiles('page_buttons.NCGR.lz')
+  local bank=C.parse(member('page_buttons_cell.NCER.lz'),G)
+  local animation=Anim.parse(member('page_buttons_anim.NANR.lz'),G)
+  local colors=palette('info.NCLR')
+  if buttonSheet and bank and animation and colors then
+    for i=0,5 do
+      local frames=Anim.frames(animation,i)
+      local cell=frames and frames[1] and bank.cells[frames[1].cell+1]
+      if cell then
+        local pic=C.assemble(cell,buttonSheet,colors,bank,G)
+        if pic then pic.originX,pic.originY=C.extent(cell);out[('dex/page_button_%02d'):format(i)]=pic end
+      end
+    end
+  end
+  local shapeSheet=tiles('search_body_shapes.NCGR.lz')
+  local shapeBank=C.parse(member('search_body_shapes_cell.NCER.lz'),G)
+  local shapeAnim=Anim.parse(member('search_body_shapes_anim.NANR.lz'),G)
+  local shapeColors=palette('buttons.NCLR')
+  if shapeSheet and shapeBank and shapeAnim and shapeColors then
+    for i=3,16 do
+      local frames=Anim.frames(shapeAnim,i)
+      local cell=frames and frames[1] and shapeBank.cells[frames[1].cell+1]
+      if cell then
+        local pic=C.assemble(cell,shapeSheet,shapeColors,shapeBank,G)
+        if pic then pic.originX,pic.originY=C.extent(cell);out[('dex/search_shape_%02d'):format(i-2)]=pic end
+      end
+    end
+  end
+  local buttonSheet=tiles('scroll_buttons.NCGR.lz')
+  local bank=C.parse(member('scroll_buttons_cell.NCER.lz'),G)
+  local animation=Anim.parse(member('scroll_buttons_anim.NANR.lz'),G)
+  local colors=palette('buttons.NCLR')
+  if buttonSheet and bank and animation and colors then
+    for i=0,5 do
+      local frames=Anim.frames(animation,i)
+      local cell=frames and frames[1] and bank.cells[frames[1].cell+1]
+      if cell then
+        local pic=C.assemble(cell,buttonSheet,colors,bank,G)
+        if pic then pic.originX,pic.originY=C.extent(cell);out[('dex/list_button_%02d'):format(i)]=pic end
+      end
+    end
+  end
+  for key,pic in pairs(Gen4Dex.listImages(member)) do out[key]=pic end
+  return out
+end
+
+-- ---------------------------------------------------------------------------
+-- The LIST screen (top), ov21_021D5AEC.c
+-- ---------------------------------------------------------------------------
+--
+-- Back to front: BG3 the scroll background with the species window stamped
+-- at tile (1,4), the preview Pokemon, the plates/balls/thumb sprites, BG2
+-- the header and footer bars, BG1 the counters.
+--
+--   BG3  scroll_main_background.NSCR at (0,0) + register_species_window.NSCR
+--        at (1,4), over scroll_main_background.NCGR, palette
+--        background_scroll_default.NCLR whole.
+--   BG2  search_sinnoh/search_national.NSCR: the app scrolls the 32x32 map so
+--        its rows 29..31 sit at screen rows 0..2 and rows 0..5 at 18..23.  In
+--        search results palette row 0 is register.NCLR's row 0 (red bars).
+--   OBJ  buttons.NCLR with an explicit palette row per sprite (the template's
+--        plttIdx replaces the cell's own OAM palette): plates and balls take
+--        row 0 for the selected slot and 7/8/9 for the farther ones, the
+--        scroll thumb row 0, the unseen "?" row 10.
+Gen4Dex.LIST_ROWS = { 0, 7, 8, 9 }
+-- ink (colour 3) and shadow (colour 2) per sprite row, if the palette is
+-- missing; read from buttons.NCLR when it is there.
+Gen4Dex.LIST_INK_FALLBACK = {
+  [0] = { ink = '636363', shadow = '636363' },
+  [7] = { ink = '635a6b', shadow = '635a6b' },
+  [8] = { ink = '635a7b', shadow = '635a7b' },
+  [9] = { ink = '5a528c', shadow = '5a528c' },
+}
+
+local function copy(list) local t={} for i,v in ipairs(list) do t[i]=v end return t end
+local function hex(c) return c and ('%02x%02x%02x'):format(c[1]%256,c[2]%256,c[3]%256) or nil end
+
+-- `member(name)` returns the decompressed bytes of a zukan.narc member.
+function Gen4Dex.listImages(member)
+  local G=require('src.import.Gen4Graphics')
+  local C=require('src.import.Gen4Cells')
+  local Anim=require('src.import.Gen4CellAnim')
+  local out={}
+  local function get(name,fn) local b=member(name);return b and fn(b) end
+  local sheet=get('scroll_main_background.NCGR.lz',G.tiles)
+  local default=get('background_scroll_default.NCLR',G.palette)
+  local register=get('register.NCLR',G.palette)
+  local mainMap=get('scroll_main_background.NSCR.lz',G.tilemap)
+  local windowMap=get('register_species_window.NSCR.lz',G.tilemap)
+  if sheet and default and mainMap then
+    local canvas=G.canvas(32,24)
+    G.stamp(canvas,mainMap,0,0)
+    if windowMap then G.stamp(canvas,windowMap,1,4) end
+    out['dex/list_main']=G.compose(canvas,sheet,default)
+    local filtered=copy(default)
+    if register then for i=1,16 do filtered[i]=register[i] end end
+    for _,mode in ipairs({'sinnoh','national'}) do
+      local map=get('search_'..mode..'.NSCR.lz',G.tilemap)
+      if map then
+        local w=math.floor(map.width/8)
+        local frame=G.canvas(32,24)
+        local function row(dst,src)
+          for x=0,31 do
+            local cell=map.cells[src*w+x+1]
+            if cell then frame.cells[dst*32+x+1]=cell end
+          end
+        end
+        for y=0,2 do row(y,29+y) end
+        for y=18,23 do row(y,y-18) end
+        out['dex/list_frame_'..mode]=G.compose(frame,sheet,default)
+        if register then out['dex/list_frame_'..mode..'_filtered']=G.compose(frame,sheet,filtered) end
+      end
+    end
+  end
+  local buttons=get('buttons.NCLR',G.palette)
+  local function sprite(key,name,sequence,paletteRow)
+    local pixels=get(name..'.NCGR.lz',G.tiles)
+    local bank=get(name..'_cell.NCER.lz',function(b) return C.parse(b,G) end)
+    local anim=get(name..'_anim.NANR.lz',function(b) return Anim.parse(b,G) end)
+    if not (buttons and pixels and bank and anim) then return end
+    local colours={}
+    for i=paletteRow*16+1,#buttons do colours[#colours+1]=buttons[i] end
+    local frames=Anim.frames(anim,sequence)
+    local cell=frames and frames[1] and bank.cells[frames[1].cell+1]
+    if not cell then return end
+    -- SpriteSystem_NewSprite: the explicit palette replaces the OAM one.
+    local flat={oam={}}
+    for k,v in pairs(cell) do if k~='oam' then flat[k]=v end end
+    for i,o in ipairs(cell.oam) do
+      local c2={};for k,v in pairs(o) do c2[k]=v end;c2.palette=0;flat.oam[i]=c2
+    end
+    local pic=C.assemble(flat,pixels,colours,bank,G)
+    if pic then pic.originX,pic.originY=C.extent(flat);out[key]=pic end
+  end
+  for _,r in ipairs(Gen4Dex.LIST_ROWS) do
+    sprite('dex/list_plate_r'..r,'search_body_shapes',0,r)
+    sprite('dex/list_ball_r'..r,'search_body_shapes',1,r)
+  end
+  sprite('dex/list_thumb','search_body_shapes',2,0)
+  sprite('dex/list_unseen','unseen_icon',0,10)
+  return out
+end
+
+-- The list's text colours, out of the same palettes the art uses: a plate's
+-- words take its sprite row's colours 3 (ink) and 2 (shadow); the counters on
+-- BG1 take BG palette row 0's colours 2 (ink) and 1 (shadow), which in search
+-- results is register.NCLR's row 0.
+function Gen4Dex.listInkFrom(member)
+  local G=require('src.import.Gen4Graphics')
+  local function get(name) local b=member(name);return b and G.palette(b) end
+  local buttons,default,register=get('buttons.NCLR'),get('background_scroll_default.NCLR'),get('register.NCLR')
+  local out={ rows={} }
+  for _,r in ipairs(Gen4Dex.LIST_ROWS) do
+    local fb=Gen4Dex.LIST_INK_FALLBACK[r]
+    out.rows[r]={ ink=buttons and hex(buttons[r*16+4]) or fb.ink, shadow=buttons and hex(buttons[r*16+3]) or fb.shadow }
+  end
+  out.counter={ ink=default and hex(default[3]) or 'ffffff', shadow=default and hex(default[2]) or '101921' }
+  out.counterFiltered={ ink=register and hex(register[3]) or 'ffffff', shadow=register and hex(register[2]) or '000000' }
+  return out
+end
+
+local function opener(rom)
+  local G=require('src.import.Gen4Graphics')
+  local A=require('src.import.Gen4Archives')
+  local bytes=rom:read(Gen4Dex.PATH)
+  local arc=bytes and require('src.import.NarcArchive').parse(bytes)
+  return function(name)
+    local id=arc and A.find(Gen4Dex.PATH,name)
+    local b=id and arc:get(id)
+    if b and G.isCompressed(b) then b=G.decompress(b) end
+    return b
+  end
+end
+
+function Gen4Dex.listInk(rom) return Gen4Dex.listInkFrom(opener(rom)) end
+function Gen4Dex.listOnly(rom) return Gen4Dex.listImages(opener(rom)) end
 
 return Gen4Dex

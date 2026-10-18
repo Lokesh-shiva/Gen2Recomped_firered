@@ -335,6 +335,12 @@ Gen4Menus.PARTY_TEXT = {
   -- the question along the bottom, one per reason the screen was opened
   choose = 29, moveWhere = 30, giveTo = 31, useOn = 32,
   teachWhich = 33, chooseAndConfirm = 34,
+  -- the CANCEL button's label, the gender symbols on a panel, and the
+  -- question while the submenu is open ("Do what with\n{nickname}?")
+  cancelButton = 1, male = 27, female = 28, promptPokemon = 37,
+  promptItem = 38,
+  -- the item submenu
+  give = 160, take = 161,
   -- the submenu
   switch = 145, summary = 146, item = 147, mail = 148,
   mailRead = 149, mailTake = 150, mailStore = 151, cancel = 152,
@@ -429,15 +435,15 @@ Gen4Menus.SUMMARY_TEXT = {
   pp = 135, cancel = 146, power = 147, accuracy = 148, category = 149,
   switch = 152, dashes = 153, dashesLong = 154,
   -- the MEMO page
-  memo = 23,
+  memo = 23, sheen = 127, ribbonCount = 182,
 }
 
--- Twenty-five of each, in the cartridge's own order, so a nature or a
--- characteristic is looked up by index rather than spelled here.
+-- Twenty-five natures and thirty characteristics (five per stat), in the
+-- cartridge's order. The HP group starts at 71, before Attack at 76.
 Gen4Menus.SUMMARY_NATURE_FIRST = 24
-Gen4Menus.SUMMARY_CHARACTERISTIC_FIRST = 76
+Gen4Menus.SUMMARY_CHARACTERISTIC_FIRST = 71
 Gen4Menus.SUMMARY_NATURES = 25
-Gen4Menus.SUMMARY_CHARACTERISTICS = 25
+Gen4Menus.SUMMARY_CHARACTERISTICS = 30
 
 -- WHERE THE ROWS ARE, measured off the pages themselves rather than guessed.
 -- Each page is a panel of stripes, and a stripe boundary is a row: on
@@ -473,21 +479,23 @@ Gen4Menus.SUMMARY_CHARACTERISTICS = 25
 Gen4Menus.SUMMARY_LAYOUT = {
   label = { x = 112 },
   value = { x = 180 },
-  name = { x = 8, y = 42 },
+  name = { x = 24, y = 24 },
   picture = { x = 52, y = 104, plate = 64 },
   info = { first = 40, pitch = 16, rows = 7 },
   skills = { first = 40, pitch = 16, rows = 6, ability = 144, abilityText = 162 },
-  moves = { first = 50, pitch = 32, rows = 4 },
+  moves = { first = 32, pitch = 32, rows = 4 },
 }
 
 -- The pages this port draws, in the order the cartridge tabs through them.
--- CONDITION, CONTEST MOVES and RIBBONS are named in the bank and are not here:
--- contest stats and ribbons are not modelled by this engine, and an empty page
--- with the cartridge's title on it would claim otherwise.
+-- Contest moves still need their native page behavior.
 Gen4Menus.SUMMARY_PAGES = {
   { key = "info", title = "info", art = "summary/page_info" },
+  { key = "memo", title = "memo", art = "summary/page_memo" },
   { key = "skills", title = "skills", art = "summary/page_skills" },
   { key = "moves", title = "battleMoves", art = "summary/page_battle_moves" },
+  { key = "condition", title = "condition", art = "summary/page_condition" },
+  { key = "ribbons", title = "ribbons", art = "summary/page_ribbons" },
+  { key = "exit", art = "summary/page_exit" },
 }
 
 -- ---------------------------------------------------------------------------

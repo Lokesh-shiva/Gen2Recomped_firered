@@ -87,12 +87,23 @@ done
 [ -n "$MANIFESTS" ] || fail "no tools/rom_manifest*.json found; no ROM could be imported"
 say "manifests:$MANIFESTS"
 
-# mods/ ships too: the launcher's MODS tab lists what is installed, and the
-# bundled example mods (DramaticShapes among them) live there.
+# THE BUNDLED MODS (scripts/bundled_mods.txt) ship -- DRAMATIC SHAPES -- and
+# ONLY those: zipping all of mods/ packed whatever a working folder held,
+# every installed mod with its .git, release zips and the OpenXR drop.
+BUNDLED_MODS=""
+if [ -f "$ROOT/scripts/bundled_mods.txt" ]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"; line="${line//[[:space:]]/}"
+    [ -n "$line" ] && [ -d "$ROOT/mods/$line" ] && BUNDLED_MODS="$BUNDLED_MODS mods/$line"
+  done < "$ROOT/scripts/bundled_mods.txt"
+fi
+# shellcheck disable=SC2086  # BUNDLED_MODS / MANIFESTS are word lists
 (cd "$ROOT" && zip -q -9 -r "$LOVE_FILE" \
-  main.lua conf.lua src data assets mods tools/save-editor \
+  main.lua conf.lua src data assets $BUNDLED_MODS tools/save-editor tools/map-editor \
   $MANIFESTS \
-  -x '*.DS_Store' 'data/generated/*' 'assets/generated/*')
+  -x '*.DS_Store' 'data/generated/*' 'assets/generated/*' '*/generated/*' \
+     'mods/*/tests/*' 'mods/*/tools/*' 'mods/*/oxr/*' 'mods/*.zip' \
+     'mods/*/CHANGELOG.md' 'mods/*_PLAN.md' 'mods/*/.git*')
 if unzip -Z1 "$LOVE_FILE" \
     | grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/'; then
   fail "game.love unexpectedly contains generated ROM data"
@@ -102,8 +113,14 @@ fi
 # ROM import fails in the built app (dev reads them off the source tree, so
 # the miss only ever shows up in a build -- the Yellow manifest shipped this
 # way once).
+# tools/map-editor too: the editor's MAP pages require it pcall'd, so a build
+# without it opened a MAP EDITOR with an empty body for every game --
+# scripts/pack_love.sh shipped it, this list did not.
 for required in tools/save-editor/App.lua tools/save-editor/Kit.lua \
-                tools/save-editor/panels/Party.lua; do
+                tools/save-editor/panels/Party.lua \
+                tools/map-editor/MapEdits.lua tools/map-editor/ModExport.lua \
+                tools/map-editor/panels/Preview.lua \
+                $(for m in $BUNDLED_MODS; do echo "$m/manifest.json $m/main.lua"; done); do
   unzip -Z1 "$LOVE_FILE" | grep -qx "$required" \
     || fail "game.love is missing $required"
 done
@@ -154,6 +171,10 @@ build_mac() {
   # drop any bundled placeholder .love and fuse ours in
   find "$out_app/Contents/Resources" -maxdepth 1 -name '*.love' -delete
   cp "$LOVE_FILE" "$out_app/Contents/Resources/game.love"
+  if [ -f "$ROOT/translation/rom-translate" ]; then
+    mkdir -p "$out_app/Contents/Resources/translation"
+    cp "$ROOT/translation/rom-translate" "$out_app/Contents/Resources/translation/"
+  fi
 
   local plist="$out_app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$plist" 2>/dev/null \
@@ -244,6 +265,10 @@ build_win() {
   cp "$love_dir"/license.txt "$out_dir"/ 2>/dev/null || true
 
   cat "$love_dir/love.exe" "$LOVE_FILE" > "$out_dir/$APP_NAME.exe"
+  if [ -f "$ROOT/translation/rom-translate.exe" ]; then
+    mkdir -p "$out_dir/translation"
+    cp "$ROOT/translation/rom-translate.exe" "$out_dir/translation/"
+  fi
 
   local zip_out="$DIST/win/$APP_NAME-win64.zip"
   rm -f "$zip_out"
@@ -302,6 +327,10 @@ build_linux() {
   unsquashfs -q -no-xattrs -o "$sfs_offset" -d "$appdir" "$love_appimage" >/dev/null
 
   cp "$LOVE_FILE" "$appdir/game.love"
+  if [ -f "$ROOT/translation/rom-translate" ]; then
+    mkdir -p "$appdir/translation"
+    cp "$ROOT/translation/rom-translate" "$appdir/translation/"
+  fi
   # `sed -i` takes a MANDATORY backup suffix on BSD and forbids one on GNU, so
   # no single spelling works on both -- and `sed -i ''` on Linux silently ate
   # the next argument as the script, which is why this step could only ever run

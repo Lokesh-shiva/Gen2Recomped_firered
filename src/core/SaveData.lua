@@ -396,6 +396,12 @@ local function persistFs(fs)
   return SaveData.portableFs() or fs or (love and love.filesystem)
 end
 
+-- Public seam for mods (Stadium import, HD zip install, custom pickers).
+-- Same routing as options/saves: injected fs, then portable.io, then LOVE.
+function SaveData.persistenceFs()
+  return persistFs(love and love.filesystem)
+end
+
 -- Port + original Options menu defaults.  Missing keys on load are filled
 -- from this table so old options.lua files stay compatible.
 function SaveData.defaultOptions()
@@ -1303,6 +1309,30 @@ end)
 -- the game file.  mods (when given) refreshes the meta stamp; the write
 -- itself rolls the last good save into .bak and stages the new bytes as
 -- a .tmp witness before the swap, so a crash mid-write is recoverable.
+-- Is there already a save file where the next save will land?
+--
+-- Sinnoh's save script needs this: the cartridge's `SaveData_DataExists`
+-- decides whether the player is asked "There is already a saved file.  Is it
+-- OK to overwrite it?", which the FIRST save into a file skips and every
+-- later one shows (src/scrcmd.c ScrCmd_CheckSaveType).  The engine's answer is
+-- the same question about the active slot, resolved through the same
+-- saveNames/persistFs pair SaveData.save is about to write through, so the
+-- file it reports on is the file that is about to be overwritten.
+--
+-- nil rather than false when it cannot be asked -- an unknown version, or no
+-- filesystem at all under a headless check -- so a caller can tell "there is
+-- no file" from "there was no way to look".
+function SaveData.saveFileExists(version)
+  version = version or GameVersion.get()
+  if not knownVersion(version) then return nil end
+  local FILENAME = saveNames(version)
+  local fs = persistFs(nil)
+  if not (fs and fs.getInfo and FILENAME) then return nil end
+  local ok, info = pcall(fs.getInfo, FILENAME)
+  if not ok then return nil end
+  return info ~= nil
+end
+
 function SaveData.save(data, mods)
   -- write to the file matching this save's own version, not just the active
   -- one, so Blue/Yellow playthroughs land in save_blue.lua / save_yellow.lua
@@ -1507,9 +1537,15 @@ local function scrubMonList(list, where, save, data, report, slots)
 end
 
 local function scrubItemMap(map, where, save, data, report)
+  local badges={}
+  if where=='inventory' and data.isGen4Cache then
+    for _,entry in ipairs(Badges.list(data)) do badges[Badges.itemFor(entry)]=entry end
+  end
   if type(map) ~= "table" then return end
   for id, count in pairs(map) do
-    if not known(data.items, id) then
+    if badges[id] then
+      Badges.set(save,badges[id],true,'platinum')
+    elseif not known(data.items, id) then
       map[id] = nil
       ensureOrphaned(save)
       save.orphaned.items[#save.orphaned.items + 1] =
@@ -1632,7 +1668,10 @@ function SaveData.validate(save, data)
   -- hall of fame rosters keep their shape: an unknown species blanks in
   -- place so the team stays the size it won at, with the rest of the mon
   -- (level etc.) intact for display
-  for _, entry in ipairs(save.hallOfFame or {}) do
+  -- Gen3 stores the induction COUNT here (including zero), not rosters.
+  -- Keep it numeric: Champion/Mystery Gift code reads and increments it.
+  local rosters = type(save.hallOfFame) == "table" and save.hallOfFame or {}
+  for _, entry in ipairs(rosters) do
     if type(entry) == "table" then
       for i = 1, #entry do
         local mon = entry[i]

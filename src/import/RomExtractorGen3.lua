@@ -53,7 +53,7 @@ RomExtractorGen3.__index = RomExtractorGen3
 -- The progress denominator.  Kept honest with the two stage lists below: a
 -- mismatch does not break anything, it just makes the bar lie, which is the
 -- kind of small wrongness that survives for months.
-local STAGE_COUNT = 93
+local STAGE_COUNT = 94
 
 -- ---------------------------------------------------------------------------
 -- The stage tables below are keyed to Emerald's ROM.  A sibling cartridge
@@ -191,6 +191,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function RomExtractorGen3:beginStage(name)
+  self.stageName=name
   self.stage = self.stage + 1
   if self.progress then
     self.progress(self.stage - 1, STAGE_COUNT, name, 0, 1)
@@ -205,10 +206,12 @@ function RomExtractorGen3:tick(name, current, total)
 end
 
 function RomExtractorGen3:write(name, value)
+  if self.checkpoint and self.stageName=='Gen3 constants' then self.checkpoint('Writing '..name..'.lua') end
   LuaWriter.write("data/generated/" .. name .. ".lua", value)
 end
 
 function RomExtractorGen3:saveImage(image, relative)
+  if self.checkpoint and self.stageName=='Gen3 constants' then self.checkpoint('Encoding '..relative) end
   ImageWriter.save(image, "assets/generated/" .. relative)
 end
 
@@ -2249,6 +2252,246 @@ function RomExtractorGen3:monRotate()
              :format(task, step, tip, back),
   }
   return self._monRotate
+end
+
+-- ---------------------------------------------------------------------------
+-- THE POKEMON THAT TIPS OVER, AND BACK
+--
+-- WITHDRAW's tip (above) is one task with one shape, and it was the only
+-- rotation this port could draw.  The cartridge has a GENERAL one, and six
+-- moves use it: FURY_ATTACK, DOUBLE_EDGE, PECK, LOW_KICK, SKULL_BASH and
+-- ARM_THRUST.  Until now every one of them rotated not at all.
+--
+-- There are two entry points and they share a step, which is the pin this
+-- whole pass hangs on:
+--
+--   AnimTask_RotateMonSpriteToSide      08:$0D6134  ->  step 08:$0D6308
+--   AnimTask_RotateMonToSideAndRestore  08:$0D622C  ->  step 08:$0D6308
+--
+-- ...the SAME step, read out of each one's literal pool as the one odd word
+-- there ($080D6309).  Two functions that install one step are two front doors
+-- on one room, and no unrelated pair of addresses matches that by accident.
+--
+-- WHAT THE STEP DOES, instruction by instruction at 08:$0D6308:
+--
+--   +0x10  ldrh r0,[r4,#0x10]   data[4], the per-frame delta
+--   +0x12  ldrh r1,[r4,#0x0E]   data[3], the angle so far
+--   +0x14  add  r0,r0,r1        data[3] += data[4]
+--   +0x1A  mov  r2,#0x80
+--   +0x1C  lsl  r2,r2,#1        r2 = 0x100 -- the scale, x and y both
+--   +0x22  bl   $0A71B4         SetSpriteRotScale(spriteId, 0x100, 0x100, a)
+--   +0x26  mov  r2,#0x16        data[7], the side gate
+--   +0x30  bl   $0A73A0         SetBattlerSpriteYOffsetFromRotation, if set
+--   +0x36  add  r0,#1           ++data[1]
+--   +0x3E  mov  r2,#0x0C        data[2], the frame limit
+--   +0x52  cmp  r0,#2           mode 2: run it again backwards
+--
+-- ...so the angle is an ACCUMULATOR, not a function of the frame, and the
+-- four script arguments are `frames, delta, battler, mode`.
+--
+-- THE THREE MODES, off data[6]:
+--
+--   0  tip and stay tipped                 (DOUBLE_EDGE's first pair)
+--   1  tip, then reset the matrix          (DOUBLE_EDGE's second pair)
+--   2  tip out over `frames`, then back    (FURY_ATTACK, PECK, LOW_KICK,
+--      over `frames` more, then reset       SKULL_BASH)
+--
+-- ...which is why mode 2 lives twice as long as the other two.
+--
+-- WHICH SIDE THE NUMBER IS WRITTEN FOR.  Both entries negate, and they arrive
+-- at the same place from opposite directions: the plain one sets data[7] from
+-- `side == PLAYER` and negates when it is set, and the restoring one negates
+-- the delta itself when the battler is NOT the player's and then negates
+-- again unconditionally.  Work both through and the enemy's track is the
+-- exact negation of the player's, for both entries -- so this emits the
+-- player's and lets the renderer mirror it, which is the convention the
+-- offsets already use (`authoredForPlayer`).
+--
+-- THE ONE PLACE THEY DIFFER is the RISE.  `SetBattlerSpriteYOffsetFromRotation`
+-- sets y2 = |matrix.c| >> 3, and matrix.c is the sine of the angle in Q8.8 --
+-- so a tipping sprite lifts, or its corner would sink through the platform.
+-- The plain entry only calls it when data[7] is set, which is the player's
+-- side ONLY.  The restoring entry hardcodes data[7] = 1, so it lifts on both.
+-- One flag, `risesOnEnemy`, carries that difference rather than two shapes.
+--
+-- The sine is the CARTRIDGE'S OWN (gSineTable, proven from a real call site
+-- by the ellipse pass), not a computed one, so the whole port keeps one sine.
+-- Note the honest limit: the hardware builds the matrix in the BIOS, whose
+-- table is not in the cartridge and cannot be read from here.  The two agree
+-- on eight of the ten calls and sit one pixel apart on LOW_KICK and
+-- SKULL_BASH; a pixel of lift on two moves is the known residual.
+RomExtractorGen3.MON_TIP = {
+  -- the step's own numbers, pinned at their offsets rather than scanned for
+  SCALE_MOV = { at = 0x1A, op = 0x2280 },   -- mov r2,#0x80
+  SCALE_LSL = { at = 0x1C, op = 0x0052 },   -- lsl r2,r2,#1   -> 0x100
+  DELTA     = { at = 0x10, op = 0x8A20 },   -- ldrh r0,[r4,#0x10]  data[4]
+  ANGLE     = { at = 0x12, op = 0x89E1 },   -- ldrh r1,[r4,#0x0E]  data[3]
+  ACCUM     = { at = 0x14, op = 0x1840 },   -- add  r0,r0,r1
+  STORE     = { at = 0x16, op = 0x81E0 },   -- strh r0,[r4,#0x0E]
+  SIDE      = { at = 0x26, op = 0x2216 },   -- mov r2,#0x16   data[7]
+  TICK      = { at = 0x36, op = 0x3001 },   -- add r0,#1      ++data[1]
+  LIMIT     = { at = 0x3E, op = 0x220C },   -- mov r2,#0x0C   data[2]
+  REVERSE   = { at = 0x52, op = 0x2802 },   -- cmp r0,#2      mode 2
+  ROTSCALE = 0x0A71B4,     -- SetSpriteRotScale, called every frame
+  YOFFSET  = 0x0A73A0,     -- SetBattlerSpriteYOffsetFromRotation, the rise
+  CALL_SCAN = 200, POOL_SCAN = 140,
+  TURN = 65536, STEPS = 256, UNIT = 256, SHIFT = 8,
+  MAX_FRAMES = 64, MAX_DELTA = 8192, MAX_LIFE = 600,
+}
+
+-- The two tip entries and their shared step, checked, or nil.
+function RomExtractorGen3:monTip()
+  if self._monTip ~= nil then return self._monTip or nil end
+  local T = RomExtractorGen3.MON_TIP
+  local function fail(why)
+    Logger.warn("gen3 move animations: %s, so the six tipping moves keep "
+                  .. "their flat sprites", why)
+    self._monTip = false
+    return nil
+  end
+  -- FURY_ATTACK and PECK each call their entry as the FIRST task in their
+  -- script, which is what names the two addresses without a symbol table.
+  local plain = self:moveAnimTask("FURY_ATTACK", 1)
+  local restore = self:moveAnimTask("PECK", 1)
+  if not (plain and restore) then
+    return fail("neither tipping move opens with a task")
+  end
+  if plain == restore then
+    return fail("both tipping moves open with the same task")
+  end
+  -- THE PIN: one step, installed out of both literal pools.
+  local function installed(at)
+    local found = nil
+    for _, word in ipairs(self:poolWords(at, T.POOL_SCAN)) do
+      if word % 2 == 1 then
+        local flat = RomExtractorGen3.romOffset(word - 1)
+        if flat and flat > 0 and flat < self.rom.size then
+          if found and found ~= flat then return nil end
+          found = flat
+        end
+      end
+    end
+    return found
+  end
+  local stepA, stepB = installed(plain), installed(restore)
+  if not (stepA and stepB and stepA == stepB) then
+    return fail("the two tipping entries do not install one shared step")
+  end
+  local step = stepA
+  -- ...AND THE STEP IS THE ONE THE READING ABOVE DESCRIBES.  Each of these is
+  -- a whole halfword at a fixed offset, so a near miss is a miss.
+  for name, pin in pairs({
+    SCALE_MOV = T.SCALE_MOV, SCALE_LSL = T.SCALE_LSL, DELTA = T.DELTA,
+    ANGLE = T.ANGLE, ACCUM = T.ACCUM, STORE = T.STORE, SIDE = T.SIDE,
+    TICK = T.TICK, LIMIT = T.LIMIT, REVERSE = T.REVERSE,
+  }) do
+    local ok, h = pcall(self.rom.u16, self.rom, step + pin.at)
+    if not (ok and h == pin.op) then
+      return fail(("the tip step's %s is not the instruction it should be")
+                  :format(name))
+    end
+  end
+  -- ...AND IT TURNS A SPRITE AND LIFTS IT.  Without both calls this is some
+  -- other step that happens to share a few immediates.
+  local turns, lifts = false, false
+  for _, target in ipairs(self:blTargets(step, T.CALL_SCAN)) do
+    if target == T.ROTSCALE then turns = true end
+    if target == T.YOFFSET then lifts = true end
+  end
+  if not turns then
+    return fail("the tip step never sets a sprite's rotation")
+  end
+  if not lifts then
+    return fail("the tip step never lifts the sprite it rotates")
+  end
+  -- ...AND EVERY CALL IN THE GAME KEEPS THE SAME ARGUMENT SHAPE.
+  local calls = 0
+  for _, list in pairs(self._animTasks or {}) do
+    for _, t in ipairs(list) do
+      local fn = t.fn and (t.fn - (t.fn % 2))
+      if fn == plain or fn == restore then
+        local a = t.args or {}
+        if #a ~= 4
+           or a[1] < 1 or a[1] > T.MAX_FRAMES
+           or a[2] == 0 or math.abs(a[2]) > T.MAX_DELTA
+           or (a[3] ~= 0 and a[3] ~= 1)
+           or a[4] < 0 or a[4] > 2 then
+          return fail("a tip address is also used with another argument shape")
+        end
+        calls = calls + 1
+      end
+    end
+  end
+  if calls < 10 then
+    return fail(("only %d call(s) to the tip carry its argument shape")
+                :format(calls))
+  end
+  -- the cartridge's own sine, proven from a real call site by the ellipse
+  local ellipse = self:monEllipse()
+  local sine = ellipse and ellipse.sine or nil
+  if type(sine) ~= "table" then
+    return fail("the cartridge's sine table is not readable, so the lift "
+                  .. "that keeps a tipped sprite off the platform is unknown")
+  end
+  self._monTip = {
+    plain = plain, restore = restore, step = step, sine = sine,
+    turn = T.TURN, calls = calls,
+    source = ("ROM:the tip entries at %07X and %07X, the step they share at "
+              .. "%07X, its ten pinned immediates and %d call(s)")
+             :format(plain, restore, step, calls),
+  }
+  return self._monTip
+end
+
+-- One script's call, walked frame by frame into the angles it produces.
+--
+-- This is the step above run forward with data[] held in locals, which is the
+-- only honest way to get the track: the angle is an accumulator, so frame N
+-- cannot be computed without frames 1..N-1.
+function RomExtractorGen3:tipOffsets(args, shape, restoring)
+  local T = RomExtractorGen3.MON_TIP
+  if type(args) ~= "table" or #args < 4 then return nil end
+  if not (shape and type(shape.sine) == "table") then return nil end
+  local frames, delta, battler, mode = args[1], args[2], args[3], args[4]
+  if frames < 1 or frames > T.MAX_FRAMES then return nil end
+  if delta == 0 or math.abs(delta) > T.MAX_DELTA then return nil end
+  if battler ~= 0 and battler ~= 1 then return nil end
+  if mode < 0 or mode > 2 then return nil end
+  -- THE PLAYER'S SIDE, which is the one this emits.  Both entries land on
+  -- d4 = -delta there; see the header for the two routes to it.
+  local d4 = -delta
+  local d3 = (mode == 1) and -(frames * delta) or 0
+  local d1, d6 = 0, mode
+  local sine = shape.sine
+  local angles, rises = {}, {}
+  for _ = 1, T.MAX_LIFE do
+    d3 = d3 + d4
+    angles[#angles + 1] = d3
+    -- y2 = |matrix.c| >> 3, and matrix.c is the angle's sine in Q8.8
+    local idx = math.floor((d3 % T.TURN) / T.UNIT) % T.STEPS
+    local s = sine[idx]
+    if s == nil then return nil end
+    rises[#rises + 1] = math.floor(math.abs(s) / T.SHIFT)
+    d1 = d1 + 1
+    if d1 >= frames then
+      if d6 == 2 then
+        -- mode 2 turns around and becomes a mode 1: back, then reset
+        d1, d4, d6 = 0, -d4, 1
+      else
+        break
+      end
+    end
+  end
+  if #angles < 1 then return nil end
+  return {
+    task = restoring and shape.restore or shape.plain,
+    angles = angles, rises = rises,
+    target = battler == 1 or nil,
+    authoredForPlayer = true,
+    risesOnEnemy = restoring or nil,
+    life = #angles, turn = shape.turn or T.TURN,
+    source = shape.source,
+  }
 end
 
 -- ---------------------------------------------------------------------------
@@ -10753,7 +10996,11 @@ function RomExtractorGen3:tradeTable()
   local function readName(at)
     local text, used = self:readText(at, T.NAME_MAX)
     if not (text and used and used <= T.NAME_MAX) then return nil end
-    if text == "" or text:find("[^A-Za-z0-9 .'%-]") then return nil end
+    -- the cartridge's apostrophe is $B4, which the charmap spells as U+2019:
+    -- FireRed's CH'DING (the fifth record) has one, and refusing it broke the
+    -- run there and lost MIMIEN, ZYNX, MS. NIDO and CH'DING itself
+    local plain = text:gsub("\226\128\153", "'")
+    if plain == "" or plain:find("[^A-Za-z0-9 .'%-]") then return nil end
     return text
   end
   local function row(at)
@@ -18246,6 +18493,208 @@ RomExtractorGen3.FRONTIER_PARTIES = {
   -- open level with a floor, not the Frontier's flat 50
   LEVEL_FLOOR = 30,
 }
+
+-- THE FRONTIER TRAINERS' WORDS: struct BattleFrontierTrainer carries three
+-- six-word easy chat phrases after the name -- speechBefore at +12, speechWin
+-- at +24, speechLose at +36 -- which GetOpponentIntroSpeech and the battle's
+-- end lines read (FrontierSpeechToString). Written as their own module,
+-- keyed like gen3FrontierParties.trainers (one based).
+function RomExtractorGen3:extractFrontierSpeech()
+  self:beginStage("Gen3 Frontier speech")
+  local P = RomExtractorGen3.FRONTIER_PARTIES
+  local rom = self.rom
+  local out = {}
+  local function words(o)
+    local w = {}
+    for k = 0, 5 do w[k + 1] = rom:u16(o + k * 2) end
+    return w
+  end
+  for i = 0, P.TRAINER_COUNT - 1 do
+    local o = P.TRAINERS + i * P.TRAINER_STRIDE
+    out[i + 1] = { before = words(o + 12), win = words(o + 24), lose = words(o + 36) }
+  end
+  -- ...and the three tents', keyed like gen3FrontierParties.tents (by the
+  -- VAR_FRONTIER_FACILITY their lobby sets)
+  out.tents = {}
+  for _, spec in ipairs(P.TENTS) do
+    local t = {}
+    for i = 0, P.TENT_TRAINERS - 1 do
+      local o = spec.trainers + i * P.TRAINER_STRIDE
+      t[i + 1] = { before = words(o + 12), win = words(o + 24), lose = words(o + 36) }
+    end
+    out.tents[spec.var] = t
+  end
+  -- ...and the Battle Pike's NPC rooms (battle_pike.c sNPCSpeeches: 42 rows
+  -- of six words at 086123E4, found by its first row and checked row by row
+  -- against the decomp's table), zero based like BufferNPCMessage's ids
+  out.pikeNpc = {}
+  for i = 0, 41 do out.pikeNpc[i] = words(0x6123E4 + i * 12) end
+  -- ...and the Battle Pyramid's post-battle hints (sPostBattleTexts)
+  out.pyramidHints = self:pyramidHintTexts()
+  -- ...and the Battle Tower's multi partners' five lines by facility class
+  out.partnerTexts = self:multiPartnerTexts()
+  self:write("gen3_frontier_speech", out)
+  Logger.info("Gen3 Frontier speech: %d trainers' three phrases", #out)
+end
+
+-- THE BATTLE PYRAMID'S POST-BATTLE HINTS (battle_pyramid.c sPostBattleTexts):
+-- six text groups -- one per trainer manner (sTrainerTextGroups) -- of three
+-- lists each: the exit's direction (4: up, left, right, down), the items left
+-- (9: zero to eight) and the trainers left (8: zero to seven). Only C points
+-- at them, so they are FOUND rather than named: every "exit is in" string,
+-- the 4-pointer direction tables whose first entry is one of them, the
+-- groups' 3-pointer tables that start with one of those, and the 6-pointer
+-- table that starts with that group (the other five word it differently, so
+-- they are checked for shape) -- each step a whole-ROM search for a pointer.
+-- Returned as hints[group][kind][n], all zero based; nil if the shape is
+-- not there (another ROM).
+function RomExtractorGen3:pyramidHintTexts()
+  local rom = self.rom
+  local data = rom.data
+  if type(data) ~= "string" then return nil end
+  local rev = self:charmapReverse()
+  local needle = {}
+  for ch in ("exit is in"):gmatch(".") do
+    local code = (ch == " ") and 0x00 or rev[ch]
+    if not code then return nil end
+    needle[#needle + 1] = string.char(code)
+  end
+  needle = table.concat(needle)
+  local function ptrTo(addr)
+    local v = 0x08000000 + addr
+    return string.char(v % 256, math.floor(v / 256) % 256, math.floor(v / 65536) % 256, math.floor(v / 16777216) % 256)
+  end
+  local function pointersTo(addr)
+    local found, from, p = {}, 1, ptrTo(addr)
+    while true do
+      local at = data:find(p, from, true)
+      if not at then break end
+      if (at - 1) % 4 == 0 then found[#found + 1] = at - 1 end
+      from = at + 1
+    end
+    return found
+  end
+  local function deref(at)
+    local v = rom:u32(at)
+    return (v >= 0x08000000 and v < 0x0A000000) and (v - 0x08000000) or nil
+  end
+  -- the strings: back to the byte after the previous terminator
+  local dirTables = {}
+  local from = 1
+  while true do
+    local at = data:find(needle, from, true)
+    if not at then break end
+    from = at + 1
+    local start = at - 1
+    while start > 0 and data:byte(start) ~= 0xFF do start = start - 1 end
+    for _, t in ipairs(pointersTo(start)) do dirTables[t] = true end
+  end
+  -- the groups: a 3-pointer table whose first entry is a direction table
+  local groupTables = {}
+  for t in pairs(dirTables) do
+    for _, g in ipairs(pointersTo(t)) do groupTables[g] = true end
+  end
+  -- the top: six consecutive pointers -- the first to the group found (only
+  -- group 1 words it "exit is in"), every one to three pointers to lists
+  local function shaped(gt)
+    for kind = 0, 2 do
+      local list = gt and deref(gt + kind * 4)
+      if not (list and deref(list)) then return false end
+    end
+    return true
+  end
+  local top
+  for g in pairs(groupTables) do
+    for _, at in ipairs(pointersTo(g)) do
+      local ok = true
+      for k = 0, 5 do
+        if not shaped(deref(at + k * 4)) then ok = false break end
+      end
+      if ok and (not top or at < top) then top = at end
+    end
+  end
+  if not top then return nil end
+  local COUNTS = { [0] = 4, 9, 8 }
+  local hints = {}
+  for g = 0, 5 do
+    local gt = deref(top + g * 4)
+    hints[g] = {}
+    for kind = 0, 2 do
+      local list = deref(gt + kind * 4)
+      hints[g][kind] = {}
+      for n = 0, COUNTS[kind] - 1 do
+        local sp = list and deref(list + n * 4)
+        hints[g][kind][n] = sp and self:readText(sp, 256) or ""
+      end
+    end
+  end
+  Logger.info("Gen3 Frontier speech: the Pyramid's hints at %06X", top)
+  return hints
+end
+
+-- THE BATTLE TOWER'S MULTI PARTNERS' LINES (battle_tower.c
+-- sPartnerTrainerTextTables): fifty { u32 facilityClass, const u8 *const
+-- strings[5] } rows -- intro, the first Pokemon, the second and the
+-- question, yes, no. Found from the LASS's intro ("...m a LASS!"): the
+-- pointers to it are the head of her five-string list, and the row holding
+-- that list with FACILITY_CLASS_LASS (0x47) in front is the table's first.
+-- Returns [facilityClass] = { [0] = intro, mon1, mon2Ask, accept, reject }.
+function RomExtractorGen3:multiPartnerTexts()
+  local rom = self.rom
+  local data = rom.data
+  if type(data) ~= "string" then return nil end
+  local rev = self:charmapReverse()
+  local needle = {}
+  for ch in ("m a LASS!"):gmatch(".") do
+    local code = (ch == " ") and 0x00 or rev[ch]
+    if not code then return nil end
+    needle[#needle + 1] = string.char(code)
+  end
+  needle = table.concat(needle)
+  local function ptrTo(addr)
+    local v = 0x08000000 + addr
+    return string.char(v % 256, math.floor(v / 256) % 256, math.floor(v / 65536) % 256, math.floor(v / 16777216) % 256)
+  end
+  local function pointersTo(addr)
+    local found, from, p = {}, 1, ptrTo(addr)
+    while true do
+      local at = data:find(p, from, true)
+      if not at then break end
+      if (at - 1) % 4 == 0 then found[#found + 1] = at - 1 end
+      from = at + 1
+    end
+    return found
+  end
+  local function deref(at)
+    local v = rom:u32(at)
+    return (v >= 0x08000000 and v < 0x0A000000) and (v - 0x08000000) or nil
+  end
+  local at = data:find(needle, 1, true)
+  if not at then return nil end
+  local start = at - 1
+  while start > 0 and data:byte(start) ~= 0xFF do start = start - 1 end
+  local top
+  for _, list in ipairs(pointersTo(start)) do
+    for _, row in ipairs(pointersTo(list)) do
+      if row >= 4 and rom:u32(row - 4) == 0x47 then top = row - 4 end
+    end
+  end
+  if not top then return nil end
+  local out = {}
+  for i = 0, 49 do
+    local class = rom:u32(top + i * 8)
+    local list = deref(top + i * 8 + 4)
+    if not list or class > 0xFF then break end
+    local lines = {}
+    for k = 0, 4 do
+      local sp = deref(list + k * 4)
+      lines[k] = sp and self:readText(sp, 512) or ""
+    end
+    out[class] = lines
+  end
+  Logger.info("Gen3 Frontier speech: the multi partners' lines at %06X", top)
+  return out
+end
 
 function RomExtractorGen3:extractFrontierParties()
   self:beginStage("Gen3 Frontier teams")
@@ -38140,6 +38589,58 @@ function RomExtractorGen3:extractMoveAnimations()
     end
   end
 
+  -- ---- ...AND THE POKEMON THAT TIPS OVER, AND BACK ----------------------
+  --
+  -- NOT written into `shakes`, which is where the sway and the ellipse go: a
+  -- shake is an offset on pos2 and `shakeAt` reads it as one, and a rotation
+  -- is not an offset.  Feeding an angle through the offset channel would slide
+  -- the sprite sideways by the angle's magnitude and never turn it.  So this
+  -- gets a channel of its own, and `Gen3MoveAnim:monRotate` -- which already
+  -- answers (radians, rise) for WITHDRAW -- learns to answer from a list too.
+  -- The return contract does not move, so nothing in BattleState changes.
+  do
+    local shape = self:monTip()
+    local marked, calls = 0, 0
+    if shape then
+      for _, row in pairs(leftovers) do
+        local list = nil
+        for _, t in ipairs(row.tasks or {}) do
+          local fn = t.fn and (t.fn - (t.fn % 2)) or -1
+          local plain = fn == shape.plain or fn == shape.plain + 0x08000000
+          local restoring = fn == shape.restore
+                            or fn == shape.restore + 0x08000000
+          if plain or restoring then
+            local built = self:tipOffsets(t.args, shape, restoring)
+            if built then
+              built.at = t.at or 0
+              list = list or {}
+              list[#list + 1] = built
+              calls = calls + 1
+            end
+          end
+        end
+        if list then
+          row.record = row.record or {}
+          local existing = row.record.rotateTracks or {}
+          for _, entry in ipairs(list) do existing[#existing + 1] = entry end
+          row.record.rotateTracks = existing
+          local longest = 0
+          for _, entry in ipairs(list) do
+            longest = math.max(longest, (entry.at or 0) + entry.life)
+          end
+          row.record.duration = math.max(row.record.duration or 0, longest)
+          row.def.anim = row.record
+          marked = marked + 1
+        end
+      end
+    end
+    if marked > 0 then
+      Logger.info("Gen3 move animations: %d move(s) tip the Pokemon over on "
+                    .. "a rotation track over %d call(s) (%s)", marked, calls,
+                  shape.source)
+    end
+  end
+
   -- ---- ...AND THE POKEMON THAT SWAYS -------------------------------------
   do
     local shape = self:monSway()
@@ -39406,6 +39907,76 @@ end
 -- checked rather than scanned for.
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- THE MIRAGE TOWER'S COLLAPSE (mirage_tower.c)
+--
+-- Taking a fossil on 4F brings the ceiling down (16 crumble sprites and a
+-- camera shake) and warps the player out to Route 111, where the tower is put
+-- on BG0 as a picture -- 73 tiles through a 6x12 tilemap, in the map's own BG
+-- palette 6 -- shaken two pixels side to side, then eaten a pixel at a time
+-- from the bottom row up while it sinks, as the fossil you left falls and
+-- dissolves into the sand. None of it is in the map; it is all in mirage_tower.c's
+-- rodata, which sits in one run, verified against pokeemerald's graphics:
+--
+--   0617274  sMirageTower_Gfx           73 tiles, 4bpp
+--   0617B94  sMirageTowerTilemap        72 entries (6 x 12)
+--   0617C24  sFossil_Pal                (unused)
+--   0617C44  sFossil_Gfx                16x16, 4bpp
+--   0617CC4  sMirageTowerCrumbles_Gfx   16x16, 4bpp
+--
+-- The fossil and the crumbles draw with OAM palette 0, which in the field is
+-- the player's own (PALSLOT_PLAYER) -- so their colours follow Brendan or May,
+-- as the cartridge's comment on it says. Both palettes ride along.
+RomExtractorGen3.MIRAGE_TOWER = {
+  TILES = 0x617274, TILE_COUNT = 73,
+  TILEMAP = 0x617B94, COLS = 6, ROWS = 12,
+  FOSSIL = 0x617C44, CRUMBLES = 0x617CC4,
+  PAL_TAG_BRENDAN = 0x1100, PAL_TAG_MAY = 0x1110,
+}
+
+function RomExtractorGen3:extractMirageTower()
+  self:beginStage("Gen3 Mirage Tower")
+  if self:isFireRedManifest() then return end
+  local M = RomExtractorGen3.MIRAGE_TOWER
+  local rom = self.rom
+  local tilemap = {}
+  for i = 0, M.COLS * M.ROWS - 1 do
+    local entry = rom:u16(M.TILEMAP + i * 2)
+    -- the shape is the check: every entry names one of the 73 tiles. The
+    -- top four bits are its BG palette (6, the secondary tileset's first:
+    -- CopyToBgTilemapBufferRect_ChangePalette's 17 keeps the entry as it is)
+    if entry % 1024 >= M.TILE_COUNT then
+      Logger.warn("gen3 Mirage Tower: tilemap entry %d is %04X, not a tower tile -- not read", i, entry)
+      return
+    end
+    tilemap[i + 1] = entry
+  end
+  local function hex(at, n)
+    return (rom:sub(at, n):gsub(".", function(c) return ("%02x"):format(c:byte()) end))
+  end
+  local players = {}
+  local palTable = self:symbol("sObjectEventSpritePalettes")
+  local palCount = self:layoutValue("objectEventPaletteCount", 0)
+  if palTable and palCount > 0 then
+    local pals = self:objectGfxPalettes(palTable, palCount)
+    players.brendan = pals[M.PAL_TAG_BRENDAN]
+    players.may = pals[M.PAL_TAG_MAY]
+  end
+  local constants = self._constants or {}
+  constants.gen3MirageTower = {
+    tiles = hex(M.TILES, M.TILE_COUNT * 32),
+    tilemap = tilemap, cols = M.COLS, rows = M.ROWS,
+    fossil = hex(M.FOSSIL, 128),
+    crumbles = hex(M.CRUMBLES, 128),
+    playerPalettes = players,
+    source = ("ROM:mirage_tower.c rodata %08X..%08X"):format(M.TILES + 0x08000000, M.CRUMBLES + 128 + 0x08000000),
+  }
+  self._constants = constants
+  self:write("constants", constants)
+  Logger.info("Gen3 Mirage Tower: %d tiles, %dx%d map, player palettes %s/%s", M.TILE_COUNT, M.COLS, M.ROWS,
+              tostring(players.brendan ~= nil), tostring(players.may ~= nil))
+end
+
 RomExtractorGen3.POKEMON_JUMP = {
   TABLE = 0x02FB464,      -- the literal in IsSpeciesInJumpTable's pool
   ROWS = 100, STRIDE = 4, KINDS = 3,
@@ -40249,7 +40820,7 @@ RomExtractorGen3.DATA_STAGES = {
   "extractTypeChart", "extractTrainers", "extractBattleAI",
   "extractMachines", "extractVsSeeker",
   "extractBerries", "extractTrades", "extractMultichoice",
-  "extractFrontierParties", "extractStoragePanels",
+  "extractFrontierParties", "extractFrontierSpeech", "extractStoragePanels",
   "extractEncounters", "extractEggMoves", "extractDexEntries",
   "extractTrainerClasses", "extractTrainerMoney", "extractTutorMoves", "extractBattleTables",
   "extractBattlerCoords",
@@ -40268,7 +40839,7 @@ RomExtractorGen3.DATA_STAGES = {
   "extractBoxWallpapers", "extractSpritePriority", "extractGabbyAndTy",
   "extractRotatingTiles",
   "extractMovementScripts", "extractScriptText", "extractTilesets",
-  "extractScenes", "extractRayquazaScene",
+  "extractScenes", "extractRayquazaScene", "extractMirageTower",
   "extractFont", "extractBraille", "extractRegiChambers",
   "extractOverworldSprites",
   "extractFieldEffects", "extractEmotes", "extractHealMachine",
@@ -46094,10 +46665,75 @@ RomExtractorGen3.FRLG_NAMING = {
   },
 }
 
-function RomExtractorGen3:extractFireRedNaming()
-  self:beginStage("Gen3 FireRed naming screen")
-  if (self.manifest or {}).frlgItemMenu == nil then return end
-  local N = RomExtractorGen3.FRLG_NAMING
+RomExtractorGen3.EMERALD_NAMING = {
+  GFX = 0xDD3838, BG_MAP = 0xDD4544,
+  KB_MAPS = { upper = 0xDD4620, lower = 0xDD46E0, symbols = 0xDD47A0 },
+  MENU_PAL = 0xDD3778, KB_PAL = 0x58BD78,
+  SPRITES = {
+    back = { 0xDD3C84, 40, 24, 4 }, ok = { 0xDD3E64, 40, 24, 4 },
+    frame = { 0xDD3A04, 40, 32, 4 },
+    swap_upper = { 0xDD4404, 32, 16, 1 }, swap_lower = { 0xDD4404, 32, 16, 2 },
+    swap_others = { 0xDD4404, 32, 16, 3 },
+    label_upper = { 0xDD4044, 24, 8, 4 }, label_lower = { 0xDD40E4, 24, 8, 4 },
+    label_others = { 0xDD4184, 24, 8, 4 }, cursor = { 0xDD4224, 16, 16, 5 },
+    cursor_filled = { 0xDD4364, 16, 16, 5 },
+    arrow = { 0xDD4504, 8, 8, 3 }, underscore = { 0xDD4524, 8, 8, 3 },
+  },
+}
+
+function RomExtractorGen3:extractEmeraldMapPopup()
+  local id = type(self.version) == "table" and self.version.id or self.version
+  if id ~= "emerald" then return end
+  self:beginStage("Gen3 Emerald map popup")
+  -- Retail US ROM; all five addresses occur in LoadMapNamePopUpWindowBg's
+  -- literal pools at D4C54..D4CA4. Each art row contains thirty 4bpp tiles.
+  local rom = self.rom
+  local record = {themes={},images={},underwaterImages={},colors={},underwaterColors={},
+    width=96,height=40,delay=31,slideSpeed=2,hold=121,hideFlag=0x4000,
+    source="ROM:map_name_popup.c tables 057C684/057DD04/057F384/057F444/057F464"}
+  for i=0,103 do record.themes[i]=rom:u8(0x57F464+i) end
+  local function compose(theme, paletteAt)
+    local colors=self:palette16(paletteAt)
+    local img=ImageWriter.blank(96,40)
+    local function tile(at,tid,dx,dy,transparent)
+      for y=0,7 do for x=0,7 do
+        local b=rom:u8(at+tid*32+y*4+math.floor(x/2))
+        local index=x%2==0 and b%16 or math.floor(b/16)
+        local c=colors[index+1]
+        if index~=0 or not transparent then img:setPixel(dx+x,dy+y,c[1]/255,c[2]/255,c[3]/255,1) end
+      end end
+    end
+    local edge=0x57DD04+theme*960
+    for x=0,11 do tile(edge,x,x*8,0,true);tile(edge,18+x,x*8,32,true) end
+    for y=0,2 do tile(edge,12+y*2,0,8+y*8,true);tile(edge,13+y*2,88,8+y*8,true) end
+    for y=0,2 do for x=0,9 do tile(0x57C684+theme*960,y*10+x,8+x*8,8+y*8,false) end end
+    return img,colors
+  end
+  for theme=0,5 do
+    local image,colors=compose(theme,0x57F384+theme*32)
+    local path=("map_popup/theme_%d.png"):format(theme)
+    self:saveImage(image,path);record.images[theme]="assets/generated/"..path
+    record.colors[theme]={ink=colors[3],shadow=colors[4]}
+    image,colors=compose(theme,0x57F444)
+    path=("map_popup/theme_%d_underwater.png"):format(theme)
+    self:saveImage(image,path);record.underwaterImages[theme]="assets/generated/"..path
+    record.underwaterColors[theme]={ink=colors[3],shadow=colors[4]}
+  end
+  local constants=self._constants or {};constants.gen3MapPopup=record
+  self._constants=constants;self:write("constants",constants)
+end
+
+function RomExtractorGen3:extractEmeraldNaming()
+  local id = type(self.version) == "table" and self.version.id or self.version
+  if id ~= "emerald" then return end
+  self:extractFireRedNaming(self.EMERALD_NAMING, "naming_emerald", "gen3EmeraldNaming")
+end
+
+function RomExtractorGen3:extractFireRedNaming(namingSpec, folder, constantKey)
+  self:beginStage(namingSpec and "Gen3 Emerald naming screen" or "Gen3 FireRed naming screen")
+  if not namingSpec and (self.manifest or {}).frlgItemMenu == nil then return end
+  local N = namingSpec or RomExtractorGen3.FRLG_NAMING
+  folder, constantKey = folder or "naming_frlg", constantKey or "gen3FRLGNaming"
   local rom = self.rom
   local pal = {}
   local function rows(at, first, count)
@@ -46112,8 +46748,8 @@ function RomExtractorGen3:extractFireRedNaming()
   if not ok then Logger.warn("gen3 frlg naming: tiles did not decompress") return end
   local images = {}
   local function save(key, img)
-    self:saveImage(img, "naming_frlg/" .. key .. ".png")
-    images[key] = "assets/generated/naming_frlg/" .. key .. ".png"
+    self:saveImage(img, folder .. "/" .. key .. ".png")
+    images[key] = "assets/generated/" .. folder .. "/" .. key .. ".png"
   end
   local function layer(key, at, keep0)
     local okM, map = RomExtractorGen3.lz77ok(rom, at)
@@ -46209,6 +46845,7 @@ function RomExtractorGen3:extractFireRedNaming()
   -- offsets are frame indices 0,3,0,4.
   local rivalIcon
   pcall(function()
+    if not N.RIVAL_GFX then return end
     local w, h, frames = 16, 32, 9
     local frameBytes = w * h / 2
     local raw = rom:bytes(N.RIVAL_GFX, frameBytes * frames)
@@ -46244,7 +46881,7 @@ function RomExtractorGen3:extractFireRedNaming()
   local function c(i) local t = pal[i] return { t[1], t[2], t[3] } end
   local constants = self._constants or {}
   local cursorWord = rom:u16(N.MENU_PAL + 5 * 32 + 2) -- palette 5, entry 1
-  constants.gen3FRLGNaming = {
+  constants[constantKey] = {
     images = images,
     rivalIcon = rivalIcon,
     cursorPulseBase = {
@@ -46263,7 +46900,7 @@ function RomExtractorGen3:extractFireRedNaming()
   self:write("constants", constants)
   local n = 0
   for _ in pairs(images) do n = n + 1 end
-  Logger.info("Gen3 FireRed naming screen: %d images", n)
+  Logger.info("Gen3 naming screen (%s): %d images", folder, n)
 end
 
 -- ---------------------------------------------------------------------------
@@ -58073,6 +58710,8 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractFireRedStorage",
   "extractFireRedPocketArt",
   "extractFireRedNaming",
+  "extractEmeraldNaming",
+  "extractEmeraldMapPopup",
   "extractFireRedFieldShadow",
   "extractFireRedFlyBird",
   "extractFireRedMapPreviews",
@@ -58087,7 +58726,19 @@ RomExtractorGen3.ASSET_STAGES = {
   "extractBallAnims",
   "extractSummaryWindows",
   "extractSlotMachine",
+  "extractTradeScene",
 }
+
+-- STAGE: the in-game trade sequence's art -- the wireless GBA, the signal
+-- rings, the platform, the balls, the link mon and every palette and table
+-- DoTradeAnim_Wireless drives them with.  Its own module, because it is keyed
+-- by game code and checks each blob against the decomp's shape before it
+-- writes anything: see src/import/Gen3TradeArt.lua.  Writes the data module
+-- `gen3_trade_art` and assets/generated/trade/*.png.
+function RomExtractorGen3:extractTradeScene()
+  self:beginStage("Gen3 trade scene")
+  require("src.import.Gen3TradeArt").extract(self)
+end
 
 function RomExtractorGen3:run()
   for _, stage in ipairs(RomExtractorGen3.DATA_STAGES) do

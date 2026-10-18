@@ -31,6 +31,20 @@ namespace love
 {
 namespace android
 {
+// Gen2Recomp offline translation bridge, called from a LOVE worker thread.
+bool closeOfflineTranslation();
+bool translateOffline(const char *source, const char *target, const std::string &text, std::string &output);
+
+/**
+ * Gen2Recomp in-app updates: hand a downloaded release APK (absolute path) to
+ * Android's package installer, which installs it over this app. Android 8+
+ * asks the player to allow installs from this app once first
+ * (canInstallApks / requestInstallPermission). Main thread only.
+ **/
+bool installApk(const char *path);
+bool canInstallApks();
+bool requestInstallPermission();
+
 
 /**
  * Enables or disables immersive mode where the navigation bar is hidden.
@@ -111,6 +125,21 @@ bool mkdirsReal(const char *path);
  * GameActivity.syncHealthSteps). Returns whether a sync could start.
  */
 bool syncHealthSteps();
+
+/**
+ * Pokéwalker notifications (GameActivity.walkerNotify): `json` is one
+ * command -- {"post":{"title","text"}} shows a notification now,
+ * {"watch":{...}} stores step milestones and starts the background check,
+ * {"stop":true} cancels it. Returns whether the command was taken.
+ */
+bool walkerNotify(const char *json);
+
+/**
+ * One HTTP request for the cloud saves (GameActivity.httpRequest): `json` is
+ * {"method","url","headers":{...},"body"}; the answer is {"status","body"} or
+ * {"error"} as a JSON string ("" when the bridge itself is missing).
+ */
+std::string httpRequest(const char *json);
 
 /**
  * Full process relaunch (GameActivity.restartApp): schedules the app's

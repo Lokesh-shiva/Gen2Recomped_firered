@@ -39,6 +39,12 @@ end
 -- a save directory and a slot registry to ask it through
 SaveFileIO.saveSize = saveSize
 
+-- a Nintendo DS game (Platinum, HeartGold/SoulSilver, Black/White)
+local function isNds(version)
+  local ok, yes = pcall(GameVersion.isNds, version)
+  return ok and yes or false
+end
+
 -- Resolve raw save bytes from whatever the launcher hands us:
 --   * a LOVE DroppedFile (a table/userdata with :open/:read/:getSize), read the
 --     way RomImporter reads a dropped ROM;
@@ -64,6 +70,15 @@ local function readSource(source, version)
     return nil, "no save file was provided"
   end
   if #source == saveSize(version) then
+    return source
+  end
+  -- one of this port's own .lua saves, handed over as its text
+  if require("src.save_convert.SaveVariants").isPortSave(source) then
+    return source
+  end
+  -- ...and an emulator's wrapped image (a .dsv is the save plus a footer) is
+  -- bytes too: no picker path runs to tens of kilobytes
+  if #source > 4096 then
     return source
   end
   local f, openErr = io.open(source, "rb")
@@ -93,17 +108,34 @@ function SaveFileIO.importToSlot(source, version)
   local want = saveSize(version)
   local bytes, readErr = readSource(source, version)
   if not bytes then return false, readErr end
-  if #bytes ~= want then
-    local info = GameVersion.info(version)
-    return false, ("A %s save file must be %d bytes (%d KB); this one is %d.")
-      :format((info and info.displayName) or tostring(version), want,
-              math.floor(want / 1024), #bytes)
+  -- OLD SAVES AND WRAPPED SAVES (src/save_convert/SaveVariants.lua): this
+  -- port's own .lua slot files from an older build go through the migration
+  -- pass instead of a codec; emulator RTC footers, padding, 64 KiB GBA flash
+  -- images and the DS containers (.dsv, no$gba, 1 MiB) are trimmed to the
+  -- cartridge image before the size check below measures it.
+  local Variants = require("src.save_convert.SaveVariants")
+  local save, convertErr
+  if Variants.isPortSave(bytes) then
+    save, convertErr = Variants.importPortSave(bytes, version)
+    if not save then return false, convertErr end
+  else
+    local gen = 1
+    pcall(function() gen = GameVersion.generation(version) or 1 end)
+    local family = isNds(version) and "nds" or Variants.family(gen)
+    local raw, why = Variants.normalize(bytes, want, family)
+    if raw then bytes = raw elseif why and family == "nds" then return false, why end
+    if #bytes ~= want then
+      local info = GameVersion.info(version)
+      return false, ("A %s save file must be %d bytes (%d KB); this one is %d.%s")
+        :format((info and info.displayName) or tostring(version), want,
+                math.floor(want / 1024), #bytes, why and (" (" .. why .. ")") or "")
+    end
+    -- 3rd arg: the crosswalk has to come from THIS game's ROM cache.  The
+    -- launcher imports before the cache is mounted on the un-prefixed paths, so
+    -- SaveConvert cannot find the generated tables by itself here (#420).
+    save, convertErr = SaveConvert.importSav(bytes, version, version)
+    if not save then return false, convertErr end
   end
-  -- 3rd arg: the crosswalk has to come from THIS game's ROM cache.  The
-  -- launcher imports before the cache is mounted on the un-prefixed paths, so
-  -- SaveConvert cannot find the generated tables by itself here (#420).
-  local save, convertErr = SaveConvert.importSav(bytes, version, version)
-  if not save then return false, convertErr end
   -- Tag the game version and normalize the meta stamp: SaveConvert leaves
   -- meta.format = "gen1_import", but SaveData.load's migration pass compares
   -- the format numerically, so re-stamp it to the current format (the imported
@@ -139,6 +171,11 @@ function SaveFileIO.exportActiveSlot(version)
   local rel = ("exports/gen1recomp-%s-%s.sav"):format(version, slotId)
   local ok, writeErr = fs.write(rel, bytes)
   if not ok then return false, "could not write the export: " .. tostring(writeErr) end
+  -- ...and DeSmuME's own form beside it: melonDS, DraStic and no$gba read
+  -- the raw .sav, DeSmuME reads .dsv (it can also import the raw file)
+  if isNds(version) then
+    fs.write(rel:gsub("%.sav$", ".dsv"), require("src.save_convert.NdsSave").wrapDesmume(bytes))
+  end
   local base = fs.getSaveDirectory and fs.getSaveDirectory() or ""
   if base ~= "" then return true, base .. "/" .. rel end
   return true, rel

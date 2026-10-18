@@ -53,19 +53,31 @@ Gen4Options.isOpaque = true
 
 local W, H = 256, 192
 
--- The description strip at the top, then the list.  Both are Platinum's own
--- window frame, which is what `Font.drawBox` now draws on a Gen 4 cache.
-local DESC = { tx = 1, ty = 1, tw = 30, th = 4 }
-local LIST = { tx = 1, ty = 6, tw = 30 }
+-- options_menu.c SetupWindows: the title at tile (1, 0), 12 x 2, straight on
+-- the background; the entries at (1, 3), 30 x 14, in the standard frame --
+-- seven rows of SINGLE_ENTRY_HEIGHT 16; the description at (2, 19), 27 x 4,
+-- in the MESSAGE box at the bottom. This used to put the description in a
+-- box of its own under the title, four tiles tall for a title line and a
+-- 16-pixel description, so the two printed over each other.
+local TITLE = { x = 8, y = 0 }
+local DESC = { tx = 1, ty = 18, tw = 29, th = 6 }
+local LIST = { tx = 0, ty = 2, tw = 32 }
 local ROW_STEP = 2
 local LABEL_X = 3
 local VALUE_X = 136
 local CURSOR_X = 1
--- How many rows fit between the list's top border and the bottom of the
--- screen: 192px is 24 tiles, the list opens at 6 and a row is two tiles.
-local VISIBLE = 8
+-- Seven rows fit the cartridge's 14-tile entries window; the engine's own
+-- extra rows scroll.
+local VISIBLE = 7
 
 local FRAME_TYPES = 20
+
+-- options_menu.c's effects: SE_CONFIRM_sseq_3 is the ROM's SEQ_SE_DP_SELECT.
+local function se(self, name, opts)
+  local data = self.game and self.game.data or self.data
+  local ok, Sound = pcall(require, "src.core.Sound")
+  if ok and type(Sound) == "table" and Sound.playSe and data then return Sound.playSe(data, name, opts) end
+end
 
 function Gen4Options:uiSize() return W, H end
 function Gen4Options:wantsFillScale() return true end
@@ -127,6 +139,11 @@ function Gen4Options.new(game, opts)
       self.closeDescription = row.description
     end
   end
+  -- the cartridge's own screen order (enum OptionsMenuEntryID), which is not
+  -- the bank's: TEXT SPEED, SOUND, BATTLE SCENE, BATTLE STYLE, BUTTON MODE,
+  -- FRAME, then CLOSE
+  local ORDER = { textSpeed = 1, sound = 2, battleScene = 3, battleStyle = 4, buttonMode = 5, frame = 6 }
+  table.sort(self.rows, function(a, b) return (ORDER[a.key] or 99) < (ORDER[b.key] or 99) end)
   self.cartridgeRows = #self.rows
   self.closeLabel = self.closeLabel or Strings("CLOSE")
 
@@ -171,6 +188,12 @@ function Gen4Options.new(game, opts)
 
   if #self.rows == 0 then
     Logger.warn("gen4 options: this dataset carries no OPTION vocabulary")
+  end
+  -- what the cartridge rows held on entry, for ChangesWereMade
+  self.opened = {}
+  local options = (game.save and game.save.options) or {}
+  for _, row in ipairs(self.rows) do
+    if row.binding then self.opened[row.binding.field] = options[row.binding.field] end
   end
   return self
 end
@@ -229,7 +252,20 @@ function Gen4Options:valueText(row)
   return values[self:choiceOf(row)] or values[1] or ""
 end
 
+function Gen4Options:changesWereMade()
+  local options = (self.game.save and self.game.save.options) or {}
+  for field, was in pairs(self.opened or {}) do
+    if options[field] ~= was then return true end
+  end
+  return false
+end
+
+-- OptionsMenu_Main STATE_HANDLE_INPUT: leaving with nothing changed plays
+-- SE_CONFIRM_sseq_3 (options_menu.c:240). With changes the cartridge asks
+-- first and plays SEQ_SE_DP_SAVE on YES (options_menu.c:271); this screen
+-- applies each change as it is made and has no prompt, so that path is silent.
 function Gen4Options:close()
+  if not self:changesWereMade() then se(self, "SEQ_SE_DP_SELECT") end
   self.game.stack:pop()
   if self.onCancel then self.onCancel() end
 end
@@ -252,20 +288,24 @@ function Gen4Options:update()
   if not input then return end
   local n = #self.rows + 1                  -- the rows, then CLOSE
   local row = self.rows[self.index]
+  -- ProcessMainInput: every cursor move and every choice change plays
+  -- SE_CONFIRM_sseq_3 (options_menu.c:894/898/910/919); CLOSE has no choices
   if input:wasPressed("down") then
     self.index = self.index % n + 1
+    se(self, "SEQ_SE_DP_SELECT")
   elseif input:wasPressed("up") then
     self.index = (self.index - 2) % n + 1
+    se(self, "SEQ_SE_DP_SELECT")
   elseif input:wasPressed("right") then
-    self:cycle(row, 1)
+    if row then self:cycle(row, 1); se(self, "SEQ_SE_DP_SELECT") end
   elseif input:wasPressed("left") then
-    self:cycle(row, -1)
+    if row then self:cycle(row, -1); se(self, "SEQ_SE_DP_SELECT") end
   elseif input:wasPressed("a") then
     if self.index > #self.rows then return self:close() end
     if row and row.engine and row.engine.activate then
       return pcall(row.engine.activate, self.game)
     end
-    self:cycle(row, 1)
+    if row then self:cycle(row, 1); se(self, "SEQ_SE_DP_SELECT") end
   elseif input:wasPressed("b") or input:wasPressed("start") then
     self:close()
   end
@@ -284,49 +324,134 @@ function Gen4Options:description()
   return row.label or ""
 end
 
+-- THE SCREEN AS options_menu.c DRAWS IT:
+--   * BG_MAIN_2 filled with config_gra tile 1 -- light blue-grey (197,206,214);
+--     SUB_0, the bottom screen, the same
+--   * "OPTIONS" on it at (10, 2), no window frame
+--   * the entries window, tile (1, 3) 30 x 14 in the standard frame, white;
+--     labels at (12, 24 + 16 x row); every choice of TEXT SPEED, SOUND, BATTLE
+--     SCENE and BATTLE STYLE side by side from x 108 every 48, BUTTON MODE's
+--     packed (each one its width + 12 after the last), FRAME only the chosen
+--     "TYPE n" at x 156; the chosen choice red (TEXT_COLOR(3,4,15): 238,32,16
+--     over 255,172,189), the rest grey (TEXT_COLOR(1,2,15): 90,90,82 over
+--     172,189,189)
+--   * the highlight bar: config_gra's tilemap.bin rows 0-1 on BG_MAIN_0, a
+--     hollow red rounded box from x 8 to 247, sixteen high, over the row
+--   * the selected row's description in the message box, tile (2, 19), text
+--     at (20, 152)
+local INK = { text = { 90 / 255, 90 / 255, 82 / 255 }, shadow = { 172 / 255, 189 / 255, 189 / 255 } }
+local RED = { text = { 238 / 255, 32 / 255, 16 / 255 }, shadow = { 1, 172 / 255, 189 / 255 } }
+local CHOICES_X, CHOICE_STEP = 108, 48
+
+-- the cartridge's pictures (src/import/Gen4OptionsArt.lua), when the cache has them
+local artImages = {}
+local function art(game, key)
+  local index = game and game.data and game.data.gen4_options_art
+  local rec = index and index[key]
+  if not rec then return nil end
+  if artImages[rec.path] == nil then
+    local ok, img = pcall(require("src.render.Assets").image, rec.path)
+    artImages[rec.path] = ok and img or false
+  end
+  return artImages[rec.path] or nil
+end
+
+-- the bar: config_gra's tilemap rows 0-1, or (without the cache's picture)
+-- its tiles by hand -- tile 3 the corner (rows 00444444 / 04444444 /
+-- 44400000 / 44000000...), tile 4 the two-pixel top edge, mirrored
+local function drawBar(y, game)
+  local g = love.graphics
+  local img = art(game, "options_cursor")
+  if img then
+    g.setColor(1, 1, 1, 1)
+    g.draw(img, 0, y)
+    return
+  end
+  g.setColor(1, 0, 0, 1)
+  local x0, x1 = 8, 248
+  g.rectangle("fill", x0 + 2, y, x1 - x0 - 4, 1)
+  g.rectangle("fill", x0 + 1, y + 1, x1 - x0 - 2, 1)
+  g.rectangle("fill", x0 + 2, y + 15, x1 - x0 - 4, 1)
+  g.rectangle("fill", x0 + 1, y + 14, x1 - x0 - 2, 1)
+  g.rectangle("fill", x0, y + 2, 3, 1)
+  g.rectangle("fill", x0, y + 13, 3, 1)
+  g.rectangle("fill", x0, y + 3, 2, 10)
+  g.rectangle("fill", x1 - 3, y + 2, 3, 1)
+  g.rectangle("fill", x1 - 3, y + 13, 3, 1)
+  g.rectangle("fill", x1 - 2, y + 3, 2, 10)
+  g.setColor(1, 1, 1, 1)
+end
+
+function Gen4Options:drawChoices(row, y)
+  if row.engine then
+    Font.pushStyle(RED)
+    Font.draw(self:valueText(row), 156, y)
+    Font.popStyle()
+    return
+  end
+  local values = row.values or {}
+  local chosen = self:choiceOf(row)
+  if row.key == "frame" then
+    Font.pushStyle(RED)
+    Font.draw(values[chosen] or values[1] or "", 156, y)
+    Font.popStyle()
+    return
+  end
+  local x = CHOICES_X
+  for i, v in ipairs(values) do
+    Font.pushStyle(i == chosen and RED or INK)
+    Font.draw(v, x, y)
+    Font.popStyle()
+    if row.key == "buttonMode" then x = x + Font.width(v) + 12 else x = x + CHOICE_STEP end
+  end
+end
+
 function Gen4Options:draw()
   local g = love.graphics
-  local colors = ((self.game.data and self.game.data.gen4_menus) or {}).colors
-  local bg = (colors and colors.background) or { 0.39, 0.39, 1 }
-  g.setColor(bg[1], bg[2], bg[3], 1)
-  g.rectangle("fill", 0, 0, W, H)
-  g.setColor(1, 1, 1, 1)
-
-  local glyphH = Font.glyphHeight()
-  local inset = math.max(0, math.floor((ROW_STEP * 8 - glyphH) / 2))
-
-  -- Drawn at white, not black: Platinum's font page is pre-tinted, so
-  -- multiplying it by black paints the letter's shadow black too.  See the
-  -- same note on Gen4MainMenu.
-  Font.drawBox(DESC.tx, DESC.ty, DESC.tw, DESC.th)
-  Font.draw(self.title, (DESC.tx + 1) * 8, (DESC.ty + 1) * 8)
-  local desc = self:description()
-  local y = (DESC.ty + 2) * 8 + 2
-  for line in (tostring(desc) .. "\n"):gmatch("([^\n]*)\n") do
-    if y < (DESC.ty + DESC.th) * 8 then
-      Font.draw(line, (DESC.tx + 1) * 8, y)
-      y = y + glyphH + 1
-    end
+  local bg = art(self.game, "options_bg")
+  if bg then
+    g.setColor(1, 1, 1, 1)
+    g.draw(bg, 0, 0)
+  else
+    g.setColor(197 / 255, 206 / 255, 214 / 255, 1)
+    g.rectangle("fill", 0, 0, W, H)
   end
-
+  g.setColor(1, 1, 1, 1)
+  local okS, SS = pcall(require, "src.ui.SecondScreen")
+  local mode = okS and SS.mode(self.game) or "off"
+  if bg and require("src.ui.SecondScreen").separateMode(mode) and not SS.stowed(self.game) then
+    SS.draw(self.game, function() g.draw(bg, 0, 0) end)
+  end
+  Font.pushStyle(INK)
+  Font.draw(self.title, 10, 2)
+  Font.popStyle()
+  Font.drawBox(0, 2, 32, 16)
   local total = #self.rows + 1
   local shown = math.min(VISIBLE, total)
-  Font.drawBox(LIST.tx, LIST.ty, LIST.tw, shown * ROW_STEP + 2)
-
   for slot = 1, shown do
     local i = slot + self.scroll
-    local rowY = (LIST.ty + 1 + (slot - 1) * ROW_STEP) * 8 + inset
+    local y = 24 + (slot - 1) * 16
+    Font.pushStyle(INK)
     if i <= #self.rows then
-      local row = self.rows[i]
-      Font.draw(row.label, (LIST.tx + LABEL_X) * 8, rowY)
-      Font.draw(self:valueText(row), VALUE_X, rowY)
+      Font.draw(self.rows[i].label, 12, y)
     elseif i == total then
-      Font.draw(self.closeLabel, (LIST.tx + LABEL_X) * 8, rowY)
+      Font.draw(self.closeLabel, 12, y)
     end
-    if i == self.index then
-      Font.drawCode(Theme.cursor, (LIST.tx + CURSOR_X) * 8, rowY)
-    end
+    Font.popStyle()
+    if i <= #self.rows then self:drawChoices(self.rows[i], y) end
+    if i == self.index then drawBar(y, self.game) end
   end
+  if Font.hasDialogueFrame and Font.hasDialogueFrame() then
+    Font.drawDialogueBox(DESC.tx, DESC.ty, DESC.tw, DESC.th)
+  else
+    Font.drawBox(DESC.tx, DESC.ty, DESC.tw, DESC.th)
+  end
+  Font.pushStyle(INK)
+  local y = 152
+  for line in (tostring(self:description()) .. "\n"):gmatch("([^\n]*)\n") do
+    if y < 184 then Font.draw(line, 20, y); y = y + 16 end
+  end
+  Font.popStyle()
   g.setColor(1, 1, 1, 1)
 end
 
