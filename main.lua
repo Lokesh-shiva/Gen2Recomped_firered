@@ -606,6 +606,21 @@ function realLoad(args)
   BootTrace.booted()
 end
 
+-- THE MONSTER WALKER'S PASSIVE WATTS (src/pokewalker/WalkerEconomy.lua): 5 W
+-- an hour while the app is open, in the launcher or in a game alike, so the
+-- time is fed here, ahead of the hand-off to either. pcall'd: never this
+-- frame's problem.
+local walkerEconomy
+local function walkerTick(fn, ...)
+  if walkerEconomy == false then return end
+  if not walkerEconomy then
+    local ok, E = pcall(require, "src.pokewalker.WalkerEconomy")
+    walkerEconomy = ok and E or false
+    if not ok then return end
+  end
+  pcall(walkerEconomy[fn], ...)
+end
+
 function love.update(dt)
   -- Unwind anything the previous frame left on the graphics stack before this
   -- one starts building on top of it.
@@ -617,6 +632,7 @@ function love.update(dt)
   -- The report deliberately runs nothing else: the boot path it is reporting on
   -- is the code that just died.
   if bootReport then return end
+  walkerTick("tick", dt)
   if editorMode then return EditorApp.update(dt) end
   if TouchEditor then return TouchEditor.update(dt) end
   if Importer then return Importer:update(dt) end
@@ -828,6 +844,8 @@ end
 -- unfocused, so reset input on either transition rather than trust it.
 function love.focus(f)
   if bootReport then return end
+  -- a phone stops the frames in the background: the walker credits the gap
+  walkerTick("focus", f)
   if editorMode or TouchEditor then return end
   if Importer then
     if Importer.focus then Importer:focus(f) end
@@ -849,11 +867,8 @@ end
 function love.touchpressed(id, x, y, dx, dy, pressure)
   -- The dismissal that matters on a phone: there is no keyboard behind this.
   if bootReport then return dismissBootReport() end
-  -- THE EDITOR SEES TOUCHES NOW, and only for the gestures a mouse cannot
-  -- make. It is driven by SDL's synthesized mouse events -- one finger is a
-  -- pointer and always has been -- so these handlers track contact points and
-  -- act on TWO of them (pinch to zoom) and nothing else. Returning without
-  -- consuming keeps every existing single-finger path exactly as it was.
+  -- Android supplies both the pointer coordinates and pinch contacts here;
+  -- iOS keeps its synthesized mouse selection path alongside pinch gestures.
   if editorMode then
     if EditorApp.touchpressed then EditorApp.touchpressed(id, x, y) end
     return
@@ -946,6 +961,8 @@ function love.mousepressed(x, y, button, istouch)
     return Importer:mousepressed(x, y, button)
   end
   if editorMode and EditorApp.mousepressed then
+    -- Android editors use their touch pointer directly, including its position.
+    if istouch and love.system.getOS() == "Android" then return end
     return EditorApp.mousepressed(x, y, button)
   end
   if Game and (mouseTouch or Game:hasPointerScreen()) and button == 1 and not istouch then
@@ -953,7 +970,7 @@ function love.mousepressed(x, y, button, istouch)
   end
 end
 
-function love.mousereleased(x, y, button)
+function love.mousereleased(x, y, button, istouch)
   if TouchEditor then
     if love.system.getOS() == "Android" then return end
     return TouchEditor.mousereleased(x, y, button)
@@ -962,26 +979,45 @@ function love.mousereleased(x, y, button)
   if editorMode and EditorApp.mousereleased then
     return EditorApp.mousereleased(x, y, button)
   end
-  if Game and (mouseTouch or Game:hasPointerScreen()) and button == 1 then
-    Game:touchreleased("mouse", x, y)
+  if mouseTouch then
+    if Game and button == 1 then pcall(function() Game:touchreleased("mouse", x, y) end) end
+    return
+  end
+  if Game and Game.mousereleased and not istouch then
+    Game:mousereleased(x, y, button, istouch)
+  end
+  if Game and Game.recenterLookPointer and not istouch then
+    Game:recenterLookPointer()
   end
 end
 
-function love.mousemoved(x, y, dx, dy)
+function love.mousemoved(x, y, dx, dy, istouch)
   -- FREE-CAMERA LOOK FIRST, and only when one is up: `Game:cameraLook`
   -- answers false on every other map and camera, so the touch path below
-  -- keeps every case it had.
-  if Game and not (editorMode or Importer or TouchEditor)
+  -- keeps every case it had. Warp back to centre after a real look so the
+  -- pointer never sits on the window edge (where dx/dy become zero).
+  if Game and Game.lookWarping then
+    Game.lookWarping = false
+    return
+  end
+  if Game and not istouch and not (editorMode or Importer or TouchEditor)
      and not Game:hasPointerScreen()
      and Game.cameraLook and Game:cameraLook(dx, dy) then
+    if ((dx or 0) ~= 0 or (dy or 0) ~= 0) and Game.recenterLookPointer then
+      Game:recenterLookPointer()
+    end
     return
   end
   if TouchEditor then
     if love.system.getOS() == "Android" then return end
     return TouchEditor.mousemoved(x, y)
   end
-  if editorMode or Importer then return end
-  if Game and (mouseTouch or Game:hasPointerScreen()) and love.mouse.isDown(1) then
+  if editorMode then
+    if not istouch and EditorApp.mousemoved then EditorApp.mousemoved(x, y, dx, dy) end
+    return
+  end
+  if Importer then return end
+  if Game and not istouch and (mouseTouch or Game:hasPointerScreen()) and love.mouse.isDown(1) then
     Game:touchmoved("mouse", x, y)
   end
 end
@@ -1132,6 +1168,7 @@ function love.quit()
   if editorMode and EditorApp.quit then
     return EditorApp.quit() -- return true to abort quit
   end
+  walkerTick("quit")
   -- Marks the trace as an orderly shutdown.  A trace that ends mid-boot with
   -- no "clean exit" and no crash.txt beside it is the signature of a native
   -- abort rather than a Lua error -- which is exactly the distinction that is
@@ -1149,6 +1186,9 @@ function love.quit()
   end
   if package.loaded["src.update.Check"] then
     pcall(package.loaded["src.update.Check"].shutdown)
+  end
+  if package.loaded["src.translation.Service"] then
+    pcall(package.loaded["src.translation.Service"].shutdown)
   end
 end
 

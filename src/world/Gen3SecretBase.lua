@@ -69,14 +69,39 @@ end
 
 function Gen3SecretBase.mine(save)
   local held = save and save.gen3SecretBase
-  if type(held) == "table" and tonumber(held.id) then return held end
+  if type(held) == "table" and (tonumber(held.id) or 0) > 0 then return held end
   return nil
+end
+
+-- SetOccupiedSecretBaseEntranceMetatiles runs on every outdoor map load.
+-- Closed/open entrance behaviours are adjacent pairs in Emerald's tilesets.
+function Gen3SecretBase.restoreEntrance(data, save, map)
+  local held = Gen3SecretBase.mine(save)
+  if not (held and map and map.def and map.setBlock) then return end
+  local record = Gen3SecretBase.record(data)
+  local collision = map.tileset and map.tileset.collision
+  if not collision then return end
+  for _, sign in ipairs(map.def.signs or {}) do
+    if tonumber(sign.secretBaseId) == tonumber(held.id) then
+      local behaviour = map:cellBehaviour(sign.x, sign.y)
+      if behaviour and behaviour % 2 == 0 and Gen3SecretBase.kindOf(record, behaviour) then
+        for index, other in ipairs(collision) do
+          if other == behaviour + 1 then
+            map:setBlock(sign.x, sign.y, index - 1, true)
+            break
+          end
+        end
+      end
+    end
+  end
 end
 
 -- The base the player is making theirs, and where they were standing when
 -- they made it -- which is where the room's exit has to put them back.
 function Gen3SecretBase.claim(save, baseId, map, x, y)
   if not save then return nil end
+  baseId = math.floor(tonumber(baseId) or 0)
+  if baseId < 1 then return nil end
   save.gen3SecretBase = { id = math.floor(tonumber(baseId) or 0),
                           map = map, x = x, y = y }
   return save.gen3SecretBase

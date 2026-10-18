@@ -169,7 +169,10 @@ local function gen4Markup(text, game)
   if type(text) ~= "string" or not text:find("{", 1, true) then return text end
   local slots = game and game.stringBuffers
   return (text:gsub("{(%u[%u_0-9]*)([^}]*)}", function(name, rest)
-    if name == "STRVAR_1" or name == "STRVAR_6" then
+    -- HGSS also fills 0x0300, 0x0400 and 0x3400 (MsgArray_ControlCodeIsStrVar,
+    -- string_control_code.c): 208 lines, the Groups' names among them
+    if name == "STRVAR_1" or name == "STRVAR_6" or name == "STRVAR_3" or name == "STRVAR_4"
+       or name == "STRVAR_34" then
       -- `<low> <param0> <param1>`: the middle one.
       local param0 = rest:match("^%s*%d+%s+(%d+)")
       local value = param0 and slots and slots[tonumber(param0) + 1]
@@ -186,6 +189,28 @@ local function gen4Markup(text, game)
       return param0 and "" or nil
     end
     if GEN4_DROP[name] then return "" end
+    -- BLACK AND WHITE (src/import/Gen5Text): a message's 0xF000 escapes come
+    -- through as {VARn} (0x01xx, argument slot n - 1) and {CMD xxxx args}.
+    -- 0x0200..0x0208 are NUMBERS from a slot (the first argument) -- "won
+    -- {CMD 0203 1} battles in a row"; everything else is formatting and
+    -- timing (0xFF00 colour, 0xBDxx alignment, 0xBE02 / 0xBE05 waits, 0xBE09
+    -- the speaker's name box) and is dropped. Reported in N's Castle as
+    -- "N: {C...": 4,269 strings carried one, printed brace and all, and
+    -- VAR4 and up (683 more) had nothing reading them.
+    local n = name:match("^VAR(%d+)$")
+    if n and rest == "" then
+      local value = slots and slots[tonumber(n)]
+      return type(value) == "string" and value or (value ~= nil and tostring(value) or "")
+    end
+    if name == "CMD" then
+      local cmd, slot = rest:match("^%s*(%x+)%s*(%d*)")
+      local code = cmd and tonumber(cmd, 16)
+      if code and code >= 0x0200 and code <= 0x02FF and slot ~= "" then
+        local value = slots and slots[tonumber(slot) + 1]
+        return value ~= nil and tostring(value) or ""
+      end
+      return ""
+    end
     return nil
   end))
 end
@@ -197,14 +222,33 @@ end
 Commands.gen4Markup = gen4Markup
 
 function Commands.show_text(ctx, textId, subs, extraOpts)
+  -- `msgbox gStringVarN` on a buffer nothing filled (a Frontier function that
+  -- is not ported) is no box at all, not an empty one
+  if type(textId) == "string" and require("src.core.GameVersion").isGen3() then
+    local n = textId:match("^{RAM:wStringBuffer(%d)}$")
+    if n then
+      local b = ctx.game and ctx.game.stringBuffers and ctx.game.stringBuffers[tonumber(n)]
+      if b == nil or b == "" then return end
+    end
+  end
   -- The ROM has no "text id" at the point a YES/NO or phone prompt opens: the
   -- menu simply rides the box that is already on screen.  Recording the last
   -- id shown lets those prompts reproduce it when the writetext that printed
   -- it lived inside a `scall` and so could not be folded at compile time.
   if textId ~= nil then ctx.g2LastText = textId end
   local text = textId ~= nil and ctx.game.data.text[textId] or nil
+  local literal=false
   if not text and ctx.overworld then
     text = ctx.game.data:resolveText(ctx.overworld.map.def.label, textId)
+  end
+  if not text and type(textId) == "string" and textId:match("^TEXT_B%d+_%d+$") then
+    -- A GEN 4 LABEL WITH NO TEXT prints as the label itself; say which, once
+    Commands._missingLabels = Commands._missingLabels or {}
+    if not Commands._missingLabels[textId] then
+      Commands._missingLabels[textId] = true
+      require("src.core.Logger").warn("gen4 text: %s has no text (map %s) -- shown as its label", textId,
+        tostring(ctx.overworld and ctx.overworld.map and ctx.overworld.map.id))
+    end
   end
   if not text then
     -- LITERAL STRING FALLBACK for hand-ported scripts -- and for the map
@@ -216,10 +260,7 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
     -- past the reader instead of waiting for A. Marked-up text is returned
     -- unchanged, so nothing the extractor produced is re-broken.
     text = textId
-    if type(text) == "string" then
-      local okTB, TB = pcall(require, "src.render.TextBox")
-      if okTB and TB.fromProse then text = TB.fromProse(text) end
-    end
+    literal=true
   end
   -- Belt and braces: a row that reaches here with no usable id at all used to
   -- throw on the first gsub below, and a throw inside the runner leaves the
@@ -261,6 +302,7 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
   text = gen4Markup(text, ctx.game)
   if text:find("{RAM:", 1, true) then
     text = text:gsub("{RAM:([%w_]*)}", function(name)
+      if name=='hScriptVar' then return tostring(ctx.g2Var or 0) end
       local slot = tonumber(name:match("^wStringBuffer(%d)$") or "")
       if slot then
         local slots = ctx.game.stringBuffers
@@ -289,6 +331,7 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
     end)
   end
   local runner = ctx.runner
+  if literal then text=TextBox.fromProse(text) end
   local opts
   if ctx.pendingCry then
     local species = ctx.pendingCry
@@ -600,6 +643,11 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- BATTLE_TYPE_LEGENDARY, which only the three legendary specials set.
     -- The transition reads it (see OverworldState:pushBattleTransition).
     if opts and opts.legendary then battle.legendary = true end
+    -- Platinum's Encounter_NewFatefulVsSpeciesAtLevel: the wild Pokemon
+    -- carries the fateful-encounter mark (Shaymin, Darkrai)
+    if opts and opts.fateful and battle.enemy and battle.enemy.mon then
+      battle.enemy.mon.fatefulEncounter = true
+    end
   else
     battle = BattleState.newTrainer(ctx.game, a, b)
     -- the beaten trainer's own line, printed on the battle screen before
@@ -617,6 +665,20 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- was decided.
     if opts and opts.double then battle.double = true end
     if opts and opts.canLose then battle.canLose = true end
+    -- A TAG BATTLE'S PARTNER (src/battle/AllyAI.lua)
+    if opts and opts.ally then battle:setAlly(opts.ally) end
+    -- BATTLE_TYPE_FRONTIER: no experience (Emerald's Battle Tower)
+    if opts and opts.noExp then battle.noExp = true end
+    -- BATTLE_TYPE_PALACE: natures choose the moves (src/battle/Gen3Palace.lua)
+    if opts and opts.palace then battle.palace = true end
+    -- BATTLE_TYPE_ARENA: three turns, then the referee (src/battle/Gen3Arena.lua)
+    if opts and opts.arena then require("src.battle.Gen3Arena").install(battle) end
+    -- BATTLE_TYPE_FRONTIER: RUN asks whether to forfeit
+    if opts and opts.forfeit then battle.forfeitable = true end
+    -- ...and the bag stays shut (BattleScript_ActionSelectionItemsCantBeUsed)
+    if opts and opts.noItems then battle.noItems = true end
+    -- a Frontier battle: frontier.battlesCount rather than the game stats
+    if opts and opts.frontier then battle.gen3Frontier = true end
     if battle.trainer and battle.trainer.doubleBattle then battle.double = true end
     -- AND WHO THE OTHER ONE IS, when two walked up together.  The battle
     -- fills its second opponent slot from this trainer's own party rather
@@ -640,6 +702,11 @@ function Commands.start_battle(ctx, kind, a, b, opts)
   end
   battle.onFinish = function(result)
     ctx.lastBattleResult = result
+    -- PLATINUM'S ESCORTS: a battle not lost with the partner beside you ends
+    -- with the party healed (encounter.c, Party_HealAllMembers)
+    if battle.ally and battle.ally.escort and result ~= "lose" then
+      require("src.script.Gen4Commands").healParty(ctx.save)
+    end
     if before then
       local Gen3 = require("src.script.Gen3Commands")
       ctx.lastBattleFacts = Gen3.battleFacts(ctx.save, before,
@@ -701,6 +768,12 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- `reloadmapafterbattle` can tell that case from a real whiteout.
     ctx.lastBattleCanLose = battle.canLose and true or false
     ctx.lastCheck = result == "win"
+    -- THE FIELD COMES BACK BEFORE THE SCRIPT CARRIES ON (Gen 4): the map's
+    -- ON_LOAD / ON_RESUME scripts run now, as the cartridge's field init does
+    if ctx.overworld and ctx.overworld.gen4FieldResumed and not battle.g4FieldResumed then
+      battle.g4FieldResumed = true
+      pcall(ctx.overworld.gen4FieldResumed, ctx.overworld)
+    end
     if ctx.overworld then
       -- A map script often follows a trainer battle with its own text.
       -- Keep a level evolution behind that text: otherwise afterBattle
@@ -783,6 +856,16 @@ end
 -- of them.  Sharing the function rather than reimplementing it keeps the move
 -- lock, the yield and the parallel-runner preemption identical.
 Commands.walkEntity = walkEntity
+
+-- ...AND THE LOCK ON ITS OWN, for a caller that queues a movement WITHOUT
+-- blocking on it.
+--
+-- Gen 4's `applymovement` does not wait -- the cartridge starts the animation
+-- and runs on to `waitmovement` -- so it cannot go through `walkEntity`, which
+-- yields. It still needs the same lock and the same parallel-runner
+-- preemption, and the only honest way to share those is to publish them rather
+-- than to write a second copy that drifts.
+Commands.claimMove = claimMove
 
 function Commands.move_player(ctx, dir, tiles)
   walkEntity(ctx, ctx.overworld.player, dir, tiles)
@@ -1196,6 +1279,10 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, opts)
     skipNickname = true
   end
   ctx.game.stringBuffer = ctx.game.data.pokemon[species].name or species
+  if require('src.core.GameVersion').isGen2() then
+    ctx.game.stringBuffers=ctx.game.stringBuffers or {}
+    ctx.game.stringBuffers[1]=ctx.game.stringBuffer
+  end
   ctx.pendingPokemonName = species
   -- GIVEN: a gift, a starter or an egg.  An EGG has no met level yet -- the
   -- cartridge writes zero when it HATCHES, and zero is what makes the memo
@@ -1206,6 +1293,8 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, opts)
     level = mon.level,
     location = BattleStateMod.metHere(ctx.game),
   } or nil)
+  require('src.pokemon.Gen4Origin').stamp(ctx.game,mon,mon.isEgg and 'egg' or 'met',
+    BattleStateMod.metHere(ctx.game))
   local addedToParty = Party.add(ctx.save.party, mon)
   local boxNum = nil
   if not addedToParty then
@@ -1220,6 +1309,7 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, opts)
     dex.seen[species] = true
     dex.owned[species] = true
   end
+  require('src.pokemon.Gen4Forms').record(ctx.game,species,mon)
   ctx.lastCheck = true
   ctx.addedToParty = addedToParty
   require('src.pokemon.Gen4PoketchState').remember(ctx.game, mon)

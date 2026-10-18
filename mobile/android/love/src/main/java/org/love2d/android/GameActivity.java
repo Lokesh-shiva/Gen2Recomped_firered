@@ -84,6 +84,7 @@ public class GameActivity extends SDLActivity {
     public static final int FILE_PICKER_REQUEST_CODE = 4;
     public static final int FILE_CREATE_REQUEST_CODE = 5;
     public static final int STEP_PERMISSION_REQUEST_CODE = 6;
+    public static final int NOTIFY_PERMISSION_REQUEST_CODE = 7;
     public static final int RESTART_REQUEST_CODE = 7;
     public static final int FOLDER_PICKER_REQUEST_CODE = 8;
     /** @deprecated Prefer FILE_PICKER_REQUEST_CODE; kept for older call sites. */
@@ -536,6 +537,16 @@ public class GameActivity extends SDLActivity {
 
         self.pendingPickFilename = destFilename;
         self.pickRetried = false;
+        // Only bridge-owned inbox files, never the user's selected source.
+        // A previous ready ROM must not wake Lua before this new copy lands.
+        try {
+            File inbox = self.saveIdentityDir();
+            new File(inbox, destFilename).delete();
+            new File(inbox, "pick_done.flag").delete();
+        } catch (RuntimeException error) {
+            Log.e("GameActivity", "could not prepare picker inbox", error);
+            return false;
+        }
         if (android.os.Build.VERSION.SDK_INT >= 21) {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -1145,6 +1156,99 @@ public class GameActivity extends SDLActivity {
      * runtime permission; the first call shows the system prompt and a later
      * sync (the mod retries on save load / option change) delivers.
      */
+    /**
+     * Pokéwalker notifications, called from Lua as love.system.walkerNotify
+     * (src/pokewalker/WalkerNotify.lua): one JSON command, handled by
+     * WalkerNotifications. Android 13+ needs POST_NOTIFICATIONS at runtime;
+     * the first call asks for it (a refusal only means no notifications).
+     */
+    /**
+     * Cloud saves (src/cloud/Http.lua through love.system.httpRequest): one
+     * HTTP request of any method. In: {"method","url","headers":{..},"body"};
+     * out: {"status": n, "body": "..."} or {"error": "..."}. Runs on the
+     * calling (Lua) thread, which is not the UI thread, so blocking is fine.
+     * Redirects are followed (Microsoft Graph answers downloads with 302).
+     */
+    @Keep
+    public static String httpRequest(String json) {
+        org.json.JSONObject out = new org.json.JSONObject();
+        HttpURLConnection conn = null;
+        try {
+            org.json.JSONObject req = new org.json.JSONObject(json);
+            String method = req.optString("method", "GET");
+            URL url = new URL(req.getString("url"));
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(120000);
+            conn.setInstanceFollowRedirects(true);
+            if ("PATCH".equals(method)) {
+                // HttpURLConnection has no PATCH: the override header Drive honours
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("X-HTTP-Method-Override", "PATCH");
+            } else {
+                conn.setRequestMethod(method);
+            }
+            org.json.JSONObject headers = req.optJSONObject("headers");
+            if (headers != null) {
+                java.util.Iterator<String> keys = headers.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    conn.setRequestProperty(k, headers.getString(k));
+                }
+            }
+            if (req.has("body") && !req.isNull("body")) {
+                byte[] body = req.getString("body").getBytes("UTF-8");
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(body.length);
+                OutputStream os = conn.getOutputStream();
+                os.write(body);
+                os.close();
+            }
+            int status = conn.getResponseCode();
+            InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            String text = "";
+            if (in != null) {
+                java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                int n;
+                while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+                in.close();
+                text = buf.toString("UTF-8");
+            }
+            out.put("status", status);
+            out.put("body", text);
+        } catch (Exception e) {
+            try { out.put("error", String.valueOf(e)); } catch (Exception ignored) {}
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        return out.toString();
+    }
+
+    @Keep
+    public static boolean walkerNotify(final String json) {
+        final GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && ActivityCompat.checkSelfPermission(self,
+                    "android.permission.POST_NOTIFICATIONS")
+                    != PackageManager.PERMISSION_GRANTED
+                && !self.getSharedPreferences(WalkerNotifications.PREFS, MODE_PRIVATE)
+                    .getBoolean("asked", false)) {
+            self.getSharedPreferences(WalkerNotifications.PREFS, MODE_PRIVATE)
+                .edit().putBoolean("asked", true).apply();
+            self.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    ActivityCompat.requestPermissions(self,
+                        new String[]{"android.permission.POST_NOTIFICATIONS"},
+                        NOTIFY_PERMISSION_REQUEST_CODE);
+                }
+            });
+        }
+        return WalkerNotifications.command(self.getApplicationContext(), json);
+    }
+
     @Keep
     public static boolean syncHealthSteps() {
         final GameActivity self = (GameActivity) mSingleton;
@@ -1423,7 +1527,7 @@ public class GameActivity extends SDLActivity {
                 android.os.ParcelFileDescriptor pfd =
                     getContentResolver().openFileDescriptor(uri, "r");
                 if (pfd != null) {
-                    source = new java.io.FileInputStream(pfd.getFileDescriptor());
+                    source = new android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd);
                 }
             } catch (Exception e) {
                 if (why == null) why = e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -1460,15 +1564,40 @@ public class GameActivity extends SDLActivity {
                 + "\n" + (why == null ? "no reader accepted it" : why));
             return;
         }
-        if (!copyAssetFile(source, destFile.getPath())) {
-            Log.d("GameActivity", "could not copy picked file to " + destFile);
-            // A truncated pick would only fail verification later, so drop it
-            // and report instead.
-            destFile.delete();
-            writeSaveDirFlag(PICK_ERROR_FILENAME, destName
-                + "\nfrom " + uri.getScheme() + "://" + uri.getAuthority()
-                + "\nthe file opened but the copy did not finish");
+        // Lua polls on its own thread while the provider stream is copied.
+        // Publish the recognized filename only after a complete close, so a
+        // partial ROM cannot be rejected and blacklisted as the user's pick.
+        final InputStream pickedSource = source;
+        final String pickedName = destName;
+        // Provider/SD copying must not block the Android activity thread.
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean published = publishPickedFile(pickedSource, destFile);
+                if (!published) {
+                    Log.d("GameActivity", "could not copy picked file to " + destFile);
+                    writeSaveDirFlag(PICK_ERROR_FILENAME, pickedName
+                        + "\nfrom " + uri.getScheme() + "://" + uri.getAuthority()
+                        + "\nthe file opened but the copy did not finish");
+                } else {
+                    writeSaveDirFlag("pick_done.flag", pickedName);
+                }
+            }
+        }, "rom-picker-copy").start();
+    }
+
+    boolean publishPickedFile(InputStream source, File destFile) {
+        File stagedFile = new File(destFile.getParentFile(), destFile.getName() + ".part");
+        boolean published = false;
+        try {
+            boolean copied = copyAssetFile(source, stagedFile.getPath());
+            published = copied && (!destFile.exists() || destFile.delete())
+                && stagedFile.renameTo(destFile);
+        } catch (RuntimeException error) {
+            Log.e("GameActivity", "picked file publication failed", error);
+        } finally {
+            if (!published) stagedFile.delete();
         }
+        return published;
     }
 
     /**
@@ -2048,5 +2177,67 @@ public class GameActivity extends SDLActivity {
                 canvas.drawBitmap(bitmap, null, dst, paint);
             }
         }
+    }
+
+    public static byte[] translateOffline(String source, String target, byte[] input) throws Exception {
+        return OfflineTranslation.translate(source, target, input);
+    }
+
+    /**
+     * Gen2Recomp in-app updates (src/update/Check.lua, Check.install): open
+     * Android's package installer on a downloaded release APK. Every release
+     * is signed with the same key (docs/android-signing.md), so it installs
+     * over this app in place and the save directory is kept. The APK is in the
+     * app's own storage, shared through the FileProvider declared in the app
+     * manifest (authority <applicationId>.updates).
+     */
+    public static boolean installApk(String path) {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null || path == null) return false;
+        try {
+            Context context = self.getApplicationContext();
+            if (!canInstallApks()) return false;
+            File apk = new File(path);
+            if (!apk.isFile()) return false;
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                context, context.getPackageName() + ".updates", apk);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            self.startActivity(intent);
+            return true;
+        } catch (Exception e) {
+            Log.d("GameActivity", "could not open the installer: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Android 8+: has the player allowed installs from this app? */
+    public static boolean canInstallApks() {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        if (android.os.Build.VERSION.SDK_INT < 26) return true;
+        return self.getPackageManager().canRequestPackageInstalls();
+    }
+
+    /** Open the "install unknown apps" setting for this app. */
+    public static boolean requestInstallPermission() {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null || android.os.Build.VERSION.SDK_INT < 26) return false;
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:" + self.getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            self.startActivity(intent);
+            return true;
+        } catch (Exception e) {
+            Log.d("GameActivity", "could not open the install permission screen: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public static boolean closeOfflineTranslation() {
+        OfflineTranslation.close();
+        return true;
     }
 }

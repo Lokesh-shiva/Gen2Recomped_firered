@@ -1235,7 +1235,45 @@ local MARKER_PATH = "rom-cache.complete"
 -- The marker a finished import writes for a version: the generation tag plus
 -- that version's ROM hash, so both a format bump and a swapped ROM invalidate.
 local function markerFor(version)
-  local revision = version == "platinum" and "platinum-audio-ui-v15:" or ""
+  local revision = version == "platinum" and "platinum-geometry-v17:" or ""
+  -- gen5-trades-v5: constants.gen5Trades, gen5_trade_art and the trade
+  -- commands' operands in map_scripts (Gen5Trades / Gen5TradeArt)
+  -- gen5-starter-v6: gen5_starter_art, the gift box app (Gen5StarterArt)
+  if version == "black" or version == "white" then revision = "gen5-starter-v6:" end
+  -- emerald-trade-scene-v3 / firered-trade-scene-v1: the in-game trade
+  -- sequence's art (extractTradeScene, gen3_trade_art) -- without it special
+  -- 257 falls back to the bare swap, so both Gen 3 caches re-import once
+  if version == "emerald" then revision = "emerald-trade-scene-v3:" end
+  if version == "firered" then revision = "firered-trade-scene-v1:" end
+  if version == "polishedcrystal" then revision = "polished-stored-unown-forms-v7:" end
+  if version == "prism" then revision = "prism-events-art-v2:" end
+  -- hgss-phone-call-v1: gen4_hgss_phone_call (Gen4HgssPhoneCall), the
+  -- scripted Pokegear calls' phonebook / script defs / ink
+  -- hgss-emotes-v1: gen4_emotes from HGSS's own /a/1/0/3 (members 118 / 125)
+  -- hgss-mart-buy-v1: gen4_hgss_mart_art (Gen4HgssMartArt), the Poke Mart's
+  -- BUY touch screen (/a/0/6/0 members 15-25, overlay 31)
+  -- hgss-water-emotes-v1: gen4_emotes actually written for HGSS (the terrain
+  -- stage's HGSS branch never called it) and gen4_terrain.texAnims /
+  -- texAnimLand / maps[].texAnim, the sea's /a/1/4/0 animation (Gen4HgssTexAnim)
+  -- hgss-gear-dex-v1: gen4_hgss_pokegear_art's app art and data
+  -- (Gen4HgssPokegearExtra: button states, OBJ, the whole map, location
+  -- specs, generic call headers, sort keys) and gen4_hgss_dex_art's search /
+  -- area / size / forms art and zukan data (Gen4HgssDexArt)
+  -- hgss-summary-v2: gen4_hgss_summary_art gains the egg / bare-ribbon pages
+  -- (14 / 11) and /a/0/3/9's status, marking, shiny, Pokerus and ribbon
+  -- sprites (Gen4HgssSummaryArt.pstImages)
+  if version == "heartgold" or version == "soulsilver" then revision = "hgss-gear-dex-v1:hgss-summary-v2:" end
+  -- Include version-specific field encounters, sleep, swarm and rate tables.
+  -- Only these three caches need rebuilding; other markers remain stable.
+  -- v8: field.gen2TradeAnim, GSC's own trade movie art (Gen2TradeArt).
+  if version == "gold" or version == "silver" or version == "crystal" then
+    revision = "gen2-field-encounters-v8:"
+  end
+  -- field.tradeArt: the cable-trade movie's tiles out of the ROM
+  -- (Gen1TradeArt); without it the trade ran on drawn stand-ins.
+  if version == "red" or version == "blue" or version == "yellow" then
+    revision = "gen1-trade-art-v1:"
+  end
   return CACHE_FORMAT .. revision .. GameVersion.info(version).sha1
 end
 
@@ -1283,6 +1321,7 @@ local function parseMarker(raw)
   return head, absent
 end
 local COMMUNITY_URL = "https://discord.gg/4VXnEnePT"
+local TILT_RIPS_URL = "https://tiltrips.com/r/GEN2RECOMP/"
 -- Donations.  A plain PayPal checkout link, opened with the same
 -- love.system.openURL the community mark and the release links use.
 local DONATE_URL = "https://www.paypal.com/ncp/payment/F3QPTKT4E8HCS"
@@ -1296,6 +1335,38 @@ local DONATE_URL = "https://www.paypal.com/ncp/payment/F3QPTKT4E8HCS"
 -- after.
 local MAP_EDITOR_LABEL = "Map Editor (Beta)"
 local UD_URL = "https://discord.gg/4VXnEnePT"
+
+-- WHO MADE THE GAME ON THIS TAB, AND WHERE TO THANK THEM.
+--
+-- The footer's credit line and its donate buttons, per tab:
+--   * Red, Blue and Yellow are bryanthaboi's / Boi's Club's work, and they
+--     asked for no donation link -- so there is none on those tabs.
+--   * FireRed is Tranzue's, and the buttons go to Tranzue: Patreon and Ko-fi.
+--   * Everything else -- the other games and the non-game tabs like mods --
+--     is UNDERdecoded's, with the PayPal link.
+-- A table rather than branches in `draw`, so a new tab is one row here.
+local CREDITS = {
+  default = {
+    by = "UNDERdecoded",
+    links = { { label = "DONATE", url = DONATE_URL } },
+  },
+  red = { by = "bryanthaboi / boisclub", links = {} },
+  blue = { by = "bryanthaboi / boisclub", links = {} },
+  yellow = { by = "bryanthaboi / boisclub", links = {} },
+  firered = {
+    by = "Tranzue",
+    links = {
+      { label = "Tranzue on Patreon",
+        url = "https://www.patreon.com/c/cartethyia_bot/shop" },
+      { label = "Tranzue on Ko-fi", url = "https://ko-fi.com/cartethyiabot" },
+    },
+  },
+}
+RomImporter.CREDITS = CREDITS
+
+function RomImporter.creditFor(tab)
+  return CREDITS[tab] or CREDITS.default
+end
 local TRUST_WARNING = "if you did not get this from UNDERdecodedHD's github " ..
   "or a link from the discord that UNDERdecodedHD himself posted, just know " ..
   "it might have been tampered with. go to the discord to verify " ..
@@ -1551,6 +1622,8 @@ local REQUIRED_FILES_GEN4 = {
 local function requiredFiles(version)
   local gen = GameVersion.generation(version)
   if gen == 4 then return REQUIRED_FILES_GEN4 end
+  -- Black and White: their own list as the Gen 5 stages arrive (RomExtractorGen5)
+  if gen == 5 then return require("src.import.RomExtractorGen5").REQUIRED_FILES end
   if gen == 3 then return REQUIRED_FILES_GEN3 end
   if gen == 2 then return REQUIRED_FILES_GEN2 end
   return REQUIRED_FILES_GEN1
@@ -1650,6 +1723,14 @@ local PAL = {
   -- and a chip that has to be read twice has failed.
   chipPlatinumTop = { 166, 176, 216 }, -- #a6b0d8  Platinum
   chipPlatinumBot = { 74, 82, 134 },   -- #4a5286
+  chipHeartGoldTop = { 236, 186, 72 },  -- #ecba48  HeartGold
+  chipHeartGoldBot = { 140, 82, 20 },   -- #8c5214
+  chipSoulSilverTop = { 176, 196, 222 }, -- #b0c4de SoulSilver
+  chipSoulSilverBot = { 70, 92, 126 },  -- #465c7e
+  chipBlackTop = { 96, 100, 112 },      -- #606470  Black
+  chipBlackBot = { 24, 26, 32 },        -- #181a20
+  chipWhiteTop = { 238, 240, 246 },     -- #eef0f6  White
+  chipWhiteBot = { 146, 150, 164 },     -- #9296a4
   chipPrismTop = { 106, 240, 150 },   -- #6af096  Prism
   chipPrismBot = { 22, 138, 82 },     -- #168a52
   -- Polished Crystal: amethyst, deliberately far from Crystal's cyan and
@@ -1760,9 +1841,28 @@ end
 -- shadow it, because physfs searches the save directory before the source.
 -- Clear it out once, and only when a remnant is actually present so a clean
 -- install pays nothing.
+--
+-- PORTABLE ONLY, AND THAT IS THE WHOLE POINT OF THE TEST BELOW.  This used to
+-- run for ANY non-save root, which includes the player's chosen game-data
+-- folder -- and the launcher calls readyReport for every version the moment
+-- the folder changes.  So choosing a folder DELETED the installed game out of
+-- AppData, a gigabyte at a time, while the new folder was still empty: the
+-- next line of the same report then said "no cache for this version yet" and
+-- the player was told to re-import a game they already had.
+--
+-- It cannot be right for a chosen folder, because the launcher offers MOVE
+-- EXISTING DATA HERE for exactly this case (RomImporter:startDataMove).  A
+-- purge that runs first deletes the thing the move exists to move.  The
+-- shadowing the purge was there to prevent is handled where it belongs now --
+-- CacheFs prepends the live root's generated trees, so the stale copy loses
+-- the read path instead of being destroyed to get out of its way.
+--
+-- A portable install has no such action and no such choice: its root is a
+-- fact about where the copy lives, so clearing the duplicate is still right.
 local saveDirPurged = false
 local function purgeSaveDirCache()
   if saveDirPurged then return end
+  if not require("src.core.SaveData").isPortable() then return end
   saveDirPurged = true
   local saveDir = love.filesystem.getSaveDirectory()
   local function saveDirHas(rel)
@@ -1795,10 +1895,14 @@ end
 function RomImporter.readyReport(version)
   version = version or "red"
   local CacheFs = require("src.import.CacheFs")
-  if CacheFs.root() then
+  if CacheFs.rootReport().kind == "portable" then
     -- Portable: the cache lives in the game folder next to the executable
     -- (mounted onto the read path for a fused build).  Drop any stale
     -- save-directory copy that would otherwise shadow it at runtime.
+    --
+    -- ASKS rootReport, NOT root().  root() is non-nil for a chosen game-data
+    -- folder too, and purging on that one destroyed the installed game the
+    -- moment the setting changed -- see purgeSaveDirCache above.
     purgeSaveDirCache()
   end
   -- Red generated data in the physfs source (developer checkout / Python
@@ -1901,14 +2005,6 @@ local function blockedImportReason(version, manifest)
   return nil
 end
 
-local function sha1(data)
-  local digest = love.data.hash("sha1", data)
-  if type(digest) == "userdata" and digest.getString then
-    digest = digest:getString()
-  end
-  return love.data.encode("string", "hex", digest)
-end
-
 local function readExternalPath(path)
   local file, openError = io.open(path, "rb")
   if not file then return nil, openError end
@@ -1989,26 +2085,12 @@ end
 -- is 16 MiB, and this predicate rejecting it is why a perfectly good dump came
 -- back as "Expected a 1 MiB ... Game Boy ROM; this file is 16.00 MiB."
 --
--- The other GBA sizes are listed too.  Only 16 MiB is reachable today, but a
--- size table that admits exactly one cartridge is the same trap this one was:
--- it looks like a check and behaves like a hardcoded constant.
-local ROM_SIZES = {
-  [1024 * 1024] = true,        -- Game Boy
-  [2 * 1024 * 1024] = true,    -- Game Boy Color
-  [4 * 1024 * 1024] = true,    -- Game Boy Advance, from here down
-  [8 * 1024 * 1024] = true,
-  [16 * 1024 * 1024] = true,   -- Emerald
-  [32 * 1024 * 1024] = true,
-  -- ...and up here, a NINTENDO DS cartridge.  Platinum is 128 MiB, four times
-  -- the largest Game Boy Advance cart, and the jump is why this is listed
-  -- rather than folded into a range: the size table exists so a file that
-  -- cannot be a cartridge is refused before it is hashed, and a range would
-  -- wave through every truncated dump in between.
-  [128 * 1024 * 1024] = true,  -- Platinum, and Diamond/Pearl after it
-}
+-- Include BW's 256-MiB capacity and known trimmed DS candidates. Verification
+-- still requires exact supported content; a size or header is never enough.
+local ROM_SIZES = require('src.import.RomVerification').SIZES
 
-local function isSupportedRomSize(byteLength)
-  return ROM_SIZES[byteLength] == true
+local function isSupportedRomSize(byteLength,data)
+  return require('src.import.RomVerification').isCandidate(byteLength,data)
 end
 
 -- One test, used everywhere a file is judged by its name.  There were five
@@ -2164,8 +2246,8 @@ local function findPendingRom(ready, skip)
   for _, name in ipairs(pendingRomPaths()) do
     if not (skip and skip[name]) then
       local data = love.filesystem.read(name)
-      if type(data) == "string" and isSupportedRomSize(#data) then
-        local version = GameVersion.forSha1(sha1(data))
+      if type(data) == "string" and isSupportedRomSize(#data,data) then
+        local version = require('src.import.RomVerification').identify(data).version
         if version and not ready[version] then
           return name, data, realPathFor(name)
         end
@@ -2186,10 +2268,11 @@ end
 -- that one alone.
 local function consumePickedRomError(self)
   local preferred = "picked_rom.gb"
+  if self.failedRoms and self.failedRoms[preferred] then return false end
   if not love.filesystem.getInfo(preferred, "file") then return false end
   local data = love.filesystem.read(preferred)
-  if type(data) == "string" and isSupportedRomSize(#data) then
-    local version = GameVersion.forSha1(sha1(data))
+  if type(data) == "string" and isSupportedRomSize(#data,data) then
+    local version = require('src.import.RomVerification').identify(data).version
     if version and self.ready[version] then return false end
   end
   love.filesystem.remove(preferred)
@@ -2656,14 +2739,16 @@ local function chooseSav()
   local platform = love.system.getOS()
   if platform == "OS X" then
     return commandOutput(
-      ([[osascript -e 'POSIX path of (choose file with prompt "%s" of type {"sav"})' 2>/dev/null]])
+      ([[osascript -e 'POSIX path of (choose file with prompt "%s" of type {"sav", "dsv", "lua"})' 2>/dev/null]])
         :format(prompt))
   elseif platform == "Windows" then
     local script = table.concat({
       "Add-Type -AssemblyName System.Windows.Forms;",
       "$d=New-Object System.Windows.Forms.OpenFileDialog;",
       "$d.Title='" .. prompt .. "';",
-      "$d.Filter='Game Boy save (*.sav)|*.sav|All files (*.*)|*.*';",
+      -- .dsv: DeSmuME's DS save (SaveFileIO unwraps it)
+      -- .lua: this port's own slot file from an older build (SaveVariants)
+      "$d.Filter='Save file (*.sav;*.dsv;*.lua)|*.sav;*.dsv;*.lua|All files (*.*)|*.*';",
       -- UTF-8, like the ROM and mod pickers (#325)
       "if($d.ShowDialog() -eq 'OK'){[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Write($d.FileName)}",
     })
@@ -2671,11 +2756,11 @@ local function chooseSav()
       'powershell -NoProfile -STA -Command "' .. script .. '"')
   elseif platform == "Linux" then
     local path = commandOutput(
-      ([[zenity --file-selection --title="%s" --file-filter="Game Boy save | *.sav" 2>/dev/null]])
+      ([[zenity --file-selection --title="%s" --file-filter="Save file | *.sav *.dsv *.lua" 2>/dev/null]])
         :format(prompt))
     if path then return path end
     return commandOutput(
-      [[kdialog --getopenfilename "$HOME" "*.sav|Game Boy save" 2>/dev/null]])
+      [[kdialog --getopenfilename "$HOME" "*.sav *.dsv *.lua|Save file" 2>/dev/null]])
   end
   return nil
 end
@@ -2708,6 +2793,8 @@ end
 -- the bundled editor in map mode on that game; drawn only when supplied AND
 -- the game is imported, because the editor has nothing to show otherwise).
 function RomImporter.new(onComplete, opts)
+  require("src.translation.Service").resetRuntime()
+  Strings.load({})
   opts = opts or {}
   -- iOS rides the same mobile import flows as Android: the save-dir
   -- pending-file scan plus love.system.pickFile / createFile, provided
@@ -2761,6 +2848,7 @@ function RomImporter.new(onComplete, opts)
     settingsScroll = 0,
     tab = "red",          -- active launcher tab: "red"/"blue"/"yellow"/"mods"
     logo = love.graphics.newImage("assets/logo/logo.png"),
+    tiltRipsLogo = love.graphics.newImage("assets/logo/tilt-rips.png",{mipmaps=true}),
     bcg = love.graphics.newImage("assets/logo/UD.png"),
     -- Gold/Silver get their own branding: the Gen2 wordmark over the strip and
     -- the UD credit in the footer, swapped in whenever one of those tabs is up.
@@ -2882,12 +2970,22 @@ function RomImporter.new(onComplete, opts)
     self.returning[version] =
       (not ready) and marker ~= nil and head ~= markerFor(version)
     self.romName[version] = "pokemon_" .. info.id
-      .. (info.generation == 4 and ".nds"
+      .. (info.generation >= 4 and ".nds"
           or info.generation == 3 and ".gba"
           or ((info.id == "yellow" or info.generation == 2) and ".gbc" or ".gb"))
   end
 
   BootTrace.mark("launcher: versions scanned")
+  local interrupted=require('src.import.ImportRecovery').load()
+  if interrupted then
+    self.interruptedImport=interrupted
+    self.failedRoms=self.failedRoms or {};self.failedRoms[interrupted.source]=true
+    self.workState='error';self.errorVersion=interrupted.version or self.tab
+    self.status='Previous import stopped'
+    self.detail=('Stopped at %s%s. Tap Import to retry. Data folder: %s'):format(
+      interrupted.stage or 'verification',interrupted.operation and (' / '..interrupted.operation) or '',interrupted.root or 'default')
+    if interrupted.version and GameVersion.VERSIONS[interrupted.version] then self.tab=interrupted.version end
+  end
 
   -- Android: import a save-dir .gb/.gbc that is not yet ready (USB drop or a
   -- leftover SAF pick), routed by SHA-1.  Already-imported carts are skipped
@@ -2896,7 +2994,7 @@ function RomImporter.new(onComplete, opts)
   for _, version in ipairs(GameVersion.ORDER) do
     if not self.ready[version] then needRom = true; break end
   end
-  if android and needRom then
+  if android and needRom and not interrupted then
     local name, data, romPath = findPendingRom(self.ready, self.failedRoms)
     if name then
       self:startData(data, name, romPath)
@@ -2987,6 +3085,11 @@ end
 -- _pollPickedFiles must stay armed so it consumes the file when it lands
 -- moments later (it clears pickPending itself once something is found).
 function RomImporter:focus(f)
+  if f and love.filesystem.getInfo('pick_done.flag','file') then
+    local picked=love.filesystem.read('pick_done.flag')
+    love.filesystem.remove('pick_done.flag')
+    if type(picked)=='string' and self.failedRoms and not self.interruptedImport then self.failedRoms[picked]=nil end
+  end
   if not (f and self.android and self.workState ~= "working") then return end
   -- SAF create-document finished: GameActivity wrote export_done.flag.
   if love.filesystem.getInfo("export_done.flag", "file") then
@@ -3096,6 +3199,7 @@ function RomImporter:focus(f)
       self.saveNotice[version] and self.saveNotice[version].ok)
     return
   end
+  if self.interruptedImport then return end
   for _, v in ipairs(GameVersion.ORDER) do
     if not self.ready[v] then
       local name, data, romPath = findPendingRom(self.ready, self.failedRoms)
@@ -3117,6 +3221,7 @@ function RomImporter:focus(f)
 end
 
 function RomImporter:setError(message, version)
+  self.interruptedImport=require('src.import.ImportRecovery').fail(message)
   require("src.import.CacheFs").prefix = ""
   -- THIS FILE HAS HAD ITS TURN. Without this the Android scan hands the same
   -- failing cartridge back on every attempt and nothing else can be imported;
@@ -3170,6 +3275,7 @@ end
 -- the cartridge itself and read ranges out of it on demand.
 function RomImporter:startData(data, displayName, sourcePath, verified)
   if self.workState == "working" then return end
+  self:_acknowledgeInterruptedImport()
   if not verified and type(data)=='string' then
     if self:_beginRomProbe(data,sourcePath,displayName) then return end
   end
@@ -3177,19 +3283,42 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
     self:setError("The selected file could not be read.")
     return
   end
-  if not isSupportedRomSize(verified and verified.size or #data) then
-    self:setError(("Expected a 1 MiB (Red/Blue/Yellow), 2 MiB (Gold/Silver), "
-      .. "16 MiB (Emerald) or 128 MiB (Platinum) cartridge; this file is "
-      .. "%.2f MiB."):format(#data / 1024 / 1024))
+  if not (verified and verified.version and GameVersion.forSha1(verified.hash)==verified.version)
+      and not isSupportedRomSize(verified and verified.size or #data,data) then
+    local size=verified and verified.size or #data
+    -- A trimmed unsupported region/revision needs its real explanation,
+    -- rather than suggesting every DS dump must have a power-of-two size.
+    local revisions=require('src.import.RomRevisions')
+    local header=revisions.header(data)
+    local found=header and header.platform=='nds' and revisions.describe(data,verified and verified.hash)
+    if found then
+      self:setError('Unsupported or incomplete Nintendo DS ROM. '..found.message)
+      return
+    end
+    self:setError(("Unrecognized cartridge size: %.2f MiB. Supported sizes include "
+      .. "1 MiB (Game Boy), 2 MiB (Game Boy Color), and 4-32 MiB (Game Boy Advance). DS cartridges are "
+      .. "128 MiB (Platinum/HeartGold/SoulSilver) or 256 MiB (Black/White). "
+      .. "Trimmed HeartGold/SoulSilver and Black/White dumps are accepted only "
+      .. "when their game data exactly matches a supported clean ROM."):format(size / 1048576))
     return
   end
-  local actualHash = verified and verified.hash or sha1(data)
+  local identity=verified or require('src.import.RomVerification').identify(data)
+  local actualHash = identity.hash
   local version = GameVersion.forSha1(actualHash)
   if not version then
+    -- A clean dump of ANOTHER retail revision (FireRed Rev 1, Crystal
+    -- Australia, Platinum Europe ...) is not a patched cart: say which
+    -- revision it is and that it is not supported yet (docs/rom-revisions.md).
+    local okRev, RomRevisions = pcall(require, "src.import.RomRevisions")
+    local found = okRev and RomRevisions.describe(data, actualHash) or nil
+    if found then
+      self:setError(("Unsupported ROM (SHA-1 %s). %s"):format(actualHash,
+        found.message))
+      return
+    end
     self:setError(("Unsupported ROM (SHA-1 %s). This needs a clean US Pokemon "
-      .. "Red, Blue, Yellow, Gold, Silver, Crystal, FireRed, Emerald or "
-      .. "Platinum dump; patched, "
-      .. "trimmed or "
+      .. "Red, Blue, Yellow, Gold, Silver, Crystal, FireRed, Emerald, "
+      .. "Platinum, HeartGold, SoulSilver, Black or White dump; patched or "
       .. "\"fixed\" dumps "
       .. "(tagged [b] or [BF]) never verify."):format(actualHash))
     return
@@ -3209,6 +3338,7 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
   self.progress = 0
   self.romData = data
   self.romPath = sourcePath
+  self.importRecovery=require('src.import.ImportRecovery').begin(displayName or sourcePath,version,require('src.import.CacheFs').root())
   -- KEPT SO A FAILURE CAN BE ATTRIBUTED. `setError` clears everything else, and
   -- without the name there is no way to know which pending file to stop
   -- offering -- see `findPendingRom`'s `skip`.
@@ -3244,10 +3374,10 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
 
     local CacheFs=require('src.import.CacheFs')
     local modules={[1]='src.import.RomExtractor',[2]='src.import.RomExtractorGen2',
-      [3]='src.import.RomExtractorGen3',[4]='src.import.RomExtractorGen4'}
+      [3]='src.import.RomExtractorGen3',[4]='src.import.RomExtractorGen4',[5]='src.import.RomExtractorGen5'}
     local task=require('src.import.RomImportTask').new({action='extract',version=version,
       generation=info.generation,module=modules[info.generation],manifest=manifest,
-      prefix=info.cachePrefix,root=CacheFs.root(),path=self.romPath,bytes=info.generation~=4 and self.romData or nil,clear=true})
+      prefix=info.cachePrefix,root=CacheFs.root(),path=self.romPath,bytes=info.generation<4 and self.romData or nil,clear=true,recovery=self.importRecovery})
     if task then
       self.romData=nil
       local complete=false
@@ -3300,6 +3430,9 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
       -- opens the cartridge itself instead of being handed its bytes.
       [4] = { module = "src.import.RomExtractorGen4", takesVersion = true,
               takesPath = true },
+      -- ...and the fifth, Black and White: a DS cartridge like the fourth
+      [5] = { module = "src.import.RomExtractorGen5", takesVersion = true,
+              takesPath = true },
     }
     local choice = EXTRACTORS[info.generation]
     if not choice then
@@ -3321,6 +3454,7 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
       -- without anybody having to reproduce it under a profiler.
       if stage ~= markedStage then
         markedStage = stage
+        require('src.import.ImportRecovery').stage(stage)
         BootTrace.mark(("import %s: %s (%.0f MB lua)"):format(
           tostring(version), tostring(stage), collectgarbage("count") / 1024))
       end
@@ -3357,6 +3491,7 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
         and RomExtractor.new(self.romData, version, manifest, onProgress)
         or RomExtractor.new(self.romData, manifest, onProgress)
     end
+    extractor.checkpoint=function(operation) require('src.import.ImportRecovery').stage(markedStage,operation) end
     extractor:run()
     if extractor.close then extractor:close() end
     self.romData = nil
@@ -3386,6 +3521,7 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
     local ok, writeError = CacheFs.write(MARKER_PATH, markerBody(version, gaps))
     CacheFs.prefix = ""   -- restore the default so later writes stay at the root
     if not ok then error("could not finish the private cache: " .. tostring(writeError)) end
+    require('src.import.ImportRecovery').finish()
     self.ready[version] = true
     self.returning[version] = false
     self.romName[version] = (displayName
@@ -3399,6 +3535,7 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
     self.importing = nil
     self.workState = "complete"
     self.completeVersion = version
+    require("src.translation.Service").enqueue(version,self:_settings())
     self.status = "Ready"
     self.detail = "Starting " .. info.displayName .. "..."
     self.progress = 1
@@ -3413,7 +3550,9 @@ function RomImporter:startData(data, displayName, sourcePath, verified)
 end
 
 function RomImporter:_beginRomProbe(bytes,path,name)
-  local task=require('src.import.RomImportTask').new({action='verify',bytes=bytes,path=path})
+  self:_acknowledgeInterruptedImport()
+  self.importRecovery=require('src.import.ImportRecovery').begin(name or path,nil,require('src.import.CacheFs').root())
+  local task=require('src.import.RomImportTask').new({action='verify',bytes=bytes,path=path,recovery=self.importRecovery})
   if not task then return false end
   self.probeTask=task;self.probePath=path;self.probeName=name
   self.workState='working';self.importing=GameVersion.VERSIONS[self.tab] and self.tab or nil
@@ -3490,12 +3629,17 @@ function RomImporter:_scanRomSources(paths)
     end
     if type(data) ~= "string" then
       rejects.unreadable[#rejects.unreadable + 1] = name
-    elseif not isSupportedRomSize(#data) then
+    elseif not isSupportedRomSize(#data,data) then
       rejects.unknown[#rejects.unknown + 1] = name
     else
-      local version = GameVersion.forSha1(sha1(data))
+      local hash = require('src.import.RomVerification').identify(data).hash
+      local version = GameVersion.forSha1(hash)
       if not version then
-        rejects.unknown[#rejects.unknown + 1] = name
+        -- name the revision when the header says what it is (RomRevisions)
+        local okRev, RomRevisions = pcall(require, "src.import.RomRevisions")
+        local found = okRev and RomRevisions.describe(data, hash) or nil
+        rejects.unknown[#rejects.unknown + 1] =
+          found and (name .. ": " .. found.short) or name
       elseif self.ready[version] and not self.returning[version] then
         -- ALREADY IMPORTED IS NOT A FAILURE.  Pointing at the folder you keep
         -- your dumps in when you already have half of them is the normal case,
@@ -3544,7 +3688,7 @@ function RomImporter:_pollRomScan()
       local rejects={unknown={},present={},duplicate={},unreadable={}}
       for _,entry in ipairs(message.results) do
         if entry.unreadable then table.insert(rejects.unreadable,entry.name)
-        elseif not entry.version then table.insert(rejects.unknown,entry.name)
+        elseif not entry.version then table.insert(rejects.unknown,entry.revision and (entry.name..': '..entry.revision) or entry.name)
         elseif self.ready[entry.version] and not self.returning[entry.version] then
           table.insert(rejects.present,GameVersion.info(entry.version).displayName)
         elseif seen[entry.version] then table.insert(rejects.duplicate,entry.name)
@@ -3686,6 +3830,7 @@ end
 -- The button.  One press: pick, sort, queue.
 function RomImporter:chooseRomBatch()
   if self.workState == "working" then return end
+  self:_acknowledgeInterruptedImport()
   self.romBatch = nil
   local paths
   if self.android or self.ios then
@@ -4517,8 +4662,17 @@ end
 -- version argument only titles the dialog and steers error/notice text; the
 -- picked ROM is still routed by its SHA-1, so choosing a Blue cart in the Red
 -- column imports Blue.
+function RomImporter:_acknowledgeInterruptedImport()
+  if self.interruptedImport then
+    if self.failedRoms then self.failedRoms[self.interruptedImport.source]=nil end
+    self.interruptedImport=nil
+    require('src.import.ImportRecovery').finish()
+  end
+end
+
 function RomImporter:choose(version)
   if self.workState == "working" then return end
+  self:_acknowledgeInterruptedImport()
   self.chooseVersion = version or "red"
   if self.ios and love.system.getPickedFile then
     self.iosPendingKind = "rom"
@@ -4646,6 +4800,7 @@ function RomImporter:_pollPickedFiles(dt)
     return
   end
   local found = love.filesystem.getInfo("export_done.flag", "file") ~= nil
+    or love.filesystem.getInfo('pick_done.flag','file') ~= nil
     or love.filesystem.getInfo("pick_error.flag", "file") ~= nil
     or love.filesystem.getInfo("picked_folder.txt", "file") ~= nil
   if not found then
@@ -4688,6 +4843,15 @@ function RomImporter:_pollPickedFiles(dt)
 end
 
 function RomImporter:update(dt)
+  local translation=require("src.translation.Service")
+  translation.update()
+  translation.setLauncher(self:_settings())
+  if not self._launcherTranslationRequested then
+    self._launcherTranslationRequested=true;translation.enqueueLauncher(self:_settings())
+  end
+  if self._translationMessage~=translation.message then
+    self._translationMessage=translation.message;self._settingsRowCache=nil
+  end
   self.pulse = self.pulse + dt
   self:_updatePadCursor(dt)
   -- A drop that landed last frame is a COMPLETE drop now: LOVE hands over one
@@ -5001,10 +5165,12 @@ end
 -- Faux-bold: the launcher's UI font ships no bold face, so 800-weight text
 -- (headings, buttons) is thickened with a second sub-pixel pass.
 local function printfB(text, x, y, w, align)
+  text=require("src.translation.Service").launcherLookup(text)
   love.graphics.printf(text, x, y, w, align)
   love.graphics.printf(text, x + 0.6, y, w, align)
 end
 local function printB(text, x, y)
+  text=require("src.translation.Service").launcherLookup(text)
   love.graphics.print(text, x, y)
   love.graphics.print(text, x + 0.6, y)
 end
@@ -5109,9 +5275,9 @@ end
 -- Draw letterspaced text (the UI font has no tracking control): advance glyph
 -- by glyph.  Returns the total drawn width so a caller can align to it.
 local function printSpaced(font, text, x, y, spacing)
+  text=require("src.translation.Service").launcherLookup(text)
   local cx = x
-  for i = 1, #text do
-    local ch = text:sub(i, i)
+  for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
     love.graphics.print(ch, cx, y)
     cx = cx + font:getWidth(ch) + spacing
   end
@@ -5251,6 +5417,7 @@ function RomImporter:_resetFrameRects()
   self.settingsRect = nil
   self.settingsRowRects = nil
   self.mapEditorRect = nil
+  self.translateGameRect = nil
   -- Rebuilt only by the FIND MODS panel.
   self.findAddRect = nil
   self.findRefreshRect = nil
@@ -5295,10 +5462,14 @@ function RomImporter:draw()
 
   -- Fonts + size-dependent scenery, rebuilt only when the window / safe
   -- area changes (rotation, resize, inset changes).
-  local fontKey = ("%dx%d@%d,%d"):format(fullW, fullH, ox, oy)
+  local launcherFont=require("src.translation.Service").launcherFont
+  local fontKey = ("%dx%d@%d,%d"):format(fullW, fullH, ox, oy)..tostring(launcherFont)
   if self.fontKey ~= fontKey then
     self.fontKey = fontKey
-    local function f(px) return love.graphics.newFont(math.max(8, math.floor(px + 0.5))) end
+    local function f(px)
+      px=math.max(8,math.floor(px+0.5))
+      return launcherFont and love.graphics.newFont(launcherFont,px) or love.graphics.newFont(px)
+    end
     self.headFont     = f(19 * s)
     self.detailFont   = f(14 * s)
     self.buttonFont   = f(19 * s)
@@ -5400,6 +5571,9 @@ function RomImporter:draw()
   love.graphics.rectangle("fill", 0, 0, fullW, fullH)
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.draw(self.bgMesh)
+  -- the sidebar launcher's live background: a game's own main menu (or a
+  -- chosen video) behind everything, under a scrim (LauncherBackdrop)
+  if self.sidebarMode and self._sbDrawBackdrop then self:_sbDrawBackdrop(fullW, fullH) end
 
   -- Centered content container (max ~1440 scaled units on very wide windows)
   -- with a responsive side gutter; every column below derives from these.
@@ -5408,15 +5582,32 @@ function RomImporter:draw()
   local appX = ox + (width - appW) / 2
   local padH = clamp(appW * 0.03, 12 * s, 26 * s)
   local third = appW / 3
+  -- THE SIDEBAR (src/import/LauncherSidebar.lua): the rail down the left and
+  -- everything below laid out in what is left of the window beside it
+  local sbTopH = 0
+  if self.sidebarMode then
+    -- the top bar (strip + the Gen 2 logo, centred across the window) first,
+    -- then the rail under it
+    sbTopH = self:_sbDrawTopBar(ox, oy, width, s, height)
+    local sbW, sbCompact = self:_sbWidth(width, s)
+    self:_sbDrawRail(ox, oy + sbTopH, sbW, height - sbTopH, s, sbCompact)
+    appW = math.min(width - sbW, 1440 * s)
+    appX = ox + sbW + (width - sbW - appW) / 2
+    padH = clamp(appW * 0.03, 12 * s, 26 * s)
+    third = appW / 3
+  end
 
   -- tricolor strip (Red | Blue | Yellow), 6px tall, with a soft downward bloom
   local stripH = math.max(4, 6 * s)
   local stripY = oy
+  -- under the sidebar's top bar, which draws the strip across the window
+  if self.sidebarMode then stripY = oy + sbTopH - stripH end
   local segs = {
     { PAL.red,  appX,             third },
     { PAL.blue, appX + third,     third },
     { PAL.gold, appX + 2 * third, appW - 2 * third },
   }
+  if not self.sidebarMode then
   love.graphics.setBlendMode("add")
   for _, seg in ipairs(segs) do
     fillGrad(seg[2], stripY + stripH, seg[3], stripH * 3.6, seg[1], seg[1], 0.30, 0.0)
@@ -5424,6 +5615,7 @@ function RomImporter:draw()
   love.graphics.setBlendMode("alpha")
   for _, seg in ipairs(segs) do
     col(seg[1]); love.graphics.rectangle("fill", seg[2], stripY, seg[3], stripH)
+  end
   end
 
   -- Footer (Boi's Club Games logo + trust warning), measured first so the
@@ -5439,38 +5631,98 @@ function RomImporter:draw()
   local bcgW, bcgH = bcgImage:getDimensions()
   local bcgScale = math.min(math.min(appW - 48 * s, 190 * s) / bcgW, height * 0.06 / bcgH)
   local bcgDW, bcgDH = bcgW * bcgScale, bcgH * bcgScale
-  -- The donate chip sits on its own row under the warning, so its height is
-  -- reserved here too: measure it the same way _chipButton will, or the page
-  -- ends up scrolling short and the chip falls off the bottom edge.
+  -- The credit line and the donate chips sit on their own rows under the
+  -- warning, so their height is reserved here too: measure them the same way
+  -- _chipButton will, or the page ends up scrolling short and a chip falls off
+  -- the bottom edge. A tab with no donate links reserves no chip row.
+  local credit = RomImporter.creditFor(self.tab)
+  local footerLinks, paypalLink = {},nil
+  for _,link in ipairs(credit.links) do
+    if link.url==DONATE_URL then paypalLink=link
+    else footerLinks[#footerLinks+1]=link end
+  end
+  local creditH = self.hintFont:getHeight()
   local donateH = self.hintFont:getHeight() + 10 * s
-  local footerH = 10 * s + bcgDH + 6 * s + warningH + 8 * s + donateH + 12 * s
+  local chipsH = (#footerLinks > 0) and (8 * s + donateH) or 0
+  local footerH = 10 * s + bcgDH + 6 * s + warningH + 8 * s + creditH + chipsH + 12 * s
 
   -- Logo: centred over the strip, width clamped, gentle bob + glow pulse.  The
   -- resting metrics fix the tab bar's top so the layout never shifts as it bobs.
   local logoW, logoH = logoImage:getDimensions()
-  local logoTargetW = math.max(math.min(180 * s, appW - 32 * s),
-    math.min(330 * s, appW - 32 * s))
+  local tiltW, tiltH = self.tiltRipsLogo:getDimensions()
+  local tiltTargetW = math.min(116 * s,appW * 0.20)
+  local tiltScale = tiltTargetW / tiltW
+  local tiltDH = tiltH * tiltScale
+  local tiltCodeScale = math.min(1,tiltTargetW / self.warningFont:getWidth("GEN2RECOMP"))
+  local tiltCodeH = self.warningFont:getHeight() * 2 * tiltCodeScale
+  local tiltBlockH = tiltDH + 4 * s + tiltCodeH
+  local paypalW = paypalLink and math.min(self.hintFont:getWidth(paypalLink.label)+24*s,appW*0.20) or 0
+  local paypalFont = self.hintFont
+  if paypalLink and paypalFont:getWidth(paypalLink.label)>paypalW-12*s then paypalFont=self.warningFont end
+  local paypalBaseW = paypalW
+  local paypalMultiplier = height > width and 1 or 2
+  paypalW = paypalW * paypalMultiplier
+  local paypalH = donateH * paypalMultiplier
+  local paypalStacked = paypalLink and paypalMultiplier==2 and appW < 2 * (paypalW + padH + 8 * s) + 180 * s
+  if paypalLink then
+    local fontSize=paypalFont:getHeight()*paypalMultiplier
+    if self._paypalFontSize~=fontSize then
+      self._paypalFontSize=fontSize
+      self._paypalFont=love.graphics.newFont(fontSize)
+    end
+    paypalFont=self._paypalFont
+  end
+  -- Keep the centered wordmark clear of the corner link on narrow screens.
+  local logoTargetW = math.min(appW - 2 * (math.max(tiltTargetW,paypalStacked and paypalBaseW or paypalW) + padH + 8 * s),math.max(math.min(180 * s, appW - 32 * s),
+    math.min(330 * s, appW - 32 * s)))
   local logoScale = math.min(logoTargetW / logoW, height * 0.15 / logoH)
   local logoDW, logoDH = logoW * logoScale, logoH * logoScale
   local logoY = stripY + stripH + 14 * s
+  local paypalY = paypalStacked and (logoY + math.max(logoDH,tiltBlockH) + 12 * s) or (logoY + 16 * s)
 
   -- Tab bar: R/B/Y/divider/MODS chips (label + underline on the active one),
   -- with "N of X ready" right-aligned.
   local chip = 44 * s
-  local tabBarY = logoY + logoDH + 6 * s
+  local tabBarY = math.max(logoY + math.max(logoDH,tiltBlockH),paypalLink and (paypalY+paypalH) or 0) + 6 * s
   local tabBarH = chip + 22 * s
+  if self.sidebarMode then
+    tabBarY = stripY + stripH + 12 * s
+    tabBarH = math.max(chip, self.gameNameFont:getHeight() + 14 * s)
+  end
 
   -- Self-updater banner state: computed up front so its band can be reserved
-  -- above the footer, then drawn after the content below.  Only the four
-  -- actionable states surface anything.
-  local upStatus, upLatest, upProgress
+  -- above the footer, then drawn after the content below.
+  --
+  -- WHICH STATES SURFACE is Check's answer, not a list kept here.  It was a
+  -- list, of four, and "error" was not in it -- so a host that cannot check at
+  -- all (the Switch, an Xbox UWP container: no HTTPS client reachable from Lua)
+  -- ended on "error" and the launcher drew NOTHING, which is why those two
+  -- looked like builds with no updater rather than builds with a disabled one.
+  -- Check.STATUS now marks the drawable states and Check.state() reports a
+  -- `notify` one for exactly that case; tools/auto_update_check.lua asserts the
+  -- two halves still agree.
+  --
+  -- upAdvice is "download" | "ota" | "package" | "releases" -- what the player
+  -- should DO on this host, decided in src/update/Check.lua so the banner only
+  -- has to pick the wording.
+  local upStatus, upLatest, upProgress, upAdvice, upCannotCheck, upInfo
   if self.Check then
     local ok, st = pcall(self.Check.state)
     st = (ok and type(st) == "table") and st or nil
     local status = st and st.status
-    if status == "available" or status == "downloading"
-        or status == "ready" or status == "needs_full" then
+    local drawable = self.Check.STATUS or {}
+    if status and drawable[status] then
       upStatus, upLatest, upProgress = status, st.latest, st.progress
+      upInfo = st
+      upAdvice = st.advice or "releases"
+      -- Resolved HERE and not in the banner below, so that the only places the
+      -- text `upStatus == "<state>"` appears in this file are the branch heads
+      -- of the banner's own dispatch.  tools/auto_update_check.lua derives the
+      -- set of states the banner draws by reading those heads, and a second
+      -- test of the same literal further in made that derivation pass while
+      -- the state was no longer drawn at all -- a vocabulary scan with two
+      -- sources for one token cannot grade membership.
+      upCannotCheck = (status == "notify")
     end
   end
   local bannerActive = upStatus ~= nil
@@ -5526,13 +5778,17 @@ function RomImporter:draw()
   -- measurement below is what it always was.
   local viewportH = math.max(0, oy + height - contentTop)
   self._panelNaturalH = self._panelNaturalH or {}
-  local naturalH = (self._panelNaturalH[self.tab] or 0) + bannerBand + footerH
+  local panelKey = self.sidebarMode and self:_sbKey() or self.tab
+  local naturalH = (self._panelNaturalH[panelKey] or 0) + bannerBand + footerH
   local paged, pageScroll, maxPage =
     RomImporter.pageScrollFor(naturalH, viewportH, self.pageScroll)
   self.pageScroll, self._pageMax = pageScroll, maxPage
   -- read by the hit tests; a scrolled control is live only inside the viewport
   pageBand = paged and { contentTop, oy + height } or nil
 
+  if self.sidebarMode then
+    self:_sbDrawHeader(cX, tabBarY, barW, tabBarH)
+  else
   -- THE GEAR, top right, on every tab.
   --
   -- Pinned beside the tab bar rather than made a chip in it: the bar scrolls
@@ -5622,6 +5878,7 @@ function RomImporter:draw()
   -- tab bar (rebuilds self.tabRects).  Pinned: it is the launcher's navigation,
   -- and it sits above the scrolling viewport.
   self:_drawTabBar(cX, tabBarY, barW, tabBarH, chip)
+  end
 
   if batchText then
     local by = tabBarY + tabBarH + 10 * s
@@ -5649,7 +5906,13 @@ function RomImporter:draw()
 
   -- content: game panel for a version tab, mods panel for the mods tab
   local panelH
-  if self.tab == "mods" then
+  if self.sidebarMode and self:_sbOwns() then
+    panelH = self:_sbDrawContent(cX, panelY, cW, cH, paged)
+  elseif self.tab == "mods" and self.sidebarMode then
+    -- the sidebar's search / tags / sort row sits over the installed list
+    local barH = self:_sbModToolbar(cX, panelY, cW)
+    panelH = barH + (self:_drawModsPanel(cX, panelY + barH, cW, math.max(0, cH - barH), paged) or 0)
+  elseif self.tab == "mods" then
     panelH = self:_drawModsPanel(cX, panelY, cW, cH, paged)
   elseif self.tab == "find" then
     panelH = self:_drawFindPanel(cX, panelY, cW, cH, paged)
@@ -5657,7 +5920,7 @@ function RomImporter:draw()
     panelH = self:_drawGamePanel(self.tab, cX, panelY, cW, cH, paged)
   end
   panelH = panelH or 0
-  self._panelNaturalH[self.tab] = panelH
+  self._panelNaturalH[panelKey] = panelH
 
   -- THE SETTINGS DRAWER, over the panel it belongs to.
   --
@@ -5671,10 +5934,13 @@ function RomImporter:draw()
   -- viewport (it scrolls independently, so a row scrolled out of ITS view has
   -- to be dead even though the page has not scrolled at all).
   self.settingsDrawerRect = nil
-  if self.settingsOpen then
+  -- (the sidebar's Settings page draws its own, full height, over everything:
+  -- LauncherSidebar's draw wrapper)
+  if self.settingsOpen and not (self.sidebarMode and self.section == "settings") then
     local pad = 16 * s
     local dw = math.max(300 * s, math.min(560 * s, appW * 0.52))
     local dx = appX + appW - dw
+    if self.sidebarMode and self.section == "settings" then dx, dw = appX, appW end
     local dy = contentTop
     local dh = math.max(60 * s, contentBottom - contentTop)
     self.settingsDrawerRect = { x = dx, y = dy, width = dw, height = dh,
@@ -5767,13 +6033,67 @@ function RomImporter:draw()
       local rect = actionButton("Update")
       self.updateButton = { x = rect.x, y = rect.y, width = rect.width,
         height = rect.height, action = "download" }
-      message(upLatest and ("Update v" .. upLatest .. " available")
-        or Strings("An update is available"), rect.width)
-    elseif upStatus == "needs_full" then
-      local rect = actionButton("Open releases")
+      local text = upLatest and ("Update v" .. upLatest .. " available")
+        or Strings("An update is available")
+      -- Android: the whole app is updated (installs over it, saves kept)
+      if upInfo and upInfo.app then
+        text = upInfo.native and Strings("An app update is needed for new features")
+          or (upLatest and ("App update v" .. upLatest .. " available")) or Strings("An app update is available")
+      end
+      message(text, rect.width)
+    elseif upStatus == "install" then
+      -- the APK is downloaded; Android's installer puts it over this app
+      local rect = actionButton("Install")
       self.updateButton = { x = rect.x, y = rect.y, width = rect.width,
-        height = rect.height, action = "openurl" }
-      message("A new version needs a fresh download", rect.width)
+        height = rect.height, action = "install" }
+      local text = Strings("App update downloaded. Your saves are kept.")
+      if upInfo and upInfo.needsPermission then
+        text = Strings("Allow installs from this app, then tap Install again")
+      elseif upInfo and upInfo.installStarted then
+        text = Strings("Confirm the update in Android's installer")
+      end
+      message(text, rect.width)
+    elseif upStatus == "browser" then
+      -- an app too old to install updates itself: the browser fetched the APK
+      local rect = actionButton("Download again")
+      self.updateButton = { x = rect.x, y = rect.y, width = rect.width,
+        height = rect.height, action = "openapk" }
+      message(Strings("Open the downloaded APK to update. Your saves are kept."), rect.width)
+    elseif upStatus == "needs_full" or upStatus == "notify" then
+      -- ONE ROW, THREE TRUTHS, and it used to tell only the first of them.
+      --
+      -- "A new version needs a fresh download" + "Open releases" is right on a
+      -- desktop and on Android: the release carries no in-place payload (or its
+      -- minShell needs a newer native build), and the releases page is where
+      -- the installer is.  It is wrong on both consoles.  A Switch player
+      -- updates by running ports/switch/ota-launcher's gen2recomp.nro, which
+      -- checks GitHub and replaces both NROs itself; an Xbox player installs a
+      -- newer package.  And neither has a browser for the button to open --
+      -- love.system.openURL on those hosts does nothing at best.
+      --
+      -- So the two console advices draw NO button: a dead button is worse than
+      -- no button, because the player taps it and concludes the updater is
+      -- broken.  The sentence is the whole row there.
+      local label, action
+      if upAdvice == "ota" then
+        label = Strings("Update from the OTA launcher (gen2recomp.nro)")
+      elseif upAdvice == "package" then
+        label = Strings("Install the newer package to update")
+      elseif upCannotCheck then
+        label = Strings("Cannot check for updates on this build")
+        action = "openurl"
+      else
+        label = Strings("A new version needs a fresh download")
+        action = "openurl"
+      end
+      local reserve = 0
+      if action then
+        local rect = actionButton("Open releases")
+        self.updateButton = { x = rect.x, y = rect.y, width = rect.width,
+          height = rect.height, action = action }
+        reserve = rect.width
+      end
+      message(label, reserve)
     elseif upStatus == "ready" then
       local rect = actionButton("Restart to update")
       self.updateButton = { x = rect.x, y = rect.y, width = rect.width,
@@ -5849,19 +6169,52 @@ function RomImporter:draw()
     end
   end
 
-  -- Donate: centred on its own row below the warning.  Drawn from warningY so
-  -- it tracks the footer wherever the footer landed (pinned or scrolled).
+  -- "Created by ..." and the tab's donate chips (see CREDITS), centred on
+  -- their own rows below the warning.  Drawn from warningY so they track the
+  -- footer wherever the footer landed (pinned or scrolled).
   do
     love.graphics.setFont(self.hintFont)
-    local dw = self.hintFont:getWidth("DONATE") + 24 * s
-    self.donateButton = self:_chipButton(appX + (appW - dw) / 2,
-      warningY + warningH + 8 * s, "DONATE",
-      { font = self.hintFont, w = dw, h = donateH, kind = "accent" })
+    local creditY = warningY + warningH + 8 * s
+    col(PAL.warning)
+    love.graphics.printf("Created by " .. credit.by, appX, creditY, appW, "center")
+    self.donateButtons = {}
+    self.donateButton = nil
+    if #footerLinks > 0 then
+      local gap = 10 * s
+      local widths, total = {}, 0
+      for i, link in ipairs(footerLinks) do
+        widths[i] = self.hintFont:getWidth(link.label) + 24 * s
+        total = total + widths[i] + (i > 1 and gap or 0)
+      end
+      local x = appX + (appW - total) / 2
+      local y = creditY + creditH + 8 * s
+      for i, link in ipairs(footerLinks) do
+        local rect = self:_chipButton(x, y, link.label,
+          { font = self.hintFont, w = widths[i], h = donateH, kind = "accent" })
+        if rect then
+          rect.url = link.url
+          self.donateButtons[#self.donateButtons + 1] = rect
+        end
+        x = x + widths[i] + gap
+      end
+      self.donateButton = self.donateButtons[1]
+    end
   end
 
   -- End of the scrolling column; the logo and the page scrollbar are pinned and
   -- draw outside it.
   if paged then love.graphics.setScissor() end
+
+  if self.sidebarMode then
+    self:_sbDrawRailFoot(paypalLink)
+  else
+  if paypalLink then
+    local rect=self:_chipButton(appX+padH,paypalY,paypalLink.label,
+      {font=paypalFont,w=paypalW,h=paypalH,r=16*s,kind="accent",pinned=true})
+    rect.url=paypalLink.url
+    self.donateButtons[#self.donateButtons+1]=rect
+    self.donateButton=rect
+  end
 
   -- logo, over the split, with a gentle bob + gold glow + sweeping shine
   local bob = math.sin(pulse * (2 * math.pi / 4)) * 6 * s
@@ -5878,6 +6231,25 @@ function RomImporter:draw()
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.draw(logoImage, lx, ly, 0, logoScale, logoScale)
   love.graphics.setShader()
+
+  local tiltX = appX + appW - padH - tiltTargetW
+  self.tiltRipsButton = {x=tiltX,y=logoY,width=tiltTargetW,height=tiltBlockH,pinned=true}
+  if not self._tiltFilterSet then
+    self.tiltRipsLogo:setFilter("linear","linear")
+    self.tiltRipsLogo:setMipmapFilter("linear")
+    self._tiltFilterSet=true
+  end
+  local tiltHot = self:_hover(self.tiltRipsButton)
+  love.graphics.setColor(1,1,1,tiltHot and 1 or 0.92)
+  love.graphics.draw(self.tiltRipsLogo,tiltX,logoY,0,tiltScale,tiltScale)
+  love.graphics.push("all")
+  love.graphics.translate(tiltX,logoY + tiltDH + 4 * s)
+  love.graphics.scale(tiltCodeScale,tiltCodeScale)
+  love.graphics.setFont(self.warningFont)
+  col(PAL.ink)
+  printfB("Use code\nGEN2RECOMP",0,0,tiltTargetW / tiltCodeScale,"center")
+  love.graphics.pop()
+  end
 
   -- page scrollbar: the same thin thumb the lists use, against the app edge
   if paged then
@@ -6469,6 +6841,7 @@ function RomImporter:mousepressed(x, y, button)
     if inside(self.genDropdownRect, x, y) then return end
     return
   end
+  if self.sidebarMode and self:_sbMousepressed(x, y) then return end
   if inside(self.genDropdownRect, x, y) then
     self._genMenuOpen = true
     return
@@ -6485,9 +6858,15 @@ function RomImporter:mousepressed(x, y, button)
     love.system.openURL(self.bcgUrl or COMMUNITY_URL)
     return
   end
-  if inside(self.donateButton, x, y) then
-    love.system.openURL(DONATE_URL)
+  if inside(self.tiltRipsButton,x,y) then
+    love.system.openURL(TILT_RIPS_URL)
     return
+  end
+  for _, button in ipairs(self.donateButtons or {}) do
+    if inside(button, x, y) then
+      love.system.openURL(button.url or DONATE_URL)
+      return
+    end
   end
   if inside(self.linkUrlRect, x, y) then
     love.system.openURL(COMMUNITY_URL)
@@ -6499,10 +6878,18 @@ function RomImporter:mousepressed(x, y, button)
     local action = self.updateButton.action
     if action == "download" and self.Check then
       pcall(self.Check.download)
+    elseif action == "install" and self.Check then
+      pcall(self.Check.install)
+    elseif action == "openapk" and self.Check then
+      pcall(self.Check.openApk)
     elseif action == "restart" then
       HostShell.restart()
     elseif action == "openurl" and self.Check then
-      love.system.openURL(self.Check.releaseUrl())
+      -- pcall because this is reachable on hosts whose love.system.openURL is
+      -- a stub or absent; an unguarded call there takes the launcher down on a
+      -- tap.  The banner only offers the button where a page can be opened
+      -- (see upAdvice above), so this is the belt to that braces.
+      pcall(love.system.openURL, self.Check.releaseUrl())
     end
     return
   end
@@ -6644,6 +7031,10 @@ function RomImporter:mousepressed(x, y, button)
     if self.onEditTouchControls then self.onEditTouchControls() end
     return
   end
+  if inside(self.translateGameRect, x, y) then
+    self:_openTranslationSettings(self.panelVersion)
+    return
+  end
   if inside(self.mapEditorRect, x, y) then
     if self.onEditMaps then self.onEditMaps(self.panelVersion) end
     return
@@ -6669,6 +7060,12 @@ function RomImporter:mousepressed(x, y, button)
   for _, r in ipairs(self.slotEditRects or {}) do
     if inside(r, x, y) then
       if self.onEditSave then self.onEditSave(self.panelVersion, r.id) end
+      return
+    end
+  end
+  for _, r in ipairs(self.slotSyncRects or {}) do
+    if inside(r, x, y) then
+      if self._sbSyncSlot then self:_sbSyncSlot(self.panelVersion, r.id) end
       return
     end
   end
@@ -6736,6 +7133,12 @@ function RomImporter:mousepressed(x, y, button)
   for _, r in ipairs(self.modImportGameRects or {}) do
     if inside(r, x, y) then
       if r.version then self:choose(r.version) end
+      return
+    end
+  end
+  for _, r in ipairs(self.modSupportRects or {}) do
+    if inside(r, x, y) then
+      if r.url then love.system.openURL(r.url) end
       return
     end
   end
@@ -6937,6 +7340,7 @@ end
 -- pushes a label over, and then it looks like the button is broken rather
 -- than the label being long.
 function RomImporter:_fittingFont(label, w)
+  label=Strings(label)
   for _, font in ipairs({ self.saveBtnFont, self.hintFont }) do
     if font and font:getWidth(label) <= w then return font end
   end
@@ -6944,6 +7348,7 @@ function RomImporter:_fittingFont(label, w)
 end
 
 function RomImporter:_glassyButton(x, y, w, h, label, font, enabled)
+  label=Strings(label)
   local s = self._s
   local r = 10 * s
   love.graphics.setFont(font)
@@ -6972,6 +7377,7 @@ end
 -- kind: "neutral" (default), "accent" (green), "danger" (red), "dangerArmed"
 -- (filled confirm). Returns the hit rect; opts.id is copied onto it.
 function RomImporter:_chipButton(x, y, label, opts)
+  label=Strings(label)
   opts = opts or {}
   local s = self._s
   local font = opts.font or self.hintFont
@@ -6981,7 +7387,7 @@ function RomImporter:_chipButton(x, y, label, opts)
   local w = opts.w or (font:getWidth(label) + 2 * padX)
   local r = opts.r or math.min(8 * s, h / 2)
   local kind = opts.kind or "neutral"
-  local rect = { x = x, y = y, width = w, height = h, id = opts.id }
+  local rect = { x = x, y = y, width = w, height = h, id = opts.id, pinned = opts.pinned }
   local hot = self:_hover(rect)
 
   if kind == "dangerArmed" then
@@ -7315,6 +7721,19 @@ function RomImporter:_drawTabBar(x, y, w, h, chip)
     { id = "platinum", letter = "PL", top = PAL.chipPlatinumTop,
       bot = PAL.chipPlatinumBot, under = PAL.chipPlatinumTop,
       label = Strings("PLATINUM"), ink = PAL.chipInkSilver },
+    -- Gen 4's other pair and Gen 5's, after Platinum in generation order
+    { id = "heartgold", letter = "HG", top = PAL.chipHeartGoldTop,
+      bot = PAL.chipHeartGoldBot, under = PAL.chipHeartGoldTop,
+      label = Strings("HEARTGOLD"), ink = PAL.chipInkGold },
+    { id = "soulsilver", letter = "SS", top = PAL.chipSoulSilverTop,
+      bot = PAL.chipSoulSilverBot, under = PAL.chipSoulSilverTop,
+      label = Strings("SOULSILVER"), ink = PAL.chipInkSilver },
+    { id = "black", letter = "B", top = PAL.chipBlackTop,
+      bot = PAL.chipBlackBot, under = PAL.chipBlackTop,
+      label = Strings("BLACK"), ink = PAL.white },
+    { id = "white", letter = "W", top = PAL.chipWhiteTop,
+      bot = PAL.chipWhiteBot, under = PAL.chipWhiteTop,
+      label = Strings("WHITE"), ink = PAL.chipInkSilver },
     -- Prism sits after Crystal: it is a Crystal romhack, so it belongs at the
     -- end of the Gen 2 run rather than beside the official carts.
     { id = "prism", letter = "P", top = PAL.chipPrismTop, bot = PAL.chipPrismBot,
@@ -7607,6 +8026,10 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   elseif version == "firered" then accent = PAL.chipFireRedTop
   elseif version == "emerald" then accent = PAL.chipEmeraldTop
   elseif version == "platinum" then accent = PAL.chipPlatinumTop
+  elseif version == "heartgold" then accent = PAL.chipHeartGoldTop
+  elseif version == "soulsilver" then accent = PAL.chipSoulSilverTop
+  elseif version == "black" then accent = PAL.chipBlackTop
+  elseif version == "white" then accent = PAL.chipWhiteTop
   elseif version == "prism" then accent = PAL.chipPrismTop
   -- Without a branch here the panel silently falls back to PAL.blue, which
   -- reads as a rendering bug rather than a missing case.
@@ -7684,6 +8107,18 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   local detailH = math.max(1, #dtl) * self.hintFont:getHeight()
   local btnH = math.max(40 * s, self.saveBtnFont:getHeight() + 22 * s)
   local romCardH = pad + labelH + 10 * s + stateH + 5 * s + detailH + 14 * s + btnH + pad
+  -- in the sidebar layout the import button lives on the About card above
+  -- (LauncherSidebar); the progress bar still shows here while importing
+  local romBtnElsewhere = self.sidebarMode and self.section == "games" and romProgress == nil
+  self._sbRomBtn = romBtnElsewhere and { label = romBtnLabel, enabled = romBtnEnabled } or nil
+  if romBtnElsewhere then romCardH = romCardH - 14 * s - btnH + 4 * s end
+  -- ...and once the ROM is in and there is nothing to report, the card goes:
+  -- the About card's buttons are all it was for. It comes back for an import
+  -- in progress, a failure, or a ROM this build needs re-imported.
+  local romCardHidden = romBtnElsewhere and ready and not locked
+    and not (self.workState == "error" and self.errorVersion == version)
+    and not self.returning[version]
+  if romCardHidden then romCardH = -12 * s end
 
   -- SAVE FILES card: Import save is live once the ROM is imported (playable);
   -- Export save is live only when the active slot actually holds a save.  The
@@ -7740,13 +8175,16 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   -- The row is reserved when EITHER button wants it. Keying the height off
   -- onEditTouchControls alone left touchY equal to playY on a build without
   -- it, which drew the map button straight over Play.
-  local touchBtnH = (self.onEditTouchControls or showMapBtn)
-    and math.max(38 * s, self.saveBtnFont:getHeight() + 20 * s) or 0
+  local touchBtnH = math.max(38 * s, self.saveBtnFont:getHeight() + 20 * s)
   -- The one-line reason under a disabled Map Editor button needs room of its
   -- own, or it prints through Play -- which is how the Touch Controls row got
   -- its own note about reserving height in the first place.
   local mapHintH = (showMapBtn and not canMapEdit and touchBtnH > 0)
     and (self.hintFont:getHeight() + 4 * s) or 0
+  local translation=require("src.translation.Service")
+  local showTranslationProgress=translation.version==version and translation.status~="idle" and translation.status~="checking"
+  local translationY=mapHintH
+  if showTranslationProgress then mapHintH=mapHintH+2*self.hintFont:getHeight()+24*s end
   local touchGap = touchBtnH > 0 and (12 * s) or 0
 
   -- vertical placement of the left column
@@ -7765,6 +8203,7 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   end
 
   -- ROM card
+  if not romCardHidden then
   roundedCard(leftX, romY, colW, romCardH, 16 * s)
   local ix, iy = leftX + pad, romY + pad
   love.graphics.setFont(self.labelFont)
@@ -7790,9 +8229,10 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
       col(accent)
       love.graphics.rectangle("fill", ix, track, pw2, barH, barH / 2, barH / 2)
     end
-  else
+  elseif not romBtnElsewhere then
     self.romButtonRect =
       self:_glassyButton(ix, iy, innerW, btnH, romBtnLabel, self.saveBtnFont, romBtnEnabled)
+  end
   end
 
   -- SAVE FILES card: Import save (new slot) + Export save (active slot), with an
@@ -7833,24 +8273,13 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   -- Touch Controls: open the drag-to-reposition / disable editor (#327).
   -- Map Editor beside it when this game is imported: the two share the row,
   -- each taking half, so adding the second button did not push Play down.
-  if self.onEditTouchControls and touchBtnH > 0 then
-    if showMapBtn then
-      local halfW = (colW - 10 * s) / 2
-      self.touchControlsRect = self:_glassyButton(
-        leftX, touchY, halfW, touchBtnH, "Touch Controls", self.saveBtnFont, true)
-      self.mapEditorRect = self:_glassyButton(
-        leftX + halfW + 10 * s, touchY, halfW, touchBtnH, MAP_EDITOR_LABEL,
-        self:_fittingFont(MAP_EDITOR_LABEL, halfW - 16 * s), canMapEdit)
-    else
-      self.touchControlsRect = self:_glassyButton(
-        leftX, touchY, colW, touchBtnH, "Touch Controls", self.saveBtnFont, true)
-    end
-  elseif showMapBtn and touchBtnH > 0 then
-    -- No Touch Controls host (a desktop-only build): the map button takes the
-    -- reserved row on its own.
-    self.mapEditorRect = self:_glassyButton(
-      leftX, touchY, colW, touchBtnH, MAP_EDITOR_LABEL,
-      self:_fittingFont(MAP_EDITOR_LABEL, colW - 16 * s), canMapEdit)
+  local tools={{rect="translateGameRect",label="Translate",enabled=true}}
+  if self.onEditTouchControls then table.insert(tools,1,{rect="touchControlsRect",label="Touch Controls",enabled=true})end
+  if showMapBtn then table.insert(tools,#tools,{rect="mapEditorRect",label=MAP_EDITOR_LABEL,enabled=canMapEdit})end
+  local toolW=(colW-(#tools-1)*10*s)/#tools
+  for i,tool in ipairs(tools)do
+    self[tool.rect]=self:_glassyButton(leftX+(i-1)*(toolW+10*s),touchY,toolW,touchBtnH,
+      tool.label,self:_fittingFont(tool.label,toolW-16*s),tool.enabled)
   end
   -- WHY IT IS GREY, under it, rather than left to be guessed at. One line,
   -- and only when the button is disabled: a reader looking at a lit button
@@ -7864,6 +8293,9 @@ function RomImporter:_drawGamePanel(version, x, y, w, h, paged)
   end
 
   -- Play button
+  if showTranslationProgress then
+    self:_drawTranslationProgress(leftX,touchY+touchBtnH+translationY+4*s,colW,s)
+  end
   self:_playButton(leftX, playY, colW, playH, gameName, ready, locked)
 
   -- SAVE SLOT card (right column, or stacked below Play when single-column).
@@ -8122,10 +8554,29 @@ function RomImporter:_settingsRows()
   -- games and what colour it paints itself are about the launcher, they are
   -- set once and never again, and interleaving them with the rows a player
   -- actually comes here to change makes both lists longer to read.
+  if self.settingsPage~="translation"then
   add({ kind = "section", label = "LAUNCHER" })
   add({ kind = "action", label = "LAUNCHER SETTINGS",
         value = "OPEN", action = "launcherPage",
         note = "Where games are installed, and how the launcher looks." })
+  end
+
+  local translationVersion=(self.settingsPage=="translation" and self._translationSettingsVersion)
+    or self:_savedropTarget() or GameVersion.get()
+  local languages=require("src.translation.Languages")
+  local values,labels=languages.choices(true)
+  -- No ROM TEXT LANGUAGE row: the ROM's language is known (Languages.romLanguage),
+  -- and a row offering it let French -> French jobs leave the text in English.
+  add({kind="section",label="THIS GAME: TEXT TRANSLATION",
+    note="Applies to "..tostring(translationVersion)..". The ROM's text is English. Play after translation finishes; ORIGINAL ROM TEXT restores the imported wording."})
+  add({kind="option",scope="translation",version=translationVersion,label="LANGUAGE",
+    row={id="target",values=values,labels=labels}})
+  add({kind="action",label="TRANSLATE THIS GAME",value="START",action="translateGame",version=translationVersion})
+  add({kind="progress",label="TRANSLATION STATUS"})
+  if self.settingsPage=="translation"then
+    add({kind="action",label="BACK TO SETTINGS",value="BACK",action="settingsBack"})
+    return rows
+  end
 
   add({ kind = "section", label = "GAME DEFAULTS",
         note = "These are the defaults every game starts with. A "
@@ -8211,6 +8662,20 @@ function RomImporter:_launcherSettingsRows()
 
   add({ kind = "action", label = "BACK", value = "SETTINGS",
         action = "settingsBack" })
+
+  local languages=require("src.translation.Languages")
+  local values,labels=languages.choices(false)
+  local launcherLanguages={};for _,value in ipairs(values)do if value~="original"then launcherLanguages[#launcherLanguages+1]=value end end
+  add({kind="section",label="LAUNCHER LANGUAGE",note="English is the default. Other launcher languages are translated on this device and cached separately from game dialogue."})
+  add({kind="option",scope="launcher",label="LAUNCHER LANGUAGE",row={id="launcherLanguage",values=launcherLanguages,labels=labels}})
+  add({kind="option",scope="launcher",label="TRANSLATION HARDWARE",row={id="translationHardware",values={"auto","gpu","cpu"},labels={auto="Automatic (GPU when available)",gpu="NVIDIA GPU (download support)",cpu="CPU"}}})
+  add({kind="section",label="GPU SUPPORT",note="NVIDIA GPU mode can download about 435 MB of support files once on Windows. Automatic uses existing GPU support, with a CPU fallback. Android uses its on-device translation runtime."})
+  add({kind="section",label="GAME TEXT TRANSLATION",
+    note="Translate imported game text on this device. Language models and fonts download once; dialogue is never uploaded. Machine translation may differ from official dialogue."})
+  add({kind="option",scope="launcher",label="DEFAULT LANGUAGE",
+    row={id="translationLanguage",values=values,labels=labels}})
+  add({kind="action",label="TRANSLATE IMPORTED GAMES",value="START",action="translateAll"})
+  add({kind="progress",label="TRANSLATION STATUS"})
 
   -- ------- where games are installed
   add({ kind = "section", label = "GAME DATA FOLDER",
@@ -8351,6 +8816,23 @@ function RomImporter:_dataDirNote()
     lines[#lines + 1] = "Games are installed in the app's own folder "
       .. "(" .. tostring(report.path or "AppData on Windows") .. ")."
   end
+  -- STAYS ON THE PANEL, not just in the one-shot notice a tab change clears:
+  -- this is true for the rest of the session, and it is the one thing that
+  -- explains a folder the panel says is in use still reading like the old one.
+  if report.restart then
+    lines[#lines + 1] = "The previous folder is still on the read path. "
+      .. "Restart the app to finish applying this."
+  end
+  -- A DIFFERENT PROBLEM WITH THE SAME SYMPTOM, so it gets its own line.  On a
+  -- build where nothing can position a mount (an Android APK whose liblove.so
+  -- the FFI cannot reach), the chosen folder is written and read but cannot be
+  -- put AHEAD of the default one -- so a game imported before the change goes
+  -- on being the one that loads.  A restart does not help; moving it does.
+  if report.shadowed and report.kind ~= "save" then
+    lines[#lines + 1] = "A game already imported to the default folder can "
+      .. "still be the one that loads on this device. Use MOVE EXISTING DATA "
+      .. "HERE to be sure."
+  end
   -- WHAT MOVES AND WHAT DOES NOT, said here rather than discovered.
   --
   -- Everything that grows without bound follows the folder: the ROM cache, the
@@ -8403,6 +8885,14 @@ end
 -- The current value of one entry, whichever scope it lives in.
 function RomImporter:_settingValue(entry)
   local opts = self:_settings()
+  if entry.scope=="translation" then
+    local per=opts.translationPerGame and opts.translationPerGame[entry.version] or {}
+    return per[entry.row.id] or (entry.row.id=="target" and "inherit" or opts.translationSource or "en")
+  end
+  if entry.scope == "launcher" and entry.row.id=="translationLanguage" then return opts.translationLanguage or "original" end
+  if entry.scope=="launcher" and entry.row.id=="launcherLanguage"then return opts.launcherLanguage or "en"end
+  if entry.scope=="launcher" and entry.row.id=="translationHardware"then return opts.translationHardware or "auto"end
+  if entry.scope == "launcher" and entry.row.id=="translationSource" then return opts.translationSource or "en" end
   if entry.scope == "settingsGen" then
     -- `false` rather than nil: the stepper matches against its own value list,
     -- and ALL is spelled `false` there for the same reason the generation
@@ -8431,6 +8921,25 @@ end
 
 function RomImporter:_setSettingValue(entry, value)
   local opts = self:_settings()
+  if entry.scope=="launcher" and entry.row.id=="launcherLanguage"then
+    opts.launcherLanguage=value
+    require("src.translation.Service").setLauncher(opts)
+    require("src.translation.Service").enqueueLauncher(opts)
+    self._settingsRowCache=nil
+    return
+  end
+  if entry.scope=="translation" then
+    opts.translationPerGame=opts.translationPerGame or {}
+    opts.translationPerGame[entry.version]=opts.translationPerGame[entry.version] or {}
+    opts.translationPerGame[entry.version][entry.row.id]=value
+    require("src.translation.Service").enqueue(entry.version,opts)
+    return
+  end
+  if entry.scope=="launcher" and (entry.row.id=="translationLanguage" or entry.row.id=="translationSource")then
+    opts[entry.row.id]=value
+    require("src.translation.Service").enqueueAll(opts)
+    return
+  end
   if entry.scope == "settingsGen" then
     self.settingsGen = RomImporter.isGeneration(value)
     -- The rows below it change meaning, and one of them (USE SHARED VALUES)
@@ -8581,10 +9090,54 @@ end
 -- What an `action` row does when it is pressed.  One place rather than a chain
 -- of ifs in mousepressed, because the drawer now has two pages of them and the
 -- touch path below resolves the same rows on release.
+function RomImporter:_drawTranslationProgress(x,y,w,s)
+  local service=require("src.translation.Service")
+  local fraction,detail,message=require("src.translation.Progress").describe(service)
+  love.graphics.setFont(self:_fittingFont(message,w))
+  col(PAL.ink);printB(message,x,y)
+  local barY=y+self.hintFont:getHeight()+4*s
+  local barH=8*s
+  col(PAL.cardBlue,0.8);love.graphics.rectangle("fill",x,barY,w,barH,4*s,4*s)
+  col(service.status=="error" and PAL.warning or PAL.link)
+  if fraction then
+    love.graphics.rectangle("fill",x,barY,w*fraction,barH,4*s,4*s)
+  elseif service.status=="working"then
+    local phase=(love.timer.getTime()*0.45)%1
+    local width=w*0.22
+    love.graphics.rectangle("fill",x+(w-width)*phase,barY,width,barH,4*s,4*s)
+  end
+  if detail then
+    love.graphics.setFont(self.hintFont);col(PAL.ink)
+    printB(detail,x,barY+barH+4*s)
+  end
+  return 2*self.hintFont:getHeight()+24*s
+end
+
+function RomImporter:_openTranslationSettings(version)
+  self._translationSettingsVersion=version or self:_savedropTarget()
+  self.settingsOpen=true
+  self.settingsPage="translation"
+  self.settingsScroll=0
+  self.settingsNotice=nil
+  self._settingsPress=nil
+  self._settingsRowCache=nil
+end
+
 function RomImporter:_settingsAction(entry)
   local action = entry and entry.action
   if not action or action == "none" then return end
-  if action == "touchLayout" then
+  if action=="translateAll" then
+    require("src.translation.Service").enqueueAll(self:_settings())
+  elseif action=="translateGame" then
+    local target=require("src.translation.Languages").resolve(self:_settings(),entry.version)
+    if target=="original"then
+      self.settingsNotice="Choose a translation LANGUAGE above first. The ROM text is already English, and Original ROM text needs no translating."
+    else
+      require("src.translation.Service").enqueue(entry.version,self:_settings())
+      self.settingsNotice="Translation queued. Its progress will appear below; start the game when translation is ready."
+    end
+    self._settingsRowCache=nil
+  elseif action == "touchLayout" then
     if self.onEditTouchControls then self.onEditTouchControls() end
   elseif action == "launcherPage" then
     self.settingsPage = "launcher"
@@ -8718,14 +9271,28 @@ function RomImporter:setDataDir(path)
   -- and a confirmation that names a folder nothing will be written to is
   -- worse than no confirmation at all.
   local report = require("src.import.CacheFs").rootReport()
+  -- A FOLDER CHANGE THAT CANNOT FULLY TAKE EFFECT SAYS SO.  CacheFs takes the
+  -- previous home's mounts back off the read path so the change applies
+  -- without a restart; where it cannot (Android's mountDirectory bridge has no
+  -- unmount, and a mount something is streaming from will refuse), the old
+  -- home is still in front of the new one for the rest of the session.  A
+  -- setting that silently does nothing is the bug being fixed here; one that
+  -- says "restart to apply" is not.
+  local tail = report.restart
+    and "  Restart the app to finish applying it." or ""
+  if report.shadowed and report.kind ~= "save" then
+    tail = tail .. "  A game already in the default folder can still be the "
+      .. "one that loads; use MOVE EXISTING DATA HERE."
+  end
   if report.kind == "custom" then
     self.settingsNotice = Strings("Games will be installed in %s",
-      tostring(report.path))
+      tostring(report.path)) .. tail
   elseif path ~= nil and path ~= "" then
     self.settingsNotice = Strings("That folder was saved but cannot be used: %s",
       tostring(report.why or "unknown reason"))
   else
-    self.settingsNotice = Strings("Games will be installed in the default folder")
+    self.settingsNotice =
+      Strings("Games will be installed in the default folder") .. tail
   end
   return true
 end
@@ -9061,6 +9628,7 @@ function RomImporter:_drawSaveSlotPanel(version, x, y, w, h, paged)
     self.slotRects = {}
     self.slotDeleteRects = {}
     self.slotEditRects = {}
+    self.slotSyncRects = {}
   elseif listH > 0 then
     -- clamp scroll against the current content extent, and stash the max so the
     -- wheel handler (which has no geometry) can clamp against the same value.
@@ -9075,6 +9643,7 @@ function RomImporter:_drawSaveSlotPanel(version, x, y, w, h, paged)
     self.slotRects = {}
     self.slotDeleteRects = {}
     self.slotEditRects = {}
+    self.slotSyncRects = {}
     -- Paged, the page viewport's scissor is already set and nothing here
     -- overflows the card, so leave it alone rather than replace and clear it.
     if not paged then
@@ -9117,6 +9686,17 @@ function RomImporter:_drawSaveSlotPanel(version, x, y, w, h, paged)
             w = edW, h = chipBtnH, id = slot.id, kind = "accent",
           })
           rightReserve = rightReserve + edW + btnGap + 6 * s
+        end
+
+        -- Sync (cloud saves, src/import/CloudSync.lua), left of Edit
+        if slot.exists and self._sbSyncSlot then
+          local syW = self.hintFont:getWidth("Sync") + 24 * s
+          local syX = (erect and erect.x or delX) - btnGap - syW
+          local syrect = self:_chipButton(syX, delY, "Sync", {
+            w = syW, h = chipBtnH, id = slot.id, kind = "neutral",
+          })
+          if syrect then self.slotSyncRects[#self.slotSyncRects + 1] = syrect end
+          rightReserve = rightReserve + syW + btnGap
         end
 
         -- LOADED pill top-right (above the button row, never over Delete)
@@ -9619,6 +10199,9 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
   local s = self._s
   self:_ensureMods()
   local mods = self.mods or {}
+  if self.sidebarMode then
+    mods = require("src.import.LauncherSidebar").filterMods(mods, self.modSearch, self.modTag, self.modSort)
+  end
 
   -- header: "Mods" + "N of M enabled" (left) and "Import mod .zip" (right)
   love.graphics.setFont(self.gameNameFont)
@@ -9793,6 +10376,7 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
     self.modVersionsRects = {}
     self.modImportFileRects = {}
     self.modImportGameRects = {}
+    self.modSupportRects = {}
     self.modGenRects = {}
     self._modMax = 0
     return (top - y) + boxH
@@ -9896,8 +10480,13 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
         or ("Needs " .. tostring(needGame.name) .. " imported")
     end
 
+    -- "Support the creator": the manifest's `support` link, first in the row
+    -- so it is the button a player reads before the maintenance ones.
+    local supLabel = (m.support and m.support ~= "") and "Support the creator" or nil
+    local supW = supLabel and (self.hintFont:getWidth(supLabel) + 24 * s) or 0
     local btnRowW = delW
     if hasGh then btnRowW = updW + btnGap + verW + btnGap + delW end
+    if supLabel then btnRowW = supW + btnGap + btnRowW end
     if impLabel then btnRowW = impW + btnGap + btnRowW end
     if gameLabel then btnRowW = gameW + btnGap + btnRowW end
     -- PER-GENERATION CHIPS, under the switch.
@@ -9959,7 +10548,8 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
       needs = needs, impLabel = impLabel, impW = impW, needLine = needLine,
       readyLine = readyLine,
       needGame = needGame, gameLabel = gameLabel, gameW = gameW,
-      gameLine = gameLine, gameLineH = gameLineH }
+      gameLine = gameLine, gameLineH = gameLineH,
+      supLabel = supLabel, supW = supW, support = m.support }
     total = total + cardH
   end
   total = total + (#mods - 1) * cardGap
@@ -9977,6 +10567,7 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
   self.modVersionsRects = {}
   self.modImportFileRects = {}
   self.modImportGameRects = {}
+  self.modSupportRects = {}
   self.modGenRects = {}
 
   if not paged then
@@ -10159,6 +10750,17 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
             id = rect.id,
           }
         end
+      end
+      if L.supLabel then
+        local srect = self:_chipButton(btnX, btnY, L.supLabel, {
+          w = L.supW, h = btnH, id = m.id, kind = "accent",
+        })
+        local before = #self.modSupportRects
+        clipHit(srect, self.modSupportRects)
+        if #self.modSupportRects > before then
+          self.modSupportRects[#self.modSupportRects].url = L.support
+        end
+        btnX = btnX + L.supW + btnGap
       end
       if L.impLabel then
         local irect = self:_chipButton(btnX, btnY, L.impLabel, {
@@ -10496,6 +11098,10 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
   -- Built once per entry into the tab, not once per frame: reading every
   -- installed mod's schema file is disk work, and at sixty frames a second on
   -- a folder of mods it is disk work the whole time the screen is open.
+  local translationVersion=self:_savedropTarget()
+  if self._settingsTranslationVersion~=translationVersion then
+    self._settingsTranslationVersion=translationVersion;self._settingsRowCache=nil
+  end
   if not self._settingsRowCache then
     self._settingsRowCache = self:_settingsRows()
   end
@@ -10503,7 +11109,8 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
 
   love.graphics.setFont(self.gameNameFont)
   col(PAL.ink)
-  printB(self.settingsPage == "launcher" and Strings("Launcher settings")
+  printB(self.settingsPage == "translation" and Strings("Translate game")
+       or self.settingsPage == "launcher" and Strings("Launcher settings")
                                           or Strings("Settings"), x, y)
   local top = y + self.gameNameFont:getHeight() + 10 * s
 
@@ -10551,6 +11158,8 @@ function RomImporter:_drawSettingsPanel(x, y, w, h, paged)
         cy = cy + 8 * s
       end
 
+    elseif entry.kind == "progress"then
+      cy=cy+self:_drawTranslationProgress(x,cy,w,s)+8*s
     elseif entry.kind == "action" then
       col(PAL.cardBlue, 0.55)
       love.graphics.rectangle("fill", x, cy, w, rowH - 4 * s, 6 * s, 6 * s)
@@ -10969,5 +11578,23 @@ function RomImporter:_drawFindPanel(x, y, w, h, paged)
   end
   return (top - y) + totalH
 end
+
+-- THE SIDEBAR LAUNCHER (src/import/LauncherSidebar.lua): News / Games / Mods /
+-- Tools / Settings down the left. It draws with this file's own helpers, which
+-- are locals, so they are handed over here in one table.
+RomImporter._ui = {
+  col = col, roundedCard = roundedCard, fillGrad = fillGrad,
+  fillGradRounded = fillGradRounded, neonGlow = neonGlow, buttonShine = buttonShine,
+  ellipsize = ellipsize, printSpaced = printSpaced, printB = printB, clamp = clamp,
+  inside = inside, unlockedByEnv = unlockedByEnv, chooseFileByExt = chooseFileByExt,
+  -- the page band the hover / button helpers clip against (nil = none);
+  -- returns the one it replaced
+  setPageBand = function(b) local was = pageBand; pageBand = b; return was end,
+  chooseFolder = chooseFolder,
+}
+require("src.import.LauncherSidebar").install(RomImporter)
+-- Android's "All files access" for a chosen GAME DATA FOLDER, asked again
+-- whenever the folder is unusable for want of it (src/import/AndroidStorage.lua)
+require("src.import.AndroidStorage").install(RomImporter)
 
 return RomImporter

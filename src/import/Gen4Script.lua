@@ -114,22 +114,31 @@ end
 
 -- Decode one script from `at` (1-based).  Returns the instruction list and a
 -- reason the walk stopped: "end", "variable", "unknown" or "overrun".
-function Gen4Script.decode(data, at)
+--
+-- `ops` is the command table, Platinum's by default; HeartGold and SoulSilver
+-- pass Gen4HgssScriptOps, whose opcodes are different numbers entirely.
+function Gen4Script.decode(data, at, ops)
   if type(data) ~= "string" or type(at) ~= "number" then return nil, "bad arguments" end
+  local Ops = ops or Ops
+  local JUMPS = Ops.JUMPS or Gen4Script.JUMPS
   local out, pc = {}, at
   local stopped = "overrun"
   while pc + 1 <= #data do
     local op = u16(data, pc)
     local entry = Ops.COMMANDS[op]
     if not entry then stopped = "unknown"; break end
-    local size = Ops.size(op)
+    -- `sizeAt` rather than `size`: a `*` command whose rule is known resolves
+    -- here from its own operand bytes instead of stopping the walk.  Three do
+    -- (the field-move flag commands); the other six still stop, and stopping
+    -- is still the right answer for them -- see the paragraph in
+    -- `Gen4ScriptOps` for what a guessed width costs.
+    local spec = Ops.specAt(op, data, pc)
+    local size = spec and (Ops.OPCODE_BYTES + Ops.specWidth(spec))
     if not size then
       out[#out + 1] = { at = pc, op = op, name = Ops.name(op), variable = true }
       stopped = "variable"
       break
     end
-
-    local spec = entry[2]
     local args, o = {}, pc + Ops.OPCODE_BYTES
     for i = 1, #spec do
       local c = spec:sub(i, i)
@@ -142,7 +151,7 @@ function Gen4Script.decode(data, at)
 
     -- A jump's operand is the LAST one, signed, and measured from the byte
     -- after it -- which is pc + size, since the operand ends the instruction.
-    local jump = Gen4Script.JUMPS[op]
+    local jump = JUMPS[op]
     if jump then
       local rel = i32(data, pc + size - 4)
       if rel then instruction.target = pc + size + rel end
@@ -156,10 +165,10 @@ function Gen4Script.decode(data, at)
 end
 
 -- Every script in one member, keyed by entry-point position.
-function Gen4Script.decodeAll(data)
+function Gen4Script.decodeAll(data, ops)
   local out = {}
   for _, at in ipairs(Gen4Script.entries(data)) do
-    local instructions, stopped = Gen4Script.decode(data, at)
+    local instructions, stopped = Gen4Script.decode(data, at, ops)
     out[#out + 1] = { at = at, instructions = instructions, stopped = stopped }
   end
   return out

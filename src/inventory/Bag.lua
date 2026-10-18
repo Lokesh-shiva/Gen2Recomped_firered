@@ -148,6 +148,18 @@ function Bag.add(save, id, qty, data)
   -- pocket's thirty
   data = data or require("src.core.Data")
   local inv = save.inventory
+  -- INSIDE THE BATTLE PYRAMID the bag is its own ten slots, no pockets
+  -- (AddPyramidBagItem; see Gen3BattlePyramid.syncBag)
+  if save.gen3PyramidBag then
+    local slots = 0
+    for _ in pairs(inv) do slots = slots + 1 end
+    if not inv[id] and slots >= 10 then return false end
+    if (inv[id] or 0) + (qty or 1) > 99 then return false end
+    local isNew = not inv[id]
+    inv[id] = (inv[id] or 0) + (qty or 1)
+    if isNew then table.insert(Bag.order(save), id) end
+    return true
+  end
   if not inv[id] and not isBadge(id) then
     -- EMERALD'S BAG IS FIVE POCKETS, and the sizes are the cartridge's:
     -- they fall out of the save layout, where each pocket starts where the
@@ -249,11 +261,22 @@ end
 -- GSC held items (engine/items/pack.asm GiveItem / TryGiveItemToMon).  Give
 -- returns whatever the mon was already holding -- the ROM offers to swap and
 -- the old item goes straight back into the pack.
+-- A held item can change a Gen 4 form: Giratina is Origin Forme exactly while
+-- it holds the Griseous Orb (`Pokemon_SetGiratinaFormByHeldItem`, which the
+-- cartridge's party menu calls after every give and take).
+local function heldItemForm(mon, data)
+  if not (data and (data.constants or {}).gen == 4) then return end
+  pcall(function()
+    require("src.pokemon.Gen4Forms").giratinaByHeldItem(data, mon)
+  end)
+end
+
 function Bag.giveHeld(save, mon, id, data)
   local previous = mon.item
   mon.item = id
   Bag.remove(save, id, 1)
   if previous then Bag.add(save, previous, 1, data) end
+  heldItemForm(mon, data)
   return previous
 end
 
@@ -264,6 +287,7 @@ function Bag.takeHeld(save, mon, data)
   if not id then return nil end
   if not Bag.add(save, id, 1, data) then return nil, "full" end
   mon.item = nil
+  heldItemForm(mon, data)
   return id
 end
 

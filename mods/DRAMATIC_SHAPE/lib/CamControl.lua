@@ -91,6 +91,8 @@ end
 function CamControl.zoomTarget()
   if battleLive() then return "battle" end
   if not roaming() then return nil end
+  local Game=require("src.core.Game")
+  if Game.zoomView and Game:zoomView() then return "native" end
   if Voxel.isThirdPerson(Voxel.level) then return "boom" end
   if Voxel.isFirstPerson(Voxel.level) then return nil end
   return "survey"
@@ -117,7 +119,10 @@ end
 function CamControl.zoomBy(notches)
   if not notches or notches == 0 then return false end
   local target = CamControl.zoomTarget()
-  if target == "battle" then
+  if target == "native" then
+    require("src.core.Game"):zoomView():zoomBy(notches)
+    return true
+  elseif target == "battle" then
     BattleCam.stepZoom(notches)
     return true
   elseif target == "boom" then
@@ -192,9 +197,20 @@ end
 
 local installed = false
 
+-- (Rewrap: replaced by a later load in the same process, see lib/Rewrap.lua)
+local installSeams
+
 function CamControl.install()
   if installed then return end
   installed = true
+  V.require("Rewrap").install({
+    { require("src.core.Game"), "dramaticShapeCamControlHook",
+      { "wheelmoved", "gamepadpressed", "touchpressed", "touchmoved",
+        "touchreleased", "focus" } },
+  }, installSeams)
+end
+
+installSeams = function()
 
   local Game = require("src.core.Game")
 

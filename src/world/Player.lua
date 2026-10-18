@@ -273,6 +273,8 @@ function Player:refreshForm(data)
   local fieldMoveId =
     FieldDefaults.fieldValue(data, "playerSprites", "fieldMove")
   local form = require("src.pokemon.Sprites").playerForm(data)
+  -- BLACK / WHITE: the bike and surf sheets (src/world/Gen5PlayerForms.lua)
+  if form and data.gen5_version then form = require("src.world.Gen5PlayerForms").fix(data, form) end
   if form then
     local sprites = data.sprites or {}
     if form.walk and sprites[form.walk] then walkId = form.walk end
@@ -289,6 +291,16 @@ function Player:refreshForm(data)
   -- there is no bicycle either, so both sheets become the mon's
   local monId = pokemonModeSprite(data)
   if monId then walkId, bikeId = monId, monId end
+  -- HEARTGOLD / SOULSILVER'S ROCKET DISGUISE (PLAYER_STATE_ROCKET):
+  -- SPRITE_RHERO 258 / SPRITE_RHEROINE 259 while `save.hgssRocketCostume`
+  local okG, Game = pcall(require, "src.core.Game")
+  local save = okG and Game and Game.save
+  if save and save.hgssRocketCostume then
+    local okO, OW = pcall(require, "src.world.OverworldController")
+    local girl = save.player and save.player.gender == "girl"
+    local id = okO and OW.gen4SpriteFor and OW.gen4SpriteFor(data, girl and 259 or 258)
+    if id and data.sprites and data.sprites[id] then walkId, bikeId = id, id end
+  end
   -- The pose follows the character, so it is refreshed even when the walking
   -- sheets did not change (a rip that only produced Kris's fish art).
   self:refreshFishTiles(data)
@@ -331,6 +343,19 @@ function Player:refreshForm(data)
   local sprites = data.sprites or {}
   local walkDef = sprites[walkId]
   local runId = type(walkDef) == "table" and walkDef.run or nil
+  -- Compatibility for imports made before the second walk_and_run cycle
+  -- was exported. These indices are mmodel's ROM sequence frames 64..127.
+  if not runId and walkDef and walkDef.frames==32 and walkDef.facingSource
+     and walkDef.facingSource:find('walk_and_run',1,true) then
+    runId=walkId..'_RUN'
+    if not sprites[runId] then
+      local run={};for k,v in pairs(walkDef) do run[k]=v end
+      run.id=runId
+      run.facings={up={8,9,10,12},down={13,14,15,16},left={17,18,19,20},right={21,23,24,25}}
+      run.fullCycle=true
+      sprites[runId]=run
+    end
+  end
   if runId ~= self.runId then
     self.runId = runId
     self.runSprite = (runId and sprites[runId])
@@ -643,18 +668,28 @@ function Player:freeWalk(vx, vy, map, entities)
     return math.floor((px + 8) / 16), math.floor((py + 8) / 16)
   end
 
+  -- THE BODY'S LEADING EDGE, not only its centre, asks for the next cell:
+  -- tested at the centre alone, half the body walked into a wall before the
+  -- centre reached it (FREE_REACH pixels ahead of the centre now)
+  local reach = Player.FREE_REACH or 6
   local nx = self.px + vx * speed
-  local cx = (cellOf(nx, self.py))
+  local cx = (cellOf(nx + (vx > 0 and reach or -reach), self.py))
   if cx == self.cellX
      or Collision.mayEnter(map, entities, self, cx, self.cellY,
                            vx > 0 and "right" or "left") then
     self.px = nx
   end
 
+  -- THE COLUMN THE X MOVE JUST LEFT US IN, not the cell we started from:
+  -- after a diagonal's x half crossed into a new column, asking the old
+  -- column's cell let the y half cut the corner into a wall or a table
+  -- (Black's bedroom: (7,7) down-left onto the table at (6,8)), and the
+  -- player then stood on top of it at its height.
   local ny = self.py + vy * speed
-  local _, cy = cellOf(self.px, ny)
-  if cy == self.cellY
-     or Collision.mayEnter(map, entities, self, self.cellX, cy,
+  local colX, cy = cellOf(self.px, ny + (vy > 0 and reach or -reach))
+  local rowY = select(2, cellOf(self.px, self.py))
+  if cy == rowY
+     or Collision.mayEnter(map, entities, self, colX, cy,
                            vy > 0 and "down" or "up") then
     self.py = ny
   end
@@ -686,6 +721,12 @@ function Player:update()
   if free then
     self.stepLanded = false
     if self.turnTimer > 0 then self.turnTimer = self.turnTimer - 1 end
+    -- THE HOP ARC COUNTS DOWN HERE TOO. The free cameras hand the player a
+    -- free-walk input every frame, stick centred or not, so this branch is
+    -- the whole of `update` there -- and the countdown below it never ran:
+    -- a ledge hopped in third or first person froze its arc mid-air and the
+    -- player stood floating until the next grid step.
+    if self.hopFrames and self.hopFrames > 0 then self.hopFrames = self.hopFrames - 1 end
     return self:freeWalk(free[1], free[2], free[3], free[4])
   end
   -- LEAVING FREE MODE PUTS THE BODY BACK ON THE GRID.
@@ -856,7 +897,14 @@ function Player:pose()
     -- update runs before draw, so remaining N means N steps already
     -- consumed this hop → t matches the old draw-side post-decrement phase
     local t = 1 - self.hopFrames / total
-    py = py - math.floor(10 * math.sin(t * math.pi) + 0.5)
+    -- Gen 4: the cartridge's jump table in world units, drawn up by what
+    -- that height is under the camera now drawing (src/world/Gen4Jump.lua)
+    local lift = require("src.world.Gen4Jump").flatLift(self)
+    if lift then
+      py = py - lift
+    else
+      py = py - math.floor(10 * math.sin(t * math.pi) + 0.5)
+    end
     hopping = true
   elseif self.acroBike and self.acroTrick == "hop" then
     -- THE ACRO BIKE'S BUNNY HOP, WHICH NOTHING DREW.
@@ -943,6 +991,9 @@ function Player:pose()
                  -- no run cycle of its own; Hoenn's two both have one
                  or (self.running and self.runSprite)
                  or self.sprite
+  if sprite and sprite.def and sprite.def.fullCycle and (self.moving or self.freeWalking or self.stepLanded) then
+    phase=math.floor((self.animClock or 0)/4)%4
+  end
   return sprite, px, py, facing, phase, flip, hopping
 end
 
@@ -1011,6 +1062,13 @@ function Player:draw(camX, camY)
   -- the cartridge entirely and the import had never opened it.  It does now,
   -- and it comes with three frames: one for each way the blob turns.
   self:drawSurfBlob(px, py, camX, camY, facing)
+  -- Gen 4's rod pose: one texture of the fishing sheet, picked frame by frame
+  -- by src/world/Gen4FishingTask.lua
+  local g4f = self.gen4Fish
+  if g4f and g4f.sprite and g4f.sprite.drawFixedFrame then
+    g4f.sprite:drawFixedFrame(px, py, camX, camY, g4f.frame or 0)
+    return
+  end
   -- THE FIELD-MOVE POSE IS A SEQUENCE, not a facing.
   --
   -- Reported from play: "it seems like my players animation stops as he

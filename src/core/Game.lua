@@ -29,6 +29,9 @@ local function bootScreens(game)
 end
 
 function Game:load()
+  self.pointerOwners={}
+  self.secondScreenPointerOwner=nil
+  self.secondScreenOverworldPoketch=nil
   self.data = Data
   Data:load()
 
@@ -36,7 +39,13 @@ function Game:load()
   -- data exists, so mods can register or override the same definitions that
   -- the rest of the game consumes.  A broken mod is reported and skipped by
   -- the loader without preventing the base game from booting.
-  self.mods = ModLoader.new()
+  -- THE LAUNCHER'S BACKDROP LOADS THE PLAIN GAME (src/import/LauncherBackdrop
+  -- sets `loadWithoutMods` around its own Game:load). It boots the real game
+  -- behind the launcher, and with mods on that made every game the player
+  -- then pressed Play on the SECOND mod load in the process -- a mod that
+  -- wraps engine functions once behind an "already wrapped" flag kept the
+  -- dead first load's wraps (DRAMATIC_SHAPE's 3D battles drew a white screen).
+  self.mods = ModLoader.new(self.loadWithoutMods and { noMods = true } or nil)
   self.mods:load(Data)
   self.modStatus = self.mods:status()
   -- AND THE MAP EDITOR'S OVERLAY AGAIN, ON TOP OF THE MERGE.
@@ -79,6 +88,7 @@ function Game:load()
   self.renderer = Renderer
   Renderer:init()
 
+  require("src.translation.Service").install(Data,require("src.core.GameVersion").get(),SaveData.loadOptions())
   require("src.render.Font").load(Data)
   -- menu cursor/border/geometry constants; field.theme restyles them
   require("src.ui.Theme").load(Data)
@@ -202,8 +212,13 @@ function Game:bootConfig()
     if type(items) == "table" then
       local id = items.POTION and "POTION" or nil
       if not id then
+        -- STRING KEYS ONLY: Gen 4's table carries every item under ITEM_nnn
+        -- AND its bare number, and a bag is keyed by the string.  Taking the
+        -- number (whenever `pairs` met it first) was dropped by newGame's
+        -- copy, which fell back to the literal "POTION" -- an id Platinum does
+        -- not have, quarantined off the first Continue.
         for key, def in pairs(items) do
-          if type(def) == "table"
+          if type(key) == "string" and type(def) == "table"
              and tostring(def.name or ""):upper():gsub("[^%a]", "") == "POTION" then
             id = key
             break
@@ -224,6 +239,7 @@ function Game:makeTitleState()
   local title = factory.new(self, {
     onNewGame = function()
       while self.stack:top() do self.stack:pop() end
+      if self.overworld then self.overworld.fadeOverlay = nil end
       -- New Game keeps the standalone options.lua preferences
       self.save = SaveData.newGame(self:bootConfig())
       -- no bucket carry-over: mod state from an abandoned session must
@@ -283,6 +299,12 @@ end
 function Game:returnToTitle()
   require("src.core.Music").stop()
   while self.stack:top() do self.stack:pop() end
+  -- THE OVERWORLD OUTLIVES THE STACK, and a fade it had up is popped with
+  -- everything else while `fadeOverlay` still names it. The next script fade
+  -- then found an overlay, did not push it, and waited on a screen that never
+  -- updates -- Platinum's Battle Tower "Rest" (fade, save, OS_ResetSystem)
+  -- froze the resumed challenge's first fade that way.
+  if self.overworld then self.overworld.fadeOverlay = nil end
   self.stack:push(self:makeTitleState())
 end
 
@@ -310,6 +332,7 @@ function Game:_step(dt)
     ModRuntime.call("input.step", function() end, self, dt)
     close()
   end
+  if TouchControls.pollTouches then TouchControls:pollTouches() end
   self.input:step()
   -- A+B+SELECT+START held for 16 steps: SoftReset (home/init.asm) stops the
   -- audio, whites the palettes out and falls through into Init, i.e. the
@@ -394,6 +417,14 @@ function Game:freeView()
   return nil
 end
 
+-- Zoom can dolly the field camera without enabling mouse orbit on it.
+function Game:zoomView()
+  local ground=self.overworld and self.overworld.map and self.overworld.map.renderer
+  ground=ground and ground.gen4Ground
+  local view=ground and ground.view3d
+  if view and view.zoomBy and view.mode~='first' then return view end
+end
+
 -- Degrees of camera per pixel of mouse, and per second at full stick.
 --
 -- Requested: *"the orbit ... should be mouse and right analog stick
@@ -405,72 +436,97 @@ Game.LOOK_PER_PIXEL = 0.20
 Game.LOOK_RISE_PER_PIXEL = 0.12
 Game.LOOK_PER_SECOND = 150
 Game.LOOK_RISE_PER_SECOND = 80
+Game.TOUCH_LOOK_MULTIPLIER = 3.0
+Game.TOUCH_RISE_MULTIPLIER = 3.0
 -- Below this the stick is treated as centred, and past it the response starts
 -- from zero rather than jumping -- otherwise a worn stick drifts the camera
 -- round on its own and a small push snaps.
 Game.STICK_DEADZONE = 0.22
-
--- Mouse look.  Returns true when it consumed the movement.
--- THE LARGEST TURN ONE MOUSE EVENT MAY ASK FOR, in degrees.
---
--- A hand cannot move the mouse this far between two frames.  At 60 Hz a fast
--- flick of a thousand pixels a second is about sixteen pixels an event, which
--- at `LOOK_PER_PIXEL` is 3.3 degrees; twelve is nearly four times that, so no
--- real movement is ever refused.  What DOES produce a delta this size is the
--- pointer being warped, and SDL emits exactly one enormous `mousemoved` when
--- relative mode is turned on or off.
-Game.LOOK_MAX_DEGREES = 12
-
--- How many events to ignore after relative mode is toggled.
 Game.LOOK_SETTLE_EVENTS = 2
 
-function Game:cameraLook(dx, dy)
+-- Accumulated mouse deltas for Gen4 camera
+Game.cameraLookDX = 0
+Game.cameraLookDY = 0
+
+local function lookPointerWanted(self)
+  -- never for the launcher's background game: it is a picture behind the
+  -- launcher, and capturing the pointer hid the launcher's mouse whenever the
+  -- player's camera was set to first or third person
+  if self.launcherPreview then return false end
+  if not self:freeView() then return false end
+  if (self.stack and self.stack:top()) ~= self.overworld then return false end
+  if love.window and love.window.hasFocus then
+    local ok, focused = pcall(love.window.hasFocus)
+    return ok and focused or false
+  end
+  return true
+end
+
+-- Confine the look pointer: relative deltas, and grab
+-- plus a warp to the window centre so look never dies on the frame edge.
+local function syncLookPointer(self, want)
+  if not (love and love.mouse) then
+    self.lookRelative = false
+    return
+  end
+  local mouse = love.mouse
+  local changed = (self.lookRelative == true) ~= (want == true)
+  if mouse.setRelativeMode then
+    pcall(mouse.setRelativeMode, want)
+  end
+  if mouse.setGrabbed then
+    pcall(mouse.setGrabbed, want)
+  end
+  if mouse.setVisible then
+    pcall(mouse.setVisible, not want)
+  end
+  self.lookRelative = want and true or false
+  if changed then
+    self.lookSettle = Game.LOOK_SETTLE_EVENTS
+  end
+end
+
+function Game:recenterLookPointer()
+  if not lookPointerWanted(self) then return end
+  if not (love.mouse and love.mouse.setPosition) then return end
+  -- NO WARP IN RELATIVE MODE. Reported from play: "first person and third
+  -- person wont let me look around unless the window isnt active". With the
+  -- window focused the pointer is in relative mode, where SDL reports
+  -- unbounded deltas and the edge cannot be hit -- but every motion still
+  -- warped to the centre and armed `lookWarping`, and love.mousemoved threw
+  -- the NEXT motion away as the warp's echo: the look was eaten. Unfocused,
+  -- relative mode was off, nothing warped, and the look worked.
+  if self.lookRelative and love.mouse.getRelativeMode then
+    local ok, rel = pcall(love.mouse.getRelativeMode)
+    if ok and rel then return end
+  end
+  local w, h = 0, 0
+  if love.graphics and love.graphics.getDimensions then
+    w, h = love.graphics.getDimensions()
+  elseif love.window and love.window.getMode then
+    w, h = love.window.getMode()
+  end
+  if not (w and h) or w <= 0 or h <= 0 then return end
+
+  self.lookWarping = true
+  pcall(love.mouse.setPosition, w * 0.5, h * 0.5)
+end
+
+function Game:cameraLook(dx, dy, isTouch)
   local view = self:freeView()
   if not view then return false end
-  if (dx == 0 or dx == nil) and (dy == 0 or dy == nil) then return true end
-
-  -- A WARP IS NOT A LOOK.
-  --
-  -- HONESTY FIRST: this guard was added as a proposed cause of the reported
-  -- camera flip, and that proposal was WRONG.  The flip was two maps each
-  -- owning a `Gen4View` and the frame being drawn through whichever one was
-  -- current -- see the note in `Gen4View:follow`, which measures the two
-  -- disagreeing by 84 degrees.  The guard was instrumented to say so, and the
-  -- play test that found the real cause never printed its line.
-  --
-  -- It is kept, and only for what it is: relative mouse mode is toggled every
-  -- time the overworld stops or starts being the top screen, each toggle warps
-  -- the pointer, and SDL reports a warp as one `mousemoved` carrying a delta
-  -- the width of the window.  That is a real event whether or not it was the
-  -- flip.  A hand cannot move twelve degrees between two frames -- a fast
-  -- flick of a thousand pixels a second is 3.3 degrees an event -- so this
-  -- cannot refuse a real movement.  If it ever does, delete it rather than
-  -- raise the cap: it is a net, not a feature.
-  --
-  -- DROPPED rather than clamped: a clamped warp still turns the camera twelve
-  -- degrees for no reason, and the event is not a small movement that got too
-  -- big, it is not a movement at all.
   if (self.lookSettle or 0) > 0 then
     self.lookSettle = self.lookSettle - 1
     return true
   end
-  local turn = math.abs((dx or 0) * Game.LOOK_PER_PIXEL)
-  local lift = math.abs((dy or 0) * Game.LOOK_RISE_PER_PIXEL)
-  if turn > Game.LOOK_MAX_DEGREES or lift > Game.LOOK_MAX_DEGREES then
-    -- SAID ONCE, because this is a hypothesis about a report and the next play
-    -- test is what confirms it.  If the flip stops and this line never
-    -- appears, the cause was something else and this guard is dead weight.
-    if not Game.saidLookSpike then
-      Game.saidLookSpike = true
-      Logger.info("gen4 camera: dropped a mouse look of %.1f/%.1f degrees "
-                  .. "(cap %.1f) -- a pointer warp, not a hand",
-                  turn, lift, Game.LOOK_MAX_DEGREES)
-    end
-    return true
-  end
+  if (dx == 0 or dx == nil) and (dy == 0 or dy == nil) then return true end
 
-  view:orbit((dx or 0) * Game.LOOK_PER_PIXEL,
-             (dy or 0) * Game.LOOK_RISE_PER_PIXEL)
+  local multX = isTouch and Game.TOUCH_LOOK_MULTIPLIER or 1
+  local multY = isTouch and Game.TOUCH_RISE_MULTIPLIER or 1
+
+  Game.cameraLookDX = (Game.cameraLookDX or 0) + ((dx or 0) * multX)
+  Game.cameraLookDY = (Game.cameraLookDY or 0) + ((dy or 0) * multY)
+
   return true
 end
 
@@ -488,35 +544,29 @@ end
 -- nothing and the camera would stop turning while the player is still asking it
 -- to.  An analog control that means "keep going" has to be read per frame.
 function Game:updateCameraStick(dt)
-  local view = self:freeView()
+  -- the launcher's background takes no look input (the right stick was
+  -- turning its camera while the player navigated the launcher)
+  local view = (not self.launcherPreview) and self:freeView() or nil
   if not view then
-    if self.lookRelative and love.mouse and love.mouse.setRelativeMode then
-      pcall(love.mouse.setRelativeMode, false)
-      self.lookRelative = false
-      self.lookSettle = Game.LOOK_SETTLE_EVENTS
-    end
+    if self.lookRelative then syncLookPointer(self, false) end
+    Game.cameraLookDX = 0
+    Game.cameraLookDY = 0
     return
   end
-  -- RELATIVE MODE, or the pointer hits the edge of the window and the look
-  -- stops dead.  Only while the overworld itself is on top: a menu over a free
-  -- camera still wants a real cursor.
-  local wantRelative = (self.stack and self.stack:top()) == self.overworld
-  if wantRelative and love.window and love.window.hasFocus then
-    local ok, focused = pcall(love.window.hasFocus)
-    wantRelative = ok and focused or false
+  -- Relative mode, grab, and a warp to centre: without those the pointer
+  -- hits the window edge and look stops. A menu over a free camera still
+  -- wants a real cursor, so capture only while the overworld is on top.
+  local wantRelative = lookPointerWanted(self)
+  if (self.lookRelative == true) ~= (wantRelative == true) then
+    syncLookPointer(self, wantRelative)
+    if wantRelative then self:recenterLookPointer() end
   end
-  local actualRelative = self.lookRelative
-  if love.mouse and love.mouse.getRelativeMode then
-    local ok, relative = pcall(love.mouse.getRelativeMode)
-    if ok then actualRelative = relative end
-  end
-  if love.mouse and love.mouse.setRelativeMode and actualRelative ~= wantRelative then
-    local ok = pcall(love.mouse.setRelativeMode, wantRelative)
-    self.lookRelative = ok and wantRelative or false
-    -- ...and ignore what the warp this causes is about to report.
-    self.lookSettle = Game.LOOK_SETTLE_EVENTS
-  else
-    self.lookRelative = actualRelative
+
+  local dx, dy = Game.cameraLookDX or 0, Game.cameraLookDY or 0
+  Game.cameraLookDX = 0
+  Game.cameraLookDY = 0
+  if dx ~= 0 or dy ~= 0 then
+    view:orbit(dx * Game.LOOK_PER_PIXEL, dy * Game.LOOK_RISE_PER_PIXEL)
   end
   if not (love.joystick and love.joystick.getJoysticks) then return end
   local ok, pads = pcall(love.joystick.getJoysticks)
@@ -537,6 +587,11 @@ end
 
 function Game:update(dt)
   require('src.pokemon.Gen4PoketchState').tick(self, dt)
+  local panel=self.secondScreenPointerOwner
+  local top=self.stack and self.stack.top and self.stack:top()
+  if panel and panel~=top and panel.updatePresentation then
+    panel:updatePresentation(dt)
+  end
   -- Fast-forward scales only the logic clock (see src/core/GameSpeed.lua).
   -- Give the accumulator room for one full frame at the current speed,
   -- or the anti-spiral clamp quietly caps every level above ~15X.
@@ -608,6 +663,9 @@ function Game.worldBgBattleDim(stack)
   for i = #(stack and stack.states or {}), 1, -1 do
     local state = stack.states[i]
     if state and state.bgMode and state:bgMode() == "world" then
+      -- not when a mod is fighting the battle ON the map: the world is the
+      -- battle then, and dimming it blacks out the fight (BattleState:worldStaged)
+      if state.worldStaged and state:worldStaged() then return nil end
       return state.BG_WORLD_DIM or 0.55
     end
   end
@@ -858,11 +916,19 @@ Game.centerClassicZones = centerClassicZones
 
 function Game:draw()
   local closeDraw = FrameProfile.section("draw: whole frame")
+  local screenLayout=require('src.ui.SecondScreen')
+  Renderer.splitViewport=nil
+  if screenLayout.combined(self) then
+    local w,h=love.graphics.getDimensions()
+    w,h=screenLayout.mainSize(self,w,h)
+    Renderer.splitViewport={w=w,h=h}
+  end
 
   -- A specialized lower-screen state (battle menu, mining, Poketch screen)
   -- claims the panel by calling SecondScreen.draw during _draw(). If nothing
   -- claims it, a Gen 4 overworld still needs Platinum's always-present Poketch.
   self.secondScreenDrawnThisFrame = false
+  self.secondScreenPointerOwner = nil
   self:_draw()
 
   -- Single-screen generations use the physical Android lower panel as a live
@@ -874,22 +940,47 @@ function Game:draw()
 
   do
     local okSS, SS = pcall(require, "src.ui.SecondScreen")
-    if okSS and SS.mode and SS.mode(self) == "display"
+    if okSS and SS.mode and (SS.mode(self) == "display" or SS.combined(self))
        and not self.secondScreenDrawnThisFrame then
-      local okP, Poketch = pcall(require, "src.ui.Gen4Poketch")
+      local version = require("src.core.GameVersion").info()
+      local family = version and version.family
+      -- THE WATCH ONLY ONCE IT IS ON THE WRIST: Platinum's lower screen shows
+      -- the Pokétch after `enablepoketch` (Jubilife) and nothing before; Black
+      -- and White's is the C-Gear, not Platinum's watch (not built yet), so
+      -- theirs stays blank too
+      local poketchOn = require("src.pokemon.Gen4PoketchState").owned(self.save)
+      local panelModule = family == "hgss" and "src.ui.HgssFieldPanel"
+        or (family ~= "bw" and poketchOn and "src.ui.Gen4Poketch") or nil
+      local okP, Poketch = false, nil
+      if panelModule then okP, Poketch = pcall(require, panelModule) end
+      if not panelModule then
+        pcall(SS.draw, self, function()
+          love.graphics.setColor(0, 0, 0, 1)
+          love.graphics.rectangle("fill", 0, 0, 256, 192)
+          love.graphics.setColor(1, 1, 1, 1)
+        end)
+      end
       if okP and Poketch and Poketch.new then
         if not self.secondScreenOverworldPoketch then
           local okNew, p = pcall(Poketch.new, self, {})
           if okNew then self.secondScreenOverworldPoketch = p end
         end
         local p = self.secondScreenOverworldPoketch
-        if p and p.drawWatch then
-          pcall(SS.draw, self, function() p:drawWatch() end)
+        -- `hidepoketch` (SystemFlag_SetPoketchHidden): the contest stage and
+        -- a few other scenes put the watch away; the lower screen stays blank
+        local hidden = self.save and self.save.poketch and self.save.poketch.hidden
+        if p and p.drawWatch and not hidden then
+          local drawn=pcall(SS.draw, self, function() p:drawWatch() end)
+          if drawn then self.secondScreenPointerOwner=p end
         end
       end
     end
   end
 
+  if screenLayout.combined(self) then
+    screenLayout.composeWindow(self)
+    TouchControls:draw()
+  end
   closeDraw()
   -- THE SECOND PANEL'S FRAME LEAVES LAST.
   --
@@ -1085,11 +1176,13 @@ function Game:_draw()
     ModRuntime.call("render.hud", function() end, self, viewport)
   end
   -- on-screen mobile controls: pure screen-space, over the finished frame
-  TouchControls:draw()
+  if not Renderer.splitViewport then TouchControls:draw() end
 end
 
 -- overworld survey zoom: wheel up / '=' zooms in, wheel down / '-' out
 function Game:zoomStep(delta)
+  local view=self:zoomView()
+  if view and self.stack:top()==self.overworld then view:zoomBy(-delta);return end
   local Zoom = require("src.render.Zoom")
   if not Zoom.gateOK(self.stack:top(), self.overworld) then return end
   local offset = Zoom.step(delta, Renderer:fitScale())
@@ -1108,7 +1201,7 @@ function Game:wheelmoved(_, dy)
   -- zoom below keeps every case it had -- and in third person the wheel
   -- means the thing the player is looking at rather than the size of the
   -- window it is in, which is what a wheel means in every 3D game.
-  local view = self:freeView()
+  local view = self:zoomView()
   if view and view.zoomBy then
     view:zoomBy(dy > 0 and -1 or 1)
     return
@@ -1441,6 +1534,23 @@ end
 function Game:gamepadaxis(joystick, axis, value)
   -- past-deadzone only, so resting-stick drift can't hide the overlay
   if math.abs(value) > 0.5 then TouchControls:noteGamepad() end
+  -- the triggers and the right stick as bindable pseudo-buttons (Input
+  -- AXIS_BUTTONS): a press goes to BindingsMenu's capture when one is armed,
+  -- the same routing as a real pad button
+  local top = self.stack and self.stack:top()
+  for _, t in ipairs(Input:axisTransitions(axis, value)) do
+    local name, down = t[1], t[2]
+    if down then
+      if top and top.onGamepadPressed then
+        top:onGamepadPressed(name)
+      else
+        Input:padButton(name, true)
+      end
+    else
+      Input:padButton(name, false)
+      if top and top.onGamepadReleased then top:onGamepadReleased(name) end
+    end
+  end
   Input:gamepadaxis(joystick, axis, value)
 end
 
@@ -1586,43 +1696,78 @@ end
 -- THE FALL-THROUGH IS THE WHOLE DESIGN. A state claims a press by defining the
 -- handler and returning true; anything else -- no handler, or a handler that
 -- returns false because the point was outside it -- and `TouchControls` receives
--- exactly what it received before. No state in the engine defines these today,
--- so this cannot change Gen 1, 2 or 3 behaviour: the `top.touchpressed` lookup
--- is nil and the next line runs, which is what ran before.
+-- exactly what it received before. Claimed gestures stay with their screen
+-- through release, including the watch drawn on Android's lower panel.
 --
 -- `pcall` because a state that raises inside a touch handler would otherwise
 -- take the d-pad down with it, and losing the controls is worse than losing the
 -- tap.
 local function offerPointer(self, method, id, x, y)
-  local top = self.stack and self.stack.top and self.stack:top()
-  if not (top and top[method]) then return false end
-  local ok, claimed = pcall(top[method], top, id, x, y)
-  if not ok then
-    require("src.core.Logger").warn("%s raised in a touch handler: %s",
-                                    tostring(top.name or "a screen"),
-                                    tostring(claimed))
-    return false
+  self.pointerOwners=self.pointerOwners or {}
+  local captured=self.pointerOwners[id]
+  local function offer(screen)
+    if not (screen and type(screen[method])=='function') then return false end
+    local ok,claimed=pcall(screen[method],screen,id,x,y)
+    if not ok then
+      require('src.core.Logger').warn('%s raised in a touch handler: %s',
+        tostring(screen.name or 'a screen'),tostring(claimed))
+      return false
+    end
+    if claimed==true and method=='touchpressed' then self.pointerOwners[id]=screen end
+    return claimed==true
   end
-  return claimed == true
+  if captured then
+    offer(captured)
+    if method=='touchreleased' then self.pointerOwners[id]=nil end
+    return true
+  end
+  local top = self.stack and self.stack.top and self.stack:top()
+  if offer(top) then return true end
+  -- The always-present Android lower-panel watch is drawn outside the stack.
+  -- Its coordinate mapper rejects main-window input in display mode.
+  local panel=self.secondScreenPointerOwner
+  return panel~=top and offer(panel) or false
 end
 
 function Game:touchpressed(id, x, y)
+  -- Visible virtual controls own their complete gesture, even when pressing
+  -- one opens a different screen before the finger is lifted.
+  if not self.secondScreenInjecting and TouchControls.visible and TouchControls:visible()
+     and TouchControls:hitTest(x,y) then
+    TouchControls:touchpressed(id,x,y)
+    return
+  end
   if offerPointer(self, "touchpressed", id, x, y) then return end
+  if self.secondScreenInjecting then return end
   TouchControls:touchpressed(id, x, y)
 end
 
 function Game:hasPointerScreen()
+  -- Allow camera look in Gen4 free camera mode even if a pointer screen exists
+  -- (e.g., Poketch visible but not actively interacting with UI)
+  if self:freeView() then return false end
+  if self.pointerOwners and self.pointerOwners.mouse then return true end
   local top=self.stack and self.stack.top and self.stack:top()
   return top and type(top.touchpressed)=='function' or false
 end
 
 function Game:touchmoved(id, x, y)
+  if not self.secondScreenInjecting and TouchControls.touches and TouchControls.touches[id] then
+    TouchControls:touchmoved(id,x,y)
+    return
+  end
   if offerPointer(self, "touchmoved", id, x, y) then return end
+  if self.secondScreenInjecting then return end
   TouchControls:touchmoved(id, x, y)
 end
 
 function Game:touchreleased(id, x, y)
+  if not self.secondScreenInjecting and TouchControls.touches and TouchControls.touches[id] then
+    TouchControls:touchreleased(id,x,y)
+    return
+  end
   if offerPointer(self, "touchreleased", id, x, y) then return end
+  if self.secondScreenInjecting then return end
   TouchControls:touchreleased(id, x, y)
 end
 
@@ -1631,6 +1776,15 @@ end
 -- entry chunks wrote before any save existed, while NEW GAME and
 -- CONTINUE replace the backing outright.
 function Game:adoptSave(save, seedBuckets)
+  -- species-name nicknames show in the player's language (see the function)
+  pcall(require("src.translation.Service").normalizeNicknames, self.data, save)
+  -- Platinum Pokemon made before they carried friendship get their base value
+  if require("src.core.GameVersion").isGen4() then
+    pcall(function() require("src.pokemon.Gen4Friendship").migrate(self.data, save) end)
+  end
+  self.pointerOwners={}
+  self.secondScreenPointerOwner=nil
+  self.secondScreenOverworldPoketch=nil
   save.modData = save.modData or {}
   local loader = self.mods
   if not loader then return end
@@ -1743,6 +1897,12 @@ function Game:restoreSave(loaded, recovered)
   -- SaveData.load and skip on the format guard
   local activeMods = self.modStatus and self.modStatus.loaded
   SaveData.runMigrations(loaded, self.mods and self.mods.migrations, activeMods)
+  -- a party set aside for a borrowed-team battle (src/pokemon/PartyAside.lua)
+  -- when the save was written: the battle is over, so it is the party again --
+  -- first, so validation and the OT stamp below see the real team
+  pcall(require("src.pokemon.PartyAside").onLoad, loaded)
+  -- what the Pokewalker sent home (src/pokewalker/WalkerInbox.lua)
+  pcall(require("src.pokewalker.WalkerInbox").apply, loaded, self.data)
   -- PR #60 taught future FireRed League wins to keep the cartridge-native
   -- FLAG_DEFEATED_* bits and the older port EVENT_BEAT_* names in sync.  Saves
   -- already partway through the Elite Four predate that bridge and may have
@@ -1798,10 +1958,39 @@ function Game:restoreSave(loaded, recovered)
   for _, box in ipairs(loaded.boxes or {}) do
     for _, mon in ipairs(box) do stamp(loaded, mon) end
   end
-  -- rebuild the state stack from the save
+  -- A SAVE MADE INSIDE A BATTLE TOWER CHALLENGE ("Rest") continues from the
+  -- lobby spot BT_FUNC_SET_COMMUNICATION_CLUB_ACCESSIBLE marked
+  -- (FieldTask_LoadSavedGameMap's special location)
+  if require("src.core.GameVersion").get() == "platinum" then
+    require("src.script.Gen4BattleTowerCommands").applySpecialLocation(loaded)
+  end
+  -- ...and Emerald's: a SaveGameFrontier save continues in the lobby
+  if require("src.core.GameVersion").get() == "emerald" then
+    -- Pokemon a Frontier challenge stranded before LoadPlayerParty kept its
+    -- stash (Gen3BattleFrontier.recoverStranded): once per save, before the
+    -- continue point is consumed so a mid-challenge save is recognised
+    pcall(require("src.script.Gen3BattleFrontier").recoverStranded, loaded)
+    require("src.script.Gen3BattleFrontier").applyContinue(loaded)
+  end
+  -- rebuild the state stack from the save (and drop a fade the overworld
+  -- still names from before -- see returnToTitle)
   while self.stack:top() do self.stack:pop() end
+  if self.overworld then self.overworld.fadeOverlay = nil end
   self.stack:push(self.overworld, loaded.player.map,
                   loaded.player.x, loaded.player.y, loaded.player.facing)
+  -- Platinum's Journal (FieldTask_LoadSavedGameMap): opened first when two
+  -- days or more have gone by, then today's page is taken and titled here
+  if require("src.core.GameVersion").get() == "platinum" then
+    local J = require("src.pokemon.Gen4Journal")
+    if J.openOnContinue(loaded) then
+      -- the pages as they were: today's is not added until after it closes
+      local pages = {}
+      for i, p in ipairs(J.state(loaded).pages) do pages[i] = p end
+      self.stack:push(require("src.ui.Gen4Journal").new(self, { save = loaded, pages = pages }))
+    end
+    local def = self.data and self.data.maps and self.data.maps[loaded.player.map]
+    J.title(loaded, def and def.header)
+  end
   self.saveReport = report
   if not SaveData.emptyReport(report) then
     -- the report screen is a Screens id so mods (or the ui milestone) own

@@ -212,6 +212,32 @@ function Gen4Graphics.decryptSprite(pixels)
   return table.concat(out)
 end
 
+-- DIAMOND AND PEARL'S ORDER, which HeartGold and SoulSilver keep for their
+-- trainer pictures: pokeheartgold's UnscanPokepic (src/pokepic.c) sends
+-- NARC_a_0_5_8 and NARC_a_0_0_6 -- the trainer fronts and backs -- to
+-- UnscanPokepic_DP, which seeds from the LAST halfword and walks BACKWARDS,
+-- where the Platinum/HGSS order above seeds from the first and walks forward.
+-- Same key step; only the end it starts from differs.
+function Gen4Graphics.decryptSpriteDP(pixels)
+  if type(pixels) ~= "string" or #pixels < 2 then return pixels end
+  local count = floor(#pixels / 2)
+  local key = byte(pixels, count * 2 - 1) + byte(pixels, count * 2) * 256
+  local out = {}
+  for i = count, 1, -1 do
+    local lo, hi = byte(pixels, i * 2 - 1, i * 2)
+    local v = lo + hi * 256
+    local r, place, a, b = 0, 1, v, key
+    for _ = 1, 16 do
+      local x, y = a % 2, b % 2
+      if x ~= y then r = r + place end
+      a, b, place = floor(a / 2), floor(b / 2), place * 2
+    end
+    out[i] = string.char(r % 256, floor(r / 256))
+    key = (key * 0x41C64E6D + 0x6073) % 65536
+  end
+  return table.concat(out) .. sub(pixels, count * 2 + 1)
+end
+
 -- ---------------------------------------------------------------------------
 -- The container
 -- ---------------------------------------------------------------------------
@@ -286,6 +312,40 @@ function Gen4Graphics.palette(data)
   local stated = floor((size or 0) / 2)
   local count = (room < stated) and room or stated
   if count < 0 then count = 0 end
+  -- A COMPRESSED PALETTE (a PMCP section, nitro's `-pcmp`) says itself how
+  -- many 16-colour palettes it holds and which slot each goes to, and its
+  -- TTLP size may be written INVERTED (`-invertsize`: 0x200 - size). The
+  -- Poffin Case's background.NCLR states 160 bytes for eleven palettes; read
+  -- by the size it came out five palettes long, and the case's screens
+  -- composed with the wrong colours or none. With a PMCP the slot list is
+  -- the authority, each palette placed at its slot.
+  local pm = c.sections.PMCP
+  if pm then
+    local n = u16(c.data, pm.body) or 0
+    local listAt = pm.body + (u32(c.data, pm.body + 4) or 8) - 0
+    -- a PMCP palette is sixteen colours at 4bpp and 256 at 8bpp (depth 4,
+    -- an extended palette): the credits' memories are the latter, and read
+    -- sixteen at a time they came out in their first sixteen colours only
+    local per = (u32(c.data, s.body) == 4) and 256 or 16
+    local out = {}
+    for k = 0, n - 1 do
+      local slot = u16(c.data, listAt + k * 2)
+      if slot == nil or (k + 1) * per > room then break end
+      for i = 0, per - 1 do
+        local v = u16(c.data, at + (k * per + i) * 2)
+        if v then
+          local r, g, b = bgr555(v)
+          out[slot * per + i + 1] = { r, g, b }
+        end
+      end
+    end
+    -- slots that no palette fills stay black rather than holes, so `#` and
+    -- ipairs over the result behave as they do for an ordinary file
+    local top = 0
+    for i in pairs(out) do if i > top then top = i end end
+    for i = 1, top do out[i] = out[i] or { 0, 0, 0 } end
+    if top > 0 then return out, perPalette end
+  end
   local out = {}
   for i = 0, count - 1 do
     local v = u16(c.data, at + i * 2)
@@ -758,7 +818,10 @@ function Gen4Graphics.compose(map, sheet, palette, firstTile)
   -- arithmetic, and ten are the odd sizes above.
   local cols = floor(w / 8)
   local blockCols = nil
-  if (w == 256 or w == 512) and (h == 256 or h == 512)
+  -- ...AND NOT AN AFFINE ONE. An extended rotation/scaling background (BG
+  -- mode 5's bg2/bg3 -- the Battle Frontier's scenes) is one linear grid at
+  -- any size; the caller that knows its BG mode says so with `map.linear`.
+  if not map.linear and (w == 256 or w == 512) and (h == 256 or h == 512)
      and (w > 256 or h > 256) then
     blockCols = floor(w / 256)
   end

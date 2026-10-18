@@ -75,6 +75,7 @@ mobile/ios/build/
 
 # Final packaged build artifacts (mac/win/web/android/ios) — see scripts/build.sh
 /dist/
+/tmp/
 
 # Legacy manual convenience-copy location (superseded by /dist/android/)
 mobile/dist/
@@ -159,3 +160,14 @@ mobile/ios/bundle_id.local
 /mods/DRAMATIC_SHAPE/tools/
 /mods/DRAMATIC_SHAPE/CHANGELOG.md
 /mods/DRAMATIC_SHAPE/VOXEL_HOENN_PLAN.md
+
+# The offline translator helper (rom-translate / rom-translate.exe, ~65 MB),
+# built by tools/translation/build_desktop.py. The release workflow builds it
+# fresh; scripts/build.sh only copies it into packages when present.
+/translation/
+
+# Cloud-save app credentials (src/cloud/CloudClients.lua reads this). The
+# Google client secret is not a password -- Google treats installed-app
+# secrets as public -- but GitHub's secret scanning flags it, so it is kept out
+# of the repository and injected into release builds instead.
+/cloud_clients.lua

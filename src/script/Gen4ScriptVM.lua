@@ -154,6 +154,17 @@ L.gotoif = function(ins, s)
   if to then emit(s, { "g4_jump_if", ins.args[1], to }) end
 end
 
+-- BW: a stack expression the link could not turn into compare/goto chains,
+-- evaluated whole; the jump is taken when it is FALSE (0x1F 0xFF)
+L.bwevalgoto = function(ins, s)
+  local to = branch(s, ins)
+  if not to then return end
+  local row = { "g4_bw_eval" }
+  for _, v in ipairs(ins.args or {}) do row[#row + 1] = v end
+  emit(s, row)
+  emit(s, { "g4_jump_if", 0, to })
+end
+
 L.callif = function(ins, s)
   local to = branch(s, ins)
   if not to then return end
@@ -215,6 +226,8 @@ L.clearflag = function(ins, s) emit(s, { "clear_flag", flagName(ins.args[1]) }) 
 L.checkflag = function(ins, s) emit(s, { "g4_check_flag", flagName(ins.args[1]) }) end
 L.checkflagfromvar = function(ins,s) emit(s, {'g4_check_flag_var',ins.args[1],ins.args[2]}) end
 L.setflagfromvar = function(ins,s) emit(s, {'g4_set_flag_var',ins.args[1]}) end
+-- HeartGold / SoulSilver's ClearFlagVar <var>: the flag the var names, cleared
+L.clearflagvar = function(ins,s) emit(s, {'g4_clear_flag_var',ins.args[1]}) end
 L.openbag = function(ins,s) emit(s,{'g4_open_bag',ins.args[1]}) end
 L.getselecteditem = function(ins,s) emit(s,{'g4_selected_item',ins.args[1]}) end
 L.checkpockethasitems = function(ins,s) emit(s,{'g4_pocket_has_items',ins.args[1],ins.args[2]}) end
@@ -269,9 +282,81 @@ L.message = function(ins, s) message(ins.args[1], s) end
 L.messageinstant = L.message
 L.messagenoskip = L.message
 L.messagesynchronized = L.message
+-- HEARTGOLD / SOULSILVER's `GenderMsgBox <male> <female>`: one of two entries
+-- of the script's own bank by the player's gender (ScrCmd_GenderMsgBox reads
+-- PlayerProfile_GetTrainerGender; anything not male takes the second).
+L.gendermsgbox = function(ins, s)
+  emit(s, { "g4_gender_message", ins.args[1], ins.args[2], s.bankFor and s.bankFor(s.member) })
+end
+-- ...and `GetStdMsgNaix <index> <destVar>`, which hands a script one of four
+-- shared banks to print from with MsgBoxExtern (scrcmd_message.c,
+-- ov01_022067C8): the day-of-week siblings 752, field moves 211, Cameron the
+-- photographer 30, the shops 435; anything past the table is 0.
+L.getstdmsgnaix = function(ins, s)
+  emit(s, { "g4_std_msg_bank", ins.args[1], ins.args[2] })
+end
 L.messagevar = function(ins, s)
   emit(s, { "g4_message_var", ins.args[1], s.bankFor and s.bankFor(s.member) })
 end
+
+-- `messagefrombank <bank> <entry>` -- an explicit bank rather than the map's,
+-- and otherwise the same operation, so it shares the row. The `instant` twin
+-- differs only in not waiting for the printer, which `show_text` does for both
+-- anyway (the same reason `g4_wait_button` is a no-op).
+--
+-- Nine uses over three bands -- tv_broadcast (6), mystery_gift_deliveryman (2)
+-- and tv_reporter_interviews (1) -- and the latter two have 13 and 12 objects
+-- behind them, which is how the band-reach invariant found them.
+L.messagefrombank = function(ins, s)
+  emit(s, { "g4_message_bank", ins.args[1], ins.args[2] })
+end
+L.messagefrombankinstant = L.messagefrombank
+-- BW 0x0CC <dest>: the bank this script prints from, resolved at lowering
+-- (the script's own member's bank), into a var
+L.bwstorecurrentbank = function(ins, s)
+  emit(s, { "g4_set_var", ins.args[1], (s.bankFor and s.bankFor(s.member)) or 0 })
+end
+
+-- `messagefromtrainertype` -- NO OPERANDS, and the entry comes off the object:
+--
+--     u8 trainerType = MapObject_GetTrainerType(*mapObj);
+--     ScriptMessage_Show(ctx, ctx->loader, trainerType, TRUE, NULL);
+--
+-- `ctx->loader` is the loader the block was loaded WITH, so the bank is the
+-- band's own -- the same resolution `message` does -- and only the entry is
+-- unusual: it is the target object's trainer type, which a Gen 4 object record
+-- already carries (`Gen4Events` reads it at offset 6).  So the bank is baked in
+-- at lowering time, as it is for `message`, and the entry is read at run time
+-- from `ctx.npc`.
+L.messagefromtrainertype = function(_, s)
+  emit(s, { "g4_message_trainer_type", s.bankFor and s.bankFor(s.member) })
+end
+
+-- `choosecustommessageword <unused> <resultVar> <destVar>` -- two destinations
+-- and a literal 0 the macro emits for an operand pokeplatinum itself calls
+-- unused. See the handler for why it answers "cancelled" rather than nothing.
+L.choosecustommessageword = function(ins, s)
+  emit(s, { "g4_choose_message_word", ins.args[1], ins.args[2], ins.args[3] })
+end
+-- `openmessage` -- AND ITS ABSENCE IS WHY `closemessage` WAS LOWERED ALONE.
+-- The cartridge opens the field text window explicitly before printing into
+-- it and closes it explicitly afterwards; we had the close and not the open,
+-- so the pair was asymmetric in the one direction nothing complains about.
+-- Ten sites, nine of them in `scripts_battles.s`, which is every trainer.
+L.openmessage = function(_, s) emit(s, { "g4_open_message" }) end
+-- `choosetwocustommessagewords <unused> <result> <dest1> <dest2>` (scrcmd.c
+-- 3516): Jubilife TV's interview, two words; both 0xFFFF until chosen
+L.choosetwocustommessagewords = function(ins, s)
+  emit(s, { "g4_choose_two_message_words", ins.args[2], ins.args[3], ins.args[4] })
+end
+-- `getpartymonconteststat <slot> <type> <dest>` (scrcmd_party.c 331):
+-- MON_DATA_COOL + type -- Pastoria's scarf man asks for 200
+L.getpartymonconteststat = function(ins, s)
+  emit(s, { "g4_party_contest_stat", ins.args[1], ins.args[2], ins.args[3] })
+end
+-- `checkheapmemory <assert>` (scrcmd.c 7025): records or asserts the field
+-- heaps' free sizes -- a debugging probe with nothing to hand back
+L.checkheapmemory = function() end
 L.closemessage = function(_, s) emit(s, { "g4_close_message" }) end
 L.closemessagewithouterasing = L.closemessage
 L.waitbutton = function(_, s) emit(s, { "g4_wait_button" }) end
@@ -296,8 +381,10 @@ L.bufferplayername = function(ins, s) emit(s, { "g4_buffer", ins.args[1], "playe
 -- `bufferpokemonname` is not an opcode either; the cartridge has one buffer
 -- for a party member's SPECIES and another for its NICKNAME, plus move,
 -- number and the counterpart's name.  All six are byte-slot-then-word.
+-- ...and bufferpartymonspecies's second operand is a PARTY SLOT
+-- (ScriptContext_GetVar -> Party_GetPokemonBySlotIndex), not a species.
 L.bufferpartymonspecies = function(ins, s)
-  emit(s, { "g4_buffer", ins.args[1], "species", ins.args[2] })
+  emit(s, { "g4_buffer", ins.args[1], "partyspecies", ins.args[2] })
 end
 L.bufferpartymonnickname = function(ins, s)
   emit(s, { "g4_buffer", ins.args[1], "nickname", ins.args[2] })
@@ -328,9 +415,9 @@ L.applymovement = function(ins, s)
   emit(s, { "g4_move", ins.args[1], ins.movement })
 end
 L.waitmovement = function(_, s) emit(s, { "g4_wait_move" }) end
-L.playse = function(ins, s) emit(s, { "play_sound", ins.args[1] }) end
-L.waitse = function(_, s) emit(s, { "g4_wait_sound" }) end
-L.playcry = function(ins, s) emit(s, { "play_cry", ins.args[1], ins.args[2] }) end
+L.playse = function(ins, s) emit(s, { "g4_play_sound", ins.args[1] }) end
+L.waitse = function(ins, s) emit(s, { "g4_wait_sound", ins.args[1] }) end
+L.playcry = function(ins, s) emit(s, { "g4_play_cry", ins.args[1] }) end
 L.playfanfare = function(ins, s) emit(s, { "g4_fanfare", ins.args[1] }) end
 L.waitfanfare = function(_, s) emit(s, { "g4_wait_fanfare" }) end
 -- `fadescreen <steps> <framesPerStep> <type> <colour>` -- FOUR operands, and the
@@ -375,6 +462,9 @@ end
 -- the listing suggests, because a script that stops at one stops before the
 -- battle it exists to start.
 L.gettrainerid = function(ins, s) emit(s, { "g4_get_trainer_id", ins.args[1] }) end
+L.getapproachingtrainerid = function(ins, s)
+  emit(s, { "g4_get_approaching_trainer_id", ins.args[1], ins.args[2] })
+end
 L.checkistrainerdoublebattle = function(ins, s)
   emit(s, { "g4_check_trainer_double", ins.args[1] })
 end
@@ -385,12 +475,89 @@ end
 -- `trainerbattle` used to sit here and is not an opcode; the cartridge's own
 -- name is `starttrainerbattle`, which is lowered further down with its two
 -- operands.
+-- `getrematchtrainerid <trainer> <destVar>` -- operand order is value then
+-- DESTINATION, which is the reverse of `getmovementtype` two lines up, and the
+-- C is the only place that says so: `trainerID = ScriptContext_GetVar(ctx)`
+-- comes first, `destVar = ScriptContext_GetVarPointer(ctx)` second.  One use,
+-- reached every time the player talks to a trainer they have already beaten.
+-- THE APPROACH TRIO.  `startapproachingtrainertask <approachNum>`,
+-- `checkisapproachingtrainertaskdone <approachNum> <destVar>` and
+-- `getapproachingtrainertype <destVar>` are the "a trainer notices you and
+-- walks over" sequence, and they are lowered DESPITE being unreachable here
+-- today -- our overworld spots the player itself and then runs the trainer's
+-- own script, so `Battles_ApproachingTrainer` is never entered.
+--
+-- They are lowered anyway because of what the script does with the middle one:
+--
+--     Battles_WaitTrainerSinglesTaskDone:
+--       CheckIsApproachingTrainerTaskDone 0, VAR_RESULT
+--       GoToIfEq VAR_RESULT, FALSE, Battles_WaitTrainerSinglesTaskDone
+--
+-- which is a jump to itself gated on a var the unlowered command never wrote.
+-- The moment anything does dispatch that entry -- a map whose trainer uses the
+-- approach band, a mod, the harness -- a stale FALSE in VAR_RESULT is not a
+-- missing animation, it is a HANG.  Lowering it to the cartridge's own
+-- degenerate answer (see the handler: no task means done) makes the loop
+-- terminate on its first pass, which is exactly what the C does when there is
+-- no task to wait for.
+L.startapproachingtrainertask = function(ins, s)
+  emit(s, { "g4_start_approach", ins.args[1] })
+end
+L.checkisapproachingtrainertaskdone = function(ins, s)
+  emit(s, { "g4_approach_done", ins.args[1], ins.args[2] })
+end
+L.getapproachingtrainertype = function(ins, s)
+  emit(s, { "g4_approach_type", ins.args[1] })
+end
+L.getrematchtrainerid = function(ins, s)
+  emit(s, { "g4_get_rematch_trainer_id", ins.args[1], ins.args[2] })
+end
+-- `setmovecodeforfacingdirection` takes no operands and is answered by doing
+-- nothing; see the handler for why that is a decision and not a stub.
+L.setmovecodeforfacingdirection = function(_, s)
+  emit(s, { "g4_set_move_code_facing" })
+end
+-- `StartVsSeeker <destVar>` (Platinum 0x20A): src/world/Gen4VsSeeker.lua
+L.startvsseeker = function(ins, s)
+  emit(s, { "g4_start_vs_seeker", ins.args[1] })
+end
 L.checkwonbattle = function(ins, s) emit(s, { "g4_check_won_battle", ins.args[1] }) end
 -- Its twin, and NOT the negation of it: `CheckPlayerLostBattle` reads a
 -- different bit of the same result mask, so a battle that ended some third way
 -- (a draw, a fled wild) answers no to both.  One site in the cartridge.
 L.checklostbattle = function(ins, s)
   emit(s, { "g4_check_lost_battle", ins.args[1] })
+end
+
+-- WHAT THE TRAINER SAYS, which until now was nothing at all.
+--
+-- `gettrainermessagetypes <preVar> <postVar> <notEnoughVar>` writes THREE
+-- message-type numbers into three vars, and the operands are VAR IDS rather
+-- than var-or-literals: the C takes them with `ScriptContext_GetVarPointer`,
+-- not `ScriptContext_GetVar`.  Resolving them as values first -- which is what
+-- most of this file does, and what a copy of a neighbouring lowering would do
+-- -- would read the three destinations and then write to wherever their
+-- CONTENTS pointed, which on a fresh save is var 0 three times.
+--
+-- The rematch twin differs only in the table it picks from, so both go through
+-- one row with a flag; see `Gen4TrainerMessages.SCRIPT_TYPES` for the four
+-- rows and for the literal zeroes that are the cartridge's own.
+L.gettrainermessagetypes = function(ins, s)
+  emit(s, { "g4_trainer_message_types",
+            ins.args[1], ins.args[2], ins.args[3] })
+end
+L.gettrainerrematchmessagetypes = function(ins, s)
+  emit(s, { "g4_trainer_message_types",
+            ins.args[1], ins.args[2], ins.args[3], "rematch" })
+end
+
+-- `printtrainerdialogue <trainer> <messageType>` -- and THESE two ARE
+-- var-or-literal (`ScriptContext_GetVar` both), which is the opposite of the
+-- command above it.  The cartridge writes the string into the script message
+-- buffer and prints it into the window `openmessage` opened, then waits for
+-- the printer; the handler does the same through `show_text`.
+L.printtrainerdialogue = function(ins, s)
+  emit(s, { "g4_print_trainer_dialogue", ins.args[1], ins.args[2] })
 end
 
 -- signposts ---------------------------------------------------------------
@@ -439,9 +606,20 @@ L.waitcry = function(_, s) emit(s, { "g4_wait_cry" }) end
 -- and the daily random level.  Named as no-ops so they stop going through the
 -- unknown-command path -- a log line saying nothing is worse than one saying
 -- which feature is absent.
-L.initsizecontestrecord = function(_, s) emit(s, { "g4_noop", "size contest record" }) end
-L.randomizejubilifelottery = function(_, s) emit(s, { "g4_noop", "Jubilife lottery" }) end
-L.initdailyrandomlevel = function(_, s) emit(s, { "g4_noop", "daily random level" }) end
+-- Route 222's size contest (size_contest.c); the record is VAR_SIZE_CONTEST_RECORD
+L.initsizecontestrecord = function(_, s) emit(s, { "g4_size_contest_init" }) end
+L.buffersizecontestrecord = function(ins, s)
+  emit(s, { "g4_size_contest_buffer", ins.args[1], ins.args[2], ins.args[3], "record" })
+end
+L.bufferpartypokemonsize = function(ins, s)
+  emit(s, { "g4_size_contest_buffer", ins.args[1], ins.args[2], ins.args[3], "party" })
+end
+L.calcsizecontestresult = function(ins, s) emit(s, { "g4_size_contest_result", ins.args[1], ins.args[2] }) end
+L.updatesizecontestrecord = function(ins, s) emit(s, { "g4_size_contest_update", ins.args[1] }) end
+-- Jubilife's lottery number and the daily level are kept now
+-- (Gen4Commands.g4_lottery_randomize / g4_daily_level_init)
+L.randomizejubilifelottery = function(_, s) emit(s, { "g4_lottery_randomize" }) end
+L.initdailyrandomlevel = function(_, s) emit(s, { "g4_daily_level_init" }) end
 
 L.setobjecteventdir = function(ins, s)
   emit(s, { "g4_set_object_dir", ins.args[1], ins.args[2] })
@@ -535,7 +713,9 @@ local function menuInit(ins, s, bank)
   -- own rules on a screen of a different size.  Passing a foreign coordinate
   -- through would put the box off the edge; the cursor row and the B rule are
   -- real behaviour and are kept.
-  emit(s, { "g4_menu_init", ins.args[5], ins.args[4], ins.args[3], bank })
+  -- ...but carried along, last, for the family whose menu does sit there
+  -- (HGSS: ov01_021EDF78 / EDC84, the window's top-left at (x, y))
+  emit(s, { "g4_menu_init", ins.args[5], ins.args[4], ins.args[3], bank, ins.args[1], ins.args[2] })
 end
 
 L.initglobaltextmenu = function(ins, s)
@@ -597,7 +777,9 @@ L.pokemartspecialties = function(ins, s) emit(s, { "g4_pokemart", ins.args[1], "
 L.checkbadgeacquired = function(ins, s) emit(s, { "g4_check_badge", ins.args[1], ins.args[2] }) end
 L.getplayerdir = function(ins, s) emit(s, { "g4_player_dir", ins.args[1] }) end
 L.returntofield = function(_, s) emit(s, { "g4_return_to_field" }) end
-L.waitforanimation = function(_, s) emit(s, { "g4_wait_animation" }) end
+L.waitforanimation = function(ins, s)
+  emit(s, { "g4_wait_animation", ins.args[1] })
+end
 L.drawsignposttextbox = function(_, s) emit(s, { "g4_signpost_command" }) end
 -- `drawsignpostscrollingmessage <messageID> <destVar>` prints its line into
 -- the sign's window and then waits for the player, leaving what they pressed
@@ -736,7 +918,7 @@ end
 
 local PHASE_KEYS = {
   talk = { talk = true },
-  scenes = { onEnter = true, onStep = true, onFrame = true },
+  scenes = { onEnter = true, onStep = true, onFrame = true, onResume = true },
 }
 
 -- What a map contributes.  Gen 4 has no TEXT constant the way Gen 2 and Gen 3
@@ -828,8 +1010,16 @@ local function contributionFor(data, mapId, entry)
   -- produces, because `MapScripts` declares `onEnter` and `onFrame` for Gen 3
   -- and the overworld already asks for both every frame; nothing above this
   -- file needs to learn a fourth generation's spelling.
-  local onEnter = {}
+  local onEnter, onResume = {}, {}
   for _, callback in ipairs(entry.callbacks or {}) do
+    -- ...AND ON_LOAD / ON_RESUME AGAIN EVERY TIME THE FIELD COMES BACK
+    -- (fieldmap.c runs both from the field's init, which a battle's end
+    -- rebuilds): the Lake of Rage's ON_LOAD shows Lance after the red
+    -- Gyarados while the talk script that started the battle is suspended
+    if callback.type == 3 or callback.type == 4 then
+      local rows = Gen4ScriptVM.compile(data, callback.script)
+      if rows then onResume[#onResume + 1] = rows end
+    end
     -- ON_LOAD, ON_TRANSITION and ON_RESUME all run once as the map comes up.
     -- The cartridge distinguishes them by how far through the load it is --
     -- ON_LOAD while the map is being built, ON_RESUME on coming back to the
@@ -848,6 +1038,18 @@ local function contributionFor(data, mapId, entry)
     end
   end
 
+  if #onResume > 0 then
+    -- RUN AT ONCE, not queued: the script that started the battle is waiting
+    -- to carry on, and on the cartridge these finish before it does
+    contribution.onResume = function(game, overworld)
+      local Runner = require("src.script.ScriptRunner")
+      for _, rows in ipairs(onResume) do
+        local r = Runner.new(game, overworld)
+        local ok, err = pcall(r.run, r, rows, { mapId = mapId })
+        if not ok then require("src.core.Logger").warn("gen4 map resume script: %s", tostring(err)) end
+      end
+    end
+  end
   if #onEnter > 0 or #onFrame > 0 then
     contribution.onEnter = function(_, overworld)
       -- A fresh visit re-arms the frame table, for the reason Gen3ScriptVM
@@ -939,9 +1141,15 @@ local function contributionFor(data, mapId, entry)
       if firedAt ~= here then firedAt, fired = here, {} end
       local Gen4Commands = require("src.script.Gen4Commands")
       local ctx = { save = game.save, game = game, overworld = overworld }
+      -- BLACK / WHITE'S QUICKSAND (behaviour 0x7C, Gen5Quicksand): on a sand
+      -- cell only a pit's own rule runs its event -- the centre, or a player
+      -- standing still
+      local Quicksand = require("src.world.Gen5Quicksand")
+      local sand = Quicksand.onSand(overworld, x, y)
       for i, coord in ipairs(coords) do
         local inside = x >= coord.x and x < coord.x + coord.width
                        and y >= coord.y and y < coord.y + coord.height
+        if inside and sand and not Quicksand.pitFires(overworld, coord, x, y) then inside = false end
         -- ONLY THE VAR SIDE IS RESOLVED.  `sub_0203CC14` is
         -- `TryGetVar(e.var) == e.value` -- the value is compared RAW, unlike
         -- the init frame table two functions up, where BOTH sides go through
@@ -1002,6 +1210,17 @@ end
 --
 -- Signs are the same shape and are keyed by their index in the map's own
 -- list, which is what the extractor filed them under.
+function Gen4ScriptVM.resolveTalk(data,mapId,index,textConst)
+  local pool=store(data)
+  local entry=pool and pool.maps and pool.maps[mapId]
+  local label=entry and entry.objects and index and entry.objects[index]
+  if not label and entry and entry.shared and index then
+    label=sharedLabel(pool,(entry.shared.objects or {})[index])
+  end
+  if not label and type(textConst)=='string' then label=textConst end
+  return label and Gen4ScriptVM.compile(data,label) or nil
+end
+
 function Gen4ScriptVM.bindObjects(data)
   local pool = store(data)
   if not (pool and pool.maps and data and data.maps) then return 0 end
@@ -1106,6 +1325,14 @@ L.getrandom = function(ins, s)
   emit(s, { "g4_get_random", ins.args[1], ins.args[2] })
 end
 
+L.getrandom2 = function(ins,s)
+  emit(s, {'g4_get_random',ins.args[1],ins.args[2]})
+  emit(s, {'wait',1})
+end
+L.buffervaluepaddingdigits = function(ins,s)
+  emit(s, {'g4_buffer_padded_number',ins.args[1],ins.args[2],ins.args[3],ins.args[4]})
+end
+
 -- `Party_HealAllMembers`.  The engine already has this verb for four other
 -- cartridges and it means the same thing on all five.
 L.healparty = function(_, s) emit(s, { "heal_party" }) end
@@ -1117,11 +1344,27 @@ L.checkmoney = function(ins, s)
 end
 L.removemoney = function(ins, s) emit(s, { "g4_remove_money", ins.args[1] }) end
 
--- The money box is a HUD this port does not draw.  Named so they stop
--- counting as unimplemented, because a noop here is the truth: there is
--- nothing to show or hide.
-L.showmoney = function(_, s) emit(s, { "g4_noop", "money box" }) end
-L.hidemoney = function(_, s) emit(s, { "g4_noop", "money box" }) end
+-- THE MONEY WINDOW.  These said "a HUD this port does not draw ... a noop
+-- here is the truth: there is nothing to show or hide", which was true and is
+-- the second claim of its kind this week to stop being so: there is a window
+-- now (`src/ui/Gen4MoneyWindow.lua`), drawn the same way the save panel and
+-- FireRed's lift window are.
+--
+-- 109 invocations over the decoded corpus, second only to the doors, and NOT
+-- the shop's balance -- this is the standalone window a field script puts up
+-- while you decide: the Game Corner, the Day-Care's fee, the Ribbon
+-- Syndicate, Floaroma's flower seller, the Pastoria gates, the cafe.
+--
+-- `showmoney <left> <top>` -- BOTH var-or-literal, and in THAT order.  pret's
+-- middle layer swaps the parameter names twice so they cancel
+-- (`ScrCmd_ShowMoney` reads left then top, `FieldMenu_CreateMoneyWindow`
+-- declares them the other way round, and `Window_Add` takes left then top
+-- again); the call sites settle it -- `ShowMoney 20, 2` puts a ten-tile window
+-- in the top right of a 32-tile screen.
+L.showmoney = function(ins, s)
+  emit(s, { "g4_money_window", "show", ins.args[1], ins.args[2] })
+end
+L.hidemoney = function(_, s) emit(s, { "g4_money_window", "hide" }) end
 
 -- `u16 *partySlot = GetVarPointer; u16 *destVar = GetVarPointer` -- BOTH are
 -- var ids, and the slot is the VALUE HELD IN THE FIRST.  An egg reads as
@@ -1142,6 +1385,607 @@ end
 L.getplayerstarterspecies = function(ins, s)
   emit(s, { "g4_starter_species", ins.args[1] })
 end
+-- HEARTGOLD / SOULSILVER'S STARTER. `ChooseStarter` (ScrCmd_ChooseStarter ->
+-- LaunchStarterChoiceScene, choose_starter.c) runs Elm's turntable and then
+-- ADDS THE CHOICE TO THE PARTY ITSELF -- Chikorita, Cyndaquil or Totodile at
+-- level 5 -- so the lab script follows it with `GetPartyMonSpecies 0` rather
+-- than a give. `SetStarterChoice <var>` stores the species in the save's
+-- starter field and `GetStarterChoice <var>` reads it back.
+L.choosestarter = function(_, s) emit(s, { "g4_hgss_choose_starter" }) end
+L.setstarterchoice = function(ins, s) emit(s, { "g4_set_starter_choice", ins.args[1] }) end
+L.getstarterchoice = function(ins, s) emit(s, { "g4_starter_species", ins.args[1] }) end
+L.placestarterballsinelmslab = function(_, s) emit(s, { "g4_place_starter_balls" }) end
+-- `GetFriendSprite <var>`: the other hero's overworld sprite -- Ethan's for
+-- a girl, Lyra's for a boy -- into the object-graphics var the friend wears.
+L.getfriendsprite = function(ins, s) emit(s, { "g4_friend_sprite", ins.args[1] }) end
+-- `CatchingTutorial`: the friend catches a Rattata on Route 29
+L.catchingtutorial = function(_, s) emit(s, { "g4_hgss_catching_tutorial" }) end
+-- `NameRival <var>`: the naming screen for the rival, var = 1 when nothing
+-- was entered (the lab script asks again until something is)
+L.namerival = function(ins, s) emit(s, { "g4_name_rival", ins.args[1] }) end
+-- THE POKEGEAR AND MOM'S SAVINGS (HGSS), save state only: which cards and
+-- phone numbers are registered, how far the map is unlocked, and the balance.
+L.registerpokegearcard = function(ins, s) emit(s, { "g4_pokegear_card", ins.args[1] }) end
+L.registergearnumber = function(ins, s) emit(s, { "g4_pokegear_number", ins.args[1] }) end
+L.checkregisteredphonenumber = function(ins, s) emit(s, { "g4_pokegear_has_number", ins.args[1], ins.args[2] }) end
+L.scrcmd_804 = function(ins, s) emit(s, { "g4_pokegear_map_level", ins.args[1] }) end
+-- HGSS's points box (overlay_22.c ScrCmd_116-118, ov01_021EEC00): one
+-- 10 x 2 window for coins (0), Battle Points (1) or athlete points (2)
+L.scrcmd_116 = function(ins, s) emit(s, { "g4_points_window", "show", ins.args[1], ins.args[2], ins.args[3] }) end
+L.scrcmd_117 = function(_, s) emit(s, { "g4_points_window", "hide" }) end
+-- HGSS's CheckGiveCoins <destVar> <amount> is Platinum's checkcanaddcoins
+L.checkgivecoins = function(ins, s) L.checkcanaddcoins(ins, s) end
+-- HGSS commands that are Platinum's under another name or operand order
+-- (pokeheartgold scrcmd_c.c / scrcmd_party.c / field/scrcmd_pokemon_misc.c):
+-- ScrCmd_517 Party_HasMon <species, destVar>; ScrCmd_518 sets every party
+-- Deoxys to <form> (the Route 3 meteorite) as ChangeDeoxysForm does;
+-- CheckMonSeen <species, destVar>; GiveRibbon <slot, ribbon>; MonHasRibbon
+-- <destVar, slot, ribbon>; MonAddFriendship <value, slot>; WaitButtonOrDelay
+-- <frames> (A or B ends it early)
+L.scrcmd_517 = function(ins, s) emit(s, { "g4_party_has_species2", ins.args[1], ins.args[2] }) end
+L.scrcmd_518 = function(ins, s) emit(s, { "g4_deoxys_form", ins.args[1] }) end
+L.checkmonseen = function(ins, s) emit(s, { "g4_bw_dex_seen", ins.args[1], ins.args[2] }) end
+L.giveribbon = function(ins, s) emit(s, { "g4_set_mon_ribbon", ins.args[1], ins.args[2] }) end
+L.monhasribbon = function(ins, s) emit(s, { "g4_get_mon_ribbon", ins.args[1], ins.args[2], ins.args[3] }) end
+L.monaddfriendship = function(ins, s) emit(s, { "g4_increase_friendship", ins.args[1], ins.args[2] }) end
+L.waitbuttonordelay = function(ins, s) emit(s, { "g4_wait_ab_press_time", ins.args[1] }) end
+-- ScrCmd_374 hides an object (MapObject_SetVisible FALSE), MakeObjectVisible's
+-- other half; ScrCmd_446 is the current map id; ScrCmd_545 the Unown forms seen
+L.scrcmd_374 = function(ins, s) emit(s, { "g4_hide_object", ins.args[1] }) end
+L.scrcmd_446 = function(ins, s) emit(s, { "g4_get_map_id", ins.args[1] }) end
+L.scrcmd_545 = function(ins, s) emit(s, { "g4_unown_forms_seen", ins.args[1] }) end
+-- FollowerPokeIsEventTrigger <event, slot, destVar> (scrcmd_c.c 4379): 1 only
+-- for a distributed event Pokemon whose met data MonMetadataMatchesEvent
+-- accepts (Spiky-eared Pichu, the Arceus / Sinjoh events, the Celebi ones);
+-- a Pokemon from the Mystery Gift carries the fateful-encounter mark
+-- (src/pokemon/Gen4MysteryGift.lua) and answers 1; anything caught in play 0
+L.followerpokeiseventtrigger = function(ins, s)
+  emit(s, { "g4_follower_event_trigger", ins.args[1], ins.args[2], ins.args[3] })
+end
+-- GetPartySlotWithFatefulEncounter <dest, species> (scrcmd_party.c 733):
+-- Platinum's findpartyslotwithfatefulencounterspecies by another name
+L.givespikyearpichu = function(ins, s) emit(s, { "g4_give_spiky_ear_pichu" }) end
+-- SINJOH RUINS (D51R0201, the Arceus event): the cutscene tasks pokeheartgold
+-- runs there -- ScrCmd_Cinematic <scene>, ScrCmd_UnownCircle (the Unown
+-- carrying the player), ScrCmd_817 <legend> (the egg forming), ScrCmd_820
+-- <legend> (the chosen legend's model), ScrCmd_819 (freeze the models),
+-- ScrCmd_815 <n> and MystriStageGymmickInit -- are pictures; what the event
+-- GIVES is ordinary commands after them. Stood in for by pauses so the event
+-- plays to its reward; the cutscenes themselves are not ported.
+L.cinematic = function(ins, s)
+  -- the cinematic is its own program: the field is torn down and rebuilt
+  -- behind it, so a legendary cutscene's camera ends there (sub_02097BE0)
+  emit(s, { "g4_legend", "fieldrebuild" })
+  emit(s, { "wait", 60 })
+end
+L.unowncircle = function(ins, s) emit(s, { "wait", 90 }) end
+L.scrcmd_817 = function(ins, s) emit(s, { "wait", 90 }) end
+L.scrcmd_820 = function(ins, s) emit(s, { "wait", 30 }) end
+L.scrcmd_819 = function() end
+L.scrcmd_815 = function() end
+L.mystristagegymmickinit = function() end
+-- ScrCmd_810: FieldSystem_BeginCelebiTimeTravelCutsceneTask -- the screen
+-- whiting out as Celebi carries the player back; the script goes on after
+-- (the cutscene's own effects are not ported: a short pause stands in)
+L.scrcmd_810 = function(ins, s) emit(s, { "wait", 60 }) end
+-- THE KIMONO GIRLS' DANCE (pokeheartgold legend_cutscene_camera.c, ported in
+-- src/world/HgssLegendCutscene.lua): one command per ScrCmd, the halfword
+-- argument carried where the cartridge reads one
+for name, op in pairs({
+  legendcutsceneclearbellanimbegin = "begin", legendcutsceneclearbellanimend = "finish",
+  legendcutsceneclearbellrisefrombag = "rise", legendcutsceneclearbellshimmer = "shimmer",
+  legendcutscenelugiaeyeglimmereffect = "glimmer", legendcutscenemovecamerato = "move",
+  legendcutscenepancamerato = "pan", legendcutscenewaitcamerapan = "waitpan",
+  legendcutscenebirdfinalapproach = "bird", legendcutscenewavesorleaveseffectbegin = "fxbegin",
+  legendcutscenewavesorleaveseffectend = "fxend", legendcutscenelugiaarriveseffectbegin = "lugiabegin",
+  legendcutscenelugiaarriveseffectend = "lugiaend", legendcutscenelugiaarriveseffectcamerapan = "lugiapan",
+}) do
+  L[name] = function(ins, s) emit(s, { "g4_legend", op, ins.args[1] }) end
+end
+-- HGSS's names for queries Platinum already has (pokeheartgold scrcmd_*.c):
+-- GetFossilPokemon <dest, fossil> (scrcmd_fossils.c), GetSealQuantity <seal,
+-- dest> and GetPartyMonForm2 <slot, dest> (scrcmd_pokemon_misc.c / _party.c),
+-- BufferSealNamePlural <slot, seal> (msg_0016 by id), ScrCmd_420 <stat>
+-- (GameStats_Inc), SubMoneyVar <amount var>, CheckNationalDexComplete <dest>
+-- (Pokedex_NationalDexIsComplete: 493 less HGSS's nine mythicals) and
+-- CheckSeenAllLetterUnown <dest> (all 26 letters, ! and ? not counted)
+L.getfossilpokemon = function(ins, s) emit(s, { "g4_species_from_fossil", ins.args[1], ins.args[2] }) end
+L.getsealquantity = function(ins, s) emit(s, { "g4_count_seal", ins.args[1], ins.args[2] }) end
+L.getpartymonform2 = function(ins, s) emit(s, { "g4_party_mon_form", ins.args[1], ins.args[2] }) end
+L.buffersealnameplural = function(ins, s) emit(s, { "g4_buffer_bank_line", ins.args[1], 16, ins.args[2] }) end
+L.scrcmd_420 = function(ins, s) emit(s, { "g4_add_game_record", ins.args[1], 1, true }) end
+L.submoneyvar = function(ins, s) emit(s, { "g4_sub_money_var", ins.args[1] }) end
+L.checknationaldexcomplete = function(ins, s) emit(s, { "g4_hgss_national_complete", ins.args[1] }) end
+L.checkseenallletterunown = function(ins, s) emit(s, { "g4_seen_all_letter_unown", ins.args[1] }) end
+-- THE SAFARI ZONE (HGSS; src/world/HgssSafariZone.lua). SafariZoneAction
+-- <action, set> starts (0) or ends (1) a game; NatDexFlagAction <action, dest>
+-- sets (1) or reads (2) the National Dex; UpdateSafariZoneIGT marks the play
+-- time for the zone's timed upgrades; CheckSafariZoneChallengeCompleted <n,
+-- dest> is Baoba's two challenges; ScrCmd_247 is a dummy
+L.safarizoneaction = function(ins, s) emit(s, { "g4_hgss_safari", ins.args[1], ins.args[2] }) end
+L.natdexflagaction = function(ins, s) emit(s, { "g4_natdex_flag", ins.args[1], ins.args[2] }) end
+L.updatesafarizoneigt = function(ins, s) emit(s, { "g4_hgss_safari_igt" }) end
+L.checksafarizonechallengecompleted = function(ins, s)
+  emit(s, { "g4_hgss_safari_challenge", ins.args[1], ins.args[2] })
+end
+L.scrcmd_247 = function() end
+-- PLATINUM'S SMALL QUERIES (pokeplatinum scrcmd.c / scrcmd_party.c /
+-- scrcmd_jubilife_lottery.c / easy_chat_words.c), operands in the order the
+-- handlers read them
+local function rows(name, n)
+  return function(ins, s)
+    local row = { name }
+    for i = 1, n do row[#row + 1] = ins.args[i] end
+    emit(s, row)
+  end
+end
+L.getpartymonlevel = rows("g4_party_mon_level", 2)
+-- StartFatefulEncounter <species, level>: Shaymin at Flower Paradise
+L.startfatefulencounter = rows("g4_fateful_encounter", 2)
+-- Jubilife TV 3F's wallpaper password and Mystery Gift phrase, the
+-- Battleground's daily trainers, Veilstone's massage girl (scrcmd.c)
+L.getwallpaperfromcustommessagewords = rows("g4_wallpaper_password", 5)
+L.checkismysterygiftphrase = rows("g4_mystery_gift_phrase", 5)
+L.getrandombattlegroundtrainers = rows("g4_battleground_trainers", 4)
+L.trygetrandommassagegirlaccessory = rows("g4_massage_accessory", 1)
+-- smaller Platinum queries (scrcmd.c / scrcmd_party.c)
+L.countpartymonsbelowlevelthreshold = rows("g4_party_below_level", 2)
+L.getplayer3dpos = rows("g4_player_3d_pos", 3)
+L.checkbackdrop = rows("g4_check_backdrop", 2)
+L.getcapturedflagcount = rows("g4_captured_flag_count", 1)
+L.checkistodayplayerbirthday = rows("g4_is_birthday", 1)
+L.getpartymonfootprinttype = rows("g4_footprint_type", 3)
+L.pokemartdecor = rows("g4_decor_mart", 1)
+L.drawpokemonpreviewfrompartyslot = rows("g4_pokemon_preview_party", 1)
+-- GiveBag: SystemFlag_SetBagAcquired, FLAG_BAG_ACQUIRED (0x960) -- the start
+-- menu's BAG row is not gated on it here (saves from before this lowering
+-- never set it), but an exported save carries it
+L.givebag = function(_, s) emit(s, { "set_flag", flagName(0x960) }) end
+-- UndergroundNPCMessage <entry>: TEXT_BANK_UNDERGROUND_NPCS (636) whatever
+-- the map, closed by its own command
+L.undergroundnpcmessage = function(ins, s) emit(s, { "g4_message_bank", 636, ins.args[1] }) end
+L.closeundergroundnpcmessage = function(_, s) emit(s, { "g4_close_message" }) end
+-- no Wi-Fi list, no link partner, no recorded Chatot
+L.checkhaswifilistvalidlogin = function(ins, s) emit(s, { "g4_no_feature", ins.args[1], "Wi-Fi" }) end
+L.getwiflistvalidfriendscount = function(ins, s) emit(s, { "g4_no_feature", ins.args[1], "Wi-Fi" }) end
+L.checknowifiplazacooldown = function(ins, s) emit(s, { "g4_no_feature", ins.args[1], "Wi-Fi Plaza" }) end
+L.checkrecordedchatotcryisplayable = function(ins, s) emit(s, { "g4_no_feature", ins.args[1], "Chatot's recorded cry" }) end
+L.iscommgamecodeplatinum = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 1 }) end
+-- DrawPokemonPreview <species, gender> / RemovePokemonPreview: Cresselia's
+-- picture on Fullmoon Island, the species marked seen
+L.drawpokemonpreview = rows("g4_pokemon_preview", 2)
+L.removepokemonpreview = rows("g4_pokemon_preview_remove", 0)
+-- ShakeObject <id, times, speed, x, z> / FlickerObject <id, times, delay>:
+-- MapObject_Shake / _Flicker -- held for as long as the cartridge's task
+-- runs (times x speed / times x delay frames)
+L.shakeobject = function(ins, s) emit(s, { "g4_object_effect_wait", ins.args[2], ins.args[3] }) end
+L.flickerobject = function(ins, s) emit(s, { "g4_object_effect_wait", ins.args[2], ins.args[3] }) end
+L.getpartymonnature = rows("g4_party_mon_nature", 2)
+L.buffernaturename = rows("g4_buffer_nature_name", 2)
+L.buffermonnicknamefrompc = rows("g4_buffer_pc_nickname", 2)
+L.checkhasseenspecies = rows("g4_has_seen_species", 2)
+L.countrepeatedspeciesinparty = rows("g4_count_repeated_species", 2)
+L.checkhasalllegendarytitansinparty = rows("g4_has_all_titans", 1)
+L.getrotomformsinsave = rows("g4_rotom_forms_in_save", 5)
+L.setrotomform = rows("g4_set_rotom_form", 4)
+L.countpartyribbons = rows("g4_count_party_ribbons", 1)
+L.checkpartycombeegendercount = rows("g4_combee_genders", 1)
+L.checkshouldshowghost = rows("g4_should_show_ghost", 2)
+L.getdailyrandomlevel = rows("g4_daily_level", 1)
+L.checkispartymonoutsider = rows("g4_party_mon_outsider", 2)
+L.turnonpokedexlanguagedetection = rows("g4_dex_language_detection", 0)
+L.judgestats = rows("g4_judge_stats", 4)
+L.getcurrentbgm = rows("g4_current_bgm", 1)
+L.checkabpress = rows("g4_ab_held", 1)
+L.getgbacartridgeversion = rows("g4_gba_cartridge", 1)
+L.setfavoritemon = rows("g4_set_favorite_mon", 0)
+L.buffertrainername = rows("g4_buffer_trainer_name", 2)
+L.getjubilifelotterytrainerid = rows("g4_lottery_id", 1)
+L.checkforjubilifelotterywinner = rows("g4_lottery_winner", 4)
+L.checkalltoughwordsunlocked = rows("g4_all_tough_words", 1)
+L.trybufferandunlockrandomtoughword = rows("g4_unlock_tough_word", 2)
+-- ProcessSoundplate: restarts the tile-region ambient sounds (waterfall,
+-- wind, sea -- field_control.c), which this port does not have yet
+L.processsoundplate = function() end
+L.getpartyslotwithfatefulencounter = function(ins, s)
+  emit(s, { "g4_fateful_slot", ins.args[1], ins.args[2] })
+end
+-- MysteryGift <stage> [dest] (pokeheartgold scrcmd_mystery_gift.c): SCR_MG_BEGIN
+-- .. SCR_MG_END2 are Platinum's MYSTERY_GIFT_LOAD .. UNLOAD_RECEIVED in the
+-- same order, so the marts' deliveryman runs on Platinum's handler
+L.mysterygift = function(ins, s) return L.mysterygiftgive(ins, s) end
+-- MomGiftCheck <destVar> (scrcmd_12.c): whether Mom's gift queue (filled when
+-- she shops with the player's savings, PhoneCallPersistentState) has an item
+-- for the mart's deliveryman; the queue is save.hgssMomGifts, empty until
+-- the phone's Mom calls are built
+L.momgiftcheck = function(ins, s) emit(s, { "g4_mom_gift_check", ins.args[1] }) end
+-- ScrCmd_840 <mapId, destVar> (scrcmd_c.c 2247): 1 for a Pokemon Center
+-- (map_header.c sPokemonCenterMaps), 2 for the League's entrance (300)
+L.scrcmd_840 = function(ins, s) emit(s, { "g4_hgss_map_kind", ins.args[1], ins.args[2] }) end
+-- THE LAKE OF RAGE'S MAGIKARP RECORD (scrcmd_size_record.c, src/pokemon/
+-- HgssSizeRecord.lua): SizeRecordCompare <destVar, slot>, SizeRecordUpdate
+-- <slot>, BufferMonSize <inches, tenths, slot>, BufferRecordSize <inches,
+-- tenths, species>
+L.sizerecordcompare = function(ins, s) emit(s, { "g4_size_record", "compare", ins.args[1], ins.args[2] }) end
+L.sizerecordupdate = function(ins, s) emit(s, { "g4_size_record", "update", ins.args[1] }) end
+L.buffermonsize = function(ins, s) emit(s, { "g4_size_record", "mon", ins.args[1], ins.args[2], ins.args[3] }) end
+L.bufferrecordsize = function(ins, s) emit(s, { "g4_size_record", "record", ins.args[1], ins.args[2], ins.args[3] }) end
+-- BufferSealName <slot, sealId> (scrcmd_strbuf.c 375 -> message_format.c
+-- BufferSealName): HGSS reads the seal's name straight out of msg_0015 by id
+L.buffersealname = function(ins, s) emit(s, { "g4_buffer_bank_line", ins.args[1], 15, ins.args[2] }) end
+-- GetBuenasPassword <msgVar, indexVar> (scrcmd_pokemon_misc.c 1251): today's
+-- category line and which of its three passwords, out of VAR_BUENAS_PASSWORD_SET
+L.getbuenaspassword = function(ins, s) emit(s, { "g4_buenas_password", ins.args[1], ins.args[2] }) end
+L.scrcmd_118 = function(ins, s) emit(s, { "g4_points_window", "update", ins.args[1] }) end
+L.checkbankbalance = function(ins, s) emit(s, { "g4_bank_balance_at_least", ins.args[1], ins.args[2] }) end
+L.bankorwalletisfull = function(ins, s) emit(s, { "g4_bank_or_wallet_full", ins.args[1], ins.args[2] }) end
+L.banktransaction = function(ins, s) emit(s, { "g4_bank_transaction", ins.args[1], ins.args[2] }) end
+-- `GetPersonCoords <object> <xVar> <zVar>` (HGSS): where an object stands
+L.getpersoncoords = function(ins, s) emit(s, { "g4_object_coords", ins.args[1], ins.args[2], ins.args[3] }) end
+-- `UnlockMysteryGift` (Platinum) / ScrCmd_573 (HGSS, after Oak's Pokedex):
+-- the title menu's MYSTERY GIFT entry turns on -- a save flag here
+L.unlockmysterygift = function(_, s) emit(s, { "g4_unlock_mystery_gift" }) end
+-- CAMERON THE PHOTOGRAPHER (HGSS): CameronPhoto <n> takes photo n into the
+-- album (the script fades around it), CountSavedPhotos / PhotoAlbumIsFull
+-- read it back; 36 photos (photo_album.h PHOTO_ALBUM_MAX)
+L.cameronphoto = function(ins, s) emit(s, { "g4_take_photo", ins.args[1] }) end
+L.countsavedphotos = function(ins, s) emit(s, { "g4_count_photos", ins.args[1] }) end
+L.photoalbumisfull = function(ins, s) emit(s, { "g4_photo_album_full", ins.args[1] }) end
+-- `GiveTogepiEgg` (HGSS): the Mystery Egg's Togepi, as an Egg that knows
+-- Extrasensory
+L.givetogepiegg = function(_, s) emit(s, { "g4_give_togepi_egg" }) end
+-- FALKNER'S GYM (HGSS): the lift. VioletGymInit runs from the gym's entry
+-- script; VioletGymElevator carries the player up or down
+L.violetgyminit = function(_, s) emit(s, { "g4_violet_gym_init" }) end
+L.violetgymelevator = function(_, s) emit(s, { "g4_violet_gym_elevator" }) end
+-- BUGSY'S GYM (HGSS): the Spinarak carts and their two switches
+L.azaleagyminit = function(_, s) emit(s, { "g4_azalea_gym_init" }) end
+L.azaleagymspinarak = function(ins, s) emit(s, { "g4_azalea_gym_spinarak", ins.args[1] }) end
+L.azaleagymswitch = function(ins, s) emit(s, { "g4_azalea_gym_switch", ins.args[1] }) end
+-- THE HEADBUTT TUTOR in Ilex Forest (HGSS), on Platinum's tutor commands:
+-- `PartySelectUI` is the plain party pick GetPartySelection reads;
+-- `ScrCmd_656 slot, dest` is GetLearnableTutorMoves(mon, NPC 3) > 0;
+-- `PokemonSummaryScreen 1, slot, move` / `GetMoveSelection 1, dest` the
+-- forget-a-move pick (4 keeps them); `SetMonMove slot, moveSlot, move`
+-- PartyMonSetMoveInSlot. `MonHasMove` and `CountMonMoves` are Platinum's
+-- checkpartymonhasmove / getpartymonmovecount, operands in the same order.
+-- APRICORNS (HGSS): the trees' shared script (scr_seq_0150) and Kurt's
+-- (T23R0501) -- scrcmd_apricorn.c and scrcmd_pokemon_misc.c
+L.animapricorntree = function(ins, s) emit(s, { "g4_apricorn_tree_shake", ins.args[1] }) end
+L.apricorntreegetapricorn = function(ins, s) emit(s, { "g4_apricorn_tree_colour", ins.args[1] }) end
+L.giveapricornfromtree = function(ins, s)
+  emit(s, { "g4_apricorn_give", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.bufferapricornname = function(ins, s) emit(s, { "g4_buffer_apricorn", ins.args[1], ins.args[2] }) end
+L.scrcmd_735 = function(ins, s) emit(s, { "g4_kurt_quantity", ins.args[1] }) end
+L.clearkurtapricorn = function(_, s) emit(s, { "g4_kurt_clear" }) end
+L.scrcmd_737 = function(ins, s) emit(s, { "g4_kurt_ball", ins.args[1] }) end
+L.gettotalapricorncount = function(ins, s) emit(s, { "g4_apricorn_total", ins.args[1] }) end
+L.scrcmd_739 = function(_, s) emit(s, { "g4_apricorn_box_for_kurt" }) end
+-- GOLDENROD AND ROUTES 34-36 (HGSS): small ones, each a Platinum command
+-- or a few lines (scrcmd_c.c, scrcmd_party.c, scrcmd_battle.c, scrcmd_8.c)
+L.scrcmd_522 = function(ins, s) emit(s, { "g4_get_hour", ins.args[1] }) end
+L.getstaticencounteroutcome = function(ins, s) emit(s, { "g4_static_outcome", ins.args[1] }) end
+L.staticwildwonorcaughtcheck = function(ins, s) emit(s, { "g4_static_not_won", ins.args[1] }) end
+L.countalivemons = function(ins, s) emit(s, { "g4_party_alive_except", ins.args[1], ins.args[2] }) end
+L.partycountnotegg = function(ins, s) emit(s, { "g4_party_non_eggs", ins.args[1] }) end
+L.checkdaycareegg = function(ins, s) emit(s, { "g4_daycare_has_egg", ins.args[1] }) end
+L.getitemquantity = function(ins, s) emit(s, { "g4_item_quantity", ins.args[1], ins.args[2] }) end
+L.addmoney = function(ins, s) emit(s, { "g4_add_money", ins.args[1] }) end
+L.setobjectmovementtype = function(ins, s) emit(s, { "g4_set_object_movement", ins.args[1], ins.args[2] }) end
+L.scrcmd_582 = function(ins, s) emit(s, { "g4_special_spawn", ins.args[1], ins.args[2], ins.args[3] }) end
+-- GOLDENROD DEPT. STORE'S LIFT: the floor name is msg_0191 (BufferDeptStore-
+-- FloorNo: 0 is B1F, entry 122; n is entry 116 + n - 1); the floor window and
+-- the car's rocking are drawn by Platinum's lift as nothing, here likewise
+L.bufferdeptstorefloorno = function(ins, s)
+  local floor = tonumber(ins.args[2]) or 1
+  emit(s, { "g4_buffer", ins.args[1], "bank:191", floor == 0 and 122 or (115 + floor) })
+end
+L.elevatorcurfloorbox = function(_, s) emit(s, { "g4_noop", "the lift's current-floor window" }) end
+L.elevatoranim = function(_, s) emit(s, { "g4_noop", "the elevator animation" }) end
+-- THE BURNED TOWER (HGSS): `CreateRoamer n` is Platinum's release on HGSS's
+-- four slots (Gen4Roamers / HgssRoamers); `ScrCmd_523 obj, count, step,
+-- ampX, ampZ` rattles an object in place (the beasts rearing)
+L.createroamer = function(ins, s) emit(s, { "g4_release_roamer", ins.args[1] }) end
+L.scrcmd_523 = function(ins, s)
+  emit(s, { "g4_object_shake", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5] })
+end
+-- THE ROCKET DISGUISE (HGSS, Radio Tower): SetAvatarBits is Platinum's
+-- setplayerstate (the bits), UpdateAvatarState its latch;
+-- RocketCostumeFlagAction / Check the save's costume flag
+L.setavatarbits = function(ins, s) emit(s, { "g4_player_state", ins.args[1] }) end
+L.updateavatarstate = function(_, s) emit(s, { "g4_noop", "the player-state latch (applied when set)" }) end
+L.rocketcostumeflagaction = function(ins, s) emit(s, { "g4_rocket_costume_flag", ins.args[1] }) end
+L.rocketcostumeflagcheck = function(ins, s) emit(s, { "g4_rocket_costume_check", ins.args[1] }) end
+L.scrcmd_436 = function(_, s) emit(s, { "g4_noop", "leaving the overworld for an app" }) end
+-- THE ROCKET HIDEOUT (HGSS, Mahogany): the floor traps are wild battles
+-- (ScrCmd_RocketTrapBattle: SetupAndStartWildBattle with the species and
+-- level); MovePerson is Platinum's setobjecteventpos (the template's x, y);
+-- MultiBattle <partner> <foe 1> <foe 2> <byte> is the tag battle beside Lance
+-- in Platinum's operand order; ScrCmd_530 <n> <on> writes sys_vars.c's
+-- _020FE4A8[n] (or 0) into var 0x4036 + n. ScrCmd_708 (the trap's flash),
+-- 709 (the Persian statues' alarm) and 710 (the B2F doors' prop animations)
+-- are pictures only.
+L.rockettrapbattle = function(ins, s) emit(s, { "g4_start_wild_battle", ins.args[1], ins.args[2] }) end
+L.moveperson = function(ins, s) emit(s, { "g4_set_object_pos", ins.args[1], ins.args[2], ins.args[3] }) end
+L.multibattle = function(ins, s)
+  emit(s, { "g4_start_tag_battle", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.scrcmd_530 = function(ins, s)
+  local magic = { [0] = 0x6208, 0xF229, 0x0382, 0x1228 }
+  local n = tonumber(ins.args[1]) or 0
+  emit(s, { "g4_set_var", 0x4036 + n, (tonumber(ins.args[2]) or 0) ~= 0 and (magic[n] or 0) or 0 })
+end
+L.scrcmd_708 = function(_, s) emit(s, { "g4_noop", "the rocket trap's flash" }) end
+L.scrcmd_709 = function(_, s) emit(s, { "g4_noop", "the Persian statues' alarm" }) end
+L.scrcmd_710 = function(_, s) emit(s, { "g4_noop", "the hideout doors' prop animations" }) end
+-- LOAN POKEMON (HGSS): Shuckie in Cianwood, Kenya on Route 35
+L.giveloanmon = function(ins, s) emit(s, { "g4_give_loan_mon", ins.args[1], ins.args[2], ins.args[3] }) end
+L.checkreturnloanmon = function(ins, s)
+  emit(s, { "g4_check_return_loan_mon", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.returnloanmon = function(ins, s) emit(s, { "g4_return_loan_mon", ins.args[1] }) end
+L.kenyacheckpartyormailbox = function(ins, s) emit(s, { "g4_kenya_mail", ins.args[1] }) end
+-- LAKE OF RAGE (HGSS): Lance and Dragonite fly off
+L.scrcmd_775 = function(ins, s) emit(s, { "g4_fly_off_pair", ins.args[1], ins.args[2] }) end
+-- CHUCK'S GYM (HGSS): the winch that stops the waterfall
+L.cianwoodgyminit = function(_, s) emit(s, { "g4_cianwood_gym_init" }) end
+L.cianwoodgymturnwinch = function(ins, s) emit(s, { "g4_cianwood_turn_winch", ins.args[1] }) end
+-- BLACKTHORN'S MOVE RELEARNER AND TUTORS (HGSS; scrcmd_move_relearner.c):
+-- MoveRelearnerInit <slot> is Platinum's move reminder, MoveTutorInit <slot>
+-- <move> its one-move tutor (Draco Meteor and friends), and
+-- MoveRelearnerGetResult answers 0 learned / 255 not, as checklearned* does
+L.moverelearnerinit = function(ins, s) emit(s, { "g4_open_move_reminder_menu", ins.args[1] }) end
+L.movetutorinit = function(ins, s) emit(s, { "g4_open_move_tutor_menu", ins.args[1], ins.args[2] }) end
+L.moverelearnergetresult = function(ins, s) emit(s, { "g4_learned_move", ins.args[1] }) end
+-- KANTO'S GYMS (HGSS): Lt. Surge's cans, Janine's and Blue's gymmicks
+L.vermiliongyminit = function(_, s) emit(s, { "g4_vermilion_gym_init" }) end
+L.vermiliongymcancheck = function(ins, s) emit(s, { "g4_vermilion_can_check", ins.args[1], ins.args[2] }) end
+L.vermiliongymlockaction = function(ins, s) emit(s, { "g4_vermilion_lock_action", ins.args[1], ins.args[2] }) end
+L.resamplevermiliongymcans = function(_, s) emit(s, { "g4_vermilion_resample" }) end
+L.fuchsiagyminit = function(_, s) emit(s, { "g4_kanto_gym_init", "fuchsia" }) end
+L.viridiangyminit = function(_, s) emit(s, { "g4_kanto_gym_init", "viridian" }) end
+-- SetBikeStateLock <on> (Cycling Road): Platinum's forcebicycling
+L.setbikestatelock = function(ins, s) emit(s, { "g4_force_bike", ins.args[1] }) end
+L.scrcmd_452 = function(ins, s) emit(s, { "g4_show_mon_pic", ins.args[1], ins.args[2] }) end
+L.scrcmd_453 = function(_, s) emit(s, { "g4_close_mon_pic" }) end
+-- CLAIR'S GYM (HGSS): the platforms over the magma (HgssBlackthornGym)
+L.blackthorngyminit = function(_, s) emit(s, { "g4_blackthorn_gym_init" }) end
+-- MORTY'S GYM (HGSS): the fog and the mediums' candles
+L.ecruteakgyminit = function(_, s) emit(s, { "g4_ecruteak_gym_init" }) end
+L.extinguishecruteakgymcandle = function(_, s) emit(s, { "g4_ecruteak_candle_out" }) end
+-- the following Pokemon's commands: none walks behind the player here, so
+-- "is it in the way" answers 0 and waiting for it is immediate
+-- HGSS'S WALKING POKEMON (src/world/HgssFollowMon.lua; scrcmd_c.c 4422-4577,
+-- 4799, 4863-4906, 5238): 596 too tall?, 600 recall into the ball, 601 face
+-- the player, 602 pause / unpause, 604 movement type (56 = hidden tracking),
+-- 606 out again on the next step, 607 onto the player, 609 reset, 711 talk,
+-- 727 the lead's slot, 729 / 730 active / not, 732 mood, 783 inhibit
+L.scrcmd_596 = function(ins, s) emit(s, { "g4_follow", "tall", ins.args[1] }) end
+L.scrcmd_600 = function(_, s) emit(s, { "g4_follow", "recall" }) end
+L.followmonfaceplayer = function(_, s) emit(s, { "g4_follow", "faceplayer" }) end
+L.togglefollowingpokemonmovement = function(ins, s) emit(s, { "g4_follow", "pause", ins.args[1] }) end
+L.followingpokemonmovement = function(ins, s) emit(s, { "g4_follow", "movement", ins.args[1] }) end
+L.scrcmd_606 = function(_, s) emit(s, { "g4_follow", "release" }) end
+L.scrcmd_607 = function(_, s) emit(s, { "g4_follow", "snap" }) end
+L.scrcmd_609 = function(_, s) emit(s, { "g4_follow", "reset" }) end
+L.followmoninteract = function(_, s) emit(s, { "g4_follow", "talk" }) end
+L.getfollowpokepartyindex = function(ins, s) emit(s, { "g4_follow", "slot", ins.args[1] }) end
+L.scrcmd_729 = function(ins, s) emit(s, { "g4_follow", "active", ins.args[1] }) end
+L.scrcmd_730 = function(ins, s) emit(s, { "g4_follow", "inactive", ins.args[1] }) end
+L.scrcmd_732 = function(ins, s) emit(s, { "g4_follow", "mood", ins.args[1] }) end
+-- HEARTGOLD / SOULSILVER'S FIELD-MOVE SCRIPT (scr_seq_0146: Cut, Rock Smash,
+-- Strength, Whirlpool, Headbutt...), scrcmd_c.c:
+--   183 <slot>     the "<MON> used CUT!" cut-in (ov02_02249458) -- Platinum's
+--                  playhmcutin
+--   560 <kind,var> the obstacle's animation; its task writes the var when it
+--                  ends, and the script spins `Wait 1` until it is nonzero --
+--                  so skipping it hung the script whenever the follower's slot
+--                  (left in that var just before) was 0
+--   598 <mode>     the follower and the player hand the move over (motion only)
+--   733 <n,var> / 734 <n>  the follower's reaction check and emote
+-- GetPartySlotWithMove is Platinum's FindPartySlotWithMove (first non-egg
+-- knowing it, else 6), GetPlayerState PlayerAvatar_GetState (0 walking,
+-- 1 cycling, 2 surfing).
+L.scrcmd_183 = function(ins, s) emit(s, { "g4_hm_cut_in", ins.args[1] }) end
+L.scrcmd_560 = function(ins, s) emit(s, { "g4_destroy_obstacle_anim", ins.args[1], ins.args[2] }) end
+L.scrcmd_598 = function() end
+L.scrcmd_733 = function(ins, s) emit(s, { "g4_set_var", ins.args[2], 0 }) end
+L.scrcmd_734 = function() end
+L.getpartyslotwithmove = function(ins, s) emit(s, { "g4_find_slot_with_move", ins.args[1], ins.args[2] }) end
+L.getplayerstate = function(ins, s) emit(s, { "g4_get_player_state", ins.args[1] }) end
+-- HGSS small queries (scrcmd_c.c / field/scrcmd_pokemon_misc.c /
+-- scrcmd_strbuf.c): the item with its article is msg_0223 (Platinum's 393);
+-- SetObjectFacing is Field_SetEventDefaultDirection, Platinum's
+-- SetObjectEventDir
+L.bufferitemnameindef = function(ins, s) emit(s, { "g4_buffer", ins.args[1], "bank:223", ins.args[2] }) end
+L.countalivemonsandpc = function(ins, s) emit(s, { "g4_count_alive_and_pc", ins.args[1] }) end
+L.partycountegg = function(ins, s) emit(s, { "g4_party_egg_count", ins.args[1] }) end
+L.counttranformedrotomsinparty = function(ins, s) emit(s, { "g4_count_rotom_forms", ins.args[1], ins.args[2] }) end
+L.setobjectfacing = function(ins, s) emit(s, { "g4_set_object_dir", ins.args[1], ins.args[2] }) end
+L.monaddcontestvalue = function(ins, s) emit(s, { "g4_add_contest_value", ins.args[1], ins.args[2], ins.args[3] }) end
+-- HGSS small commands, second batch (scrcmd_party.c / scrcmd_strbuf.c /
+-- scrcmd_c.c / overlay_22.c / field/scrcmd_pokemon_misc.c):
+--   GetMonTypes <type1Var, type2Var, slot> is Platinum's GetPartyMonType;
+--   PartyLegalCheck <var>: TRUE only for an egg whose checksum failed, which
+--   this port's eggs cannot be -- always FALSE;
+--   BufferTrainerClassNameIndef <slot, class>: the class with its article;
+--   ShowCertificate <id>: the Johto / National diploma, the Shiny Leaf sheet;
+--   Give/Take/CheckAthletePoints: the Pokeathlon's points (save.hgssAthletePoints,
+--   the number the points box already shows);
+--   ScrCmd_724 <which, var> reads one Pokeathlon record (capped at 0xFFFF),
+--   ScrCmd_725 <add|sub, n> moves record 11 (unk70);
+--   ScrCmd_712 <app>: the Pokeathlon record viewers (course / medals /
+--   event / ...), which this port does not have -- the script's own fade
+--   either side of it still runs
+L.getmontypes = function(ins, s) emit(s, { "g4_mon_types", ins.args[1], ins.args[2], ins.args[3] }) end
+L.partylegalcheck = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 0 }) end
+L.buffertrainerclassnameindef = function(ins, s) emit(s, { "g4_buffer", ins.args[1], "trainerClass", ins.args[2] }) end
+L.showcertificate = function(ins, s) emit(s, { "g4_hgss_certificate", ins.args[1] }) end
+L.giveathletepoints = function(ins, s) emit(s, { "g4_athlete_points", "give", ins.args[1] }) end
+L.takeathletepoints = function(ins, s) emit(s, { "g4_athlete_points", "take", ins.args[1] }) end
+L.checkathletepoints = function(ins, s) emit(s, { "g4_athlete_points", "check", ins.args[2], ins.args[1] }) end
+L.scrcmd_724 = function(ins, s) emit(s, { "g4_athlon_record", "get", ins.args[1], ins.args[2] }) end
+L.scrcmd_725 = function(ins, s) emit(s, { "g4_athlon_record", "move", ins.args[1], ins.args[2] }) end
+L.scrcmd_712 = function(ins, s) emit(s, { "g4_noop", "the Pokeathlon record viewer" }) end
+-- THE GOLDENROD UNDERGROUND (scr_seq_0094_D37R0102 / 0095_D37R0103,
+-- scrcmd_c.c, overlay_02_02251E74.c):
+--   ScrCmd_553 <limit, var>: TRUE when LCRandom() % 101 <= limit (limit
+--   capped at 100) -- the accessory man's 5% / 95% rolls;
+--   ScrCmd_622 <object, var>: that object's facing (DIR_NORTH when absent);
+--   ScrCmd_830 <var>: TRUE when none of the lottery's 39 Accessories fits in
+--   the Fashion Case any more; 831 <var> draws one of the 39; 832 <var>: TRUE
+--   when all 14 backdrops are owned; 833 <var> draws one not owned yet;
+--   ScrCmd_404 <id, n, var> is Platinum's CanFitAccessory;
+--   ScrCmd_154 <slot, var, kind> dresses a Pokemon up for a portrait
+--   (overlay 41) and 255 / 155 look up / show a saved portrait -- the
+--   dress-up studio is not ported, so no portrait is ever saved: 154 answers
+--   "cancelled" (0), 255 "nothing in that frame" (0) and 155 "no data" (1)
+L.scrcmd_553 = function(ins, s) emit(s, { "g4_percent_roll", ins.args[1], ins.args[2] }) end
+L.scrcmd_622 = function(ins, s) emit(s, { "g4_object_facing", ins.args[1], ins.args[2] }) end
+L.scrcmd_830 = function(ins, s) emit(s, { "g4_hgss_accessory_lottery", "soldOut", ins.args[1] }) end
+L.scrcmd_831 = function(ins, s) emit(s, { "g4_hgss_accessory_lottery", "draw", ins.args[1] }) end
+L.scrcmd_832 = function(ins, s) emit(s, { "g4_hgss_accessory_lottery", "allBackdrops", ins.args[1] }) end
+L.scrcmd_833 = function(ins, s) emit(s, { "g4_hgss_accessory_lottery", "drawBackdrop", ins.args[1] }) end
+L.scrcmd_404 = function(ins, s) emit(s, { "g4_can_fit_accessory", ins.args[1], ins.args[2], ins.args[3] }) end
+-- ...and the rest of the Fashion Case row, which the std give-scripts call
+-- (scr_seq_0003 std_receive_accessory / std_receive_background):
+--   403 <id, n> FashionCase_GiveFashionItem; 405 <id, n, var> TRUE when n <=
+--   the count held; 406 <id> FashionCase_GiveContestBackground; 407 <id, var>
+--   has that backdrop
+-- THE ROUTE 34 DAY CARE (std_daycare, scr_seq_0265; pokeheartgold
+-- scrcmd_daycare.c over get_egg.c): Platinum's Solaceon handlers under
+-- HGSS's names, the same buffer slots and returns --
+--   BufferDaycareMonNicks: 0 / 1 the two names, 2 the first one's OT;
+--   RetrieveDaycareMon <var, slot>; BufferDaycareWithdrawCost <var, slot>
+--   (0 name, 1 price); BufferDaycareMonGrowth <var, slot> (0 name, 1 levels);
+--   GetTailDaycareMonSpeciesAndNick <var>: the later of the two (buffer 0);
+--   PutMonInDaycare <slot>; BufferDaycareMonStats <nick, level, gender, slot>;
+--   DaycareSanitizeMon <slot, var> is Platinum's TryRevertPokemonForm (the
+--   Griseous Orb back to the bag, 0xFF when it will not fit; Giratina / Rotom
+--   / Shaymin to form 0); 551 <mode> / 552 <slotVar, summaryVar> are the
+--   party menu and its answer; UpdateDaycareMonObjects puts the two outside
+--   in the yard -- not drawn here
+-- THE BATTLE FRONTIER'S MOVE TUTORS (std scr_seq_0002; pokeheartgold
+-- field/scrcmd_move_tutor.c), Battle Points for moves out of sTutorMoves
+-- (src/import/Gen4MoveTutor.lua's HGSS rows: move, BP cost, tutor 0..3):
+--   ScrCmd_652 <slot, tutor, var>: pages needed -- 0 none, 1 for up to seven,
+--   else n / 6 + 1;
+--   MoveTutorChooseMove <slot, tutor, page, var>: the menu -- seven to a page
+--   when they fit, else six and NEXT (0xFFFD), then CANCEL (0xFFFE);
+--   TutorMoveGetPrice <move, var>; TutorMoveTeachInSlot <slot, moveSlot, move>;
+--   ScrCmd_556 <bp> spends the Battle Points
+-- PROFESSOR OAK'S POKEDEX RATING AND THE DEX COUNTS (HGSS scrcmd_c.c,
+-- pokedex.c, unk_0205BB1C.s GetOak*DexRating; std scr_seq_0148):
+--   CountJohtoDexSeen / Owned, CountNationalDexSeen / Owned <var>;
+--   CheckJohtoDexComplete <var>: Johto owned, less Mew and Celebi, >= 254;
+--   GetDexEvalResult <national, msgVar, fanfareVar>: the rating line out of
+--   msg_0666 and SEQ_ME_HYOUKA1, or HYOUKA6 and the "complete" line
+-- ...and the rest of std_flash (scr_seq_0146): FlashAction <0 clear | 1 set |
+-- 2 check, var> is Platinum's flash flag; FlashEffect turns the cave's
+-- weather to WEATHER_FLASH_2 (12); SurvivePoisoning <var, slot> is
+-- Platinum's survivepoison
+L.countjohtodexseen = function(ins, s) emit(s, { "g4_hgss_dex_count", "johto", "seen", ins.args[1] }) end
+L.countjohtodexowned = function(ins, s) emit(s, { "g4_hgss_dex_count", "johto", "owned", ins.args[1] }) end
+L.countnationaldexseen = function(ins, s) emit(s, { "g4_hgss_dex_count", "national", "seen", ins.args[1] }) end
+L.countnationaldexowned = function(ins, s) emit(s, { "g4_hgss_dex_count", "national", "owned", ins.args[1] }) end
+L.checkjohtodexcomplete = function(ins, s) emit(s, { "g4_hgss_johto_complete", ins.args[1] }) end
+L.getdexevalresult = function(ins, s) emit(s, { "g4_hgss_dex_eval", ins.args[1], ins.args[2], ins.args[3] }) end
+L.flashaction = function(ins, s) emit(s, { "g4_field_move_flag", "flash", ins.args[1], ins.args[2] }) end
+L.flasheffect = function(_, s) emit(s, { "g4_hgss_flash_effect" }) end
+L.survivepoisoning = function(ins, s) emit(s, { "g4_survive_poison", ins.args[1], ins.args[2] }) end
+L.scrcmd_652 = function(ins, s) emit(s, { "g4_hgss_tutor_pages", ins.args[1], ins.args[2], ins.args[3] }) end
+L.movetutorchoosemove = function(ins, s)
+  emit(s, { "g4_hgss_tutor_menu", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.tutormovegetprice = function(ins, s) emit(s, { "g4_hgss_tutor_price", ins.args[1], ins.args[2] }) end
+L.tutormoveteachinslot = function(ins, s) emit(s, { "g4_tutor_set_move", ins.args[1], ins.args[3], ins.args[2] }) end
+L.scrcmd_556 = function(ins, s) emit(s, { "g4_remove_bp", ins.args[1] }) end
+L.bufferdaycaremonnicks = function(_, s) emit(s, { "g4_daycare_names" }) end
+L.resetdaycareegg = function(_, s) emit(s, { "g4_daycare_reset_egg" }) end
+L.givedaycareegg = function(_, s) emit(s, { "g4_daycare_give_egg" }) end
+L.retrievedaycaremon = function(ins, s) emit(s, { "g4_daycare_withdraw", ins.args[1], ins.args[2] }) end
+L.bufferdaycarewithdrawcost = function(ins, s) emit(s, { "g4_daycare_price", ins.args[1], ins.args[2] }) end
+L.bufferdaycaremongrowth = function(ins, s) emit(s, { "g4_daycare_gained", ins.args[1], ins.args[2] }) end
+L.gettaildaycaremonspeciesandnick = function(ins, s) emit(s, { "g4_daycare_tail", ins.args[1] }) end
+-- HGSS ScrCmd_465 <mode, ...>: the GROUPS (std_group, scr_seq_0143)
+L.scrcmd_465 = function(ins, s) emit(s, { "g4_hgss_group", ins.args[1], ins.args[2], ins.args[3] }) end
+-- HGSS ScrCmd_494 <slot, word>: BufferECWord, an Easy Chat word to a buffer
+L.scrcmd_494 = function(ins, s) emit(s, { "g4_buffer_message_word", ins.args[1], ins.args[2] }) end
+-- ScrCmd_706 / 642 <dest>: a Hall of Fame record loads / the extra save
+-- chunks exist -- both "the Hall of Fame has a team" here
+L.scrcmd_706 = function(ins, s) emit(s, { "g4_hof_exists", ins.args[1] }) end
+-- HGSS 722 / 723 (scrcmd_c.c: sub_020977CC / sub_020979A8, asm only): the
+-- travel cut-ins, read as (u8 direction, u8, u16 map header, u16 x, u16 z).
+-- 723 is the S.S. Aqua (Olivine and Vermilion docks -> ship 1F 307 at
+-- 24,19), 722 the Magnet Train (T11R0603 / T25R0503). Both end in the warp
+-- to that header and cell; the ride itself is not drawn.
+-- HGSS 445 (scrcmd_c.c): LocalFieldData_GetPreviousPosition's mapId into the
+-- var -- the same answer as Platinum's `getpreviousmapid` (the Olivine port
+-- seaman faces south when the player came off the dock, map 330).
+L.scrcmd_445 = function(ins, s) emit(s, { "g4_previous_map", ins.args[1] }) end
+-- HGSS 814: SetFlag99A -- system flag 0x99A, set as Cerulean Gym loads.
+L.scrcmd_814 = function(_, s) emit(s, { "set_flag", flagName(0x99A) }) end
+-- HGSS mass outbreaks (src/world/HgssOutbreaks.lua)
+L.enablemassoutbreaks = function(_, s) emit(s, { "g4_hgss_enable_outbreaks" }) end
+L.scrcmd_211 = function(ins, s) emit(s, { "g4_hgss_outbreak_info", ins.args[1], ins.args[2] }) end
+L.scrcmd_722 = function(ins, s) emit(s, { "g4_warp", ins.args[3], ins.args[4], ins.args[5] }) end
+L.scrcmd_723 = function(ins, s) emit(s, { "g4_warp", ins.args[3], ins.args[4], ins.args[5] }) end
+L.scrcmd_642 = function(ins, s) emit(s, { "g4_hof_exists", ins.args[1] }) end
+-- ScrCmd_164: HallOfFameShowcase_LaunchApp, the PC's record browser
+L.scrcmd_164 = function(_, s) emit(s, { "g4_open_hall_of_fame" }) end
+-- ScrCmd_289 <choice>: PlayerProfile_SetAvatar (the Union Room look)
+L.scrcmd_289 = function(ins, s) emit(s, { "g4_hgss_set_avatar", ins.args[1] }) end
+L.putmonindaycare = function(ins, s) emit(s, { "g4_daycare_store", ins.args[1] }) end
+L.bufferdaycaremonstats = function(ins, s)
+  emit(s, { "g4_daycare_name_level_gender", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.getdaycarecompatibility = function(ins, s) emit(s, { "g4_daycare_compatibility", ins.args[1] }) end
+L.daycaresanitizemon = function(ins, s) emit(s, { "g4_try_revert_form", ins.args[1], ins.args[2] }) end
+L.scrcmd_551 = function(_, s) emit(s, { "g4_daycare_party_menu" }) end
+L.scrcmd_552 = function(ins, s) emit(s, { "g4_daycare_party_result", ins.args[1], ins.args[2] }) end
+L.updatedaycaremonobjects = function(_, s) emit(s, { "g4_noop", "the Day Care's Pokemon in the yard" }) end
+L.scrcmd_403 = function(ins, s) emit(s, { "g4_add_accessory", ins.args[1], ins.args[2] }) end
+L.scrcmd_405 = function(ins, s) emit(s, { "g4_has_accessories", ins.args[1], ins.args[2], ins.args[3] }) end
+L.scrcmd_406 = function(ins, s) emit(s, { "g4_add_backdrop", ins.args[1] }) end
+L.scrcmd_407 = function(ins, s) emit(s, { "g4_check_backdrop", ins.args[1], ins.args[2] }) end
+L.scrcmd_154 = function(ins, s) emit(s, { "g4_no_feature", ins.args[2], "the dress-up portrait studio" }) end
+L.scrcmd_255 = function(ins, s) emit(s, { "g4_set_var", ins.args[2], 0 }) end
+L.scrcmd_155 = function(ins, s) emit(s, { "g4_set_var", ins.args[2], 1 }) end
+-- the rest of HGSS's field-move script (scr_seq_0146): Surf / Waterfall /
+-- RockClimb are Platinum's tasks; Whirlpool carries the player across the
+-- whirlpool's run (TILE_BEHAVIOR_WHIRLPOOL 0x11) the same way;
+-- StrengthFlagAction is Platinum's (0 clear, 1 set, 2 check -> var);
+-- CheckEscortMode is "never true in HGSS" (field_control.c); 728 / 731 are
+-- the follower's own animations and 829 asks whether it does the Headbutt
+-- (0: the player does it); Capitalize upper-cases a buffer's first letter;
+-- TryHeadbuttEncounter / RockSmashItemCheck roll the tree / the rock
+L.surf = function(ins, s) emit(s, { "g4_use_surf", ins.args[1] }) end
+L.waterfall = function(ins, s) emit(s, { "g4_use_waterfall", ins.args[1] }) end
+L.rockclimb = function(ins, s) emit(s, { "g4_use_rock_climb", ins.args[1] }) end
+L.whirlpool = function(ins, s) emit(s, { "g4_use_whirlpool", ins.args[1] }) end
+L.strengthflagaction = function(ins, s) emit(s, { "g4_field_move_flag", "strength", ins.args[1], ins.args[2] }) end
+L.checkescortmode = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 0 }) end
+L.scrcmd_728 = function() end
+L.scrcmd_731 = function() end
+L.scrcmd_829 = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 0 }) end
+L.capitalize = function(ins, s) emit(s, { "g4_capitalize", ins.args[1] }) end
+L.tryheadbuttencounter = function(ins, s) emit(s, { "g4_hgss_headbutt", ins.args[1] }) end
+L.rocksmashitemcheck = function(ins, s) emit(s, { "g4_hgss_rock_smash", ins.args[1], ins.args[2], ins.args[3] }) end
+-- AlphPuzzle <n>: the Ruins of Alph sliding puzzle (src/ui/HgssAlphPuzzle.lua)
+L.alphpuzzle = function(ins, s) emit(s, { "g4_alph_puzzle", ins.args[1] }) end
+L.setfollowmoninhibitstate = function(ins, s) emit(s, { "g4_follow", "inhibit", ins.args[1] }) end
+-- `ScreenShake ampX, ampY, count, period` (HGSS): the look-at target shakes
+L.screenshake = function(ins, s)
+  emit(s, { "g4_screen_shake", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.partyselectui = function(_, s) emit(s, { "g4_select_tutor_mon" }) end
+L.scrcmd_656 = function(ins, s) emit(s, { "g4_tutor_has_moves", ins.args[1], 3, ins.args[2] }) end
+L.monhasmove = function(ins, s) emit(s, { "g4_mon_has_move", ins.args[1], ins.args[2], ins.args[3] }) end
+L.countmonmoves = function(ins, s) emit(s, { "g4_mon_move_count", ins.args[1], ins.args[2] }) end
+L.pokemonsummaryscreen = function(ins, s) emit(s, { "g4_tutor_forget_menu", ins.args[2], ins.args[3] }) end
+L.getmoveselection = function(ins, s) emit(s, { "g4_tutor_forget_slot", ins.args[2] }) end
+L.setmonmove = function(ins, s) emit(s, { "g4_tutor_set_move", ins.args[1], ins.args[3], ins.args[2] }) end
 
 -- THE FIVE ROWS THAT HAND OVER THE FIRST POKEMON, and three of them were
 -- unlowered.  Route 201's briefcase scene, in full:
@@ -1157,6 +2001,83 @@ end
 -- the tree.  This is the line that opens it.
 L.startchoosestarterscene = function(_, s) emit(s, { "g4_choose_starter" }) end
 L.savechosenstarter = function(_, s) emit(s, { "g4_save_starter" }) end
+-- Black / White's gift box (Gen5ScriptLink 0x153): answers 0..2 into a var
+L.bwchoosestarter = function(ins, s) emit(s, { "g4_bw_choose_starter", ins.args[1] }) end
+-- 0x101 <dest, slot>: is that Pokemon at full HP (or an Egg)
+L.bwmonhpfull = function(ins, s) emit(s, { "g4_mon_hp_full", ins.args[1], ins.args[2] }) end
+-- 0x110 <dest, slot, u16>: does that Pokemon carry a nickname
+L.bwmonhasnickname = function(ins, s) emit(s, { "g4_mon_has_nickname", ins.args[1], ins.args[2] }) end
+-- 0x17D: Juniper's catching demonstration on Route 1
+L.bwcatchingtutorial = function(_, s) emit(s, { "g4_bw_catching_tutorial" }) end
+-- 0x0D0 / 0x0D4 <month var, day var>: today, and the DS profile's birthday
+L.bwgetdate = function(ins, s) emit(s, { "g4_bw_date", ins.args[1], ins.args[2] }) end
+L.bwgetbirthday = function(ins, s) emit(s, { "g4_bw_birthday", ins.args[1], ins.args[2] }) end
+-- 0x0E0 <var>: the version id (21 Black, 20 White)
+L.bwgetversion = function(ins, s) emit(s, { "g4_bw_version", ins.args[1] }) end
+-- BW 0x220 <species, 0, slotVar, resultVar>: a fateful Pokemon of that
+-- species in the party (src/import/Gen5ScriptLink.lua)
+L.bwpartyhaseventmon = function(ins, s)
+  emit(s, { "g4_bw_event_mon", ins.args[1], ins.args[3], ins.args[4] })
+end
+-- 0x025 <flag, dest>: a flag's state into a var
+L.bwflagtovar = function(ins, s) emit(s, { "g4_bw_flag_to_var", ins.args[1], ins.args[2] }) end
+-- the shared trainer script: beaten?, healer / prize, object movement type
+L.bwtrainerbeaten = function(ins, s) emit(s, { "g4_bw_trainer_beaten", ins.args[1], ins.args[2] }) end
+L.bwtrainerafter = function(ins, s) emit(s, { "g4_bw_trainer_after", ins.args[1], ins.args[2] }) end
+L.bwobjectmovement = function(ins, s) emit(s, { "g4_bw_object_movement", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE 0x07B: an object placed, its facing left as it is (99
+-- names no direction)
+L.bwplaceobject = function(ins, s)
+  emit(s, { "g4_place_object", ins.args[1], ins.args[2], ins.args[4], 99, ins.args[3] })
+end
+-- BLACK / WHITE 0x195: a gated rail ride (Icirrus Gym)
+L.bwrailride = function(ins, s) emit(s, { "g4_bw_rail_ride", ins.args[1] }) end
+-- BLACK / WHITE 0x0DF: has a species been seen
+L.bwdexseen = function(ins, s) emit(s, { "g4_bw_dex_seen", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE: Driftveil Gym's lifts
+L.bwliftmove = function(ins, s) emit(s, { "g4_bw_lift_move", ins.args[1] }) end
+-- BLACK / WHITE 0x021: the script the next warp's destination runs
+L.bwqueueentry = function(ins, s) emit(s, { "g4_bw_queue_entry", ins.args[1] }) end
+-- BLACK / WHITE: Opelucid Gym's dragons (Gen5DragonGym)
+L.bwdragoninit = function(_, s) emit(s, { "g4_bw_dragon_init" }) end
+-- BLACK / WHITE 0x1A2: an Elite Four room's lift
+L.bwe4lift = function(ins, s) emit(s, { "g4_bw_e4_lift", ins.args[1] }) end
+L.bwdragonflip = function(ins, s) emit(s, { "g4_bw_dragon_flip", ins.args[1], ins.args[2] }) end
+L.bwdragonsettle = function(ins, s) emit(s, { "g4_bw_dragon_settle", ins.args[1] }) end
+-- BLACK / WHITE 0x0D8: var = whether condition n of the field's table holds
+L.bwcondition = function(ins, s) emit(s, { "g4_bw_condition", ins.args[1], ins.args[2] }) end
+L.bwpartyable = function(ins, s) emit(s, { "g4_bw_party_able", ins.args[1] }) end
+L.bwbattleok = function(ins, s) emit(s, { "g4_bw_battle_ok", ins.args[1] }) end
+L.bwgameclear = function(ins, s) emit(s, { "g4_bw_game_clear", ins.args[1] }) end
+L.bwlegend = function(ins, s) emit(s, { "g4_bw_legend", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE: Nimbasa Gym's coaster switch
+L.bwcoasterswitch = function(ins, s) emit(s, { "g4_bw_coaster_switch", ins.args[1] }) end
+-- BLACK / WHITE: the season, var *= value, and the park visitor's table
+L.bwseason = function(ins, s) emit(s, { "g4_bw_season", ins.args[1] }) end
+L.bwmulvar = function(ins, s) emit(s, { "g4_bw_mul_var", ins.args[1], ins.args[2] }) end
+L.bwparkvisitor = function(ins, s) emit(s, { "g4_bw_park_visitor", ins.args[1], ins.args[2] }) end
+-- BLACK / WHITE MENUS AND ELEVATORS (Gen5ScriptLink 0xB2, 0x1CB..0x1CD, 0xA7)
+L.bwmenuopen = function(ins, s)
+  emit(s, { "g4_menu_init", ins.args[5], ins.args[4], ins.args[3], s.bankFor and s.bankFor(s.member) or nil })
+end
+L.bwelevator = function(ins, s) emit(s, { "g4_bw_elevator", ins.floors or {} }) end
+L.bwelevatorfloors = function(_, s) emit(s, { "g4_bw_elevator_floors" }) end
+L.bwelevatorpick = function(ins, s) emit(s, { "g4_bw_elevator_pick", ins.args[1] }) end
+L.bwelevatorwarp = function(_, s) emit(s, { "g4_bw_elevator_warp" }) end
+-- BLACK / WHITE 0x049: one of two entries of the script's bank by version
+L.bwversionmsgbox = function(ins, s)
+  emit(s, { "g4_bw_version_message", ins.args[1], ins.args[2], s.bankFor and s.bankFor(s.member) })
+end
+-- BLACK / WHITE 0x1BB: the League's statue, once the four are beaten (Z137's
+-- plaque, M0274 S007A). Its handler (ov21 0x21CC544) starts the event at
+-- ov10 0x216C204: the platform's sound (SE 0x7A1) and camera, then a warp
+-- (0x21854B0) to zone 0x8A -- 138, the stair to the Champion -- at that
+-- zone's own standing spot (its header's +0x24 / +0x2C: 30, 83). Stepped
+-- over, the plaque did nothing and the League ended at the Elite Four.
+L.bw_1BB = function(_, s) emit(s, { "g4_warp", 138, 30, 83 }) end
+L.bwspawnobject = function(ins, s)
+  emit(s, { "g4_bw_spawn_object", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5], ins.args[6] })
+end
 -- `givepokemon <species> <level> <heldItem> <destVar>` -- the first three are
 -- var-or-literal, which matters because the starter arrives as a var.
 L.givepokemon = function(ins, s)
@@ -1277,22 +2198,61 @@ L.removecameraoverrideobject = function(_, s)
 end
 
 -- DOORS.  A Gen 4 door is an NSBCA animation on the door's own NSBMD map prop,
--- played on a tagged one-shot slot with a sound effect
--- (`DoorAnimation_FindDoorAndLoad` searches the loaded props for one of twenty
+-- played on a tagged one-shot slot WITH A SOUND EFFECT:
+-- `DoorAnimation_FindDoorAndLoad` searches the loaded props for one of twenty
 -- named door models at the given tile, then
--- `MapPropOneShotAnimationManager_PlayAnimationWithSoundEffect`).  This port
--- reads NSBMD but not NSBCA, bakes the ground's props into a flat canvas, and
--- has no SE bank for Gen 4 yet -- three separate stages, none of them close.
+-- `MapPropOneShotAnimationManager_PlayAnimationWithSoundEffect`.
 --
--- Named rather than left on the unknown-command path, so the log says WHICH
--- feature is absent instead of printing an opcode nobody can look up.  The
--- wait is a no-op too: with nothing animating there is nothing to wait for,
--- and holding the script would be a frozen pause rather than a door opening.
-L.loaddooranimation = function(_, s) emit(s, { "g4_noop", "door animations" }) end
-L.playdooropenanimation = function(_, s) emit(s, { "g4_noop", "door animations" }) end
-L.playdoorcloseanimation = function(_, s) emit(s, { "g4_noop", "door animations" }) end
-L.unloadanimation = function(_, s) emit(s, { "g4_noop", "door animations" }) end
-L.waitforanimation = function(_, s) emit(s, { "g4_noop", "door animations" }) end
+-- THESE WERE A NO-OP, AND THE REASON GIVEN FOR IT HAD EXPIRED.  It read "this
+-- port reads NSBMD but not NSBCA, bakes the ground's props into a flat canvas,
+-- and has no SE bank for Gen 4 yet -- three separate stages, none of them
+-- close."  The first two are still true.  The third is not: `audio.lua` carries
+-- 2,030 sound effects keyed by the cartridge's own SSEQ symbols, and
+-- `g4_play_sound` has been using them all along.
+--
+-- Measured over the decoded corpus, these are **194 invocations** -- the
+-- largest declined subject in the port -- so every door in Sinnoh opened in
+-- silence for want of a claim nobody re-checked.  `src/world/Gen4Doors.lua`
+-- has the three cartridge tables and the hitbox search; the sound plays now
+-- and the animation is still absent, which is said in one place rather than
+-- five.
+--
+-- `loaddooranimation mapX mapZ tileX tileZ tag` -- the first two are matrix
+-- cells read as raw halfwords, the next two are var-or-literal tiles within
+-- that chunk, and the tag is the one-shot slot.  The tag is what `open` and
+-- `close` name later, and it OUTLIVES the script that loaded it: there are 52
+-- loads against 142 plays, because a map loads its door once and opens it
+-- every time somebody walks through.
+L.loaddooranimation = function(ins, s)
+  emit(s, { "g4_door_anim", "load", ins.args[1], ins.args[2],
+            ins.args[3], ins.args[4], ins.args[5] })
+end
+L.playdooropenanimation = function(ins, s)
+  emit(s, { "g4_door_anim", "open", ins.args[1] })
+end
+L.playdoorcloseanimation = function(ins, s)
+  emit(s, { "g4_door_anim", "close", ins.args[1] })
+end
+-- The slot is released and the wait is still a no-op: with nothing animating
+-- there is nothing to wait for, and holding the script would be a frozen pause
+-- rather than a door opening.  `unloadanimation` drops the remembered model so
+-- a tag reused for something else cannot play a door's sound.
+L.unloadanimation = function(ins, s)
+  emit(s, { "g4_door_anim", "unload", ins.args[1] })
+end
+-- `waitforanimation <tag>` IS LOWERED ABOVE, with its operand.
+--
+-- This row used to be a second `L.waitforanimation`, onto `g4_noop`, and
+-- being later in the file it silently OVERWROTE the real one -- so the
+-- handler was unreachable and the declined-subject census filed all 48 sites
+-- under "the door animation's wait".  Two spellings of one command in one
+-- table, which is this port's recurring bug with both copies in the same
+-- file.
+--
+-- Left as a comment rather than deleted, because the no-op's REASONING was
+-- right and is still the contract: a tag that is not running is finished, so
+-- a wait on a door this port could not identify steps over instead of
+-- freezing.  `Gen4PropOneShot.finished` answers exactly that.
 
 -- `FieldMenuManager_SetHorizontalAnchor` / `SetVerticalAnchor` -- which corner
 -- the NEXT script menu is drawn from.  This engine's menu places itself, so
@@ -1337,19 +2297,101 @@ L.capitalizefirstletter = function(ins, s)
 end
 -- `GameRecords_IncrementTrainerScore` -- the trainer-card score counters,
 -- which this port keeps none of.
-L.incrementtrainerscore = function(_, s) emit(s, { "g4_noop", "trainer score records" }) end
-L.incrementtrainerscore2 = function(_, s) emit(s, { "g4_noop", "trainer score records" }) end
+-- `checkmetfurniturerequirements <furniture + 1> <destVar>`: the Villa's
+-- seven pieces that need something done first (Gen4GameRecords.villa)
+L.checkmetfurniturerequirements = function(ins, s)
+  emit(s, { "g4_villa_requirements", ins.args[1], ins.args[2] })
+end
+L.incrementtrainerscore = function(ins, s) emit(s, { "g4_trainer_score", ins.args[1] }) end
+L.incrementtrainerscore2 = function(ins, s) emit(s, { "g4_trainer_score", ins.args[1] }) end
 -- `ScrCmd_Dummy1F9` reads a var and returns.  It is a no-op ON THE CARTRIDGE,
 -- so this is not a stand-in for anything.
 L.dummy1f9 = function(_, s) emit(s, { "g4_noop", "a cartridge no-op (dummy1f9)" }) end
 L.playdefaultmusic = function(_, s) emit(s, { "play_default_music" }) end
 L.stopmusic = function(_, s) emit(s, { "stop_music" }) end
 
--- The journal is Platinum's own diary screen and this port has none.  A noop
--- rather than a gap: the scripts that write entries must keep running, and
--- what they write has nowhere to go.
-L.givejournal = function(_, s) emit(s, { "g4_noop", "journal" }) end
-L.createjournalevent = function(_, s) emit(s, { "g4_noop", "journal entry" }) end
+-- THE JOURNAL: src/pokemon/Gen4Journal.lua. `createjournalevent` reads five
+-- vars (type, parameter, three unused).
+L.givejournal = function(_, s) emit(s, { "g4_give_journal" }) end
+L.createjournalevent = function(ins, s) emit(s, { "g4_journal_event", ins.args[1], ins.args[2] }) end
+
+-- THE BATTLE TOWER AND BATTLE POINTS: src/script/Gen4BattleTowerCommands.lua.
+-- `callbattletowerfunction <fn> <arg> <dest>` is one row; behind
+-- BT_FUNC_UPDATE_GAME_RECORDS_AND_JOURNAL (38) the frontier battle room's
+-- Battle Points follow, which the field room's script (Diamond and Pearl's)
+-- never had.
+L.initbattletower = function(ins, s) emit(s, { "g4_bt_init", ins.args[1], ins.args[2] }) end
+L.setbattletowernull = function(_, s) emit(s, { "g4_bt_null" }) end
+L.freebattletower = function(_, s) emit(s, { "g4_bt_free" }) end
+L.callbattletowerfunction = function(ins, s)
+  emit(s, { "g4_bt_call", ins.args[1], ins.args[2], ins.args[3] })
+  if tonumber(ins.args[1]) == 38 then emit(s, { "g4_bt_reward" }) end
+end
+L.printbattletowerintromessage = function(ins, s) emit(s, { "g4_bt_intro", ins.args[1] }) end
+L.getbattletowerpartnerspeciesandmove = function(ins, s)
+  emit(s, { "g4_bt_partner_species_move", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+-- `bufferspeciesnamewitharticle <slot> <var> ...`: bank 413, "a TURTWIG"
+L.bufferspeciesnamewitharticle = function(ins, s)
+  emit(s, { "g4_buffer", ins.args[1], "speciesArticle", ins.args[2] })
+end
+-- `getcurnetid <var>`: the link player number; alone, always player 0
+L.getcurnetid = function(ins, s) emit(s, { "g4_set_var", ins.args[1], 0 }) end
+-- `movecamera <x> <y> <z>` (ScrCmd_MoveCamera): the hidden player's sprite
+-- and the camera nudged by x/y/z world units -- 8 is half a tile, centring
+-- the multi rooms between their two doors.  Within a tile of the same view.
+L.movecamera = function(_, s) emit(s, { "g4_noop", "half-tile camera nudge" }) end
+-- `clearreceivedtempdataallplayers`: link-play bookkeeping, nothing alone
+L.clearreceivedtempdataallplayers = function(_, s) emit(s, { "g4_noop", "link play" }) end
+-- THE BATTLE HALL'S LOBBY: src/script/Gen4BattleHallLobby.lua
+L.callbattlehalllobbyfunction = function(ins, s)
+  emit(s, { "g4_hall_lobby", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getbattlehallselectedslots = function(ins, s) emit(s, { "g4_hall_selected_slots", ins.args[1], ins.args[2] }) end
+L.deleteactivebattlehallstreak = function(ins, s) emit(s, { "g4_hall_delete_streak", ins.args[1] }) end
+L.checkifbattlehallstreakis50 = function(ins, s) emit(s, { "g4_hall_streak50", ins.args[1] }) end
+L.getnumspecieswithbattlehallrecords = function(ins, s) emit(s, { "g4_hall_num_species", ins.args[1] }) end
+L.getbattlehalltotalsinglesrecord = function(ins, s) emit(s, { "g4_hall_total_singles", ins.args[1] }) end
+L.getbattlehallrecordkeeperstats = function(ins, s)
+  emit(s, { "g4_hall_record_keeper", ins.args[1], ins.args[2], ins.args[3], ins.args[4], ins.args[5], ins.args[6] })
+end
+-- THE BATTLE FACTORY'S LOBBY: the one command of its own
+L.deleteactivebattlefactorystreak = function(ins, s)
+  emit(s, { "g4_bf_delete_streak", ins.args[1], ins.args[2] })
+end
+-- the multi challenge's species check with the link partner: alone, nobody to differ from
+L.checkbattlehallpartnerusesdifferentspecies = function(ins, s) emit(s, { "g4_set_var", ins.args[2], 0 }) end
+-- THE BATTLE CASTLE'S LOBBY: src/script/Gen4BattleHallLobby.lua
+L.callbattlecastlelobbyfunction = function(ins, s)
+  emit(s, { "g4_castle_lobby", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getbattlecastleselectedslots = function(ins, s)
+  emit(s, { "g4_castle_selected_slots", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.deleteactivebattlecastlestreak = function(ins, s) emit(s, { "g4_castle_delete_streak", ins.args[1] }) end
+L.checkbattlecastlepartnerusesdifferentspecies = function(ins, s) emit(s, { "g4_set_var", ins.args[3], 0 }) end
+-- THE BATTLE ARCADE'S LOBBY: the Castle's party pick, its own records
+L.callbattlearcadelobbyfunction = function(ins, s)
+  emit(s, { "g4_arcade_lobby", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getbattlearcadeselectedslots = L.getbattlecastleselectedslots
+L.deleteactivebattlearcadestreak = function(ins, s) emit(s, { "g4_arcade_delete_streak", ins.args[1] }) end
+L.checkbattlearcadepartnerusesdifferentspecies = L.checkbattlecastlepartnerusesdifferentspecies
+L.messageseenbanlistspecies = function(ins, s) emit(s, { "g4_bt_banlist_message", ins.args[1], ins.args[2] }) end
+L["1df"] = function(ins, s) emit(s, { "g4_bt_trophy", ins.args[1] }) end
+L["1e0"] = function(ins, s) emit(s, { "g4_bt_teala", ins.args[1] }) end
+L.launchbattlefrontierscene = function(ins, s) emit(s, { "g4_frontier_scene", ins.args[1] }) end
+L.showbattlepoints = function(ins, s) emit(s, { "g4_bp_window", "show", ins.args[1], ins.args[2] }) end
+L.hidebattlepoints = function(_, s) emit(s, { "g4_bp_window", "hide" }) end
+L.updatebpdisplay = function(_, s) emit(s, { "g4_bp_window", "update" }) end
+L.getbattlepoints = function(ins, s) emit(s, { "g4_get_bp", ins.args[1] }) end
+L.givebattlepoints = function(ins, s) emit(s, { "g4_give_bp", ins.args[1] }) end
+L.removebattlepoints = function(ins, s) emit(s, { "g4_remove_bp", ins.args[1] }) end
+L.checkbattlepoints = function(ins, s) emit(s, { "g4_check_bp", ins.args[1], ins.args[2] }) end
+L.pokemartfrontier = function(ins, s) emit(s, { "g4_pokemart_frontier", ins.args[1] }) end
+L.getexchangeservicecorneritemandcost = function(ins, s)
+  emit(s, { "g4_exchange_item", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
 
 
 -- ---------------------------------------------------------------------------
@@ -1376,6 +2418,30 @@ L.createjournalevent = function(_, s) emit(s, { "g4_noop", "journal entry" }) en
 L.blackoutfrombattle = function(_, s)
   emit(s, { "g4_noop", "the scripted blackout (the battle teardown has already done it)" })
 end
+-- 0x14B IS THE SAME FUNCTION AS 0x14A IN THE CARTRIDGE -- byte for byte, both
+-- a single `FieldTask_StartBlackOutFromBattle(ctx->task)` -- AND IT STILL MUST
+-- NOT SHARE THE ROW ABOVE. That is the interesting part.
+--
+-- The row above is a no-op, and its reasoning is a claim about the CALLER:
+-- "the battle teardown has already done it". 0x14A's only use is
+-- `CommonScript_LostHoneyTreeBattle`, which is reached after losing a battle,
+-- so the claim holds. 0x14B's only use is `CommonScript_PoisonWhiteout`, where
+-- NO BATTLE HAPPENED -- so the same no-op would leave the player walking around
+-- with a wiped party.
+--
+-- Two identical cartridge functions, and our substitute for one of them is
+-- valid for its caller and not for the other's. A shared row would have been
+-- defensible from the C alone and wrong.
+--
+-- Declared rather than implemented, because the path is UNREACHABLE under the
+-- rule the same pass put in: `Pokemon_DoPoisonDamage` is `if (hp > 1) hp--`, so
+-- field poison cannot take a Pokemon below 1 HP, so `CountAliveMonsExcept`
+-- cannot reach 0 from poison, so this script entry cannot be reached from it.
+-- Implementing it would add a third copy of the engine's whiteout sequence for
+-- a caller that never runs.
+L.blackoutfrombattle2 = function(_, s)
+  emit(s, { "g4_blackout_from_battle_2" })
+end
 L.setblackoutwarpid = function(ins, s)
   emit(s, { "g4_set_blackout_warp", ins.args[1] })
 end
@@ -1399,7 +2465,54 @@ L.checkitemisplate = function(ins, s)
   emit(s, { "g4_item_is_plate", ins.args[1], ins.args[2] })
 end
 
+-- THE ITEM BANDS. `scripts_visible_items.s` (329 objects) and
+-- `scripts_hidden_items.s` (262) are shared bands, and both finish a pickup
+-- with `IsItemTMHM` followed by two `GoToIfEq`s. Unlowered, the var neither
+-- jump tested was ever written, so neither was taken and the script fell into
+-- `End` -- 591 pickups that added the item and said nothing. See the handler.
+L.isitemtmhm = function(ins, s)
+  emit(s, { "g4_item_is_tmhm", ins.args[1], ins.args[2] })
+end
+-- One operand, no destination: a flag the cartridge sets and never reads.
+L.trysetunusedcollectedorbflag = function(ins, s)
+  emit(s, { "g4_try_set_collected_orb_flag", ins.args[1] })
+end
+-- A TV segment with nowhere to go; lowered so the row stops warning on all 262
+-- hidden items.
+L.savetvsegmenthiddenitem = function(ins, s)
+  emit(s, { "g4_save_tv_segment", "hidden_item", ins.args[1] })
+end
+
 L.getpartycount = function(ins, s) emit(s, { "g4_party_count", ins.args[1] }) end
+L.countalivemonsexcept = function(ins,s)
+  emit(s, {'g4_party_alive_except',ins.args[1],ins.args[2]})
+end
+-- `survivepoison <destVar> <slot>` -- `Pokemon_TrySurvivePoison`, and the
+-- script calls it ONCE PER PARTY SLOT in a loop:
+--
+--     CommonScript_TrySurvivePoison:
+--       SurvivePoison VAR_RESULT, VAR_0x8005
+--       GoToIfEq VAR_RESULT, FALSE, CommonScript_FaintedFromPoison
+--       BufferPartyMonNickname 0, VAR_0x8005
+--       Message CommonStrings_Text_PokemonSurvivedThePoisoning
+--     CommonScript_FaintedFromPoison:
+--       AddVar VAR_0x8005, 1
+--       GoToIfNe VAR_0x8004, VAR_0x8005, CommonScript_TrySurvivePoison
+--
+-- Destination first, slot second -- `GetVarPointer` then `GetVar`, the same
+-- order as `getmovementtype` and the reverse of `getrematchtrainerid`. The loop
+-- terminates on the slot counter either way, so an unlowered row did not hang
+-- it; it printed the survived line for every mon or for none.
+L.survivepoison = function(ins, s)
+  emit(s, { "g4_survive_poison", ins.args[1], ins.args[2] })
+end
+-- `hatchegg` -- no operands. `FieldSystem_HatchEgg` is `Party_GetFirstEgg`
+-- plus the hatch scene; the common script around it does the "Oh?" and the
+-- fades, so this row is only the hatch.
+L.hatchegg = function(_, s) emit(s, { "g4_hatch_egg" }) end
+L.countalivemonsandboxmons = function(ins,s)
+  emit(s, {'g4_party_alive_and_boxes',ins.args[1]})
+end
 L.countpartynoneggs = function(ins, s)
   emit(s, { "g4_party_non_eggs", ins.args[1] })
 end
@@ -1428,16 +2541,34 @@ L.changeplayerstate = function(_, s)
 end
 L.setplayerbike = function(ins, s) emit(s, { "g4_player_bike", ins.args[1] }) end
 
--- MUSIC.  `playmusic` already lowers to the shared `play_music`, so `setbgm`
--- goes to the same verb: the cartridge's distinction is "play now" against
--- "play on this map from now on", and without a Gen 4 sequence bank there is
--- nothing on either side of it.  The fades and the encounter jingle are noops
--- for the same reason -- `audio.lua` on a Platinum cache is cries and nothing
--- else.
+-- MUSIC.  `playmusic` lowers to the shared `play_music`, and `setbgm` to the
+-- same verb: the cartridge distinguishes "play now" from "play on this map from
+-- now on", and this port re-cues the map theme on its own. Platinum's music
+-- plays from the cartridge's SDAT (src/audio/NitroAudio.lua); the fades, the
+-- field-player volume and the trainer eyes-meet themes are real -- see
+-- `g4_fade_out_bgm`, `g4_set_player_volume` and `g4_trainer_encounter_bgm`.
 L.setbgm = function(ins, s) emit(s, { "play_music", ins.args[1] }) end
-L.fadeoutbgm = function(_, s) emit(s, { "g4_noop", "a BGM fade" }) end
-L.playtrainerencounterbgm = function(_, s)
-  emit(s, { "g4_noop", "the trainer encounter jingle" })
+L.fadeoutbgm = function(ins, s) emit(s, { "g4_fade_out_bgm", ins.args[1], ins.args[2] }) end
+-- `waitfortransition` is `FieldTransition_FinishMap`: it flags the field map as
+-- no longer running and hands the task to `FieldTask_WaitUntilMapFinished`.
+-- It appears once, in `CommonScript_PoisonWhiteout`, between the screen fade
+-- and `BlackOutFromBattle2`:
+--
+--     FadeScreenOut / WaitFadeScreen / WaitForTransition / BlackOutFromBattle2
+--
+-- In this engine the map teardown is not a thing a script can be between.
+-- `BlackOutFromBattle2` lowers onto `warpToHealPoint(nil, { whiteout = true })`,
+-- which heals the party, takes the money and loads the heal point as one
+-- operation -- so the wait has nothing to wait for and the row is a no-op with
+-- its reason written down rather than an unlowered hole that stops the walk.
+L.waitfortransition = function(_, s)
+  emit(s, { "g4_noop", "the field map teardown, which the warp owns here" })
+end
+-- `playtrainerencounterbgm <trainer>`: the class's eyes-meet theme
+-- (src/import/Gen4TrainerMusic.lua), the first row of the common
+-- trainer-encounter script.
+L.playtrainerencounterbgm = function(ins, s)
+  emit(s, { "g4_trainer_encounter_bgm", ins.args[1] })
 end
 
 L.getdayofweek = function(ins, s) emit(s, { "g4_day_of_week", ins.args[1] }) end
@@ -1458,11 +2589,21 @@ L.getdayofweek = function(ins, s) emit(s, { "g4_day_of_week", ins.args[1] }) end
 -- counts its own progress in VAR_ETERNA_GYM_TRAINERS_BEATEN), so nothing reads
 -- a state this port does not keep.  The fidelity gap is real and is recorded in
 -- the tracker; the stall is not.
+-- ...AND THE CLOCK STATE IS AN HONEST NO, which was worth establishing rather
+-- than assuming, because `advanceeternagymclock` writes a VAR and a var is
+-- the one kind of state a script can branch on.  All 1,124 members of
+-- scr_seq were scanned for VAR_ETERNA_GYM_FLOWER_CLOCK_STATE (0x404B) and
+-- NONE mentions it: the var exists so that
+-- `EternaGym_DynamicMapFeaturesInit` can pose the hands on a later entry, and
+-- nothing else reads it.  So the floor stays open and no branch anywhere
+-- takes a wrong arm -- the state is advanced because it is cheap and because
+-- the cap at DEFEATED_GYM_LEADER is what stops it walking past the end of
+-- `sEternaGymClockTimes`.
 L.advanceeternagymclock = function(_, s)
-  emit(s, { "g4_noop", "the Eterna Gym flower clock (the gym floor is open here)" })
+  emit(s, { "g4_eterna_clock_advance" })
 end
 L.initpersistedmapfeaturesforeternagym = function(_, s)
-  emit(s, { "g4_noop", "the Eterna Gym persisted map feature" })
+  emit(s, { "g4_map_feature_init", "eterna" })
 end
 
 -- THE JUBILIFE TAG BATTLE, which is on the critical path and whose absence is
@@ -1475,8 +2616,14 @@ L.starttagbattle = function(ins, s)
 end
 
 L.removemoney2 = function(ins, s) emit(s, { "g4_remove_money", ins.args[1] }) end
+-- `FieldMenu_PrintMoneyToWindow` again, on the window `showmoney` made: the
+-- script calls this after taking or giving money so the balance on screen is
+-- the one in the save.  Nothing is redrawn here -- the window reads the save
+-- every frame -- but the row still has to REBUILD the panel, because the
+-- amount is a cartridge string with the number spliced into it and that
+-- splice happened when the panel was built.
 L.updatemoneydisplay = function(_, s)
-  emit(s, { "g4_noop", "the money window refresh" })
+  emit(s, { "g4_money_window", "update" })
 end
 L.playpokecenterhealinganimation = function(ins, s)
   emit(s, { "g4_heal_animation", ins.args[1] })
@@ -1496,10 +2643,19 @@ L.gettrainercardlevel = function(ins, s)
   emit(s, { "g4_no_feature", ins.args[1], "the trainer card" })
 end
 L.checkpartypokerus = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "Pokerus" })
+  emit(s, { "g4_party_pokerus", ins.args[1] })
 end
+-- SystemVars_CheckDistributionEvent: the event var against its magic number,
+-- which a Mystery Gift's handler sets (src/pokemon/Gen4MysteryGift.lua)
 L.checkdistributionevent = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[2], "Mystery Gift distribution events" })
+  emit(s, { "g4_check_distribution_event", ins.args[1], ins.args[2] })
+end
+-- `mysterygiftgive <stage> [dest] [dest2]` (ScrCmd_MysteryGiftGive): the
+-- deliveryman, and every mart's OnTransition that shows him only while a
+-- gift is waiting
+L.mysterygiftgive = function(ins, s)
+  local a = ins.args or {}
+  emit(s, { "g4_mystery_gift", a[1], a[2], a[3] })
 end
 
 
@@ -1524,7 +2680,7 @@ end
 -- then walked into twice anyway -- on the two commands whose names both contain
 -- "fatefulencounter". Reading carefully is not a substitute for a check.
 L.findpartyslotwithfatefulencounterspecies = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "fateful-encounter Pokemon" })
+  emit(s, { "g4_fateful_slot", ins.args[1], ins.args[2] })
 end
 
 -- FIVE COMMANDS PRET HAS NOT NAMED, and all five turn out to be safe.  Read
@@ -1552,7 +2708,7 @@ L.getlocaldexseencount = function(ins, s)
   emit(s, { "g4_dex_seen_count", ins.args[1] })
 end
 L.checklocaldexcompleted = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Sinnoh dex completion check" })
+  emit(s, { "g4_dex_complete", ins.args[1], false })
 end
 L.setstepflag = function(_, s)
   emit(s, { "g4_noop", "the step-counter freeze (a script already holds the gate)" })
@@ -1560,8 +2716,8 @@ end
 L.clearstepflag = function(_, s)
   emit(s, { "g4_noop", "the step-counter freeze (a script already holds the gate)" })
 end
-L.incrementgamerecord = function(_, s)
-  emit(s, { "g4_noop", "the game records" })
+L.incrementgamerecord = function(ins, s)
+  emit(s, { "g4_add_game_record", ins.args[1], 1, true })
 end
 L.setinitialvolumeforsequence = function(_, s)
   emit(s, { "g4_noop", "a sequence volume (there is no Gen 4 sequence bank)" })
@@ -1577,6 +2733,215 @@ end
 L.startdestroyobstacleanimation = function(ins, s)
   emit(s, { "g4_destroy_obstacle_anim", ins.args[1], ins.args[2] })
 end
+
+-- THE OTHER SHARED SCRIPT.  `scripts_field_moves.s` is to HMs what
+-- `scripts_battles.s` is to trainers: one file, seventeen entries, and every
+-- use of Cut, Rock Smash, Strength, Rock Climb, Surf, Waterfall, Defog and
+-- Flash in Sinnoh goes through it -- twice over, because each has a "talk to
+-- the obstacle" path and a "use it from the party menu" path.  Nine of its
+-- commands were unlowered, 23 uses.
+
+-- `playhmcutin <slot>` -- the "<MON> used CUT!" splash, which the cartridge
+-- blocks on (`ScriptContext_Pause(ctx, ScriptContext_WaitForHMCutInFinished)`).
+-- Nine uses: once in every HM path there is.
+L.playhmcutin = function(ins, s) emit(s, { "g4_hm_cut_in", ins.args[1] }) end
+
+-- `initturnbackcave <varPillarsSeen> <varRoomsVisited>` -- the maze itself.
+--
+-- 20 uses, one in the init script of every room of Turnback Cave, and the most
+-- widely reached unlowered command in the cartridge when counted by MAPS
+-- rather than by occurrences. Every room ships with all four exits pointing at
+-- the entrance; this is what repoints them, so without it Giratina has no
+-- route to it. See `Commands.g4_init_turnback_cave`.
+L.initturnbackcave = function(ins, s)
+  emit(s, { "g4_init_turnback_cave", ins.args[1], ins.args[2] })
+end
+
+-- The three that actually move the player.  Each takes the party slot of the
+-- Pokemon doing it, and each starts a field task the cartridge does not wait
+-- for -- the script ends and the task finishes the motion.
+L.usesurf = function(ins, s) emit(s, { "g4_use_surf", ins.args[1] }) end
+L.usewaterfall = function(ins, s) emit(s, { "g4_use_waterfall", ins.args[1] }) end
+L.userockclimb = function(ins, s) emit(s, { "g4_use_rock_climb", ins.args[1] }) end
+
+-- 0x0C3 AND 0x0C4 ARE THE SAME FUNCTION, BYTE FOR BYTE.  pokeplatinum leaves
+-- both numbered because there is nothing to tell them apart:
+--
+--     FieldOverworldState_SetWeather(fieldState, OVERWORLD_WEATHER_CLEAR);
+--     ov5_021D5F7C(..., FieldOverworldState_GetWeather(fieldState));
+--
+-- in both.  The script uses 0x0C3 after Flash and 0x0C4 after Defog, which is
+-- the only thing that distinguishes them and is not a difference in behaviour.
+--
+-- THAT PLATINUM CLEARS *WEATHER* FOR FLASH IS THE INTERESTING PART: a dark
+-- cave and a foggy route are the same mechanism on this cartridge -- an
+-- overworld weather state -- so lighting a cave and blowing away fog are one
+-- operation. Gen 2 bakes darkness into the palette instead (see the Gen 2
+-- notes on FLASH), which is why nothing in this engine was looking for a
+-- weather write here.
+--
+-- Both lower to ONE row. Two rows doing the same thing is how a port ends up
+-- fixing one and not the other.
+L["0c3"] = function(_, s) emit(s, { "g4_clear_overworld_weather" }) end
+L["0c4"] = L["0c3"]
+
+-- `dostrengthfunc` / `doflashfunc` / `dodefogfunc` -- one opcode each, and all
+-- three are VARIABLE LENGTH: a sub-function byte, plus a destination word only
+-- when that byte is FIELD_MOVE_FUNC_CHECK_ACTIVE.  `Gen4ScriptOps.VARIABLE_SPEC`
+-- now decodes that rule, which is what makes these reachable at all -- the
+-- decoder used to stop the walk here and four scripts ended early.
+--
+-- All six uses in the cartridge are in this one file: SET_ACTIVE twice for
+-- Strength and once each for Flash and Defog, CHECK_ACTIVE twice for Strength.
+-- CLEAR_ACTIVE is never used from a script -- the C clears them -- but it is a
+-- sub-function the opcode defines, so the handler answers it.
+local function fieldMoveFlag(which)
+  return function(ins, s)
+    emit(s, { "g4_field_move_flag", which, ins.args[1], ins.args[2] })
+  end
+end
+L.dostrengthfunc = fieldMoveFlag("strength")
+L.doflashfunc = fieldMoveFlag("flash")
+L.dodefogfunc = fieldMoveFlag("defog")
+
+-- ---------------------------------------------------------------------------
+-- SAVING
+-- ---------------------------------------------------------------------------
+--
+-- `scripts_common.s` holds the whole save dialogue, and twelve of its
+-- commands had no row here, so every one of the eighteen `callcommonscript
+-- 2006` sites in Sinnoh ran into an unlowered command -- and so did the START
+-- menu's SAVE and the Underground descent, which reach the same file from C
+-- (`start_menu.c:1327` and `field_map_change.c:1175` both start
+-- `SCRIPT_ID(COMMON_SCRIPTS, 5)`).
+--
+-- They are lowered as a group because they only make sense as one: the two
+-- `checksavetype` calls decide which of the five save messages the player
+-- reads, and a handler that answered any of them wrongly would put the wrong
+-- text on screen without failing anything.  `src/script/Gen4Save.lua` holds
+-- the model and says why each answer is what it is.
+--
+-- `checksavetype <destVar>` -- 0 overwrite-blocked, 1 first save, 2 full,
+-- 3 quick.  Called twice: once before the "would you like to save?" prompt to
+-- catch the blocked case, once after to pick the message.
+L.checksavetype = function(ins, s) emit(s, { "g4_check_save_type", ins.args[1] }) end
+
+-- `trysavegame <destVar>` -- the write.  `ScrCmd_TrySaveGame` is
+-- `FieldSystem_Save`, which stamps the player's position and sends the Poketch
+-- its SAVE event before `SaveData_Save`, and answers 1 for SAVE_RESULT_OK and
+-- 0 for anything else.  `CommonScript_SaveComplete` branches on that zero
+-- straight into `CommonScript_SaveError`.
+L.trysavegame = function(ins, s) emit(s, { "g4_try_save_game", ins.args[1] }) end
+
+-- `storesaveresult <var>` -- the only way the CALLER learns what happened.
+-- `ScrCmd_StoreSaveResult` writes the var through a pointer the script was
+-- started with, and both C callers pass one: the START menu reads it to decide
+-- whether to show its "saved" state, and the Underground descent reads it to
+-- decide whether to descend at all.  A script started without one ignores the
+-- write, which is why the handler tolerates no destination.
+L.storesaveresult = function(ins, s) emit(s, { "g4_store_save_result", ins.args[1] }) end
+
+-- `showsavingicon` / `hidesavingicon` -- `Window_AddWaitDial`, the spinner in
+-- the corner of the message box while the write runs.  A pair, so both halves
+-- are stated: pass 169's lesson was that a `close` with no `open` cannot be
+-- made truthful after the fact.
+L.showsavingicon = function(_, s) emit(s, { "g4_saving_icon", 1 }) end
+L.hidesavingicon = function(_, s) emit(s, { "g4_saving_icon", 0 }) end
+
+-- `waitabpresstime <frames>` -- wait for A or B, but no longer than N frames.
+-- `CommonScript_SaveComplete` uses it for the 30-frame hold on "<player> saved
+-- the game." after the jingle, so the line is readable whether or not the
+-- player presses anything.
+L.waitabpresstime = function(ins, s) emit(s, { "g4_wait_ab_press_time", ins.args[1] }) end
+
+-- `opensaveinfo` / `closesaveinfo` -- the panel above the message box with the
+-- location, the player's name, the badges, the Pokedex count and the clock.
+-- Three `closesaveinfo` uses and one `opensaveinfo`, because the panel is
+-- opened once and closed on each of the three ways out (saved, cancelled,
+-- errored).
+--
+-- `ScrCmd_OpenSaveInfo` draws nothing when `SaveData_OverwriteCheck` holds,
+-- which is the case this port does not have; see Gen4Save.overwriteBlocked.
+L.opensaveinfo = function(_, s) emit(s, { "g4_save_info", 1 }) end
+L.closesaveinfo = function(_, s) emit(s, { "g4_save_info", 0 }) end
+
+-- 0x258 / 0x259 -- UNNAMED IN POKEPLATINUM AND NOT A MYSTERY.  `ScrCmd_258` is
+-- `ov5_021E1000`, which is `ov5_021E0F54(fieldSystem, PLAYER_TRANSITION_SAVE)`:
+-- it puts the player avatar into the save pose and keeps it there as a task.
+-- `ScrCmd_259` is `ov5_021E100C`, which ends the task and requests the walking
+-- state back.  `CommonScript_StartSave` brackets the write with them.
+--
+-- Note the guard in the C: `ov5_021E0F54` returns NULL unless the player is
+-- PLAYER_AVATAR_WALKING, so saving from a bike or from the water poses nothing
+-- -- and `ov5_021E0FC0` returns immediately on a NULL task, so the close is a
+-- no-op in exactly the same cases.  The handler keeps that pairing.
+L["258"] = function(_, s) emit(s, { "g4_save_pose", 1 }) end
+L["259"] = function(_, s) emit(s, { "g4_save_pose", 0 }) end
+
+-- `saveextradata` / `checkismiscsaveinit` -- the Frontier-records and
+-- battle-video sectors.  `CommonScript_SaveExtraBlock` calls the first behind
+-- `FLAG_MAP_LOCAL_SAVE_EXTRA_BLOCK` and `CommonScript_QuickSaveCheckMiscFlag`
+-- reads the second to turn the first quick save into a full one.  Gen4Save
+-- says what survives the port and what does not.
+L.saveextradata = function(_, s) emit(s, { "g4_save_extra_data" }) end
+L.checkismiscsaveinit = function(ins, s)
+  emit(s, { "g4_misc_save_init", ins.args[1] })
+end
+
+-- ---------------------------------------------------------------------------
+-- THE PC
+-- ---------------------------------------------------------------------------
+--
+-- `CommonScript_PC` is reached from the tile behaviour rather than from any
+-- object or bg event (`Field_TileBehaviorToScript` -> COMMON_SCRIPTS 18), and
+-- this port had no Gen 4 arm for that dispatch at all -- see
+-- src/world/Gen4TileScripts.lua.  With the dispatch in place these six are
+-- what the script runs into.
+--
+-- `loadpcanimation` / `playpcbootupanimation` / `playpcshutdownanimation`:
+-- the PC's screen lighting up and going dark.  `FieldSystem_LoadPCAnimation`
+-- (overlay006/pc_animation.c) finds the loaded MAP PROP whose model is one of
+-- four PC models -- `pokecenter_pc_nsbmd` and the three desk laptops -- and
+-- hands its prop animations to the one-shot manager under a tag; the other two
+-- play animation 0 and animation 1 of that tag.
+--
+-- THIS IS THE DOOR ANIMATION AGAIN, ALMOST: an NSBCA one-shot on an NSBMD map
+-- prop, loaded by the same `MapPropOneShotAnimationManager_LoadPropAnimations`
+-- against a four-model list of its own (`pokecenter_pc` and the three desk
+-- laptops).  Two of the three missing stages are shared -- this port reads
+-- NSBMD without NSBCA and bakes a chunk's props into a flat canvas -- so these
+-- take the SAME named no-op rather than a fourth spelling of one absence.
+--
+-- THE THIRD STAGE IS WHERE THEY PART, and this comment used to get it wrong.
+-- It read "and has no Gen 4 SE bank", which was the same stale claim the door
+-- rows carried: `audio.lua` has 2,030 effects and the doors are audible now
+-- (see `src/world/Gen4Doors.lua`).  It makes no difference HERE, and the
+-- reason is worth stating rather than deleting: the PC plays
+-- `MapPropOneShotAnimationManager_PlayAnimation`, with no sound argument at
+-- all, where a door plays `..._PlayAnimationWithSoundEffect`.  There is no PC
+-- sound to be missing.  The beep the script plays either side of these is a
+-- separate `playse` and is already lowered.
+L.loadpcanimation = function(_, s) emit(s, { "g4_noop", "prop animations" }) end
+L.playpcbootupanimation = function(_, s) emit(s, { "g4_noop", "prop animations" }) end
+L.playpcshutdownanimation = function(_, s) emit(s, { "g4_noop", "prop animations" }) end
+
+-- `savetvsegmentpokemonstoragebulletin` -- files a TV segment about the
+-- player's party after a visit to the storage system.  Same answer as
+-- `savetvsegmenthiddenitem` and now the same ROW: there is no TV broadcast
+-- system in this engine, so the segment is recorded nowhere and nothing would
+-- read it if it were.  One statement of that, not two.
+L.savetvsegmentpokemonstoragebulletin = function(_, s)
+  emit(s, { "g4_save_tv_segment", "pokemon_storage_bulletin" })
+end
+
+-- `checkismiscsaveinit`'s neighbour in spirit: `checkishalloffamecorrupted
+-- <destVar>` answers whether the Hall of Fame block failed its checksum.
+L.checkishalloffamecorrupted = function(ins, s)
+  emit(s, { "g4_hall_of_fame_corrupted", ins.args[1] })
+end
+
+-- `openpchalloffamescreen` -- the post-game record browser.
+L.openpchalloffamescreen = function(_, s) emit(s, { "g4_open_hall_of_fame" }) end
 L.buffermapname = function(ins, s)
   emit(s, { "g4_buffer_map_name", ins.args[1], ins.args[2] })
 end
@@ -1601,10 +2966,15 @@ end
 -- this port does not run for Gen 4.  `getswarmmapandspecies` writes TWO vars
 -- and both must be written, or the comparison behind either reads the last
 -- command's answer.
-L.enableswarms = function(_, s) emit(s, { "g4_noop", "daily swarms" }) end
+-- DAILY SWARMS -- see src/world/Gen4Swarms.lua.
+L.enableswarms = function(_, s) emit(s, { "g4_enable_swarms" }) end
+-- THE TROPHY GARDEN -- see src/world/Gen4DailySlots.lua.
+L.addtrophygardenmon = function(_, s) emit(s, { "g4_add_trophy_garden_mon" }) end
+L.gettrophygardenslot1species = function(ins, s)
+  emit(s, { "g4_trophy_garden_slot1", ins.args[1] })
+end
 L.getswarmmapandspecies = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "daily swarms" })
-  emit(s, { "g4_no_feature", ins.args[2], "daily swarms" })
+  emit(s, { "g4_swarm_map_species", ins.args[1], ins.args[2] })
 end
 -- ...AND THE ROAMERS ARE NOT SWARMS, though they sit next to them in the
 -- opcode table and in `special_encounter.h`.
@@ -1637,8 +3007,9 @@ L.checkplayeronbike = function(ins, s)
   emit(s, { "g4_check_on_bike", ins.args[1] })
 end
 L.forcebicycling = function(ins, s) emit(s, { "g4_force_bike", ins.args[1] }) end
+-- ScrCmd_SetCyclingBGM (pokeplatinum scrcmd.c): the gate plays SEQ_BICYCLE
 L.setcyclingbgm = function(_, s)
-  emit(s, { "g4_noop", "the cycling BGM override" })
+  emit(s, { "g4_cycling_bgm" })
 end
 L.getpreviousmapid = function(ins, s)
   emit(s, { "g4_previous_map", ins.args[1] })
@@ -1662,7 +3033,7 @@ end
 -- ...and this one puts the destination SECOND, which is why they are lowered
 -- one at a time against `scrcmd_party.c` rather than by pattern.
 L.checkpartyhasspecies2 = function(ins, s)
-  emit(s, { "g4_party_has_species", ins.args[1], ins.args[2] })
+  emit(s, { "g4_party_has_species2", ins.args[1], ins.args[2] })
 end
 
 L.startwildbattle = function(ins, s)
@@ -1699,10 +3070,10 @@ end
 -- That is a fidelity gap on the tracker and it is NOT a stall, and only the
 -- measurement tells the two apart.
 L.initpersistedmapfeaturesforhearthomegym = function(_, s)
-  emit(s, { "g4_noop", "the Hearthome Gym persisted map feature" })
+  emit(s, { "g4_map_feature_init", "hearthome" })
 end
 L.initpersistedmapfeaturesforveilstonegym = function(_, s)
-  emit(s, { "g4_noop", "the Veilstone Gym persisted map feature" })
+  emit(s, { "g4_map_feature_init", "veilstone" })
 end
 
 -- ---------------------------------------------------------------------------
@@ -1714,12 +3085,32 @@ end
 -- var-writer in them still writes, because an unlowered one leaves the
 -- comparison register holding the previous command's answer.
 
--- THE UNDERGROUND (the Sinnoh Underground and its goods PC).
+-- THE UNDERGROUND'S GOODS PC -- A THIRD INVENTORY, and `g4_no_feature` was
+-- giving it the WRONG ANSWER rather than no answer.
+--
+-- `g4_no_feature` writes 0, and for `checkhasroomforgoodsinpc` 0 means "no
+-- room": sixteen of its seventeen uses were telling the player their goods PC
+-- was full on a save where it holds nothing.  A fresh Underground has 200 free
+-- slots, so the truthful answer is 1 -- and that is the difference between an
+-- absent feature and a lie about a present one.
+--
+-- Same shape as the traps and the spheres pass 176 built, which is why it
+-- extends `Gen4Underground` rather than starting a module:
+-- `Underground_TryAddGoodPC` walks a 200-slot array for `UG_GOOD_NONE` and
+-- answers whether it fitted; `Underground_IsRoomForGoodsInPC` returns TRUE the
+-- moment it finds one free slot and ignores its own second operand, which pret
+-- names `unused`.
+--
+-- Both are `(var, var, destVarPointer)`, and both middle operands are read and
+-- dropped by the cartridge -- so they are carried to the handler anyway, for
+-- the reason `givetrap`'s is: one row shape for the whole family.
 L.checkhasroomforgoodsinpc = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[3], "the Underground goods PC" })
+  emit(s, { "g4_underground_room", "goodsPC",
+            ins.args[1], ins.args[2], ins.args[3] })
 end
 L.sendgoodtopc = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[3], "the Underground goods PC" })
+  emit(s, { "g4_underground_give", "goodPC",
+            ins.args[1], ins.args[2], ins.args[3] })
 end
 L.getundergroundfossilsunearthed = function(ins, s)
   emit(s, { "g4_no_feature", ins.args[1], "the Underground" })
@@ -1742,9 +3133,99 @@ end
 L.bufferundergroundgoodsnamewitharticle = function(ins, s)
   emit(s, { "g4_buffer", ins.args[1], "bank:627", ins.args[2] })
 end
+-- ...AND SO ARE THE TRAPS AND THE SPHERES.  `StringTemplate_SetUndergroundTrapName`
+-- reads TEXT_BANK_UNDERGROUND_TRAPS and `...ItemName` reads
+-- TEXT_BANK_UNDERGROUND_ITEMS, which the line-number rule puts at 630 and 628.
+--
+-- Three things agree on those two numbers, which is why they are not a guess:
+-- 626 and 627 above sit either side of them and were already confirmed; bank
+-- 634 is the Underground menu's own labels (#198) and lands on
+-- UNDERGROUND_QUESTIONS; and the CONTENT agrees item for item -- bank 630
+-- entry 1 is "Move Trap UP" and `generated/traps.txt` line 2 is TRAP_MOVE_UP,
+-- so **the trap id is its own bank index**, and the same holds for the five
+-- sphere types in 628.  The entries carry {COLOR n} markup, which is the
+-- reason `bufferKind` now runs every branch through `gen4Markup`.
+L.bufferundergroundtrapname = function(ins, s)
+  emit(s, { "g4_buffer", ins.args[1], "bank:630", ins.args[2] })
+end
+L.bufferundergrounditemname = function(ins, s)
+  emit(s, { "g4_buffer", ins.args[1], "bank:628", ins.args[2] })
+end
+
+-- THE TWO THAT WRITE REAL STATE.  `GiveTrap` and `GiveSphere` both end in a
+-- destination var holding whether the item fitted, and the `gotoif` after them
+-- tests it -- so unlowered they did not merely fail to add a trap, they branched
+-- on whatever the previous comparison had left behind.
+--
+-- One row for both, because they are one operation on two inventories: the
+-- cartridge's own `TryAddTrap`/`TryAddSphere` differ only in which 40-slot
+-- array they search and whether a second operand is carried.  `givetrap`'s
+-- middle operand is read and never used (`u16 unused`), which is why it is
+-- passed anyway -- the handler needs the same shape from both.
+L.givetrap = function(ins, s)
+  emit(s, { "g4_underground_give", "trap",
+            ins.args[1], ins.args[2], ins.args[3] })
+end
+L.givesphere = function(ins, s)
+  emit(s, { "g4_underground_give", "sphere",
+            ins.args[1], ins.args[2], ins.args[3] })
+end
+
+-- THE SEAL CASE. Seal counts live in save.gen4Seals (src/import/Gen4Seals.lua);
+-- no capsules are modelled, so a seal on a capsule never exists and the case
+-- count is the whole count.  `OpenSealCapsuleEditor` is a whole screen
+-- (`CapsuleMenu_StartFieldTask`) and stays `pending`.
+L.countuniquesealsinsealcase = function(ins, s)
+  emit(s, { "g4_count_unique_seals", ins.args[1] })
+end
+-- ...and the seals themselves (src/import/Gen4Seals.lua).
+L.findpartyslotwithspecies = function(ins, s)
+  emit(s, { "g4_party_slot_with_species", ins.args[1], ins.args[2] })
+end
+L.getpartymonform = function(ins, s) emit(s, { "g4_party_mon_form", ins.args[1], ins.args[2] }) end
+-- THE ROUTE 224 TABLET and its two sound dips (field-player volume and a
+-- BGM fade-in, which join `fadeoutbgm` as declared fades).
+L.openshaymintabletnamingscreen = function(ins, s) emit(s, { "g4_tablet_naming", ins.args[1] }) end
+L.buffertabletname = function(ins, s) emit(s, { "g4_buffer_tablet_name", ins.args[1] }) end
+L.setplayervolume = function(ins, s) emit(s, { "g4_set_player_volume", ins.args[1] }) end
+L.fadeinbgm = function(ins, s) emit(s, { "g4_fade_in_bgm", ins.args[1] }) end
+-- `135 <syncNo>` is CommTiming_StartSync, which resumes at once when fewer than
+-- two players are connected -- always, here. A no-op is the cartridge's own
+-- single-player answer, not a gap.
+L["135"] = function(_, s) end
+L.giveortakeseal = function(ins, s) emit(s, { "g4_give_or_take_seal", ins.args[1], ins.args[2] }) end
+L.countsealoccurence = function(ins, s) emit(s, { "g4_count_seal", ins.args[1], ins.args[2] }) end
+L.bufferballsealname = function(ins, s) emit(s, { "g4_buffer_seal_name", ins.args[1], ins.args[2] }) end
+L.bufferballsealnameplural = function(ins, s)
+  emit(s, { "g4_buffer_seal_name", ins.args[1], ins.args[2], true })
+end
+L.opensealcapsuleeditor = function(_, s)
+  emit(s, { "g4_open_seal_capsule_editor" })
+end
+
+-- THE MAILBOX.  `Mailbox_CountMail(mailbox, MAIL_CONTEXT_MAILBOX)` counts the
+-- valid mail in the PC's mailbox, and a Gen 4 save in this port has no mailbox
+-- -- the Gen 3 player PC has the menu for one, the Gen 4 storage does not.
+-- Zero, written to the var, which is also what a mailbox nobody has posted to
+-- would answer.
+L.countmailinmailbox = function(ins, s)
+  emit(s, { "g4_no_feature", ins.args[1], "the mailbox" })
+end
 
 -- CONTESTS, which is also all that is left in chapters two and three.
-L.addcontestbackdrop = function(_, s) emit(s, { "g4_noop", "contest backdrops" }) end
+-- AddContestBackdrop <id> / CheckBackdrop <id, dest>: the Fashion Case's
+-- backdrops, kept as a set in save.gen4Backdrops
+L.addcontestbackdrop = function(ins, s) emit(s, { "g4_add_backdrop", ins.args[1] }) end
+-- The backdrop NAMES are a bank the same way the accessory names above are:
+-- `StringTemplate_SetContestBackdropName` reads
+-- TEXT_BANK_CONTEST_BACKDROP_NAMES, line 389, so bank 388.  Two uses, and both
+-- of them print a line that would otherwise come up with the token in it --
+-- which is worth lowering even while `addcontestbackdrop` is a no-op, because a
+-- sentence with a hole in it reads as a bug and a backdrop nobody can wear
+-- does not.
+L.buffercontestbackdropname = function(ins, s)
+  emit(s, { "g4_buffer", ins.args[1], "bank:388", ins.args[2] })
+end
 -- `buffercontestantmonname` is deliberately LEFT UNLOWERED: a contestant is a
 -- live entrant, not a table row, so there is no bank to read and filling the
 -- slot with a blank would hide an absent system instead of reporting it.
@@ -1752,13 +3233,29 @@ L.contestphotohasdata = function(ins, s)
   emit(s, { "g4_no_feature", ins.args[2], "contest photos" })
 end
 L.checkhasemptypoffincaseslot = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the poffin case" })
+  emit(s, { "g4_poffin_case_has_room", ins.args[1] })
+end
+-- THE POFFIN HOUSE (src/pokemon/Gen4Poffin.lua, src/ui/Gen4PoffinCooking.lua)
+L.getemptypoffincaseslotcount = function(ins, s) emit(s, { "g4_poffin_case_empty_slots", ins.args[1] }) end
+L.checkcancookpoffin = function(ins, s) emit(s, { "g4_can_cook_poffin", ins.args[1] }) end
+L.openpoffincooking = function(ins, s) emit(s, { "g4_open_poffin_cooking", ins.args[1] }) end
+-- `startbattleserver / startbattleclient <mode> 0 0 <dest>` (the Wireless
+-- Club, COMM_CLUB_RET_*) and `endcommunication`: there is no DS link here.
+-- Mode 6 is the Poffin House's group cooking, which the port gathers locally
+-- (Commands.g4_link_club); every other mode answers COMM_CLUB_RET_ERROR, the
+-- path each script already has for a link that could not start.
+L.startbattleserver = function(ins, s) emit(s, { "g4_link_club", ins.args[1], ins.args[4], 1 }) end
+L.startbattleclient = function(ins, s) emit(s, { "g4_link_club", ins.args[1], ins.args[4], 0 }) end
+L.endcommunication = function(_, s) emit(s, { "g4_end_communication" }) end
+L.givepoffin = function(ins, s)
+  local a = ins.args or {}
+  emit(s, { "g4_give_poffin", a[1], a[2], a[3], a[4], a[5], a[6], a[7] })
 end
 
 -- ACCESSORIES (the contest dress-up items).
-L.addaccessory = function(_, s) emit(s, { "g4_noop", "contest accessories" }) end
+L.addaccessory = function(ins, s) emit(s, { "g4_add_accessory", ins.args[1], ins.args[2] }) end
 L.canfitaccessory = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[3], "contest accessories" })
+  emit(s, { "g4_can_fit_accessory", ins.args[1], ins.args[2], ins.args[3] })
 end
 L.bufferaccessoryname = function(ins, s)
   emit(s, { "g4_buffer", ins.args[1], "bank:386", ins.args[2] })
@@ -1768,20 +3265,50 @@ L.bufferaccessorynamewitharticle = function(ins, s)
 end
 
 -- THE MOVE TUTOR at Grandma Wilma's house on Route 210.
-L.openmovetutormenu = function(_, s) emit(s, { "g4_noop", "the move tutor" }) end
+L.openmovetutormenu = function(ins, s)
+  emit(s, { "g4_open_move_tutor_menu", ins.args[1], ins.args[2] })
+end
+-- ...and the SHARD tutors' party pick (src/import/Gen4MoveTutor.lua).
 L.selectmovetutorpokemon = function(_, s)
-  emit(s, { "g4_noop", "the move tutor" })
+  emit(s, { "g4_select_tutor_mon" })
 end
 L.checklearnedtutormove = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the move tutor" })
+  emit(s, { "g4_learned_move", ins.args[1] })
+end
+-- THE MOVE REMINDER (Pastoria) and THE MOVE DELETER (Canalave) --
+-- scrcmd_party_mon_moves.c; the commands sit with the teach screen in
+-- Gen4Commands.
+L.checkhaslearnableremindermoves = function(ins, s)
+  emit(s, { "g4_has_reminder_moves", ins.args[1], ins.args[2] })
+end
+L.openmoveremindermenu = function(ins, s)
+  emit(s, { "g4_open_move_reminder_menu", ins.args[1] })
+end
+L.checklearnedremindermove = function(ins, s)
+  emit(s, { "g4_learned_move", ins.args[1] })
+end
+L.selectpartymonmove = function(ins, s)
+  emit(s, { "g4_select_party_mon_move", ins.args[1] })
+end
+L.getselectedpartymonmove = function(ins, s)
+  emit(s, { "g4_selected_party_mon_move", ins.args[1] })
+end
+L.clearpartymonmoveslot = function(ins, s)
+  emit(s, { "g4_clear_move_slot", ins.args[1], ins.args[2] })
+end
+L.bufferpartymovename = function(ins, s)
+  emit(s, { "g4_buffer_party_move", ins.args[1], ins.args[2], ins.args[3] })
 end
 
 -- AMITY SQUARE's berry-and-accessory man.
+-- `VAR_AMITY_SQUARE_STEP_COUNT`, counted on every step (capped at 10,000)
+-- and read by the man who hands out berries and accessories. Both commands
+-- were stubs, so his gifts never came.
 L.clearamitysquarestepcount = function(_, s)
-  emit(s, { "g4_noop", "the Amity Square step count" })
+  emit(s, { "g4_clear_amity_steps" })
 end
 L.getamitysquarestepcount = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Amity Square step count" })
+  emit(s, { "g4_get_amity_steps", ins.args[1] })
 end
 L.calcamitysquarefoundaccessory = function(ins, s)
   emit(s, { "g4_no_feature", ins.args[1], "Amity Square accessories" })
@@ -1796,22 +3323,179 @@ L.getamitysquareberryoraccessoryidfromman = function(ins, s)
   emit(s, { "g4_no_feature", ins.args[2], "Amity Square accessories" })
 end
 
--- THE POKEMON NEWS PRESS at Solaceon.
+-- THE POKEMON NEWS PRESS at Solaceon.  One block in band 1083, reached four
+-- ways: pick a species the player has SEEN and that has a Sinnoh dex number,
+-- store it in VAR_POKEMON_NEWS_PRESS_REQUESTED_POKEMON (0x40E5, which the
+-- script names itself with `setvarfromvar`), and set a deadline in days.
 L.getrandomseenspecies = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Pokemon News Press" })
+  emit(s, { "g4_news_press_species", ins.args[1] })
 end
-L.setnewspressdeadline = function(_, s)
-  emit(s, { "g4_noop", "the Pokemon News Press" })
+L.setnewspressdeadline = function(ins, s)
+  emit(s, { "g4_news_press_deadline", "set", ins.args[1] })
 end
 L.getnewspressdeadline = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Pokemon News Press" })
+  emit(s, { "g4_news_press_deadline", "get", ins.args[1] })
 end
 
 -- ODDS AND ENDS, each read on its own.
-L.changedeoxysform = function(_, s) emit(s, { "g4_noop", "Deoxys forms" }) end
-L.addtogamerecord = function(_, s) emit(s, { "g4_noop", "the game records" }) end
+-- `ScrCmd_ChangeDeoxysForm`: the form is a var; every Deoxys in the party
+-- takes it -- the Veilstone meteorites.
+L.changedeoxysform = function(ins, s) emit(s, { "g4_deoxys_form", ins.args[1] }) end
+L.addtogamerecord = function(ins, s)
+  emit(s, { "g4_add_game_record", ins.args[1], ins.args[2], false })
+end
+L.addtogamerecordbigvalue = function(ins, s)
+  emit(s, { "g4_add_game_record", ins.args[1], ins.args[2], true })
+end
+-- SMALL FIELD QUERIES, ribbons, fossils, ratings and the Regi ruins.
+L.buffercustommessageword = function(ins, s) emit(s, { "g4_buffer_message_word", ins.args[1], ins.args[2] }) end
+L.bufferribbonname = function(ins, s) emit(s, { "g4_buffer_ribbon_name", ins.args[1], ins.args[2] }) end
+L.getfossilcount = function(ins, s) emit(s, { "g4_fossil_count", ins.args[1] }) end
+L.getspeciesfromfossil = function(ins, s) emit(s, { "g4_species_from_fossil", ins.args[1], ins.args[2] }) end
+L.findfossilatthreshold = function(ins, s)
+  emit(s, { "g4_fossil_at_threshold", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.getpartyrotomcountandfirst = function(ins, s)
+  emit(s, { "g4_party_rotom_forms", ins.args[1], ins.args[2] })
+end
+L.loadpokedexrating = function(ins, s) emit(s, { "g4_dex_rating", ins.args[1], ins.args[2] }) end
+L.gethour = function(ins, s) emit(s, { "g4_get_hour", ins.args[1] }) end
+L.countpartyeggs = function(ins, s) emit(s, { "g4_count_party_eggs", ins.args[1] }) end
+L.tryrevertpartypokemonforms = function(ins, s) emit(s, { "g4_try_revert_party_forms", ins.args[1] }) end
+L.findpartyslotwithnature = function(ins, s)
+  emit(s, { "g4_party_slot_with_nature", ins.args[1], ins.args[2] })
+end
+-- `messageunown` prints in FONT_UNOWN; this port has the line, not the font.
+L.messageunown = L.message
+L.activateregiruinsdot = function(ins, s)
+  emit(s, { "g4_regi_dot", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+
+-- THE SUPER CONTEST (scrcmd_contests.c) -- src/pokemon/Gen4Contest.lua.
+L.openpartymenuforcontest = function(ins, s)
+  emit(s, { "g4_contest_party_menu", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.getcontestpartymenuresult = function(ins, s) emit(s, { "g4_contest_party_result", ins.args[1], ins.args[2] }) end
+L.newcontest = function(ins, s)
+  emit(s, { "g4_new_contest", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.runcontestapplication = function(_, s) emit(s, { "g4_run_contest" }) end
+L.endcontest = function(_, s) emit(s, { "g4_end_contest" }) end
+L.getcontestinfo = function(ins, s)
+  emit(s, { "g4_contest_info", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.bufferjudgename = function(ins, s) emit(s, { "g4_contest_buffer", "judge", ins.args[1], ins.args[2] }) end
+L.buffercontestanttrainername = function(ins, s) emit(s, { "g4_contest_buffer", "trainer", ins.args[1], ins.args[2] }) end
+L.buffercontestantmonname = function(ins, s) emit(s, { "g4_contest_buffer", "mon", ins.args[1], ins.args[2] }) end
+L.buffercontestregistrationentrynumber = function(ins, s)
+  emit(s, { "g4_contest_buffer", "entry", ins.args[1], ins.args[2] })
+end
+L.buffercontestrank = function(ins, s) emit(s, { "g4_contest_buffer", "rank", ins.args[1] }) end
+L.buffercontesttype = function(ins, s) emit(s, { "g4_contest_buffer", "type", ins.args[1] }) end
+L.bufferwinningcontestanttrainername = function(ins, s) emit(s, { "g4_contest_buffer", "winTrainer", ins.args[1] }) end
+L.bufferwinningcontestantmonname = function(ins, s) emit(s, { "g4_contest_buffer", "winMon", ins.args[1] }) end
+L.setribbonname = function(ins, s) emit(s, { "g4_contest_buffer", "ribbon", ins.args[1] }) end
+L.settrue = function(ins, s) emit(s, { "g4_contest_query", "true", ins.args[1] }) end
+L.getplayercontestplacement = function(ins, s) emit(s, { "g4_contest_query", "placement", ins.args[1] }) end
+L.getwinningcontestantentrynum = function(ins, s) emit(s, { "g4_contest_query", "winner", ins.args[1] }) end
+L.getcontestregistrationentrynum = function(ins, s) emit(s, { "g4_contest_query", "entry", ins.args[1] }) end
+L.getcontestantobjeventgfx = function(ins, s) emit(s, { "g4_contest_query", "gfx", ins.args[1], ins.args[2] }) end
+L.getcontestantmoncontestfame = function(ins, s) emit(s, { "g4_contest_query", "fame", ins.args[1], ins.args[2] }) end
+L.getcontestmode = function(ins, s) emit(s, { "g4_contest_query", "mode", ins.args[1] }) end
+L.checkplayermonhasribbon = function(ins, s) emit(s, { "g4_contest_query", "ribbon", ins.args[1] }) end
+L.getfirsttimevictoryaccessory = function(ins, s) emit(s, { "g4_contest_query", "firstWin", ins.args[1] }) end
+L.getshouldskipawardceremony = function(ins, s) emit(s, { "g4_contest_query", "skipCeremony", ins.args[1] }) end
+-- The link half resumes at once without a link (Contest_IsSyncState answers
+-- TRUE when the contest is not a link contest), and the text-speed locks, the
+-- HBlank toggles, the network icon and the comm teardown (2B0, 2BB) have
+-- nothing to act on here: these lower to nothing, which is the cartridge's own
+-- single-player behaviour.
+L.startcontestcommsync = function(_, s) end
+L.waitforcommsyncstate = function(_, s) end
+L.lockautoscrollforlinkcontests = function(_, s) end
+L.locktextspeed = function(_, s) end
+L.starthblank = function(_, s) end
+L.stophblank = function(_, s) end
+L.destroynetworkicon = function(_, s) end
+L["2b0"] = function(_, s) end
+L["2bb"] = function(_, s) end
+-- The camera flashes on the stage and the change into contest attire are
+-- presentation this port does not draw: declared, so the census keeps them.
+L.startcontestcameraflashtask = function(_, s) emit(s, { "g4_noop", "contest camera flashes" }) end
+L.waitforcontestcameraflashtask = function(_, s) emit(s, { "g4_noop", "contest camera flashes" }) end
+L.changeintocontestattire = function(_, s) emit(s, { "g4_noop", "contest attire" }) end
+L.hidepoketch = function(_, s) emit(s, { "g4_poketch_hidden", true }) end
+L.showpoketch = function(_, s) emit(s, { "g4_poketch_hidden", false }) end
+
+-- THE VEILSTONE GAME CORNER (scrcmd_coins.c) -- Gen4GameCorner.
+L.showcoins = function(ins, s) emit(s, { "g4_coin_window", "show", ins.args[1], ins.args[2] }) end
+L.hidecoins = function(_, s) emit(s, { "g4_coin_window", "hide" }) end
+L.updatecoindisplay = function(_, s) emit(s, { "g4_coin_window", "update" }) end
+L.getcoinsamount = function(ins, s) emit(s, { "g4_get_coins", ins.args[1] }) end
+L.addcoins = function(ins, s) emit(s, { "g4_add_coins", ins.args[1] }) end
+L.subtractcoinsfromvalue = function(ins, s) emit(s, { "g4_subtract_coins", ins.args[1] }) end
+L.subtractcoinsfromvar = L.subtractcoinsfromvalue
+L.hascoinsfromvalue = function(ins, s) emit(s, { "g4_has_coins", ins.args[1], ins.args[2] }) end
+L.hascoinsfromvar = L.hascoinsfromvalue
+L.checkcanaddcoins = function(ins, s) emit(s, { "g4_can_add_coins", ins.args[1], ins.args[2] }) end
+L.getgamecornerprizedata = function(ins, s)
+  emit(s, { "g4_prize_data", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.checkbonusroundstreak = function(ins, s) emit(s, { "g4_bonus_streak", ins.args[1] }) end
+-- `267 <machine>` is the slot machine (overlay 101), not built: a named gap.
+L["267"] = function(_, s) emit(s, { "g4_noop", "the slot machine" }) end
+L.showlistmenuremembercursor = function(ins, s)
+  emit(s, { "g4_menu_show_remember", ins.args[1], ins.args[2] })
+end
+L.buffervarpaddingdigits = function(ins, s)
+  emit(s, { "g4_buffer_padded_var", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.buffertypename = function(ins, s) emit(s, { "g4_buffer_type_name", ins.args[1], ins.args[2] }) end
+L.calchiddenpowertype = function(ins, s)
+  emit(s, { "g4_hidden_power_type", ins.args[1], ins.args[2] })
+end
+
+-- THE SOLACEON DAY CARE (scrcmd_daycare.c) -- src/pokemon/Gen4DayCare.lua.
+L.bufferdaycaremonnicknames = function(_, s) emit(s, { "g4_daycare_names" }) end
+L.getdaycarestate = function(ins, s) emit(s, { "g4_daycare_state", ins.args[1] }) end
+L.resetdaycarepersonalityandstepcounter = function(_, s) emit(s, { "g4_daycare_reset_egg" }) end
+L.giveeggfromdaycare = function(_, s) emit(s, { "g4_daycare_give_egg" }) end
+L.movemontopartyfromdaycareslot = function(ins, s)
+  emit(s, { "g4_daycare_withdraw", ins.args[1], ins.args[2] })
+end
+L.bufferdaycarepricebyslot = function(ins, s)
+  emit(s, { "g4_daycare_price", ins.args[1], ins.args[2] })
+end
+L.bufferdaycaregainedlevelsbyslot = function(ins, s)
+  emit(s, { "g4_daycare_gained", ins.args[1], ins.args[2] })
+end
+L.bufferpartymonnicknamereturnspecies = function(ins, s)
+  emit(s, { "g4_buffer_nickname_species", ins.args[2], ins.args[3] })
+end
+L.storepartymonintodaycare = function(ins, s) emit(s, { "g4_daycare_store", ins.args[1] }) end
+L.bufferdaycarenicknamelevelgender = function(ins, s)
+  emit(s, { "g4_daycare_name_level_gender", ins.args[1], ins.args[2], ins.args[3], ins.args[4] })
+end
+L.getdaycarecompatibilitylevel = function(ins, s)
+  emit(s, { "g4_daycare_compatibility", ins.args[1] })
+end
+L.checkmoney2 = function(ins, s) emit(s, { "g4_check_money_var", ins.args[1], ins.args[2] }) end
+L.openpartymenufordaycare = function(_, s) emit(s, { "g4_daycare_party_menu" }) end
+L.getdaycarepartymenuresult = function(ins, s)
+  emit(s, { "g4_daycare_party_result", ins.args[1], ins.args[2] })
+end
+L.setmonsummary = function(ins, s) emit(s, { "g4_set_mon_summary", ins.args[1] }) end
+L.getmonpartyslot = function(ins, s) emit(s, { "g4_get_mon_party_slot", ins.args[1] }) end
+L.tryrevertpokemonform = function(ins, s)
+  emit(s, { "g4_try_revert_form", ins.args[1], ins.args[2] })
+end
+L.checkpoketchenabled = function(ins, s) emit(s, { "g4_poketch_enabled", ins.args[1] }) end
+L.checkpartyhasbadegg = function(ins, s) emit(s, { "g4_party_has_bad_egg", ins.args[1] }) end
+L.increasepartymonfriendship = function(ins, s)
+  emit(s, { "g4_increase_friendship", ins.args[1], ins.args[2] })
+end
 L.checkdaycarehasegg = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Solaceon day care" })
+  emit(s, { "g4_daycare_has_egg", ins.args[1] })
 end
 L.clearspiritombcounter = function(_, s)
   emit(s, { "g4_noop", "the Spiritomb counter (it needs the Underground)" })
@@ -1855,6 +3539,26 @@ L.stophoneytreeshaking=function(_,s) emit(s,{'g4_honey_stop'}) end
 L.getpcboxesfreeslotcount = function(ins, s)
   emit(s, { "g4_pc_free_slots", ins.args[1] })
 end
+-- HEARTGOLD / SOULSILVER's spelling of the same count (ScrCmd_CountPCEmptySpace,
+-- the Bug-Catching Contest's registration asks it)
+L.countpcemptyspace = L.getpcboxesfreeslotcount
+-- HEARTGOLD / SOULSILVER scrcmd 780 `CasinoGame <machine, city>`: a Game
+-- Corner machine is Voltorb Flip (src/ui/HgssVoltorbFlip.lua); the machine
+-- and city only fed a luck value the app ignores
+L.casinogame = function(ins, s) emit(s, { "g4_casino_game", ins.args[1], ins.args[2] }) end
+-- HEARTGOLD / SOULSILVER'S BUG-CATCHING CONTEST (src/world/HgssBugContest.lua),
+-- scrcmds 784..790; 784 only loads the contest's overlay
+L.scriptoverlaycmd = function() end
+L.bugcontestaction = function(ins, s) emit(s, { "g4_bug_contest_action", ins.args[1], ins.args[2] }) end
+L.bufferbugcontestwinner = function(ins, s) emit(s, { "g4_bug_contest_winner", ins.args[1] }) end
+L.judgebugcontest = function(ins, s)
+  emit(s, { "g4_bug_contest_judge", ins.args[1], ins.args[2], ins.args[3] })
+end
+L.bufferbugcontestmonnick = function(ins, s) emit(s, { "g4_bug_contest_mon_nick", ins.args[1], ins.args[2] }) end
+L.bugcontestgettimeleft = function(ins, s) emit(s, { "g4_bug_contest_time_left", ins.args[1] }) end
+L.isbugcontestantregistered = function(ins, s)
+  emit(s, { "g4_bug_contest_registered", ins.args[1], ins.args[2] })
+end
 L.checkdidnotcapture = function(ins, s)
   emit(s, { "g4_did_not_capture", ins.args[1] })
 end
@@ -1892,23 +3596,135 @@ end
 -- a route, in a cave or in a building, so treating it as floor cannot let a
 -- player walk off a cliff anywhere else -- which is the question worth asking
 -- before leaving it alone, and the census is what answers it.
+-- ...AND THE STATE BEHIND BOTH IS NOW WRITTEN, which is pass 189 and is a
+-- smaller claim than it sounds.  The gyms still do not block -- the cells
+-- still read as floor -- but the persisted slot the cartridge keeps for them
+-- exists, is saved, and holds the cartridge's own initial values: Pastoria at
+-- GREEN (the MIDDLE water level, NOT the zero value of the enum, which is
+-- ORANGE) and Canalave's 24-platform bitfield with ten platforms starting in
+-- position B.  See src/world/Gen4DynamicMapFeatures.lua, which also has the
+-- measurement saying why the resolvers are a height problem rather than a
+-- behaviour one -- and why blocking the 0x59 cells would leave Pastoria with
+-- 57 reachable cells and not one of its ten buttons in reach.
 L.initpersistedmapfeaturesforpastoriagym = function(_, s)
-  emit(s, { "g4_noop", "the Pastoria Gym water level (its cells read as floor here)" })
+  emit(s, { "g4_map_feature_init", "pastoria" })
 end
 L.initpersistedmapfeaturesforcanalavegym = function(_, s)
-  emit(s, { "g4_noop", "the Canalave Gym sliding floor (its cells read as floor here)" })
+  emit(s, { "g4_map_feature_init", "canalave" })
 end
 L.presspastoriagymbutton = function(_, s)
-  emit(s, { "g4_noop", "the Pastoria Gym water-level button" })
+  emit(s, { "g4_pastoria_button" })
 end
 
--- THE GREAT MARSH / SAFARI GAME, one absent system.
-L.startendsafarigame = function(_, s) emit(s, { "g4_noop", "the Great Marsh safari game" }) end
+-- ---------------------------------------------------------------------------
+-- THE SIX ROWS THE CENSUS COULD NOT SEE
+-- ---------------------------------------------------------------------------
+--
+-- Pass 189.  Walking the cartridge for the whole persisted-map-feature family
+-- finds 82 sites across nineteen commands.  The census ranked the subject at
+-- 53, and the 29-site gap is not an arithmetic slip -- it is 24 sites across
+-- SIX COMMANDS THAT HAD NO LOWERING AT ALL, plus the rows it merged
+-- elsewhere:
+--
+--     setplayerheightcalculationenabled           12
+--     checkgreatmarshtramlocation                  6
+--     movegreatmarshtram                           2
+--     movehearthomegymdplift                       2
+--     initgreatmarshtram                           1
+--     initpersistedmapfeaturesforvilla             1
+--
+-- The census reads its subjects out of the PROSE in `g4_noop` and
+-- `g4_no_feature` rows.  A command with no lowering emits neither, names no
+-- subject, and is therefore invisible to the ranking: the tool built to stop
+-- a subject hiding has a blind spot shaped exactly like the worst case, since
+-- an unlowered command is strictly worse than a declared one.  Recorded in
+-- claude/check_design_lessons.md.
+--
+-- AND ONE OF THE SIX WAS A LIE.  `checkgreatmarshtramlocation` writes the
+-- answer into a var and all six sites branch on it:
+--
+--     checkgreatmarshtramlocation 0, 0x8004
+--     setvarfromvalue             0x8005, 0
+--     comparevartovalue           0x8004, 6
+--     callif                      1, +0x464      --> movegreatmarshtram 0x8005, 3
+--
+-- GREAT_MARSH_TRAM_AT_LOCATION is **5** and NOT_AT_LOCATION is **6**, not 1
+-- and 0, and the script compares against the literal 6.  Unlowered, 0x8004
+-- keeps whatever the previous script left in it, so whether the tram is
+-- fetched is decided by the last unrelated command to touch that var.  A port
+-- that wrote a boolean would have been wrong at all six sites in the same
+-- direction -- the compare would never match, the tram would never be called,
+-- and a player would stand at a stop that never answers.
+--
+-- The three tram commands and the villa constructor now go through the
+-- persisted slot.  `GreatMarshTram_MoveToLocation` is transcribed as its three
+-- arms with their else-branches rather than as "go to the destination",
+-- because they are not the same function: from area 1-2 the destination is
+-- honoured only when it is 3-4, so asking to go from 1-2 to 1-2 moves the
+-- tram to 5-6.
+L.initgreatmarshtram = function(_, s)
+  emit(s, { "g4_marsh_tram", "init" })
+end
+L.movegreatmarshtram = function(ins, s)
+  emit(s, { "g4_marsh_tram", "move", ins.args[1], ins.args[2] })
+end
+L.checkgreatmarshtramlocation = function(ins, s)
+  emit(s, { "g4_marsh_tram", "check", ins.args[1], ins.args[2] })
+end
+L.initpersistedmapfeaturesforvilla = function(_, s)
+  emit(s, { "g4_map_feature_init", "villa" })
+end
+
+-- THE TWELVE-SITE ONE IS A REAL NO-OP, and naming it is the whole fix.
+--
+-- `setplayerheightcalculationenabled <0|1>` calls
+-- `PlayerAvatar_SetHeightCalculationEnabled`, which clears the flag
+-- `MapObject_RecalculatePositionHeightEx` tests before it will take a height
+-- from the DYNAMIC plate rather than the static BDHC: with it off, the player
+-- keeps the floor's height while something underneath them moves.
+--
+-- ALL TWELVE SITES ARE IN ONE SCRIPT MEMBER -- 497, the Great Marsh tram's
+-- common script, which is also where all six `checkgreatmarshtramlocation`
+-- rows and both `movegreatmarshtram` rows live.  Twelve sites sounded like a
+-- system; it is one script bracketing six rides so the player is not dragged
+-- up and down by the tram prop's own plate.  Counting WHERE the sites are,
+-- not just how many, is what turned the largest unlowered command in the
+-- family into its smallest subject.
+--
+-- This port gives the player no height at all, so there is nothing to
+-- disable; the row is a no-op for the same reason the resolvers are absent
+-- rather than wrong.  It is named here so it stops going through the
+-- unknown-command path -- a log line saying which feature is missing beats
+-- one saying only that a number was not understood, and twelve sites were
+-- producing the latter.
+L.setplayerheightcalculationenabled = function(_, s)
+  emit(s, { "g4_noop", "the player's dynamic height calculation (this port has none)" })
+end
+
+-- HEARTHOME'S LIFT IS DIAMOND AND PEARL'S GYM, not Platinum's.
+--
+-- `movehearthomegymdplift` reaches `HearthomeGym_MoveLift`, whose two task
+-- functions are `HearthomeGymDP_RaiseLift` and `HearthomeGymDP_LowerLift` --
+-- the DP suffix is the cartridge's own.  Platinum rebuilt that gym as
+-- Fantina's quiz doors and left the lift code in the overlay with two script
+-- sites still calling it.  Hearthome is also the one gym of the five whose
+-- persisted feature has NO collision function in
+-- `sCheckCollisionFuncs`, which is the same fact from the other side: there is
+-- no lift to collide with any more.
+--
+-- Named rather than implemented, and named as what it is.
+L.movehearthomegymdplift = function(_, s)
+  emit(s, { "g4_noop", "the Hearthome Gym lift, which is Diamond and Pearl's gym" })
+end
+
+-- THE GREAT MARSH / SAFARI GAME -- see `Commands.g4_safari_game`.
+-- `startendsafarigame <state>` -- one BYTE: 0 starts a game, 1 ends it.
+L.startendsafarigame = function(ins, s) emit(s, { "g4_safari_game", ins.args[1] }) end
 L.startgreatmarshlookout = function(_, s)
   emit(s, { "g4_noop", "the Great Marsh lookout" })
 end
 L.getcurrentsafarigamecaughtnum = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Great Marsh safari game" })
+  emit(s, { "g4_safari_caught", ins.args[1] })
 end
 -- !! `setspeciallocation` IS THE LIFT, AND THIS USED TO THROW IT AWAY.
 --
@@ -1970,39 +3786,50 @@ L.playelevatoranimation = function(_, s)
   emit(s, { "g4_noop", "the elevator animation" })
 end
 
--- THE SHARD MOVE TUTOR in the Route 212 house, one absent system. Its
--- var-writers must still write: `checkcanaffordmove` answering a leftover
--- would let a script charge for a move it never taught.
+-- THE SHARD MOVE TUTORS (Route 212, the Survival Area, Snowpoint City) --
+-- scrcmd_move_tutor.c, data in src/import/Gen4MoveTutor.lua.
+-- `checkcanaffordmove <move> <destVar>`
 L.checkcanaffordmove = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[2], "the shard move tutor" })
+  emit(s, { "g4_tutor_can_afford", ins.args[1], ins.args[2] })
 end
+-- `checkhaslearnabletutormoves <partySlot> <location> <destVar>`
 L.checkhaslearnabletutormoves = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[3], "the shard move tutor" })
+  emit(s, { "g4_tutor_has_moves", ins.args[1], ins.args[2], ins.args[3] })
+end
+-- `opensummaryscreenteachmove <partySlot> <move>` -- which move to forget;
+-- `getsummaryselectedmoveslot <destVar>` reads the answer (0..3, 4 = keep)
+L.opensummaryscreenteachmove = function(ins, s)
+  emit(s, { "g4_tutor_forget_menu", ins.args[1], ins.args[2] })
 end
 L.getsummaryselectedmoveslot = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the shard move tutor" })
+  emit(s, { "g4_tutor_forget_slot", ins.args[1] })
 end
-L.opensummaryscreenteachmove = function(_, s)
-  emit(s, { "g4_noop", "the shard move tutor" })
+-- `showmovetutormoveselectionmenu <partySlot> <location> <destVar>` -- the
+-- choice is the MOVE ID, or 65534 (MENU_CANCEL) for EXIT / B
+L.showmovetutormoveselectionmenu = function(ins, s)
+  emit(s, { "g4_tutor_menu", ins.args[1], ins.args[2], ins.args[3] })
 end
-L.showmovetutormoveselectionmenu = function(_, s)
-  emit(s, { "g4_noop", "the shard move tutor" })
+-- `resetmoveslot <partySlot> <move> <moveSlot>` / `payshardcost <move>`
+L.resetmoveslot = function(ins, s)
+  emit(s, { "g4_tutor_set_move", ins.args[1], ins.args[2], ins.args[3] })
 end
-L.resetmoveslot = function(_, s) emit(s, { "g4_noop", "the shard move tutor" }) end
-L.payshardcost = function(_, s) emit(s, { "g4_noop", "the shard move tutor" }) end
+L.payshardcost = function(ins, s) emit(s, { "g4_tutor_pay", ins.args[1] }) end
 
 -- THE DEX MILESTONES, none of which this port tracks per-region or per-form.
 L.getunownformsseencount = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "Unown form counting" })
+  emit(s, { "g4_unown_forms_seen", ins.args[1] })
 end
 L.checknationaldexcompleted = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the National Dex completion check" })
+  emit(s, { "g4_dex_complete", ins.args[1], true })
 end
+L.getnationaldexcaughtcount=function(ins,s) emit(s,{'g4_dex_caught_count',ins.args[1],true}) end
+L.getlocaldexcaughtcount_unused=function(ins,s) emit(s,{'g4_dex_caught_count',ins.args[1],false}) end
 L.checkgamecompleted = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "the Hall of Fame record" })
+  emit(s, { "g4_game_completed", ins.args[1] })
 end
+L.setgamecompleted = function(_, s) emit(s, { "g4_set_game_completed" }) end
 L.turnonpokedexformdetection = function(_, s)
-  emit(s, { "g4_noop", "Pokedex form detection" })
+  emit(s, { "g4_enable_dex_form_detection" })
 end
 L.showdiplomasinnoh = function(_, s) emit(s, { "g4_noop", "the Sinnoh diploma" }) end
 L.showdiplomanationaldex = function(_, s)
@@ -2032,7 +3859,18 @@ L["29f"] = function(_, s) emit(s, { "g4_noop", "a cartridge no-op (scrcmd 29F)" 
 -- whole flow since Gen 1 as `record_hall_of_fame` -- Gen 2 lowers its own
 -- `HallOfFame` special to the same verb -- so the last three rows of the
 -- Sinnoh story are one line.
-L.cleargame = function(_, s) emit(s, { "record_hall_of_fame" }) end
+-- Platinum's own ClearGame (Gen4Commands.g4_clear_game): its Hall of Fame,
+-- the save, its credits and the reset -- and, this port's addition, one
+-- Mystery Gift per induction, delivered by the cartridge's own deliveryman
+L.cleargame = function(_, s)
+  emit(s, { "g4_clear_game" })
+end
+-- HEARTGOLD / SOULSILVER: `HOFCredits <vsTrainerRed>` is that ClearGame
+-- (CallTask_GameClear); `HallOfFameAnim <count>` the machine's balls lighting
+-- one per Pokemon (ov02_0224CDB0 on prop 0x26), Platinum's healing
+-- animation, likewise a picture
+L.hofcredits = function(ins, s) emit(s, { "g4_clear_game", ins.args[1] }) end
+L.halloffameanim = function(_, s) emit(s, { "g4_noop", "the Hall of Fame machine's balls" }) end
 L.playhalloffamehealinganimation = function(_, s)
   emit(s, { "g4_noop", "the Hall of Fame healing animation" })
 end
@@ -2055,21 +3893,28 @@ end
 -- the overworld for local id 128 on a map whose object list is empty: it finds
 -- nothing and says so, once per id. A no-op is the honest lowering until
 -- `sMapObjectEvents` is extracted, which is the real fix and is on the tracker.
-L.adddistortionworldmapobject = function(_, s)
-  emit(s, { "g4_noop", "a Distortion World cast member (its table is in overlay 9)" })
+-- ...AND NOW IT IS: `gen4_distortion_world.cast` is the overlay's table, and
+-- src/world/Gen4DistPlatforms.lua places and removes its members by local id.
+L.adddistortionworldmapobject = function(ins, s)
+  emit(s, { "g4_dw_cast_add", ins.args[1] })
 end
-L.deletedistortionworldmapobject = function(_, s)
-  emit(s, { "g4_noop", "a Distortion World cast member (its table is in overlay 9)" })
+L.deletedistortionworldmapobject = function(ins, s)
+  emit(s, { "g4_dw_cast_delete", ins.args[1] })
 end
 L.initpersistedmapfeaturesfordistortionworld = function(_, s)
-  emit(s, { "g4_noop", "the Distortion World persisted map feature" })
+  emit(s, { "g4_map_feature_init", "distortion" })
 end
 L.finishdistortionworldgiratinashadowevent = function(_, s)
-  emit(s, { "g4_noop", "the Giratina shadow event" })
+  emit(s, { "g4_dw_shadow_finish" })
 end
-L.dodwwarp = function(_, s) emit(s, { "g4_noop", "the Distortion World warp" }) end
-L.setpartygiratinaform = function(_, s)
-  emit(s, { "g4_noop", "Giratina's forms" })
+-- FieldSystem_StartDWWarp: the swirl into the Distortion World (its own
+-- application on the cartridge), played over the faded-out screen
+L.dodwwarp = function(_, s) emit(s, { "g4_dw_warp" }) end
+-- `ScrCmd_SetPartyGiratinaForm`: non-zero forces Origin Forme on every
+-- Giratina in the party (the Distortion World), zero puts each back by its
+-- held item. Both register the form in the Pokedex.
+L.setpartygiratinaform = function(ins, s)
+  emit(s, { "g4_giratina_form", ins.args[1] })
 end
 
 L.getbattleresult = function(ins, s)
@@ -2122,7 +3967,7 @@ L.triggerplatformlift = function(_, s)
   emit(s, { "g4_noop", "the platform lift (all nine rooms are walkable without it)" })
 end
 L.initpersistedmapfeaturesforplatformlift = function(_, s)
-  emit(s, { "g4_noop", "the platform lift persisted map feature" })
+  emit(s, { "g4_map_feature_init", "platformlift" })
 end
 -- ...BUT THE QUESTION THE SLOT IS ASKED IS ANSWERABLE, and an unlowered
 -- var-writer is the dangerous kind -- this is the fifth time that sentence has
@@ -2146,11 +3991,18 @@ end
 -- DYNAMIC_HEIGHT_COLLISION cells (293 of them, chunks 296-298) -- so like
 -- Canalave and Pastoria its floor reads as ordinary ground here and the puzzle
 -- is absent rather than impassable.
-L.presssunyshoregymbutton = function(_, s)
-  emit(s, { "g4_noop", "the Sunyshore Gym gear button" })
+L.presssunyshoregymbutton = function(ins, s)
+  emit(s, { "g4_sunyshore_gear_button", ins.args[1] })
 end
-L.initpersistedmapfeaturesforsunyshoregym = function(_, s)
-  emit(s, { "g4_noop", "the Sunyshore Gym persisted map feature" })
+-- THE ROOM ID IS AN OPERAND AND IT IS NOT THE WHOLE INITIALISATION.
+-- `PersistedMapFeatures_InitForSunyshoreGym(fieldSystem, roomID)` sets the
+-- rotation from a per-room table (2, 1, 0 -- descending) and then forces it
+-- back to 0 if the player's own z equals that room's entrance z (14, 21, 25).
+-- So the same room initialises two different ways depending on which side you
+-- walked in from, and the command needs the player's position as well as its
+-- operand.
+L.initpersistedmapfeaturesforsunyshoregym = function(ins, s)
+  emit(s, { "g4_map_feature_init", "sunyshore", ins.args[1] })
 end
 
 -- `pokemartseal <martID>` -- `SunyshoreMarketDailyStocks[martID]` with
@@ -2169,8 +4021,11 @@ end
 L.deactivatelakeguardiancontainmentunits = function(_, s)
   emit(s, { "g4_noop", "the lake guardian containment units" })
 end
-L.sethiddenlocation = function(_, s)
-  emit(s, { "g4_noop", "a hidden location marker" })
+-- `ScrCmd_SetHiddenLocation`: a location (var or literal) and an on/off byte.
+-- Was a no-op, so no hidden location could ever be unlocked -- Spring Path,
+-- Seabreak Path and the two moon islands. See Gen4HiddenPaths.
+L.sethiddenlocation = function(ins, s)
+  emit(s, { "g4_set_hidden_location", ins.args[1], ins.args[2] })
 end
 -- !! THE DESTINATION IS OPERAND 1, AND THIS PASSED OPERAND 2.
 -- `checkpartyhasfatefulencounterregigigas` takes ONE operand and pret reads it
@@ -2179,7 +4034,7 @@ end
 -- behind each one branched on the previous command's answer. Caught by comparing
 -- pret's operand KINDS against the arg indices this file passes.
 L.checkpartyhasfatefulencounterregigigas = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[1], "fateful-encounter Regigigas" })
+  emit(s, { "g4_fateful_regigigas", ins.args[1] })
 end
 -- `noop` is named that on the cartridge too.
 L.noop = function(_, s) emit(s, { "g4_noop", "a cartridge no-op" }) end
@@ -2197,11 +4052,39 @@ L.noop = function(_, s) emit(s, { "g4_noop", "a cartridge no-op" }) end
 -- to `ScrCmd_CheckABPress`, which does. Matching each definition exactly is
 -- what separated them, and 20D would have left its five Spear Pillar sites
 -- branching on the previous command's answer.
-L["18c"] = function(_, s) emit(s, { "g4_noop", "a Spear Pillar effect (scrcmd 18C)" }) end
-L["2fb"] = function(_, s) emit(s, { "g4_noop", "a Spear Pillar cue (scrcmd 2FB)" }) end
-L["2b6"] = function(_, s) emit(s, { "g4_noop", "an Iron Island cue (scrcmd 2B6)" }) end
+-- ...AND THREE OF THE FOUR WERE NAMED AFTER THE MAP THEY APPEAR ON RATHER
+-- THAN WHAT THEY DO, which is how two ordinary object operations and a hang
+-- sat in the backlog looking like unimplementable set-pieces.
+--
+-- 18C is `MapObject_TryFace` -- turn an object to face a direction, fifteen
+-- sites, and a function this port already calls under another name.
+-- 20D is a ten-mode overlay-6 effect switch whose modes 1 and 6 are
+-- completion polls, and the scripts poll them in a backwards jump: writing 0
+-- there is an INFINITE LOOP, not a missing feature.  See
+-- `Commands.g4_field_effect` for the derivation.
+L["18c"] = function(ins, s)
+  emit(s, { "g4_face_dir", ins.args[1], ins.args[2] })
+end
 L["20d"] = function(ins, s)
-  emit(s, { "g4_no_feature", ins.args[2], "a Spear Pillar effect (scrcmd 20D)" })
+  emit(s, { "g4_field_effect", ins.args[1], ins.args[2] })
+end
+-- THE TWO THAT STAY NO-OPS, with the reason rather than the map name.
+--
+-- 2B6 is `sub_02062D80`, which sets or clears MAP_OBJ_STATUS_18 -- the flag
+-- `sub_02063F00` checks when deciding whether another object blocks a tile,
+-- so it is "this object is solid to other objects".  Both of its two sites
+-- (band 329, local id 4) pass 1, which sets the flag OFF, which is solid --
+-- the default, and nothing in the game ever clears it.  So the cartridge
+-- restores a default here and a no-op reaches the same state.  Argued, not
+-- deferred.
+L["2b6"] = function(_, s)
+  emit(s, { "g4_noop", "object-vs-object solidity (scrcmd 2B6)" })
+end
+-- 2FB fades the screen out and starts overlay 100 as a child application,
+-- handed the options and the player gender.  One site, band 236, right after
+-- the 20D mode-1 poll.  That is a whole screen this port does not have.
+L["2fb"] = function(_, s)
+  emit(s, { "g4_noop", "a full-screen child application (scrcmd 2FB)" })
 end
 
 
@@ -2225,7 +4108,7 @@ end
 L.showobject = function(ins, s) emit(s, { "g4_show_object", ins.args[1] }) end
 L.hideobject = function(ins, s) emit(s, { "g4_hide_object", ins.args[1] }) end
 L.resetdistortionworldpersistedcameraangles = function(_, s)
-  emit(s, { "g4_noop", "the Distortion World camera angles" })
+  emit(s, { "g4_dw_reset_camera" })
 end
 L.setsubscene63 = function(_, s) emit(s, { "g4_noop", "a subscene change" }) end
 
@@ -2237,8 +4120,8 @@ L.setsubscene63 = function(_, s) emit(s, { "g4_noop", "a subscene change" }) end
 L.startgiratinaoriginbattle = function(ins, s)
   emit(s, { "g4_legendary_battle", ins.args[1], ins.args[2] })
 end
-L.startdistortionworldgiratinashadowevent = function(_, s)
-  emit(s, { "g4_noop", "the Giratina shadow event" })
+L.startdistortionworldgiratinashadowevent = function(ins, s)
+  emit(s, { "g4_dw_shadow_start", ins.args[1] })
 end
 
 function Gen4ScriptVM.lower(instructions, state)
@@ -2260,5 +4143,17 @@ function Gen4ScriptVM.lower(instructions, state)
   end
   return s.out
 end
+
+-- Black / White's NPC trades (0x1BF / 0x1BE / 0x120): src/script/Gen5TradeCommands.lua
+require("src.script.Gen5TradeCommands").install(L)
+-- HGSS's scripted Pokegear calls (SetPhoneCall / RunPhoneCall / UnsetPhoneCallTrigger):
+-- src/script/HgssPhoneCallCommands.lua
+require("src.script.HgssPhoneCallCommands").install(L)
+-- Black / White's Battle Subway (0x15A and its kin): src/script/Gen5BattleSubway.lua
+require("src.script.Gen5BattleSubway").install(L)
+-- Black / White's Big Stadium / Small Court (0x1F3-0x1F8, 0x25C): src/script/Gen5Stadium.lua
+require("src.script.Gen5Stadium").install(L)
+-- HGSS's MartSell (0x30E): src/script/HgssMartCommands.lua
+require("src.script.HgssMartCommands").install(L)
 
 return Gen4ScriptVM
