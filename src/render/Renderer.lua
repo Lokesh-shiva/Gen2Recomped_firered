@@ -101,6 +101,10 @@ local function displayMetrics()
   end
   if dpiX < 1e-6 then dpiX = 1 end
   if dpiY < 1e-6 then dpiY = 1 end
+  if Renderer.splitViewport then
+    ww,wh=Renderer.splitViewport.w,Renderer.splitViewport.h
+    pw,ph=ww*dpiX,wh*dpiY
+  end
   return ww, wh, pw, ph, dpiX, dpiY
 end
 
@@ -121,6 +125,7 @@ function Renderer:init()
   -- a render pipeline's finished world image, already at window resolution
   -- (see src/render/Pipelines.lua).  nil is "no pipeline rendered this
   -- frame", which is every vanilla frame.
+  self.uiOverride = nil
   self.worldOverride = nil
 end
 
@@ -255,6 +260,19 @@ end
 -- the whole window with no background peeking at the receded top/bottom
 -- corners; flat mode returns exactly today's size (growth factor is 1 when
 -- tilt is inactive).
+-- THE WORLD THE CURRENT MAP ACTUALLY HAS, in world pixels, or nil for "do not
+-- clamp".  Set by the overworld when it loads a map; every other caller of
+-- `worldViewSize` -- battles, menus, the title screen -- leaves it nil and is
+-- unaffected.
+function Renderer:setWorldBounds(w, h)
+  w, h = tonumber(w), tonumber(h)
+  if not (w and h and w > 0 and h > 0) then
+    self.worldBoundsW, self.worldBoundsH = nil, nil
+    return
+  end
+  self.worldBoundsW, self.worldBoundsH = w, h
+end
+
 function Renderer:worldViewSize()
   local _, _, pw, ph = displayMetrics()
   local sp = Zoom.scale(self:fitScale())
@@ -267,7 +285,37 @@ function Renderer:worldViewSize()
     local g = Tilt.viewGrowth()
     vw, vh = math.ceil(vw * g), math.ceil(vh * g)
   end
+  -- Gen4 retains its bounded 3D terrain framing. Earlier generations use
+  -- the full selected view and draw native border/neighbor tiles around it.
+  local bw, bh = self.worldBoundsW, self.worldBoundsH
+  -- Gen 1-3 render native border tiles beyond the map. Capping their view
+  -- here and enlarging it during presentation silently changes the user's
+  -- zoom on every building/route transition and makes small-map zoom inert.
+  if bw and bh and require("src.core.GameVersion").isGen4() then
+    local uw, uh = self:uiSize()
+    -- Never below the screen the generation was drawn for, so a map at least
+    -- that big comes out exactly the size it did before.
+    local availW = math.max(uw, bw)
+    local availH = math.max(uh, bh)
+    local cap = math.min(1, availW / vw, availH / vh)
+    vw, vh = math.floor(vw * cap), math.floor(vh * cap)
+    if vw % 2 ~= 0 then vw = vw + 1 end
+    if vh % 2 ~= 0 then vh = vh + 1 end
+  end
   return vw, vh
+end
+
+-- Gen4's bounded terrain canvas fills the window. Gen1-3 keep the selected
+-- zoom scale; enlarging a small-map canvas would undo the user's zoom.
+--
+-- Tilt is excluded because it grows the view on purpose (Tilt.viewGrowth) to
+-- keep the projected ground plane covering the receded corners; filling with
+-- it would undo the growth it just asked for.
+function Renderer:worldPresentationScale(sp, pw, ph, vw, vh)
+  if self.worldBoundsW and require("src.core.GameVersion").isGen4() and not Tilt.active() then
+    return math.max(sp, pw / vw, ph / vh)
+  end
+  return sp
 end
 
 -- transparent: the world pass shows through (UI pass draws overlays only)
@@ -282,6 +330,7 @@ function Renderer:beginFrame(transparent)
   fontModule().clearStyles()
   self.worldActive = false
   self.uprightActive = false
+  self.uiOverride = nil
   self.worldOverride = nil
   -- warp-fade overlay from Transition (issue #121); cleared each frame so
   -- a popped transition cannot leave a sticky black veil
@@ -799,13 +848,14 @@ function Renderer:endFrame(zones, worldZones)
   -- GB pixel stops being a whole number of screen pixels, which is the trade
   -- the setting exists to offer.  Clamped on the horizontal too, so a narrow
   -- window scales to fit instead of overflowing off both sides.
-  if self.uiFill then
+  if self.uiFill or self.splitViewport then
     Up = math.min(ph / uih, pw / uiw)
   end
   local Ux, Uy = Up / dpiX, Up / dpiY
   local uvpw, uvph = uiw * Ux, uih * Uy
   local uox = math.floor((pw - uiw * Up) / 2) / dpiX
   local uoy = math.floor((ph - uih * Up) / 2) / dpiY
+  self.uiPresentation = {x=uox,y=uoy,w=uvpw,h=uvph,scaleX=Ux,scaleY=Uy}
   local GBCFX = gbcFX()
   -- Forced mono/Classic modes still need a whole-screen zone when a state
   -- exposes no SGB packets (raw DMG canvas), so sendColors can remap.
@@ -857,7 +907,8 @@ function Renderer:endFrame(zones, worldZones)
     if Runtime.call("render.compose", function() return false end, self, ctx) == true then
       self.worldActive = false
       self.uprightActive = false
-      self.worldOverride = nil
+      self.uiOverride = nil
+  self.worldOverride = nil
       PaletteFX.setPass(nil)
       return {
         width = ww, height = wh, gameX = ox, gameY = oy,
@@ -875,7 +926,8 @@ function Renderer:endFrame(zones, worldZones)
   -- frames so there is a texture we can snapshot before the wipe; reading the
   -- texture that is also the active render target is undefined on GPUs.
   local battleNeedsSource = self.battleWipe
-                            and self.battleWipe.style == "frlg_swirl"
+                            and (self.battleWipe.style == "frlg_swirl"
+                                 or self.battleWipe.needsSource)
                             and self.battleWipe.screenDraw
   local needPresent = GBCFX.active() or Pipelines.wantsPresent()
                       or battleNeedsSource
@@ -969,6 +1021,29 @@ function Renderer:endFrame(zones, worldZones)
                            bx, by, boxX, boxY, boxW, boxH, dpiX, dpiY)
   end
 
+  -- A PUBLISHER MAY HAVE FREED ITS CANVAS SINCE IT HANDED IT OVER.
+  --
+  -- Reported from play on Android, switching CAM TILT between CARTRIDGE and 90:
+  --     src/render/Renderer.lua:997: Cannot use object after it has been
+  --     released.   ... in function 'getDimensions' ... in function 'endFrame'
+  --
+  -- `setWorldOverride` takes a canvas somebody else owns. `Gen4Ground` hands
+  -- over its live 3D target, and `Gen4Ground:liveTargetFor` RELEASES that
+  -- target whenever the requested size changes -- which is exactly what
+  -- changing the camera tilt does, because it switches between the free and
+  -- oblique passes. The override still pointed at it, and `getDimensions` on a
+  -- released object raises rather than returning nil.
+  --
+  -- The owner retracting it (which `liveTargetFor` now does) is the real fix.
+  -- This is the guard that keeps the class of bug from being FATAL: a canvas
+  -- nobody can measure is simply not an override, and the frame falls back to
+  -- the world canvas below -- which is the path every other generation uses
+  -- anyway. Cheap: one pcall per frame, and only when an override is set.
+  if self.worldOverride then
+    local measurable = pcall(self.worldOverride.getDimensions, self.worldOverride)
+    if not measurable then self.worldOverride = nil end
+  end
+
   if self.worldOverride then
     -- A render pipeline already produced the whole world -- terrain,
     -- characters and its own FX overlay -- as one window-resolution image,
@@ -997,8 +1072,17 @@ function Renderer:endFrame(zones, worldZones)
     local ow, oh = self.worldOverride:getDimensions()
     local osx = (ow and ow > 0) and (ww / ow) or (1 / dpiX)
     local osy = (oh and oh > 0) and (wh / oh) or (1 / dpiY)
+    -- iOS still needs the historical presentation flip for the older
+    -- generations. Gen 4 is the exception: its 3D worldOverride already
+    -- reaches this point in the correct orientation, so applying the same
+    -- iOS flip a second time turns Platinum upside down while its UI remains
+    -- upright.
     local loveMajor = love.getVersion()
-    if love.system and love.system.getOS and love.system.getOS() == "iOS" and loveMajor >= 12 then
+    local gen = require("src.core.GameVersion").generation()
+    if love.system and love.system.getOS
+       and love.system.getOS() == "iOS"
+       and loveMajor >= 12
+       and gen ~= 4 then
       love.graphics.draw(self.worldOverride, 0, wh, 0, osx, -osy)
     else
       love.graphics.draw(self.worldOverride, 0, 0, 0, osx, osy)
@@ -1016,6 +1100,8 @@ function Renderer:endFrame(zones, worldZones)
     local sx, sy = sp / dpiX, sp / dpiY
     local wvw = self.worldCanvas:getWidth()
     local wvh = self.worldCanvas:getHeight()
+    sp = self:worldPresentationScale(sp, pw, ph, wvw, wvh)
+    sx, sy = sp / dpiX, sp / dpiY
     local wox = math.floor((pw - wvw * sp) / 2) / dpiX
     local woy = math.floor((ph - wvh * sp) / 2) / dpiY
     -- Tilt mode projects the ground world pass through the perspective mesh
@@ -1191,7 +1277,9 @@ function Renderer:endFrame(zones, worldZones)
     if fills and require("src.core.GameVersion").isGen3() then
       self:bleedEdges(self.canvas, Ux, Uy, uox, uoy, ww, wh)
     end
-    blit(self.canvas, Ux, Uy, zones, Ux, Uy, uox, uoy, uox, uoy, uvpw, uvph)
+    local uiSource=self.uiOverride or self.canvas
+    local uiFactor=uiSource:getWidth()/uiw
+    blit(uiSource, Ux/uiFactor, Uy/uiFactor, zones, Ux, Uy, uox, uoy, uox, uoy, uvpw, uvph)
   else
     local rest = { { uox, uoy, uvpw, uvph } }
     local placed = {}
@@ -1214,6 +1302,9 @@ function Renderer:endFrame(zones, worldZones)
     -- the full surface, so rect() answers 0, 0, ww, wh and every number below
     -- is what it has always been.  Which is exactly why only mobile saw this.
     local sax, say, saw, sah = require("src.core.SafeArea").rect()
+    if self.splitViewport then
+      saw=math.max(0,math.min(saw,ww-sax));sah=math.max(0,math.min(sah,wh-say))
+    end
     local saRight, saBottom = sax + saw, say + sah
     for _, a in ipairs(anchors) do
       local dw, dh = a.w * Ux, a.h * Uy
@@ -1322,6 +1413,7 @@ function Renderer:endFrame(zones, worldZones)
   end
   self.worldActive = false
   self.uprightActive = false
+  self.uiOverride = nil
   self.worldOverride = nil
   PaletteFX.setPass(nil)
   return {

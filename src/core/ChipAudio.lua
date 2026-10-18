@@ -229,8 +229,11 @@ local function slimAudio(data)
   local audio = data.audio or {}
   return {
     programFile = audio.programFile,
+    programPrefix = require('src.core.WorkerFs').prefix(),
     bankOrder = audio.bankOrder,
     waveBanks = audio.waveBanks,
+    gen2Dialect = audio.gen2Dialect,
+    drumkits = audio.gen2Dialect=="polishedcrystal" and audio.drumkits or nil,
     noiseHeaders = audio.noiseHeaders,
     -- the Gen 3 synth reads its bytecode, voicegroups and sampled
     -- instruments out of one image beside the cache; this is where it is
@@ -339,6 +342,7 @@ function ChipAudio.playMusic(data, header, allowLoops, synthName)
   cmdCh:push({ cmd = "play", gen = gen, header = header, synth = synthName,
                allowLoops = allowLoops, audio = slimAudio(data),
                channelVolumes = ChipSynth.getChannelVolumes(),
+               stereo = ChipSynth.getStereo(),
                channelPitches = ChipSynth.getChannelPitches() })
   currentMusic = { source = source, gen = gen, threaded = true,
                    synth = synth, synthName = synthName,
@@ -355,6 +359,7 @@ local function pushChannelMix()
   if workerReady and cmdCh then
     cmdCh:push({ cmd = "channelMix",
                  volumes = ChipSynth.getChannelVolumes(),
+                 stereo = ChipSynth.getStereo(),
                  pitches = ChipSynth.getChannelPitches() })
   end
 end
@@ -597,6 +602,10 @@ end
 
 function ChipAudio.setChannelVolumes(volumes)
   ChipSynth.setChannelVolumes(volumes)
+  pushChannelMix()
+end
+function ChipAudio.setStereo(value)
+  ChipSynth.setStereo(value)
   pushChannelMix()
 end
 

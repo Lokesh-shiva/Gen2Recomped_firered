@@ -598,7 +598,9 @@ return {
     -- and hanging skirt -- are stood up as floating decks on the drawn
     -- poles (Structures.buildGen3Stalls).
     gTileset_Slateport = {
-      stall_awning = { 517, 525, 526, 527, 551, 565, 559, 760, 761, 762 },
+      -- 549/519 over 557/567 are the narrow stalls' own edge columns
+      stall_awning = { 517, 525, 526, 527, 551, 565, 559, 760, 761, 762,
+                       549, 519, 557, 567 },
     },
 
     -- EVERY POKEMON CENTER'S STAIRCASE (34 maps share this tileset).
@@ -625,14 +627,6 @@ return {
       },
     },
 
-gTileset_Sootopolis = {
-      behaviour = { [0x0C] = "cliff" },   -- MB_MOUNTAIN_TOP
-      -- Every roof in the crater is drawn as a dark CONE over an octagonal
-      -- body.  Built as sheds they lean into squat lozenges; this says the
-      -- pointed style exists here, and the octagon trim picks which
-      -- buildings actually taper (Structures: tent test).
-      tent_roof = true,
-    },
 
     -- LAVARIDGE: Mt Chimney, Jagged Pass and the Fiery Path.  The volcano's
     -- flank is drawn as one continuous scree -- the same rock motif the
@@ -736,10 +730,251 @@ gTileset_Sootopolis = {
     frlg_gTileset_TanobyRuins    = { rock_plateau = true },
 
     gTileset_General = {
-      roof_bands = { [72] = 6, [73] = 6, [74] = 6, [75] = 6 },
+      -- A POKEMON CENTRE'S ROOF IS FOUR ROWS OF THE DRAWING, NOT SIX.
+      --
+      -- IN-GAME LOCATION: metatiles 72..75 are the Centre's roof, laid in
+      -- PetalburgCity, OldaleTown, MauvilleCity, SlateportCity, MossdeepCity,
+      -- FortreeCity, EverGrandeCity and BattleFrontier_OutsideEast.
+      --
+      -- REPORTED from play: "pokemon center and pokemarts arent rendering
+      -- properly ... they should look like 3d representations of the 2d
+      -- tileset".
+      --
+      -- This number is how many 8px rows of the drawing the roof SURFACE
+      -- wears; the rest is wall.  `Structures.gen3RoofArtRows`' own measured
+      -- table already writes the answer down -- "ViridianCity Pokemon Centre,
+      -- bld 1: stated 6, plan 2, roof in the art 4 rows" -- and
+      -- `frlg_gTileset_General` below has carried 4 since.  HOENN'S COPY WAS
+      -- NEVER RE-MEASURED and kept the layer's own overstated 6.
+      --
+      -- MEASURED on Petalburg's run: at 6 the split gave the building a 16px
+      -- wall under a 32px roof, so two of the four drawn wall rows were worn
+      -- by the roof surface -- the roof ran down over its own facade as a
+      -- bulging dome with the shopfront squeezed into a strip at the bottom.
+      -- At 4 it is a 32px wall under a 16px roof: the hipped cap the 2D
+      -- draws, over the two storeys of window the 2D draws under it, and the
+      -- same silhouette FireRed's Viridian Centre has always built.
+      --
+      -- Eight Emerald maps move -- every outdoor map that lays this roof --
+      -- and no other geometry in Hoenn or Kanto does.
+      --
+      -- ...AND SO IS A POKEMON MART'S, drawn one course lower.
+      --
+      -- 40..43 is the MART's overhead course, the same thing 72..75 is for
+      -- the Centre and in the same primary tileset.  No Mart in Hoenn had a
+      -- band at all before this, so every one of them split on the whole
+      -- blocked run instead and came out with a 48px, 64px or 80px wall
+      -- under a single course of cap -- a shopfront stretched up a tower,
+      -- which is the "sank" the report describes.
+      --
+      -- IN-GAME LOCATIONS reached by these four: BattleFrontier_OutsideWest,
+      -- FortreeCity, MossdeepCity, SlateportCity (all four lay 40..43 on the
+      -- row above the Mart), OldaleTown and MauvilleCity (both lay it as the
+      -- Mart's own first row -- the lookup reads the cell before the row
+      -- above it, so one entry serves both placements).
+      --
+      -- 5, the same as the Centre, and for the same reason: MEASURED, the
+      -- drawing from 40..43 down to the footprint's last row is eight 8px
+      -- rows on all six, and the shopfront is the last THREE of them, so
+      -- `(artFront - top - rows + 1) * 8` is 24px of wall.  See "THE EAVE"
+      -- under the Centre above for how that number was settled.
+      -- ---- THE EAVE, MEASURED ----
+      --
+      -- g3-pcroof-389 took this from 6 to 4 and wrote down that the wall
+      -- came out 32px.  IT IS 24.  4 was one row short and every band in
+      -- this file inherited the error; g3-eave-394 corrects all of them.
+      --
+      -- HOW IT WAS MEASURED, and the method is reusable -- `/tmp/artrows.py`:
+      -- crop the building out of a 2D map render and, per 8px row of the
+      -- drawing, count the fraction of pixels with HSV saturation > 0.28 and
+      -- value > 90.  A painted roof runs 0.66..1.00; the shopfront, which is
+      -- white panel with small window glass and a sign, drops to ~0.29.  The
+      -- row where it drops IS the eave, and nothing about it is a judgement.
+      --
+      --     PetalburgCity Centre  0.88 0.96 0.88 0.79 0.66 | 0.29 0.44 0.52
+      --     OldaleTown    Centre  0.62 0.91 0.88 0.79 0.66 | 0.29 0.44 0.52
+      --     RustboroCity  Mart    0.01 0.80 1.00 0.79 0.66 | 0.29 0.44 0.44
+      --     MauvilleCity  Mart  ...0.83 1.00 0.89 0.75     | 0.46 0.57 0.67
+      --
+      -- DERIVED over ALL 26 Centres and Marts in Hoenn, both cartridges'
+      -- shared art and every town's own: the drop is THREE ROWS FROM THE
+      -- BOTTOM in every single one, Lavaridge's seven-row Centre and
+      -- Mauville's eight-wide Mart included.  There is no exception, so
+      -- there is no per-town number: the wall is 24px and the band is
+      -- (rows from the keyed course to the last) - 3, which is 5 on all of
+      -- them.
+      --
+      -- WHAT SETTLED IT, rather than the measurement alone.  REPORTED from
+      -- play: *"in oldale the pokemon centers not right"*, with a screenshot
+      -- of the Centre torn down the middle.  Oldale is the only building in
+      -- Hoenn drawn across TWO bands -- 72..73 at 4 and 642..643 at 6 -- so
+      -- it renders the two candidate numbers side by side on one wall, and
+      -- neither half matched the drawing.  g3-oldale-393 unified them at 4
+      -- and the seam closed; this revision moves both to the 5 the art
+      -- states.  The report is the evidence that the inherited 4 is visible
+      -- in play and not a pixel-counting quibble.
+      --
+      -- KANTO IS NOT TOUCHED.  `frlg_gTileset_General` keeps 4 -- its
+      -- drawings have not been put through the same measurement, and
+      -- `data/firered/gen3_maps.lua` names no bare `gTileset_*`, so nothing
+      -- in this block reaches a FireRed map in either direction.
+      roof_bands = {
+        [72] = 5, [73] = 5, [74] = 5, [75] = 5,   -- Centre, overhead course
+        [40] = 5, [41] = 5, [42] = 5, [43] = 5,   -- Mart, overhead course
+      },
+    },
+
+    -- ---- AND THE TEN TOWNS THAT DRAW THEIR OWN OVERHEAD COURSE ----
+    --
+    -- `bldRoofBands` reads a footprint cell's own metatile and, failing
+    -- that, the row above it.  The two entries above are the SHARED courses
+    -- in the primary tileset, and eight maps lay them exactly.  The towns
+    -- below do not: each draws the top of its Centre or its Mart with
+    -- metatiles of its own, in its own secondary tileset, so nothing ever
+    -- matched and the split never ran.
+    --
+    -- Every entry here is 5 -- deliberately the same number, not a fresh
+    -- guess.  MEASURED per building: from the keyed course down to the
+    -- footprint's last row is eight 8px rows in every case, and the
+    -- shopfront is the last THREE of them, so 5 gives every one of them the
+    -- 24px wall its own drawing draws.  See "THE EAVE" under
+    -- `gTileset_General` for the measurement and the report that settled it.
+    --
+    -- Metatile ids are the ones the maps actually lay, read off the
+    -- cartridge: see `toprow`/`above` in the sweep behind this revision.
+    --
+    -- FIVE TOWNS GET NO ENTRY, because MEASURED they already answer 32 with
+    -- no band at all -- their blocked run happens to be four courses, so the
+    -- fallback lands where the band would have put it.  PacifidlogTown's
+    -- Centre, MossdeepCity's Mart, and both of LavaridgeTown's.  An entry
+    -- written for them was measured to change nothing and was taken back
+    -- out rather than left in reading as though it did.
+    --
+    -- LavaridgeTown and VerdanturfTown are also LEFT ALONE for a second
+    -- reason, and it is not a roof one.  Lavaridge's Centre is claimed as
+    -- (7..13, 0..6) and its Mart as (14..18, 0..5) -- seven rows and six,
+    -- both running off the top edge of the map -- and the two share metatile
+    -- 625, so no single number could serve them even if one were needed.
+    -- Verdanturf's Centre is claimed nine cells wide, (10..18, 0..3).  Those
+    -- footprints have swallowed what stands above and beside them; that is a
+    -- fault in the footprint, not in the split, and banding them would only
+    -- paint a roof over the wrong extent.
+    -- RUSTBORO'S GREY BLOCKS.  Every house and both apartment blocks are one
+    -- drawing: a flat grey roof three rows deep (544..563, or 548..558 on
+    -- the narrower blocks) over a facade of window rows (568..579, or
+    -- 532..535/578) and a door course (540..543).  Emerald does not cap a
+    -- building at its wall art, so Flat2 (3..9, 43..51) -- three roof rows
+    -- over six of windows -- stood its whole nine rows, a 144px slab that
+    -- filled the view of the street beside it, and Flat1 96px over 48px of
+    -- facade.  Classed, each stands exactly the windows it draws.
+    gTileset_Rustboro = {
+      -- RustboroCity: Centre (15..18, 36..38), Mart (15..18, 43..45).
+      roof_bands = { [598] = 5, [606] = 5, [607] = 5, [599] = 5,
+                     [615] = 5 },
+      building_art = {
+        [544] = "roof", [545] = "roof", [546] = "roof", [547] = "roof",
+        [552] = "roof", [553] = "roof", [554] = "roof", [555] = "roof",
+        [560] = "roof", [561] = "roof", [563] = "roof",
+        [548] = "roof", [549] = "roof", [550] = "roof",
+        [566] = "roof", [574] = "roof", [567] = "roof",
+        [556] = "roof", [557] = "roof", [558] = "roof",
+        [568] = "wall", [569] = "wall", [570] = "wall", [571] = "wall",
+        [551] = "wall", [576] = "wall", [577] = "wall", [559] = "wall",
+        [579] = "wall",
+        [532] = "wall", [533] = "wall", [534] = "wall", [535] = "wall",
+        [578] = "wall", [540] = "wall", [541] = "wall", [542] = "wall",
+        [543] = "wall",
+      },
+    },
+    gTileset_Lilycove = {
+      -- LilycoveCity: Centre (23..26, 11..14).  Nothing is drawn above it,
+      -- so the keyed course is the footprint's own first row.
+      roof_bands = { [619] = 5, [620] = 5, [621] = 5, [622] = 5 },
+    },
+    -- ONE ENTRY PER TILESET.  Sootopolis was named twice in this table, and a
+    -- Lua constructor keeps the LAST key: the crater wall and the tent roofs
+    -- above were silently dropped for the roof bands below, so every cone
+    -- came out a squat lozenge.  Merged here.
+    gTileset_Sootopolis = {
+      behaviour = { [0x0C] = "cliff" },   -- MB_MOUNTAIN_TOP
+      -- Every roof in the crater is drawn as a dark CONE over an octagonal
+      -- body.  Built as sheds they lean into squat lozenges; this says the
+      -- pointed style exists here, and the octagon trim picks which
+      -- buildings actually taper (Structures: tent test).
+      tent_roof = true,
+      -- THE TENTS' OWN ART.  Each house is a dark cone over an octagonal
+      -- body, (8..10, 13..17) the first of nine: the tip row 520/528/536,
+      -- the cone 521..523 over 547/532/548 (the outer two drawn above the
+      -- player), the door course 555/540/556.  The door founds only the
+      -- three rows above it, so the tip row fell to the crater rock behind
+      -- and the cone was cut off at its shoulders.  Named, the footprint
+      -- grows up through the whole drawing.
+      building_art = {
+        [520] = "roof", [528] = "roof", [536] = "roof",
+        [521] = "roof", [522] = "roof", [523] = "roof",
+        [547] = "roof", [532] = "roof", [548] = "roof",
+        [555] = "wall", [540] = "wall", [556] = "wall",
+      },
+      -- SootopolisCity: Centre (42..45, 28..31), Mart (16..19, 26..29).
+      --
+      -- 5 like the rest, for uniformity -- but NEITHER of these two looks
+      -- right at any band value, and the reason is not the split.  REPORTED
+      -- from play: *"sootoplis' looked better before same with the pokemart
+      -- in sootopolis is weird, might need specific rules for that city"*.
+      -- MEASURED: these are the only two Centre/Mart footprints in Hoenn
+      -- that are FOUR metatile rows (`gen3BldRows = 8`) where Petalburg's
+      -- Centre is three (6) -- Sootopolis draws the building's top course
+      -- BLOCKED, so it lands in the footprint, while Petalburg draws the
+      -- same course on the above-player layer and the height pass drops it.
+      -- Same drawing, two different founded heights: 64px here against 48px
+      -- there.  Rendered at 391, 392 and at 5, all three are wrong in the
+      -- same way.  That fault is OPEN and is a height fault, not a roof one.
+      roof_bands = { [635] = 5, [636] = 5, [637] = 5, [638] = 5,
+                     [619] = 5, [620] = 5, [621] = 5 },
+    },
+    gTileset_Dewford = {
+      -- DewfordTown: Centre (1..4, 7..10).
+      roof_bands = { [515] = 5, [516] = 5, [517] = 5, [518] = 5 },
+    },
+    gTileset_Fallarbor = {
+      -- FallarborTown: Centre (13..16, 4..7), Mart (14..17, 13..15).
+      roof_bands = { [672] = 5, [673] = 5, [674] = 5, [675] = 5,
+                     [680] = 5 },
     },
     gTileset_Petalburg = {
-      roof_bands = { [642] = 6, [643] = 6 },
+      -- ONE BUILDING, ONE BAND.
+      --
+      -- REPORTED from play: *"in oldale the pokemon centers not right"* --
+      -- the Centre torn down the middle, its two halves at different
+      -- heights and the pokeball emblem split across the seam.
+      --
+      -- DERIVED, over all six maps that use this tileset: metatiles 642 and
+      -- 643 are laid in EXACTLY TWO CELLS in the whole of Hoenn, (7,13) and
+      -- (8,13) in OldaleTown -- the right-hand half of that town's Pokemon
+      -- Centre overhead course.  The left-hand half, (5,13) and (6,13), is
+      -- the shared 72..73 in the primary tileset.  So this entry only ever
+      -- reached half of one building, and at 6 against the shared course's
+      -- 4 it gave that half a 16px wall where its other half had 32.
+      -- `bldRoofBands` keys per COLUMN and the split reads the band of the
+      -- run's own first column, so the two halves founded at different
+      -- heights and the building came apart.
+      --
+      -- MEASURED off the drawing, both halves separately: the saturation
+      -- profile of (5..6, 13..16) and (7..8, 13..16) is the same curve with
+      -- the eave in the same place -- it is one Centre, drawn once, and the
+      -- 2D shows no seam anywhere on it.  So the two halves must carry the
+      -- SAME number, and 4 is the one the other half already has.
+      --
+      -- The 6 was never measured; it is the layer's own overstated default,
+      -- the same one `gTileset_General` carried until g3-pcroof-389
+      -- re-measured it.  g3-oldale-393 unified this pair onto the shared
+      -- course's number and moved only OldaleTown; g3-eave-394 then took
+      -- every Hoenn band, this one included, to the measured 5.
+      roof_bands = { [642] = 5, [643] = 5,
+                     -- PetalburgCity's Mart, (24..27, 9..12).  This tileset
+                     -- is OldaleTown's secondary too, but Oldale's Mart lays
+                     -- the shared 40..43 and is banded by that.
+                     [592] = 5, [593] = 5, [600] = 5, [601] = 5 },
     },
 
     -- KANTO IS FLAT, AND ITS CARTRIDGE SAYS SO.
@@ -778,7 +1013,42 @@ gTileset_Sootopolis = {
     -- carry above.  What is NOT affected: the ledges you hop (stated by
     -- behaviour), and the mountains themselves, which are blocked scenery
     -- built by `climbGen3Masses` and never were terraces.
+    -- THE SEVII HARBOURS (FireRed, islands one to three): drawn on the sea
+    -- map below each island, whose door warp is on the island itself.
+    frlg_gTileset_SeviiIslands123 = {
+      doorless_art = {
+        [703] = true, [709] = true, [711] = true, [717] = true, [719] = true, [725] = true, [755] = true, [756] = true, [757] = true, [758] = true, [759] = true, [760] = true, [761] = true, [762] = true, [763] = true, [764] = true, [765] = true, [766] = true, [767] = true, [768] = true, [769] = true, [770] = true,
+        [752] = true, [753] = true, [754] = true, [779] = true, [780] = true, [781] = true, [782] = true, [783] = true, [727] = true, [743] = true, [735] = true, [751] = true, [656] = true, [676] = true, [664] = true, [684] = true,
+      },
+    },
+
+    -- THE SEVII HARBOURS on islands four to seven: drawn on the island's
+    -- own map with the door on the island side, the building south of it
+    -- over the water.  Named so the any-face door pass founds them.
+    frlg_gTileset_SeviiIslands45 = {
+      building_art = {
+        [646] = "wall", [647] = "wall", [654] = "wall", [655] = "wall", [662] = "wall", [663] = "wall", [670] = "wall", [671] = "wall", [710] = "wall", [711] = "wall", [715] = "wall", [716] = "wall", [717] = "wall", [718] = "wall", [719] = "wall", [723] = "wall", [724] = "wall", [725] = "wall", [726] = "wall", [727] = "wall", [731] = "wall", [732] = "wall", [733] = "wall", [734] = "wall", [735] = "wall", [739] = "wall", [740] = "wall", [741] = "wall", [742] = "wall", [743] = "wall", [747] = "wall", [748] = "wall", [749] = "wall", [750] = "wall", [751] = "wall", [755] = "wall", [756] = "wall", [757] = "wall", [758] = "wall", [759] = "wall",
+      },
+    },
+    frlg_gTileset_SeviiIslands67 = {
+      building_art = {
+        [642] = "wall", [646] = "wall", [648] = "wall", [654] = "wall", [656] = "wall", [662] = "wall", [664] = "wall", [670] = "wall", [744] = "wall", [745] = "wall", [746] = "wall", [747] = "wall", [748] = "wall", [749] = "wall", [750] = "wall", [751] = "wall", [752] = "wall", [753] = "wall", [754] = "wall", [760] = "wall", [761] = "wall", [762] = "wall", [763] = "wall", [764] = "wall", [765] = "wall", [766] = "wall", [767] = "wall",
+      },
+    },
+
     frlg_gTileset_General = {
+      -- KANTO'S ROUTE GATE HOUSES, every one of them drawn from the same
+      -- primary ids: Saffron's four, Route 7's, Route 16's and Route 18's
+      -- cycling-road gates.  The art repeats across the region, so it read
+      -- as landscape and each gate came out as a crown of rock spires.
+      building_art = {
+        [68] = "roof", [69] = "roof", [70] = "roof", [76] = "roof", [77] = "roof", [78] = "roof", [387] = "roof", [388] = "roof", [389] = "roof", [437] = "roof", [438] = "roof", [439] = "roof",
+        [92] = "wall", [93] = "wall", [94] = "wall", [100] = "wall", [101] = "wall", [102] = "wall", [392] = "wall", [393] = "wall", [394] = "wall", [400] = "wall", [401] = "wall", [402] = "wall",
+        -- the Underground Path entrances (Routes 5..8): an eave course
+        -- (84..86, 103) between the gate roof and a one-row brick front whose
+        -- door is 61.  Unnamed, the hut stood as a steep narrow wedge.
+        [84] = "eave", [85] = "eave", [86] = "eave", [103] = "eave", [61] = "wall",
+      },
       elevation_height = true,
       drawn_terraces = false,
       role_terraces = false,
@@ -2358,7 +2628,416 @@ gTileset_Sootopolis = {
 
   },
 
+  -- CLASS PINS FOR ONE MAP, after the tileset's own (`metatiles` above).
+  map_metatiles = {
+    Route23 = {
+      -- the statue bodies (671/751, the plaque) under the heads lifted by
+      -- the badge-gate figure in gen3_palings: each stands where it is
+      -- drawn, from the path up, instead of a sign card at one end and a
+      -- cliff (or a column of the wall) at the other
+      [671] = "post", [751] = "post",
+    },
+  },
+
   maps = {
+
+    -- LAVENDER TOWN'S POKEMON TOWER (FireRed), (15..21, 0..6).
+    --
+    -- Every storey is blocked, solid and the tower's own art, but the
+    -- window band repeats across the face, so the art read it as rock: the
+    -- tower came out as a two-course box with a lumpy cliff of its own
+    -- facade standing behind it.  These are the tower's ids in the
+    -- Lavender pair, all of them wall -- the drawing has no pitched roof.
+    -- SAFFRON CITY'S DOJO (FireRed).  The gate houses' art is the shared
+    -- primary's and is named on frlg_gTileset_General below.
+    --
+    -- Four gate houses -- one on each road out -- share their art, so it
+    -- reads as tiling landscape and none of them was ever founded as a
+    -- building: each came out as rock, a jagged crown of art-height
+    -- columns.  The Dojo, beside the Gym, likewise.  Their roofs are the
+    -- grey gate roof (68..78 over 387..439) and their walls the window band
+    -- and doorway (92..102, 392..402); the Dojo is its own block of ids.
+    SaffronCity = {
+      building_art = {
+        -- the Dojo: its top row is the tree line behind it drawn over a
+        -- thin tan roof (eave), then its eave band and brick front
+        [816] = "eave", [817] = "eave", [799] = "eave", [818] = "eave",
+        [824] = "wall", [825] = "wall", [826] = "wall", [832] = "wall", [833] = "wall", [834] = "wall", [821] = "wall", [822] = "wall", [823] = "wall", [811] = "wall", [812] = "wall", [827] = "wall", [831] = "wall", [820] = "wall",
+      },
+    },
+
+    -- CELADON CITY'S APARTMENT BLOCKS (FireRed), (18..45, 4..11).
+    --
+    -- Drawn front-on like the Condominiums they stand beside -- storeys of
+    -- windows, no roof seen from above -- and most of them have no door, so
+    -- nothing founded them: the west block came out as a stepped wedding
+    -- cake and the east ones as low boxes with jagged tops.  `elevation`
+    -- names a cell as building art drawn as a front view; a doorless mass
+    -- of it six or more cells tall is stood up whole, a course per tile
+    -- row.  A key of its own rather than `building_art`, which would also
+    -- re-class the same ids on the low blocks of the south side.
+    CeladonCity = {
+      -- ...and the low blocks beside the Pokemon Centre, (34..45, 8..11):
+      -- the same art four cells tall, a flat roof over two storeys, with
+      -- no door -- stood as rock steps until named here.
+      doorless_art = {
+        [736] = true, [737] = true, [738] = true, [739] = true, [740] = true, [744] = true, [745] = true, [747] = true, [748] = true, [752] = true, [753] = true, [755] = true, [756] = true, [760] = true, [761] = true, [763] = true, [764] = true,
+      },
+      elevation_art = {
+        [729] = true, [730] = true, [731] = true, [732] = true, [733] = true, [734] = true, [735] = true, [736] = true, [737] = true, [738] = true, [739] = true, [740] = true, [741] = true, [742] = true, [743] = true, [744] = true, [745] = true, [746] = true, [747] = true, [748] = true, [749] = true, [750] = true, [751] = true, [752] = true, [753] = true, [754] = true, [755] = true, [756] = true, [757] = true, [758] = true, [759] = true, [760] = true, [761] = true, [762] = true, [763] = true, [764] = true, [765] = true, [766] = true, [767] = true, [768] = true, [769] = true, [770] = true, [771] = true, [772] = true, [773] = true, [774] = true, [775] = true, [776] = true, [777] = true, [778] = true, [779] = true, [780] = true, [781] = true, [782] = true, [783] = true, [784] = true, [785] = true, [786] = true, [787] = true, [788] = true, [789] = true, [790] = true, [791] = true, [792] = true, [793] = true, [794] = true, [795] = true, [796] = true, [797] = true, [798] = true, [799] = true,
+      },
+    },
+
+    -- CERULEAN CITY'S NORTH-EAST HOUSE (FireRed), (38..43, 7..10): a blue
+    -- roofed house no warp leads into, so nothing founded it and it came
+    -- out as a jagged block of rock beside the trees.
+    CeruleanCity = {
+      doorless_art = {
+        [675] = true, [676] = true, [677] = true, [678] = true, [680] = true, [681] = true, [682] = true, [688] = true, [689] = true, [690] = true, [694] = true, [695] = true, [696] = true, [698] = true, [702] = true, [703] = true,
+      },
+    },
+
+    -- ROUTE 23's south edge is the BACK of the Route 22 gate, whose door is
+    -- in its north face here; named so the any-face door pass founds it.
+    Route23 = {
+      building_art = {
+        [752] = "wall", [753] = "wall", [754] = "wall",
+        [760] = "wall", [761] = "wall", [762] = "wall",
+        -- THE BADGE-GATE WALLS: a grey stone top (652..654) over a front of
+        -- orange pillar band and tan panels (660..673, the statue's cell
+        -- 663 among them).  No door, so nothing founded them and they stood
+        -- as rock at 16 to 64px column by column -- a ragged slope beside
+        -- the statues where the art draws an upright wall.
+        [652] = "roof", [653] = "roof", [654] = "roof",
+        [688] = "roof", [692] = "roof", [696] = "roof", [700] = "roof",
+        [660] = "wall", [664] = "wall", [665] = "wall", [668] = "wall", [672] = "wall", [673] = "wall", [663] = "wall",
+      },
+      doorless_art = {
+        [652] = true, [653] = true, [654] = true,
+        [688] = true, [692] = true, [696] = true, [700] = true, [660] = true, [664] = true, [665] = true, [668] = true, [672] = true, [673] = true, [663] = true,
+      },
+      -- THE ARCH BETWEEN THE WALLS: its posts (688/692 over 696/700) are the
+      -- walls' end columns, named above; its beam is drawn above the player
+      -- across two walkable rows and is raised to the walls' height by
+      -- Structures.buildGen3Arches.  Each beam cell with its clean ground.
+      arch_span = {
+        [689] = 17, [690] = 16, [691] = 17,
+        [697] = 9,  [698] = 8,  [699] = 9,
+      },
+    },
+
+    -- EVER GRANDE CITY: the massif behind the League is drawn as stacked
+    -- terraces, plateau over face, and is built from that drawing
+    -- (Structures.terraceGen3Mountains).  The rock is the shared primary's:
+    -- tops 108/109/113/190, faces the rest.
+    EverGrandeCity = {
+      mountain_terraces = true,
+      mountain_walkable_tops = true,
+      mountain_rock = {
+        [108] = true, [109] = true, [113] = true, [190] = true,
+        [112] = true, [114] = true, [115] = true, [116] = true,
+        [117] = true, [120] = true, [121] = true, [122] = true,
+        [123] = true, [124] = true, [125] = true, [137] = true,
+        [145] = true, [169] = true, [378] = true, [380] = true,
+      },
+    },
+
+    -- SKY PILLAR'S ISLAND: the same terraced massif; stood as a jumble of slabs.
+    SkyPillar_Outside = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [113] = true,
+      },
+      mountain_rock = {
+        [113] = true, [115] = true, [116] = true, [117] = true, [123] = true,
+        [124] = true, [125] = true, [137] = true, [169] = true,
+      },
+    },
+    -- MT PYRE'S FLANK: terraced like Ever Grande.
+    MtPyre_Exterior = {
+      elevation_height = true, drawn_terraces = false,
+      mountain_terraces = true,
+      mountain_tops = {
+        [105] = true, [107] = true, [109] = true, [113] = true, [191] = true,
+      },
+      mountain_rock = {
+        [105] = true, [107] = true, [109] = true, [112] = true, [113] = true,
+        [114] = true, [115] = true, [116] = true, [117] = true, [120] = true,
+        [121] = true, [122] = true, [123] = true, [124] = true, [125] = true,
+        [137] = true, [139] = true, [140] = true, [145] = true, [169] = true,
+        [191] = true,
+      },
+    },
+    -- ROUTE 122: Mt Pyre's island rim, the terraced massif drawing; the sea
+    -- stacks (37x/38x) are left to the water-rock pass.
+    Route122 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [190] = true,
+        [191] = true,
+      },
+      mountain_rock = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [115] = true,
+        [116] = true, [117] = true, [123] = true, [124] = true, [125] = true,
+        [137] = true, [169] = true, [190] = true, [191] = true,
+      },
+    },
+    -- ROUTE 125: the Shoal Cave headland; stood as a jumble with black slabs.
+    Route125 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [190] = true,
+        [191] = true,
+      },
+      mountain_rock = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [115] = true,
+        [116] = true, [117] = true, [121] = true, [123] = true, [124] = true,
+        [125] = true, [137] = true, [138] = true, [145] = true, [169] = true,
+        [190] = true, [191] = true,
+      },
+    },
+    -- THE EVENT ISLANDS: map.json types them INDOOR, the art is outdoors.
+    FarawayIsland_Entrance = { outdoor = true },
+    FarawayIsland_Interior = { outdoor = true },
+    -- (Birth Island stays as typed: its harbour, outdoors, stood as two roof towers)
+    NavelRock_Exterior     = { outdoor = true },
+
+    -- ROUTE 116'S EAST END, under Rusturf Tunnel: the same terraced massif
+    -- drawing as Ever Grande (and the same primary rock), which stood as a
+    -- jumble of rock towers up to the map's edge.
+    Route116 = {
+      mountain_terraces = true,
+      mountain_tops = { [108] = true, [109] = true, [113] = true,
+                        [182] = true, [190] = true },
+      mountain_rock = {
+        [108] = true, [109] = true, [113] = true, [182] = true, [190] = true,
+        [112] = true, [115] = true, [116] = true, [117] = true,
+        [123] = true, [124] = true, [125] = true, [137] = true, [169] = true,
+      },
+    },
+    -- ROUTE 112: Mt Chimney's red rock (Lavaridge's 617..639) and the
+    -- primary's grey, terraced like Ever Grande.
+    Route112 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [105] = true, [107] = true, [108] = true, [113] = true, [190] = true,
+        [617] = true, [620] = true, [639] = true, [790] = true,
+      },
+      mountain_rock = {
+        [105] = true, [107] = true, [108] = true, [112] = true, [113] = true,
+        [115] = true, [190] = true, [332] = true, [592] = true, [593] = true,
+        [601] = true, [617] = true, [618] = true, [620] = true, [626] = true,
+        [627] = true, [628] = true, [629] = true, [633] = true, [634] = true,
+        [635] = true, [639] = true, [790] = true,
+      },
+    },
+    -- ROUTE 115: the tan terraced cliffs north of the beach.  Its cells
+    -- stood at unrelated heights with the sky showing between them.
+    Route115 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [563] = true, [572] = true,
+      },
+      mountain_rock = {
+        [136] = true, [137] = true, [144] = true, [378] = true, [381] = true,
+        [382] = true, [563] = true, [571] = true, [572] = true, [573] = true,
+        [576] = true, [579] = true, [581] = true, [585] = true, [587] = true,
+        [588] = true, [589] = true, [595] = true, [596] = true, [603] = true,
+        [604] = true, [611] = true, [612] = true, [613] = true, [848] = true,
+        [849] = true,
+      },
+    },
+    -- ROUTE 118: the massif on the north shore, which stood as two spires.
+    Route118 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [113] = true,
+      },
+      mountain_rock = {
+        [112] = true, [113] = true, [114] = true, [115] = true, [116] = true,
+        [117] = true, [120] = true, [122] = true, [123] = true, [124] = true,
+        [125] = true, [137] = true, [145] = true, [169] = true, [513] = true,
+        [699] = true,
+      },
+    },
+    -- ROUTE 113: the ash-dusted massif along the north edge -- the primary's
+    -- rock with Fallarbor's ashy faces (521, 540, 543) and top (514).
+    Route113 = {
+      mountain_terraces = true,
+      -- ...and its free-standing mounds (513..531), rim over face like the
+      -- massif, which stood as loose blocks among the ash
+      mountain_tops = { [107] = true, [108] = true, [109] = true, [113] = true,
+                        [190] = true, [191] = true, [513] = true, [514] = true,
+                        [515] = true },
+      mountain_rock = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [190] = true,
+        [191] = true, [513] = true, [514] = true, [515] = true,
+        [117] = true, [121] = true, [123] = true, [124] = true, [125] = true,
+        [137] = true, [521] = true, [523] = true, [529] = true, [531] = true,
+        [540] = true, [543] = true,
+      },
+    },
+    -- ROUTE 114: the same drawing in Fallarbor's tan rock -- tops 577 and
+    -- its rims 563/564/569/572, faces the rest.
+    Route114 = {
+      mountain_terraces = true,
+      mountain_tops = { [563] = true, [564] = true, [569] = true,
+                        [572] = true, [577] = true },
+      mountain_rock = {
+        [563] = true, [564] = true, [569] = true, [572] = true, [577] = true,
+        [554] = true, [571] = true, [573] = true, [576] = true, [579] = true,
+        [580] = true, [581] = true, [589] = true, [613] = true,
+      },
+    },
+
+    -- LITTLEROOT'S LAB, (3..9, 12..16).  Three rows of roof, the skylight
+    -- in them (578/579 over 586/587), over two of facade -- windows, the
+    -- door.  Emerald does not cap a building at its wall art, so it stood
+    -- 64px, a mound of roof over a two-storey wall of windows.  Classed,
+    -- it stands the 32px of facade it draws.
+    LittlerootTown = {
+      building_art = {
+        [524] = "roof", [578] = "roof", [579] = "roof", [525] = "roof",
+        [526] = "roof", [532] = "roof", [586] = "roof", [587] = "roof",
+        [533] = "roof", [534] = "roof",
+        [542] = "wall", [527] = "wall", [556] = "wall", [577] = "wall",
+        [557] = "wall", [543] = "wall", [550] = "wall", [535] = "wall",
+        [564] = "wall", [585] = "wall", [565] = "wall", [551] = "wall",
+      },
+    },
+
+    -- VERDANTURF'S BATTLE TENT, (1..5, 3..7).  A dome drawn front-on: its
+    -- crown (946..958) over the emblem, the arch and the doors (962..982).
+    -- It stands against the cliff with a column of trees beside it and the
+    -- door walk claimed both -- 48 cells -- so it rose as a slab the height
+    -- of the cliff.  Named and held to its art (`art_footprint`).
+    VerdanturfTown = {
+      art_footprint = true,
+      building_art = {
+        [946] = "roof", [947] = "roof", [948] = "roof", [949] = "roof",
+        [950] = "roof", [954] = "roof", [955] = "roof", [956] = "roof",
+        [957] = "roof", [958] = "roof",
+        [962] = "wall", [963] = "wall", [964] = "wall", [965] = "wall",
+        [966] = "wall", [970] = "wall", [971] = "wall", [972] = "wall",
+        [973] = "wall", [974] = "wall", [978] = "wall", [979] = "wall",
+        [980] = "wall", [981] = "wall", [982] = "wall",
+      },
+    },
+
+    -- ROUTE 4 (FireRed): Mt Moon's massif, terraced like Ever Grande's --
+    -- FireRed's primary draws the same plateau-over-face rock.
+    Route4 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [113] = true,
+        [129] = true, [186] = true, [187] = true,
+      },
+      mountain_rock = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [113] = true,
+        [114] = true, [115] = true, [117] = true, [121] = true, [122] = true,
+        [123] = true, [124] = true, [125] = true, [129] = true, [136] = true,
+        [138] = true, [141] = true, [178] = true, [179] = true, [186] = true,
+        [187] = true,
+      },
+    },
+
+    -- ROUTE 20 (FireRed): the two Seafoam Islands, terraced rock drawn the
+    -- same way; one stood a dark slab the height of the whole island.
+    Route20 = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [152] = true,
+        [153] = true, [154] = true, [186] = true, [187] = true, [271] = true,
+      },
+      mountain_rock = {
+        [107] = true, [108] = true, [109] = true, [113] = true, [115] = true,
+        [117] = true, [121] = true, [123] = true, [124] = true, [125] = true,
+        [152] = true, [153] = true, [154] = true, [160] = true, [168] = true,
+        [170] = true, [178] = true, [179] = true, [186] = true, [187] = true,
+        [271] = true, [287] = true,
+      },
+    },
+
+    -- KINDLE ROAD: Kanto's rock and Mt Ember's grey scree (849 top, 820..861
+    -- faces), terraced; both stood as a jumble of slabs.
+    OneIsland_KindleRoad = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [113] = true,
+        [152] = true, [153] = true, [154] = true, [186] = true, [187] = true,
+        [271] = true, [849] = true,
+      },
+      mountain_rock = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [112] = true,
+        [113] = true, [114] = true, [115] = true, [117] = true, [120] = true,
+        [121] = true, [122] = true, [123] = true, [124] = true, [125] = true,
+        [152] = true, [153] = true, [154] = true, [160] = true, [162] = true,
+        [168] = true, [170] = true, [178] = true, [179] = true, [186] = true,
+        [187] = true, [271] = true, [287] = true, [820] = true, [821] = true,
+        [822] = true, [823] = true, [836] = true, [848] = true, [849] = true,
+        [850] = true, [851] = true, [853] = true, [857] = true, [859] = true,
+        [860] = true, [861] = true,
+      },
+    },
+    -- TWO ISLAND: the cliff behind the town stood as one dark tower.
+    TwoIsland = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [113] = true,
+        [152] = true, [153] = true, [154] = true, [186] = true, [187] = true,
+        [271] = true,
+      },
+      mountain_rock = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [112] = true,
+        [113] = true, [114] = true, [115] = true, [117] = true, [120] = true,
+        [121] = true, [122] = true, [123] = true, [124] = true, [125] = true,
+        [152] = true, [153] = true, [154] = true, [160] = true, [162] = true,
+        [168] = true, [170] = true, [178] = true, [179] = true, [186] = true,
+        [187] = true, [271] = true, [287] = true,
+      },
+    },
+    -- FOUR ISLAND: its hill and shore rock.
+    FourIsland = {
+      mountain_terraces = true,
+      mountain_tops = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [113] = true,
+        [152] = true, [153] = true, [154] = true, [186] = true, [187] = true,
+        [271] = true, [773] = true,
+      },
+      mountain_rock = {
+        [105] = true, [107] = true, [108] = true, [109] = true, [112] = true,
+        [113] = true, [114] = true, [115] = true, [117] = true, [120] = true,
+        [121] = true, [122] = true, [123] = true, [124] = true, [125] = true,
+        [152] = true, [153] = true, [154] = true, [160] = true, [162] = true,
+        [168] = true, [170] = true, [178] = true, [179] = true, [186] = true,
+        [187] = true, [271] = true, [287] = true, [773] = true,
+      },
+    },
+
+    -- ROUTE 10'S POWER PLANT, (2..11, 34..40): three rows of pink roof over
+    -- three of glass front.  Its west door's walk took the rock band above
+    -- it, so it stood as a striped tower; named and held to its art.
+    Route10 = {
+      art_footprint = true,
+      building_art = {
+        [797] = "roof", [645] = "roof", [646] = "roof", [647] = "roof",
+        [805] = "roof", [812] = "roof", [813] = "roof", [804] = "roof",
+        [814] = "roof", [661] = "roof", [662] = "roof", [659] = "roof",
+        [663] = "roof",
+        [724] = "wall", [766] = "wall", [792] = "wall", [793] = "wall",
+        [795] = "wall", [725] = "wall", [734] = "wall", [749] = "wall",
+        [732] = "wall", [774] = "wall", [800] = "wall", [801] = "wall",
+        [803] = "wall", [733] = "wall", [740] = "wall", [782] = "wall",
+        [808] = "wall", [809] = "wall", [794] = "wall", [810] = "wall",
+        [811] = "wall", [741] = "wall",
+      },
+    },
+
+    LavenderTown = {
+      building_art = {
+        [721] = "wall", [722] = "wall", [723] = "wall", [726] = "wall", [727] = "wall", [729] = "wall", [735] = "wall", [737] = "wall", [738] = "wall", [739] = "wall", [742] = "wall", [743] = "wall", [745] = "wall", [746] = "wall", [747] = "wall", [750] = "wall", [751] = "wall", [807] = "wall", [767] = "wall", [824] = "wall", [825] = "wall", [826] = "wall", [820] = "wall", [815] = "wall", [775] = "wall", [832] = "wall", [834] = "wall", [821] = "wall",
+      },
+    },
 
     -- ROUTE 111'S SAND RAMPS ARE A FLIGHT, AND THE CARTRIDGE SAYS SO.
     --
@@ -2428,7 +3107,7 @@ gTileset_Sootopolis = {
     -- Pinned by MAP where the tileset is shared: gTileset_Facility is Mt
     -- Pyre's secondary but also twenty-seven other maps, and gTileset_Fortree
     -- covers Faraway Island's interior as well as the grass routes.
-    MtPyre_Exterior  = { elevation_height = true, drawn_terraces = false },
+    -- MtPyre_Exterior: see its entry above (one key per map)
     MtPyre_Summit    = { elevation_height = true, drawn_terraces = false },
     Route119         = { elevation_height = true, drawn_terraces = false },
 

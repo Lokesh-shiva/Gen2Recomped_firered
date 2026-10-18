@@ -65,6 +65,17 @@ local function entityBlocks(e, cx, cy)
     -- Origin cell is the top-left of the 2x2 (pret big object_event)
     return cx >= x and cx <= x + 1 and cy >= y and cy <= y + 1
   end
+  -- a wider object (Black / White's invisible blockers: Gen5Events'
+  -- footprintW x footprintH from its top-left cell)
+  local fw, fh = e.def and e.def.footprintW, e.def and e.def.footprintH
+  if fw and fh and (fw > 1 or fh > 1) then
+    -- ...rising NORTH from its cell, not south: of Black's 18 blockers
+    -- taller than one, every one stands at the foot of an open passage
+    -- (y - h + 1 .. y all floor; y .. y + h - 1 mostly wall), and Lenora's
+    -- sliding bookcase (Z018, 4 x 4 at (11,10)) covers the stairs at (12,9)
+    -- behind it, not the floor in front of the last book
+    return cx >= x and cx < x + fw and cy <= y and cy > y - fh
+  end
   if x == cx and y == cy then return true end
   if e.targetX == cx and e.targetY == cy then return true end
   return false
@@ -74,9 +85,39 @@ end
 -- into these cells so that the two casts can see each other (see
 -- OverworldState:updateCast).  A mover meeting its own proxy is meeting
 -- itself, which is why the owner is tested alongside the entity.
+-- AN OBJECT A SCRIPT TOOK OFF THE MAP IS NOT STILL STANDING THERE.
+--
+-- `hidden` was read by the DRAW pass and by nothing else, so a script's
+-- `RemoveObject` made a character invisible and left their tile blocked for
+-- the rest of the session.  Reported from play: *"he greets me at the door but
+-- it won't let me in his house after"* -- Twinleaf's rival stands ON the warp
+-- into his own house (the cartridge puts him there so he blocks it during his
+-- scene), and the scene ends by removing him.  He went invisible; the doorway
+-- stayed shut.  The same wall answered A, which is where the log's
+-- "no text for Twinleaf Town/nil" came from: pressing A at the door talked to
+-- somebody who was no longer in the game.
+--
+-- BURIED IS THE EXCEPTION AND IT IS NOT AN EDGE CASE.  Route 113's trainers
+-- are under the ash: invisible and genuinely in the way, and they rise when
+-- they spot you.  `buried` is kept precisely so "a script hid this" can be
+-- told from "this is covered up", so it is the one hidden thing that still
+-- blocks.
+--
+-- The engine already took this view in one place -- a seam proxy is built with
+-- `passable = body.passable or body.hidden` -- so this is that rule applied
+-- where it was missing rather than a new one.
+local function entityAbsent(e)
+  return e.hidden and not e.buried
+end
+Collision.entityAbsent = entityAbsent
+
 function Collision.occupied(entities, cx, cy, ignore)
   for _, e in ipairs(entities) do
-    if e ~= ignore and e.of ~= ignore and not e.passable then
+    -- (`def.passable`: an object its map's data says is walked through --
+    -- Castelia Gym's honey walls, Gen5Field)
+    if e ~= ignore and e.of ~= ignore and not e.passable and not entityAbsent(e)
+       and not (e.def and e.def.passable)
+       and Collision.sameElevation(e, ignore) then
       if entityBlocks(e, cx, cy) then
         return e
       end
@@ -163,7 +204,16 @@ local function verdict(map, entities, mover, dir, tx, ty)
   if not map:inBounds(tx, ty) then
     return false, "bounds"
   end
-  if not map:isWalkableCell(tx, ty) then
+  if mover.onBike and map.runningBlockedAt and map:runningBlockedAt(tx, ty) then
+    return false, "tile"
+  end
+  -- A MAP'S OWN RULE FIRST, where one is hung on its def (HGSS's
+  -- GymmickCheckCollision table -- Clair's platforms over the magma): true
+  -- blocks, false is walkable whatever the tile says, nil asks the tile
+  local gymSays = map.def and map.def.gen4CollisionHook
+                  and map.def.gen4CollisionHook(map, tx, ty)
+  if gymSays == true then return false, "tile" end
+  if gymSays ~= false and not map:isWalkableCell(tx, ty) then
     if not (mover.surfing and map:isWaterCell(tx, ty)) then
       return false, "tile"
     end
@@ -184,6 +234,7 @@ local function verdict(map, entities, mover, dir, tx, ty)
     -- coast rather than only where the map says so.
     local landing = mover.surfing and map.isWaterCell
                     and map:isWalkableCell(tx, ty) and not map:isWaterCell(tx, ty)
+                    and map.cellElevation and map:cellElevation(tx, ty) == 3
     if not landing then
       return false, "elevation"
     end
@@ -260,6 +311,12 @@ end
 -- `dist` is in cells and is at least 1; a trainer standing next to the player
 -- has no gap to walk and is always clear, which is the cartridge's
 -- `approachDistance - 1` loop count.
+function Collision.sameElevation(a,b)
+  local az=a and (a.elevation or a.gen3Elevation)
+  local bz=b and (b.elevation or b.gen3Elevation)
+  return az==nil or bz==nil or az==0 or bz==0 or az==bz
+end
+
 function Collision.sightPathClear(map, entities, watcher, dir, dist)
   local x, y = watcher.cellX, watcher.cellY
   for _ = 1, (tonumber(dist) or 0) - 1 do

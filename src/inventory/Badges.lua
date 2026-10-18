@@ -30,6 +30,10 @@ function Badges.list(data, version)
   local list = data and data.constants and data.constants.badges
   if type(list) == "table" and #list > 0 then return list end
   if require("src.core.GameVersion").isGen2(version) then return GEN2 end
+  if require('src.core.GameVersion').isGen4(version) then
+    return {{id='BADGE_COAL'},{id='BADGE_FOREST'},{id='BADGE_COBBLE'},{id='BADGE_FEN'},
+      {id='BADGE_RELIC'},{id='BADGE_MINE'},{id='BADGE_ICICLE'},{id='BADGE_BEACON'}}
+  end
   return VANILLA
 end
 
@@ -45,6 +49,7 @@ end
 function Badges.has(save, entry)
   local key = Badges.itemFor(entry)
   return (save.inventory and save.inventory[key])
+    or (save.badges and save.badges[entry.id])
     or (save.flags and save.flags[key]) and true or false
 end
 
@@ -55,6 +60,46 @@ function Badges.count(data, save, version)
     if Badges.has(save, entry) then n = n + 1 end
   end
   return n
+end
+
+-- Canonical badge mutation. Reads accept either historical store, but writes
+-- must not leave a truthy duplicate behind in the other one. Turning OFF
+-- therefore clears both stores; turning ON writes only where this generation
+-- actually stores badges.
+function Badges.set(save, entry, on, version)
+  if not (save and entry) then return false end
+  local key = Badges.itemFor(entry)
+  if not key then return false end
+
+  save.inventory = save.inventory or {}
+  save.flags = save.flags or {}
+
+  if not on then
+    save.inventory[key] = nil
+    save.flags[key] = nil
+    if save.badges then save.badges[entry.id]=nil end
+    return true
+  end
+
+  local GameVersion = require("src.core.GameVersion")
+  local flagBadge = GameVersion.isGen2(version) or GameVersion.isGen3(version) or GameVersion.isGen4(version)
+  if GameVersion.isGen4(version) then
+    save.badges=save.badges or {};save.badges[entry.id]=true
+  end
+  if flagBadge then
+    save.flags[key] = true
+    save.inventory[key] = nil
+  else
+    save.inventory[key] = 1
+    save.flags[key] = nil
+  end
+  return true
+end
+
+function Badges.toggle(save, entry, version)
+  local on = Badges.has(save, entry)
+  Badges.set(save, entry, not on, version)
+  return not on
 end
 
 return Badges

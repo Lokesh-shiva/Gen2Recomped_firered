@@ -123,10 +123,209 @@ end
 -- zeroed rather than absent -- so ask this rather than looking for empty data.
 function Gen4Encounters.hasGrass(area) return area and area.grassRate > 0 end
 
-function Gen4Encounters.all(archive)
+-- ---------------------------------------------------------------------------
+-- THE GRASS SLOT SUBSTITUTIONS
+-- ---------------------------------------------------------------------------
+--
+-- WHICH SLOT EACH VARIANT REPLACES.  This was the one thing about Sinnoh's
+-- encounters that had NOT been read off the cartridge, so the consumer stood on
+-- the base twelve and said so rather than guessing -- a guess here puts the
+-- wrong species in the grass, which is worse than none.
+--
+-- It is stated outright, in the grass branch of `WildEncounters_TryWildEncounter`
+-- (pokeplatinum src/overlay006/wild_encounters.c).  The table is filled from the
+-- twelve base slots, then FIVE calls each overwrite a named pair, in this order:
+--
+--   ReplaceTimedEncounters      -> encounterTable[2], [3]
+--   ReplaceSwarmEncounters      -> encounterTable[0], [1]
+--   ReplaceTrophyGardenEncounters -> encounterTable[6], [7]
+--   ReplaceDualSlotEncounters   -> encounterTable[8], [9]
+--   ReplaceGreatMarshDailyEncounters -> the whole table
+--
+-- and then, inside `TryGenerateGrassEncounter_WithRadar` and only when the
+-- radar's `shakeType == 1`:
+--
+--   encounterTable[4], [5], [10], [11] <- radarEncounters[0..3]
+--
+-- !! AND `ReplaceSwarmEncounters` NAMES ITS OWN PARAMETERS `radarSlot1` AND
+-- `radarSlot2`.  They are not radar slots; the CALLER passes slots 0 and 1.
+-- Quoting the callee's parameter names would have put the swarm Pokemon in the
+-- radar's slots -- read the caller, not the signature.
+--
+-- Recorded 1-BASED for Lua, so these are the cartridge's indices plus one.
+Gen4Encounters.TIMED_SLOTS = { 3, 4 }
+Gen4Encounters.SWARM_SLOTS = { 1, 2 }
+Gen4Encounters.TROPHY_GARDEN_SLOTS = { 7, 8 }
+Gen4Encounters.DUAL_SLOT_SLOTS = { 9, 10 }
+Gen4Encounters.RADAR_SLOTS = { 5, 6, 11, 12 }
+
+-- ONLY THE SPECIES IS REPLACED.  Every one of those assignments writes
+-- `.species` and nothing else, so a night Pokemon inherits the LEVEL and the
+-- chance of the base slot it displaces.  A substitution that also carried a
+-- level would be inventing one.
+--
+-- `TimeOfDayForHour` (src/rtc.c), from its 24-entry lookup: 0-3 LATE_NIGHT,
+-- 4-9 MORNING, 10-16 DAY, 17-19 TWILIGHT, 20-23 NIGHT, with the enum
+-- MORNING 0, DAY 1, TWILIGHT 2, NIGHT 3, LATE_NIGHT 4.
+--
+-- This lives HERE, in a module with no requires that a check can load on its
+-- own, rather than in the script layer -- `Gen4Commands.timeOfDayValue` now
+-- delegates to it so there is ONE transcription of that table, not two that
+-- can drift.
+Gen4Encounters.TIMEOFDAY_MORNING = 0
+Gen4Encounters.TIMEOFDAY_DAY = 1
+Gen4Encounters.TIMEOFDAY_TWILIGHT = 2
+Gen4Encounters.TIMEOFDAY_NIGHT = 3
+Gen4Encounters.TIMEOFDAY_LATE_NIGHT = 4
+
+function Gen4Encounters.timeOfDayForHour(hour)
+  hour = tonumber(hour) or 12
+  if hour < 4 then return 4 end
+  if hour < 10 then return 0 end
+  if hour < 17 then return 1 end
+  if hour < 20 then return 2 end
+  return 3
+end
+
+-- timedBand(hour) -> "day", "night" or nil
+--
+-- nil is MORNING, and morning is not a third table: the comment above
+-- `ReplaceTimedEncounters` says "Default encounters are morning.  They get
+-- replaced by this if it is not morning", and the function leaves both slots
+-- untouched for it.  Twilight rides with day and late night with night, which
+-- is the cartridge's own pairing and not an approximation.
+function Gen4Encounters.timedBand(hour)
+  local tod = Gen4Encounters.timeOfDayForHour(hour)
+  if tod == Gen4Encounters.TIMEOFDAY_DAY
+    or tod == Gen4Encounters.TIMEOFDAY_TWILIGHT then return "day" end
+  if tod == Gen4Encounters.TIMEOFDAY_NIGHT
+    or tod == Gen4Encounters.TIMEOFDAY_LATE_NIGHT then return "night" end
+  return nil
+end
+
+-- timedGrass(area, hour) -> a NEW twelve-slot array, or nil to use the base one
+--
+-- Safe to apply unconditionally because the data is populated: measured over
+-- all 183 areas, NOT ONE has a zero in either its `day` or its `night` pair, so
+-- this can never write species 0 into the grass.  It is also worth doing --
+-- 115 of the 171 areas with grass vary by time of day (27 differ by day, 115 by
+-- night), so on most of Sinnoh the base twelve were the morning line-up all day.
+function Gen4Encounters.timedGrass(area, hour)
+  local band = Gen4Encounters.timedBand(hour)
+  if not band then return nil end
+  -- HEARTGOLD / SOULSILVER: a whole table per band (parseHgss)
+  if area and type(area.timed) == "table" and type(area.grass) == "table" then
+    local species = area.timed[band]
+    if type(species) ~= "table" then return nil end
+    local out = {}
+    for i, s in ipairs(area.grass) do
+      local sp = tonumber(species[i])
+      out[i] = { level = s.level, minLevel = s.minLevel, maxLevel = s.maxLevel, chance = s.chance,
+                 species = (sp and sp > 0) and sp or s.species }
+    end
+    return out
+  end
+  local pair = area and area[band]
+  local slots = area and area.grass
+  if type(pair) ~= "table" or type(slots) ~= "table" then return nil end
+  local out = {}
+  for i = 1, #slots do
+    local s = slots[i]
+    out[i] = { level = s.level, species = s.species, chance = s.chance }
+  end
+  for n, at in ipairs(Gen4Encounters.TIMED_SLOTS) do
+    local species = tonumber(pair[n])
+    -- A zero would be the cartridge saying nothing, and the measurement above
+    -- says it never does -- but refusing one costs a comparison and keeps a
+    -- hacked table from emptying a slot.
+    if species and species > 0 and out[at] then out[at].species = species end
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------------------
+-- HEARTGOLD AND SOULSILVER
+-- ---------------------------------------------------------------------------
+--
+-- /fielddata/encountdata/g_enc_data.narc (HeartGold) and s_enc_data.narc
+-- (SoulSilver): one EncounterData of 0xC4 bytes per area, a DIFFERENT record
+-- from Platinum's 424 (pokeheartgold include/wild_encounter.h):
+--
+--   00 u8 rates: walking, surfing, rock smash, old rod, good rod, super rod
+--   06 2 padding
+--   08 u8 levels[12] -- ONE level per grass slot, shared by the three times
+--   14 u16 species_morn[12]   2C u16 species_day[12]   44 u16 species_nite[12]
+--   5C u16 hoennSounds[2]     60 u16 sinnohSounds[2]
+--   64 surf[5]  78 rockSmash[2]  80 oldRod[5]  94 goodRod[5]  A8 superRod[5]
+--      each { u8 minLevel, u8 maxLevel, u16 species } -- MINIMUM FIRST here,
+--      the opposite of Platinum's water slots
+--   BC u16 landSwarm  BE surfSwarm  C0 nightFish  C2 fishSwarm
+--
+-- THE WHOLE GRASS TABLE CHANGES WITH THE TIME, not two slots of it:
+-- EncSlotArray_Init_Land (src/field/encounter_check.c) takes all twelve species
+-- from species_morn, species_day (day and evening) or species_nite (night and
+-- late night) -- the same hour bands as Platinum's TimeOfDayForHour, so
+-- `timedBand` answers for both and `timedGrass` reads `timed` when it is here.
+--
+-- The rolls (EncounterSlot_WildMonSlotRoll_*): grass and surf as Platinum's;
+-- FISHING is 40/30/15/10/5, not 60/30/5/4/1; rock smash is 80/20.
+Gen4Encounters.HGSS_RECORD_BYTES = 0xC4
+Gen4Encounters.HGSS_FISH_RATES = { 40, 30, 15, 10, 5 }
+Gen4Encounters.HGSS_ROCK_SMASH_RATES = { 80, 20 }
+
+local function u16(s, o) local a, b = s:byte(o + 1, o + 2); return (a or 0) + (b or 0) * 256 end
+
+local function hgssBlock(record, at, n, rate, chances)
+  local out = { rate = rate, slots = {} }
+  for i = 0, n - 1 do
+    local o = at + i * 4
+    out.slots[i + 1] = { minLevel = u8(record, o), maxLevel = u8(record, o + 1),
+                         species = u16(record, o + 2), chance = chances[i + 1] }
+  end
+  return out
+end
+
+function Gen4Encounters.parseHgss(record)
+  if type(record) ~= "string" or #record < Gen4Encounters.HGSS_RECORD_BYTES then
+    return nil, ("encounter record is %d bytes, expected %d")
+      :format(type(record) == "string" and #record or -1, Gen4Encounters.HGSS_RECORD_BYTES)
+  end
+  local function species(at)
+    local t = {}
+    for i = 0, Gen4Encounters.GRASS_SLOTS - 1 do t[i + 1] = u16(record, at + i * 2) end
+    return t
+  end
+  local timed = { morning = species(0x14), day = species(0x2C), night = species(0x44) }
+  local grass = {}
+  for i = 0, Gen4Encounters.GRASS_SLOTS - 1 do
+    local level = u8(record, 0x08 + i)
+    -- the base table is the morning's, as Platinum's is
+    grass[i + 1] = { level = level, minLevel = level, maxLevel = level,
+                     species = timed.morning[i + 1], chance = Gen4Encounters.GRASS_RATES[i + 1] }
+  end
+  return {
+    family = "hgss",
+    grassRate = u8(record, 0),
+    grass = grass,
+    timed = timed,
+    hoennSounds = { u16(record, 0x5C), u16(record, 0x5E) },
+    sinnohSounds = { u16(record, 0x60), u16(record, 0x62) },
+    surf = hgssBlock(record, 0x64, 5, u8(record, 1), Gen4Encounters.WATER_RATES),
+    rockSmash = hgssBlock(record, 0x78, 2, u8(record, 2), Gen4Encounters.HGSS_ROCK_SMASH_RATES),
+    oldRod = hgssBlock(record, 0x80, 5, u8(record, 3), Gen4Encounters.HGSS_FISH_RATES),
+    goodRod = hgssBlock(record, 0x94, 5, u8(record, 4), Gen4Encounters.HGSS_FISH_RATES),
+    superRod = hgssBlock(record, 0xA8, 5, u8(record, 5), Gen4Encounters.HGSS_FISH_RATES),
+    hgssSwarm = { land = u16(record, 0xBC), surf = u16(record, 0xBE),
+                  nightFish = u16(record, 0xC0), fish = u16(record, 0xC2) },
+  }
+end
+
+-- all(archive, family) -- family "hgss" reads the HeartGold/SoulSilver record
+function Gen4Encounters.all(archive, family)
+  local parse = family == "hgss" and Gen4Encounters.parseHgss or Gen4Encounters.parse
   local out = {}
   for i = 0, archive.count - 1 do
-    local a = Gen4Encounters.parse(archive:get(i))
+    local a = parse(archive:get(i))
     if a then a.id = i; out[i] = a end
   end
   return out

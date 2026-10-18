@@ -83,9 +83,9 @@ local function sortedMapIds(data, S)
     label[id] = S and mapLabel(S, id) or id
   end
   table.sort(ids, function(a, b)
-    local la, lb = label[a]:lower(), label[b]:lower()
+    local la, lb = tostring(label[a]):lower(), tostring(label[b]):lower()
     if la ~= lb then return la < lb end
-    return a < b
+    return Catalog.keyLess(a,b)
   end)
   sortedCache[data] = ids
   return ids
@@ -363,7 +363,7 @@ function MapBrowser.draw(S, Kit, x, y, w, h)
     love.graphics.push()
     love.graphics.translate(vx0, vy0)
     love.graphics.scale(S.mapZoom, S.mapZoom)
-    map.renderer:draw(S.mapCamX, S.mapCamY)
+    require('tools.map-editor.MapView').draw(S,map,'save',S.mapCamX,S.mapCamY,vinner/S.mapZoom,vh0/S.mapZoom)
     drawOverlays(S, map)
     love.graphics.pop()
     love.graphics.setScissor()

@@ -106,6 +106,11 @@ end
 function HeldItems.effect(data, holder)
   local def, id = itemDef(data, holder)
   if type(def) ~= "table" then return HeldItems.EFFECT.NONE, 0 end
+  -- Modern Polished berries are handled by HoldItems; their enum values
+  -- otherwise collide with GSC Leftovers/PP/status effects here.
+  if require('src.inventory.PolishedBerries').held(def,monOf(holder)) then
+    return HeldItems.EFFECT.NONE,0
+  end
 
   -- Intentional Gen II cleanup approved for the recomp ruleset: retail
   -- Crystal accidentally assigns HELD_DRAGON_BOOST to Dragon Scale and leaves
@@ -458,6 +463,14 @@ end
 -- that legacy bug by initializing a normal Gen II confusion duration.
 function HeldItems.onEntry(battle, holder)
   if not (battle and isAlive(holder)) then return false end
+  -- PLATINUM'S AMULET COIN counts on EITHER side: battle_lib.c's
+  -- SWITCH_IN_CHECK_STATE_AMULET_COIN walks every battler on the field, and its
+  -- items name the effect "MONEY_UP" rather than the Game Boy number.
+  if require("src.core.GameVersion").isGen4() then
+    local mon = holder.mon
+    local def = mon and battle.data and battle.data.items and battle.data.items[tonumber(mon.item or mon.heldItem) or -1]
+    if def and def.holdEffect == "MONEY_UP" then battle.amuletCoin = true end
+  end
   if HeldItems.itemKey(battle.data, holder) ~= "BERSERK_GENE" then return false end
   consume(holder)
   holder.stages = holder.stages or {}

@@ -15,6 +15,12 @@ local Strings = require("src.core.Strings")
 
 local ItemEffects = {}
 
+-- ITEM_USE_FUNC_EXPLORER_KIT, the index of the Explorer Kit's row in
+-- `sItemUseFuncs` (item_use_functions.c).  A Platinum item record names its
+-- row in `fieldUseFunc`; the Explorer Kit's is 3.
+local ITEM_USE_FUNC_EXPLORER_KIT = 3
+
+
 local HEAL_AMOUNT = {
   POTION = 20, SUPER_POTION = 50, HYPER_POTION = 200,
   FRESH_WATER = 50, SODA_POP = 60, LEMONADE = 80,
@@ -88,6 +94,26 @@ ItemEffects.alias = alias
 -- bag, only throw it -- so the pocket is the cartridge's own answer and a
 -- Gen 4 ball added by a mod gets it for free.  The name list stays as the
 -- answer for Gen 1 and Gen 2, whose items carry no pocket.
+--
+-- ...AND SINNOH SPELLS THAT POCKET DIFFERENTLY.
+--
+-- Reported from play: "pokeballs arent working in platinum they give an error
+-- not the place this item should be used".  Every one of Platinum's sixteen
+-- balls carries `pocket = "POKE_BALLS"` -- `Gen4Items` writes the
+-- cartridge's own eight pocket names, and slot 2 is POKE_BALLS -- while
+-- Emerald's twelve carry `"BALL"`.  This line knew one spelling, so no
+-- Sinnoh ball was ever a ball: `use` fell past the ball branch and ended at
+-- the refusal, which is the message that was reported.
+--
+-- The knowledge was already in the tree and in the wrong place for this:
+-- `Gen3BagMenu` normalises POKE_BALLS to BALL for its own pocket tabs and
+-- nothing else ever saw it.  THE SAME THING UNDER TWO NAMES IN TWO FILES
+-- THAT NEVER MEET is the shape that cost Sinnoh its whole type chart and
+-- every one of its abilities; the answer is the same one -- ask once, here,
+-- and accept both spellings rather than teaching each caller.
+local BALL_POCKETS = { BALL = true, POKE_BALLS = true, BALLS = true }
+ItemEffects.BALL_POCKETS = BALL_POCKETS
+
 function ItemEffects.isBall(id, itemDef)
   if BALLS[alias(id, itemDef)] then return true end
   local def = itemDef
@@ -95,7 +121,8 @@ function ItemEffects.isBall(id, itemDef)
     local Data = require("src.core.Data")
     def = Data.items and Data.items[id]
   end
-  return (type(def) == "table" and def.pocket == "BALL") or false
+  return (type(def) == "table" and BALL_POCKETS[def.pocket] == true)
+    or false
 end
 function ItemEffects.isStone(id) return STONES[alias(id)] or false end
 
@@ -120,8 +147,247 @@ function ItemEffects.gen3RecordFor(id, data)
   return type(all) == "table" and all[id] or nil
 end
 
+-- ---------------------------------------------------------------------------
+-- SINNOH'S MEDICINE, WHICH IS A TWENTY-BYTE STRUCT AND NOT A NAME.
+--
+-- Reported from play: "make sure all items are cabable of being used
+-- properly", alongside the Poke Balls above.
+--
+-- WHY NOTHING WORKED.  Everything below this point in the file dispatches on a
+-- NAME -- POTION, FULL_RESTORE, ETHER -- which `alias` resolves from the item
+-- record's `key`.  A Platinum item record has no `key`: the cache is 446 rows
+-- keyed 0..445 and `Data` publishes them again as ITEM_000..ITEM_445 because
+-- the bag's keys are strings.  So `alias` answered "ITEM_017" for a Potion,
+-- every name test below failed, and `use` fell all the way through to the
+-- refusal -- which is the message that was reported, for EVERY medicine in the
+-- game and not only for the balls.
+--
+-- THE CARTRIDGE STATES IT, PER ITEM, AND THE CACHE ALREADY CARRIES IT.
+-- `ItemData.partyUseParam` (pokeplatinum include/item.h) is an
+-- `ItemPartyParam`: a twenty-byte bitfield naming every effect using the item
+-- has on a party member.  The extractor writes it out verbatim, so the answer
+-- has been sitting in `items.lua` the whole time with nothing reading it.
+--
+-- Matching a name table against a second cartridge's spellings is the trap
+-- that has already cost this port its Gen 4 type chart, its abilities and its
+-- move effects; the struct cannot drift and does not need a translation table.
+--
+-- THE LAYOUT, and it is not guessed -- four independent facts in the shipped
+-- data land exactly where the struct says they should:
+--
+--   byte 0  healSleep .. guardSpec, one bit each in that order
+--   byte 1  revive(0) reviveAll(1) levelUp(2) evolve(3) atkStages(4..7)
+--   byte 2  defStages(0..3) spatkStages(4..7)
+--   byte 3  spdefStages(0..3) speedStages(4..7)
+--   byte 4  accStages(0..3) critStages(4..5) ppUp(6) ppMax(7)
+--   byte 5  ppRestore(0) ppRestoreAll(1) hpRestore(2) then the five EV bits
+--   byte 6  giveSpDefEVs(0) and the three friendship bits(1..3)
+--   7..12   hpEVs atkEVs defEVs speedEVs spatkEVs spdefEVs, SIGNED
+--   13      hpRestored   (255 = all, 254 = half)
+--   14      ppRestored   (127 = all)
+--   15..17  friendshipLow friendshipMed friendshipHigh, SIGNED
+--
+-- The four that confirm it: Potion/Super/Hyper read 20/50/200 at byte 13;
+-- Revive reads 254 and Max Revive 255 with the revive bit set; Rare Candy and
+-- PP Up carry +5/+3/+2 at bytes 15..17, which are Gen 4's friendship steps;
+-- and the Energy Root reads -10/-10/-15 there, which is why those bytes have
+-- to be signed.
+--
+-- IT ANSWERS IN THE GEN 3 RECORD'S SHAPE ON PURPOSE.  `gen3Use` below already
+-- runs every one of these effects -- the HP fill, the status clear, the PP
+-- restore, the EV ceilings, the friendship steps -- against a record with
+-- these field names. Emitting that shape means Sinnoh's medicine is run by
+-- code Hoenn's has been exercising for months, rather than by a second copy
+-- of it that will drift.
+local GEN4_PARTY_PARAM_BYTES = 20
+local GEN4_HP_ALL, GEN4_HP_HALF = 255, 254
+local GEN4_PP_ALL = 127
+-- byte 0, in the struct's own order
+local GEN4_CURE = { [0] = "SLP", [1] = "PSN", [2] = "BRN", [3] = "FRZ",
+                    [4] = "PAR" }
+-- byte 5 bit 3 upward, then byte 6 bit 0: the six EV bits and the stat each
+-- one names, in the order the struct declares them
+local GEN4_EV_BITS = {
+  { byte = 5, bit = 3, stat = "hp",    at = 7 },
+  { byte = 5, bit = 4, stat = "atk",   at = 8 },
+  { byte = 5, bit = 5, stat = "def",   at = 9 },
+  { byte = 5, bit = 6, stat = "speed", at = 10 },
+  { byte = 5, bit = 7, stat = "spatk", at = 11 },
+  { byte = 6, bit = 0, stat = "spdef", at = 12 },
+}
+
+local function signed8(v)
+  v = math.floor(tonumber(v) or 0) % 256
+  return v > 127 and (v - 256) or v
+end
+
+function ItemEffects.gen4RecordFor(id, data)
+  local def = nil
+  if type(id) == "table" then
+    def = id
+  else
+    local Data = data
+    if Data == nil then
+      local ok, mod = pcall(require, "src.core.Data")
+      Data = ok and mod or nil
+    end
+    def = Data and Data.items and Data.items[id] or nil
+  end
+  -- THE STRUCT IS ONLY A STRUCT WHEN `partyUse` SAYS SO.
+  --
+  -- `ItemData` declares it as `union { u8 dummy; ItemPartyParam
+  -- partyUseParam; }`, and `Item_Get` (src/item.c) switches on `partyUse`:
+  -- TRUE reads the struct, FALSE reads `dummy` and every party question
+  -- answers from that one byte.  So for the 287 items that are not party
+  -- items, those twenty bytes are NOT a party param -- byte 0 is `dummy`
+  -- and the rest is whatever follows in the file.
+  --
+  -- Read without the gate, a Great Ball's `dummy` of 2 came back as
+  -- healPoison and a Good Rod's 1 as healSleep: twenty-eight items that
+  -- would have opened a party picker and cured a status.  The gate is one
+  -- line and it is the cartridge's own.
+  if (tonumber(type(def) == "table" and def.partyUse) or 0) ~= 1 then
+    return nil
+  end
+  local blob = type(def) == "table" and def.partyUseParam
+  if type(blob) ~= "string" or #blob < GEN4_PARTY_PARAM_BYTES then
+    return nil
+  end
+  local b = {}
+  for i = 0, GEN4_PARTY_PARAM_BYTES - 1 do b[i] = blob:byte(i + 1) end
+  local function bit(byteIndex, shift)
+    return math.floor(b[byteIndex] / 2 ^ shift) % 2 == 1
+  end
+
+  local r = { source = "cartridge:ItemData.partyUseParam" }
+
+  -- ---- the friendship steps, which every medicine may carry --------------
+  local friendship = {}
+  for i, at in ipairs({ 15, 16, 17 }) do
+    if bit(6, i) then friendship[#friendship + 1] = signed8(b[at]) end
+  end
+  if #friendship > 0 then r.friendship = friendship end
+
+  -- ---- A RARE CANDY IS NOT A REVIVE, whatever the bits say ---------------
+  --
+  -- Rare Candy's byte 1 is 0x05: levelUp AND revive. The second bit is the
+  -- cartridge saying the item may be used on a fainted Pokemon, not that it
+  -- brings one back -- `gen3Use`'s revive arm would fill its HP and stop
+  -- there, and the level would never happen. So a record that levels up says
+  -- only that, and the level-up arm in `use` is what claims it.
+  if bit(1, 2) then
+    r.levelUp = true
+    r.amount = "levelUp"
+    return r
+  end
+
+  -- ---- status ------------------------------------------------------------
+  local cures, all = {}, true
+  for shift = 0, 4 do
+    if bit(0, shift) then cures[#cures + 1] = GEN4_CURE[shift]
+    else all = false end
+  end
+  -- CURE_ALL is Gen 3's own name for the five majors together, and `gen3Use`
+  -- reads it as "and the confusion volatile too" -- which is exactly what a
+  -- Full Heal does here, and its confusion bit is set alongside the five.
+  if all then r.cureAll = true
+  elseif #cures > 0 then table.sort(cures) r.cures = cures end
+  -- CONFUSION AND INFATUATION ARE NOT STATUSES, they are volatiles, and
+  -- they have bits of their own.  The Persim Berry sets ONLY the
+  -- confusion one, so without this it decoded to nothing at all and a
+  -- berry the cartridge gives an effect did nothing -- which is the same
+  -- shape as the medicine it is sitting next to in the bag.
+  if bit(0, 5) then r.confusion = true end
+  if bit(0, 6) then r.attract = true end
+
+  -- ---- HP, and the two sentinels -----------------------------------------
+  if bit(1, 1) then
+    -- reviveAll: the Sacred Ash, which takes no target
+    r.sacredAsh = true
+    r.revive = true
+    r.heal = true
+    r.amount = "all"
+  elseif bit(5, 2) then
+    r.heal = true
+    if bit(1, 0) then r.revive = true end
+    local hp = b[13]
+    r.amount = (hp == GEN4_HP_ALL and "all")
+      or (hp == GEN4_HP_HALF and "half") or hp
+  elseif bit(1, 0) then
+    r.revive = true
+    r.amount = "half"
+  end
+
+  -- ---- PP ----------------------------------------------------------------
+  if bit(5, 0) or bit(5, 1) then
+    r.pp = bit(5, 0) and "one" or "all"
+    local pp = b[14]
+    r.amount = (pp == GEN4_PP_ALL) and "all" or pp
+  end
+  if bit(4, 6) then r.ppUp = true end
+  if bit(4, 7) then r.ppMax = true end
+
+  -- ---- effort values ------------------------------------------------------
+  for _, e in ipairs(GEN4_EV_BITS) do
+    if bit(e.byte, e.bit) then
+      r.ev = e.stat
+      r.amount = signed8(b[e.at])
+      break
+    end
+  end
+
+  -- ---- and the ones that are RECORDED AND NOT RUN -------------------------
+  -- The stat-stage items (X Attack and the rest), GUARD SPEC and the evolution
+  -- stones are battle or menu flows of their own; the record says so rather
+  -- than pretending the item did nothing.  Same arrangement as the Gen 3
+  -- extractor's `effect.battle`.
+  if bit(0, 7) then r.guardSpec = true end
+  if bit(1, 3) then r.evolve = true end
+  -- EVERY stage field, and the accuracy one is why this is spelled out.
+  -- The first draft tested byte 4's crit bits and not its low nibble, so
+  -- X ACCURACY -- the one item whose only bit is `accStages` -- decoded to
+  -- nothing and was the last row in the audit's "an effect is being
+  -- dropped" list.  atk is byte 1's high nibble, def/spatk are byte 2,
+  -- spdef/speed are byte 3, acc is byte 4's low nibble and crit its next
+  -- two bits.
+  if math.floor(b[1] / 16) > 0 or b[2] > 0 or b[3] > 0
+     or (b[4] % 16) > 0 or math.floor(b[4] / 16) % 4 > 0 then
+    r.stages = true
+  end
+
+  -- NOTHING AT ALL is not a record.  446 of Sinnoh's items carry this struct
+  -- and most of them are all zeroes -- a Poke Ball, a TM, a Key Item -- and
+  -- answering with an empty table would open a party picker for every one of
+  -- them.
+  -- A RECORD IS ANY BIT AT ALL, not only the ones `use` can run today.
+  -- An evolution stone, a Dire Hit and a Guard Spec all state real
+  -- effects; leaving them out of the record would make "the cartridge
+  -- says nothing" and "this port does not run it yet" the same answer,
+  -- and `tools/gen4_item_use_check.lua` counts the second one.
+  if not (r.heal or r.revive or r.cures or r.cureAll or r.confusion
+          or r.attract or r.pp or r.ev or r.ppUp or r.ppMax
+          or r.sacredAsh or r.levelUp or r.evolve or r.guardSpec
+          or r.stages) then
+    return nil
+  end
+  return r
+end
+
+-- ONE ACCESSOR.  Hoenn's table first -- it is read straight off the ROM and
+-- verified there -- then Sinnoh's per-item struct.  Every caller that used to
+-- ask `gen3RecordFor` asks this instead, so the party picker, the heal path
+-- and `use` all agree about what an item does on every cartridge.
+function ItemEffects.recordFor(id, data)
+  local Data=data or require('src.core.Data')
+  local def=type(id)=='table' and id or (Data.items and Data.items[id])
+  local berry=require('src.inventory.PolishedBerries').record(def)
+  if berry then return berry end
+  return ItemEffects.gen3RecordFor(id, data)
+      or ItemEffects.gen4RecordFor(id, data)
+end
+
 function ItemEffects.healsHP(id)
-  local r = ItemEffects.gen3RecordFor(id)
+  local r = ItemEffects.recordFor(id)
   if r then return (r.heal or r.revive) and true or false end
   id = alias(id)
   return HEAL_AMOUNT[id] ~= nil or id == "MAX_POTION" or id == "FULL_RESTORE"
@@ -129,18 +395,185 @@ function ItemEffects.healsHP(id)
 end
 
 -- Does this item need a party-member target?
+
+-- A PLATINUM TM HAS NO `machine` RECORD, AND THAT IS WHY NONE OF THEM COULD BE
+-- TAUGHT.
+--
+-- Reported from play, with a screenshot of HM01 in the bag: "This isn't the
+-- time to use that!".
+--
+-- `BagMenu.useItem` gates the whole machine flow -- the boot-up lines, the
+-- party picker in TM/HM mode, the ABLE/UNABLE word -- on `def.machine`, and
+-- `ItemEffects.needsTarget` never answers true without one either.  Across the
+-- 446 items in a Platinum cache, **zero** carry it: Gen 1, 2 and 3 extractors
+-- write `machine = { move, kind }` and the Gen 4 one never has, because the
+-- cartridge does not store it that way.
+--
+-- So every piece of work the TM-teaching pass did -- the party alias's `tmhm`
+-- key, the 128-bit learnset mask, bank 453's ABLE!/UNABLE! -- was correct and
+-- unreachable, because the one field that triggers it was absent.
+--
+-- WHAT THE CARTRIDGE STORES INSTEAD, and it is better than a name match:
+--
+--   * `fieldUseFunc` is an index into `sItemUseFuncs`
+--     (src/item_use_functions.c), and `ITEM_USE_FUNC_TM_HM` is **6**
+--     (include/constants/items.h).  Exactly 100 items carry it.
+--   * `constants.tmhmMoves` is the 100-entry `sTMHMMoves` array in the
+--     cartridge's own order: TM01..TM92 then HM01..HM08.
+--
+-- TWO INDEPENDENT SOURCES, AND THEY MUST AGREE.  `Item_MoveForTMHM` is three
+-- lines of src/item.c and it does not look at a name at all:
+--
+--     item -= ITEM_TM01;
+--     return sTMHMMoves[item];
+--
+-- The ITEM ID IS THE INDEX, which is only true because ITEM_TM01..ITEM_HM08 is
+-- one unbroken run.  So that is the mechanism here too -- and the run being
+-- unbroken is asserted rather than assumed, because the cartridge gets to
+-- assume it and a cache does not.
+--
+-- The NAMES are then the check on the ids instead of a second mechanism: TM01
+-- must land on index 1 and HM01 on index 92 + 1, and if any name disagrees
+-- with where its id put it, nothing is stamped.  A wrong split point does not
+-- fail, it teaches Rock Climb where it should teach Focus Punch.
+--
+-- `kind` is the TM/HM half the index falls in.  The cartridge asks
+-- `Item_IsHMMove(move)` -- it scans the last NUM_HMS entries of the array for
+-- the MOVE -- which is the same answer only while no move sits in both halves.
+-- Measured on Platinum: none does.  The half is used because it is what the
+-- wording and the party picker actually want to know, and the check carries
+-- the cartridge's question as its own assertion so a cache where the two
+-- diverge fails loudly instead of printing "Booted up a TM." for an HM.
+--
+-- Stamped at LOAD rather than in the extractor, the way
+-- `Sprites.markFormsTrueColor` is and for the same reason: an existing cache
+-- is fixed without a re-import.  Only `nil` is filled in, so a mod that
+-- supplies its own machine record keeps it.
+--
+-- Returns the number stamped, or 0 with the reason logged.
+ItemEffects.ITEM_USE_FUNC_TM_HM = 6
+
+function ItemEffects.markGen4Machines(data)
+  local items = data and data.items
+  local moves = data and data.constants and data.constants.tmhmMoves
+  if type(items) ~= "table" or type(moves) ~= "table" then return 0 end
+
+  -- KEYED BY ID, which is also what collapses the dual publication: `Data`
+  -- puts every Gen 4 item in the table under both its numeric id and
+  -- `ITEM_nnn`, pointing at one table.  Walking the values counts each machine
+  -- twice; walking the ids cannot.
+  local byId, lo, hi, n = {}, nil, nil, 0
+  for key, def in pairs(items) do
+    local id = tonumber(key) or tonumber(tostring(key):match("^ITEM_(%d+)$"))
+    if id and type(def) == "table" and byId[id] == nil
+       and def.fieldUseFunc == ItemEffects.ITEM_USE_FUNC_TM_HM then
+      byId[id] = def
+      n = n + 1
+      if not lo or id < lo then lo = id end
+      if not hi or id > hi then hi = id end
+    end
+  end
+  -- ZERO IS NOT A QUIET ANSWER HERE.  This is only ever called on the Gen 4
+  -- branch, and a Platinum cache has a hundred machines; none at all means the
+  -- items were imported without `fieldUseFunc`, which looks exactly like the
+  -- bug this function exists to fix and would otherwise be reported as it.
+  local Logger = require("src.core.Logger")
+  if n == 0 then
+    Logger.warn("gen4 machines: no item carries use function %d, so the TM/HM "
+      .. "flow has nothing to trigger it -- re-import the cache",
+      ItemEffects.ITEM_USE_FUNC_TM_HM)
+    return 0
+  end
+
+  local function refuse(fmt, ...)
+    Logger.warn("gen4 machines: " .. fmt
+      .. " -- no machine record was stamped", ...)
+    return 0
+  end
+
+  if n ~= #moves then
+    return refuse("%d items carry the TM/HM use function but tmhmMoves has "
+      .. "%d entries, so the TM/HM split cannot be placed", n, #moves)
+  end
+  if hi - lo + 1 ~= n then
+    return refuse("the %d machine item ids run %d..%d, which is not one "
+      .. "unbroken run, so an id is not an index into tmhmMoves", n, lo, hi)
+  end
+
+  -- The TM run's length, read off the names rather than assumed to be 92.
+  local tmCount = 0
+  for id in pairs(byId) do
+    if tostring(byId[id].name or ""):match("^TM%d+$") then
+      tmCount = tmCount + 1
+    end
+  end
+
+  -- IN ID ORDER, so a refusal names the FIRST item that disagrees.  `pairs`
+  -- made the message depend on hash order: the same planted fault reported a
+  -- different item run to run, which is a diagnostic nobody can act on.
+  local ids = {}
+  for id in pairs(byId) do ids[#ids + 1] = id end
+  table.sort(ids)
+
+  -- The names against the ids, every one of them.
+  for _, id in ipairs(ids) do
+    local def = byId[id]
+    local index = id - lo + 1
+    local kind, number = tostring(def.name or ""):match("^([TH]M)(%d+)$")
+    if not kind then
+      return refuse("item %d carries the TM/HM use function but is named %q",
+        id, tostring(def.name))
+    end
+    local want = (kind == "HM") and (tmCount + tonumber(number))
+                 or tonumber(number)
+    if want ~= index then
+      return refuse("%s is item %d, which is index %d of the machine run, "
+        .. "but its name puts it at %d", def.name, id, index, want)
+    end
+    if (index > tmCount) ~= (kind == "HM") then
+      return refuse("%s falls in the %s half of the machine run",
+        def.name, index > tmCount and "HM" or "TM")
+    end
+  end
+
+  local stamped = 0
+  for _, id in ipairs(ids) do
+    local def = byId[id]
+    if def.machine == nil then
+      local index = id - lo + 1
+      local move = moves[index]
+      if move then
+        def.machine = { move = move,
+                        kind = (index > tmCount) and "HM" or "TM" }
+        stamped = stamped + 1
+      end
+    end
+  end
+  return stamped
+end
+
 function ItemEffects.needsTarget(id, itemDef)
+  do
+    local Data = package.loaded["src.core.Game"] and package.loaded["src.core.Game"].data
+    local g4 = require("src.inventory.Gen4ItemUse").needsTarget(id, itemDef, Data)
+    if g4 ~= nil then return g4 end
+  end
   -- HOENN ASKS FIRST, and this is what opens the party picker.
   --
   -- The list below is Gen 1's and Gen 2's, so an ORAN BERRY answered "no
   -- target needed" and was then used on nobody -- which is a medicine that
   -- silently does nothing however correct the effect behind it is.  A SACRED
   -- ASH is the one that really does not want one: it revives the whole party.
-  local r = ItemEffects.gen3RecordFor(id)
+  local r = ItemEffects.recordFor(id)
   if r then
     if r.sacredAsh then return false end
+    -- `levelUp` is in the list because Sinnoh's Rare Candy has no name to
+    -- match on further down and would otherwise open no party picker --
+    -- an item used on nobody.  Hoenn's candy already answered true from
+    -- the name list, so this changes nothing there.
     if r.heal or r.revive or r.cures or r.cureAll or r.pp or r.ev
-       or r.ppUp or r.ppMax then
+       or r.ppUp or r.ppMax or r.levelUp or r.confusion or r.attract
+       or r.evolve then
       return true
     end
   end
@@ -234,9 +667,7 @@ local GEN3_EV_TOTAL = 510          -- across the six
 local GEN3_EV_ORDER = { "hp", "attack", "defense", "speed", "spatk", "spdef" }
 
 local function gen3Record(data, itemId)
-  local c = data and data.constants
-  local all = c and c.gen3ItemEffects
-  return type(all) == "table" and all[itemId] or nil
+  return ItemEffects.recordFor(itemId,data)
 end
 
 -- The friendship a medicine moves, which is a third of the record the port
@@ -263,8 +694,10 @@ local function gen3Use(data, save, itemId, target, battle, moveIndex)
   local r = gen3Record(data, itemId)
   if not r then return nil end
   -- a stone, an X item or a rare candy is somebody else's branch
+  if r.evolve then return nil end
   if not (r.heal or r.revive or r.cures or r.cureAll or r.pp or r.ev
-          or r.ppUp or r.ppMax or r.sacredAsh) then
+          or r.ppUp or r.ppMax or r.sacredAsh or r.confusion
+          or r.attract) then
     return nil
   end
   if r.levelUp then return nil end
@@ -313,6 +746,7 @@ local function gen3Use(data, save, itemId, target, battle, moveIndex)
     local before = target.hp
     if not full then
       local by = r.amount
+      if r.hpDivisor then by=math.max(1,math.floor(maxHP/r.hpDivisor))end
       if by == "all" then
         target.hp = maxHP
       elseif by == "half" then
@@ -348,7 +782,10 @@ local function gen3Use(data, save, itemId, target, battle, moveIndex)
   end
 
   -- ---- curing, and nothing else -------------------------------------------
-  if r.cureAll or r.cures then
+  -- `r.confusion` and `r.attract` are Sinnoh's own bits (gen4RecordFor).
+  -- A Persim Berry sets only the first of them, and on a Gen 3 record
+  -- neither is ever set, so this arm behaves for Hoenn exactly as before.
+  if r.cureAll or r.cures or r.confusion or r.attract then
     local status = target.status
     local confused = nil
     if battle then
@@ -362,7 +799,7 @@ local function gen3Use(data, save, itemId, target, battle, moveIndex)
         if name == status then wanted = true end
       end
     end
-    local clearsConfusion = r.cureAll
+    local clearsConfusion = r.cureAll or r.confusion
     if not clearsConfusion then
       for _, name in ipairs(r.cures or {}) do
         if name == "CONFUSION" then clearsConfusion = true end
@@ -443,13 +880,19 @@ local function gen3Use(data, save, itemId, target, battle, moveIndex)
     else
       want = math.max(0, now + by)
     end
-    if want == now then return "failed", fail end
+    if want == now then
+      if r.friendshipOnly and (tonumber(target.happiness) or 0)<255 then
+        gen3Friendship(target,r.friendship)
+        return "consumed",{Strings("%s became\nfriendlier!",monName(data,target))}
+      end
+      return "failed", fail
+    end
     target.evs[r.ev] = want
     local okStats, Stats = pcall(require, "src.pokemon.Stats")
     if okStats and data.pokemon and data.pokemon[target.species] then
       pcall(function()
-        target.stats = Stats.calc(data.pokemon[target.species], target.level,
-                                  target.ivs, target.evs, target.nature)
+        target.stats = Stats.calc(require('src.pokemon.Gen4Forms').definition(data,target),
+                                  target.level,target.ivs,nil,target.evs,target.nature)
         target.hp = math.min(target.hp, target.stats.hp)
       end)
     end
@@ -473,11 +916,74 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
   local name = itemDef and itemDef.name or itemId
   local rawItemId = itemId
   itemId = alias(itemId, itemDef)
+  -- PLATINUM'S ITEMS ARE NUMBERS, and the branches below are names.  Reported
+  -- from play: "Rowan forbids using various items, repels and bicycle are a
+  -- couple" -- every one of them fell past its branch to the refusal.  The
+  -- cartridge dispatches on the record's own `fieldUseFunc` (sItemUseFuncs,
+  -- item_use_functions.c), so that is what picks the branch here: 4 is
+  -- ITEM_USE_FUNC_BICYCLE, 21 ESCAPE_ROPE, and 19 BAG_MESSAGE -- the bag's own
+  -- UseItemInBag, which knows exactly the three Repels and the two Flutes.
+  -- BLACK / WHITE dispatch on their own `fieldUse` (src/inventory/Gen5ItemUse.lua)
+  if data and data.gen5_version and itemDef and itemDef.fieldUse ~= nil then
+    local kind, msgs, extra = require("src.inventory.Gen5ItemUse").use(data, save, rawItemId, itemDef, target, battle, ow)
+    if kind then return kind, msgs or {}, extra end
+  end
+  -- PLATINUM'S OWN DISPATCH (src/inventory/Gen4ItemUse.lua) answers first
+  do
+    local kind, msgs, extra = require("src.inventory.Gen4ItemUse").use(data, save, rawItemId, itemDef, target, battle)
+    if kind then return kind, msgs or {}, extra end
+  end
+  local numericRaw = require("src.inventory.Gen4ItemUse").numeric(rawItemId)
+  if numericRaw and itemDef and itemDef.fieldUseFunc and itemId == rawItemId then
+    local f = tonumber(itemDef.fieldUseFunc)
+    local nm = itemDef.translationSourceName or itemDef.name
+    if f == 4 then itemId = "BICYCLE"
+    elseif f == 21 then itemId = "ESCAPE_ROPE"
+    elseif f == 19 then
+      itemId = ({ ["Repel"] = "REPEL", ["Super Repel"] = "SUPER_REPEL", ["Max Repel"] = "MAX_REPEL",
+                  ["Black Flute"] = "BLACK_FLUTE", ["White Flute"] = "WHITE_FLUTE" })[nm] or itemId
+    end
+  end
+  local gen2Friendship = require("src.pokemon.Gen2Friendship")
+  if gen2Friendship.isVanilla() and target and require("src.pokemon.Party").isEgg(target) then
+    return "failed", { Strings("It won't have\nany effect.") }
+  end
+  if gen2Friendship.isVanilla() then
+    -- The herbal shop's medicines use the ordinary heal/cure/revive path,
+    -- then apply bitterness only when the medicine was successfully used.
+    local herbs = {
+      ENERGYPOWDER={"SUPER_POTION","BITTERPOWDER"},
+      ENERGY_ROOT={"HYPER_POTION","ENERGYROOT"},
+      HEAL_POWDER={"FULL_HEAL","BITTERPOWDER"},
+      REVIVAL_HERB={"MAX_REVIVE","REVIVALHERB"},
+    }
+    local herb = herbs[itemId]
+    if herb then
+      local kind, messages, extra = ItemEffects.use(data,save,herb[1],target,battle,moveIndex,ow)
+      if kind == "consumed" then
+        gen2Friendship.change(target,herb[2])
+        messages[#messages+1]=(data.text and (data.text._ItemLooksBitterText or data.text.ItemLooksBitterText))
+          or Strings("It looks bitter…")
+      end
+      return kind,messages,extra
+    end
+  end
+  -- SINNOH'S RARE CANDY HAS NO NAME TO MATCH ON.  `alias` answers
+  -- "ITEM_050" for it, so the branch that raises a level -- which is
+  -- already written, already uses the Gen 3 stat formula and already fires
+  -- the follower's happiness step -- was unreachable.  The cartridge's own
+  -- struct says the item levels up; that is what opens the same door.
+  local gen4LevelUp = false
+  do
+    local g4 = ItemEffects.gen4RecordFor(itemDef, data)
+    gen4LevelUp = (g4 and g4.levelUp) or false
+  end
 
   -- ItemUseVitamin / ItemUsePPUp / ItemUseEvoStone / ItemUseCoinCase /
   -- ItemUseTMHM all refuse mid-battle (jp nz, ItemUseNotTime)
   if battle and (VITAMINS[itemId] or STONES[itemId] or itemId == "PP_UP"
-                 or itemId == "RARE_CANDY" or itemId == "COIN_CASE"
+                 or itemId == "RARE_CANDY" or gen4LevelUp
+                 or itemId == "COIN_CASE"
                  or (itemDef and itemDef.machine)) then
     return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!",
                                save.player.name) }
@@ -547,6 +1053,9 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
         .modifyHappiness(save, "USEDXITEM", b and b.mon)
     end
     if itemId == "X_ACCURACY" then
+      if gen2Friendship.isVanilla() and b.xAccuracy then
+        return "failed", { Strings("It won't have\nany effect.") }
+      end
       -- ItemUseXAccuracy sets USING_X_ACCURACY: moves never miss
       -- (not an accuracy stage)
       b.xAccuracy = true
@@ -554,6 +1063,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     end
     if X_ITEMS[itemId] then
       local stat = X_ITEMS[itemId]
+      gen2Friendship.change(b and b.mon,"XITEM")
       local cur = b.stages[stat] or 0
       -- ItemUseXStat removes the item BEFORE running the stat-up
       -- effect, so at +6 it is still consumed and StatModifierUpEffect
@@ -567,10 +1077,16 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     -- ItemUseDireHit/ItemUseGuardSpec always set the bit and consume
     -- the item, even when it is already active
     if itemId == "DIRE_HIT" then
+      if gen2Friendship.isVanilla() and b.focusEnergy then
+        return "failed", { Strings("It won't have\nany effect.") }
+      end
       b.focusEnergy = true
       return "consumed", { Strings("%s's\ngetting pumped!", b.name) }
     end
     if itemId == "GUARD_SPEC" then
+      if gen2Friendship.isVanilla() and b.mist then
+        return "failed", { Strings("It won't have\nany effect.") }
+      end
       b.mist = true
       return "consumed", { Strings("%s's\nprotected against\nstat changes!", b.name) }
     end
@@ -675,7 +1191,8 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
         if b and b.mon == target and b.confusedTurns then confused = b end
       end
     end
-    if not target or ((not target.status or not cures[target.status])
+    if not target or (gen2Friendship.isVanilla() and (target.hp or 0) <= 0)
+                  or ((not target.status or not cures[target.status])
                       and not confused) then
       return "failed", { Strings("It won't have\nany effect.") }
     end
@@ -699,13 +1216,13 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
            { healedFrom = 0 }
   end
 
-  if itemId == "RARE_CANDY" then
+  if itemId == "RARE_CANDY" or gen4LevelUp then
     if not target or target.level >= 100 then
       return "failed", { Strings("It won't have\nany effect.") }
     end
     local Growth = require("src.pokemon.Growth")
     local Stats = require("src.pokemon.Stats")
-    local speciesDef = data.pokemon[target.species]
+    local speciesDef = require('src.pokemon.Gen4Forms').definition(data,target)
     target.level = target.level + 1
     target.exp = Growth.expForLevel(speciesDef.growthRate, target.level)
     local old = target.stats
@@ -725,12 +1242,23 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     -- PIKAHAPPY_LEVELUP on a candy level (item_effects.asm:1540)
     require("src.world.PikachuFollower")
       .modifyHappiness(save, "LEVELUP", target)
+    gen2Friendship.levelUp(data,save,target)
     return "consumed", { Strings("%s grew\nto level %d!", monName(data, target), target.level) },
            { leveledTo = target.level, beforeStats = old,
              afterStats = target.stats }
   end
 
-  if STONES[itemId] then
+  -- ...AND SINNOH'S STONES HAVE NO NAME TO MATCH ON EITHER.  `STONES` is a
+  -- list of Gen 1/2 spellings; a Platinum Fire Stone answers "ITEM_082".
+  -- Its record carries `evolve`, which is the cartridge's own word for
+  -- exactly this branch -- the Dawn, Dusk, Shiny and Oval stones come with
+  -- it, and they are four evolution families Sinnoh could not reach.
+  local gen4Stone = false
+  do
+    local g4 = ItemEffects.gen4RecordFor(itemDef, data)
+    gen4Stone = (g4 and g4.evolve) or false
+  end
+  if STONES[itemId] or gen4Stone then
     if not target then return "failed", { Strings("It won't have\nany effect.") } end
     -- Yellow's starter Pikachu never evolves: ItemUseEvoStone runs
     -- IsThisPartyMonStarterPikachu (OT identity match) before
@@ -746,7 +1274,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
         or Strings("%s\nis refusing!", monName(data, target))
       return "failed", { line }
     end
-    local speciesDef = data.pokemon[target.species]
+    local speciesDef = require('src.pokemon.Gen4Forms').definition(data,target)
     for _, evo in ipairs(speciesDef.evolutions) do
       if evo.method == "ITEM" and (evo.item == itemId or evo.item == rawItemId) then
         return "consumed", nil, { evolveTo = evo.species }
@@ -770,6 +1298,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     target.stats = Stats.calc(data.pokemon[target.species], target.level,
                               target.dvs, target.statExp)
     target.hp = math.min(target.hp, target.stats.hp)
+    gen2Friendship.change(target,"VITAMIN")
     return "consumed", { Strings("%s's %s\nrose!", monName(data, target),
       vitaminStat == "hp" and "HP" or vitaminStat:upper()) }
   end
@@ -790,9 +1319,16 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
 
   if itemDef and itemDef.machine then
     if not target then return "failed", { Strings("It won't have\nany effect.") } end
-    local speciesDef = data.pokemon[target.species]
+    local speciesDef = require('src.pokemon.Gen4Forms').definition(data,target)
     local ok = false
-    for _, m in ipairs(speciesDef.tmhm) do
+    -- `or {}` BECAUSE A CACHE CAN ARRIVE WITHOUT THE LIST, and this line
+    -- raised when one did. Every Platinum cache written before the Gen 4
+    -- extractor learned to unpack the 128-bit machine mask has `tmLearnset`
+    -- and no `tmhm`, so `ipairs(nil)` took the game down the moment a TM was
+    -- used in Sinnoh. The fallback answer is "cannot learn", which is the safe
+    -- half of the two: a machine that refuses is a stale cache, a machine that
+    -- teaches off an empty list would be teaching anything to anything.
+    for _, m in ipairs((speciesDef and speciesDef.tmhm) or {}) do
       if m == itemDef.machine.move then ok = true break end
     end
     if not ok then
@@ -811,6 +1347,23 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     return (itemDef.machine.kind == "HM" and "learnkept" or "learn"), itemDef.machine.move
   end
 
+  -- SINNOH'S RODS, which are numbered and carry `fieldUseFunc` 16/17/18 rather
+  -- than a Gen 1 name. Matched by name alone they were never rods: every cast
+  -- in Platinum answered the OAK line below. `CanUseFishingRod` allows a rod
+  -- while SURFING (unlike Gen 1/2) and refuses it only in the Distortion World;
+  -- facing water is checked by the bag before `goFishing`.
+  local gen4Rod = require("src.world.Gen4Fishing").rodFor(itemDef)
+    or require("src.world.Gen4Fishing").rodOf(data, rawItemId)
+  if gen4Rod then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+    end
+    local header = ow and ow.map and ow.map.def and ow.map.def.header
+    if header and require("src.world.Gen4Fishing").NO_FISHING[header] then
+      return "failed", { Strings("It can't be used here.") }
+    end
+    return "fish", rawItemId
+  end
   if itemId == "OLD_ROD" or itemId == "GOOD_ROD" or itemId == "SUPER_ROD" then
     if battle then
       return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
@@ -859,7 +1412,46 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     end
     return "pokeblock_case"
   end
-  if itemId == "TOWN_MAP" then
+  -- THE EXPLORER KIT, and it is found by the cartridge's own dispatch index
+  -- rather than by item 428.  A Platinum item record carries `fieldUseFunc`,
+  -- which indexes `sItemUseFuncs` (item_use_functions.c), and slot 3 is
+  -- `ITEM_USE_FUNC_EXPLORER_KIT` = { UseExplorerKitFromMenu,
+  -- UseExplorerKitInField, CanUseExplorerKit }.  Keying on the number is what
+  -- the cartridge does, it survives a re-extraction that renumbers nothing,
+  -- and it cannot match in Gen 1, 2 or 3 -- no item record in those datasets
+  -- has the field at all, so this arm is unreachable there by construction
+  -- rather than by a version test bolted on the front.
+  --
+  -- Whether the kit may be used HERE is eight separate questions and they live
+  -- with the Underground (Gen4Underground.canUse), not here: this line only
+  -- says which item was used.
+  if itemDef and itemDef.fieldUseFunc == ITEM_USE_FUNC_EXPLORER_KIT then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!",
+                                 save.player.name) }
+    end
+    return "explorer_kit"
+  end
+  -- PLATINUM'S JOURNAL (fieldUseFunc 5, ITEM_USE_FUNC_JOURNAL: UseJournalFromMenu
+  -- and UseJournalInField both open the journal app, sub_0203D30C)
+  if itemDef and itemDef.fieldUseFunc == 5 and (itemDef.translationSourceName or itemDef.name) == "Journal" then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+    end
+    return "journal"
+  end
+  -- THE POKE RADAR (fieldUseFunc 11, ITEM_USE_FUNC_POKE_RADAR)
+  if itemDef and itemDef.fieldUseFunc == 11 and (itemDef.translationSourceName or itemDef.name) == "Poké Radar" then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+    end
+    return "poke_radar"
+  end
+  -- Platinum's is item 442, which has no Gen 1 name key: its own use
+  -- function row (`fieldUseFunc` 2, UseTownMapFromBag) says what it is
+  local isGen4TownMap = itemDef and itemDef.fieldUseFunc == 2
+    and (itemDef.translationSourceName or itemDef.name) == "Town Map"
+  if itemId == "TOWN_MAP" or isGen4TownMap then
     if battle then
       return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
     end
@@ -886,8 +1478,60 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     end
     return "teachy_tv"
   end
+  -- PLATINUM'S COIN CASE (item 444): BagContext_FormatUsageMessage prints bank
+  -- 7 (TEXT_BANK_BAG) #57, "Your Coins: {STRVAR_1 54 0 0}", unpadded.
+  if require("src.inventory.Gen4ItemUse").numeric(rawItemId) == 444 and itemDef and (itemDef.translationSourceName or itemDef.name) == "Coin Case" then
+    local key = require("src.import.Gen4Text").label(7, 57)
+    local line = data and data.text and data.text[key]
+    local coins = tostring(require("src.import.Gen4GameCorner").coins(save))
+    line = type(line) == "string" and line:gsub("{STRVAR_1 54 0 0}", coins) or ("Your Coins: " .. coins)
+    return "failed", { line }
+  end
+  -- THE POFFIN CASE (item 449): its own screen (src/ui/Gen4PoffinCase.lua).
+  if require("src.inventory.Gen4ItemUse").numeric(rawItemId) == 449 and itemDef and (itemDef.translationSourceName or itemDef.name) == "Poffin Case" then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+    end
+    return "poffin_case"
+  end
+  -- ...and the SEAL CASE (item 434): bank 7 #92, "Seals: n" -- CalcTotalBallSeals.
+  if require("src.inventory.Gen4ItemUse").numeric(rawItemId) == 434 and itemDef and (itemDef.translationSourceName or itemDef.name) == "Seal Case" then
+    local key = require("src.import.Gen4Text").label(7, 92)
+    local line = data and data.text and data.text[key]
+    local n = tostring(require("src.import.Gen4Seals").total(save))
+    line = type(line) == "string" and line:gsub("{STRVAR_1 53 0 0}", n) or ("Seals: " .. n)
+    return "failed", { line }
+  end
   if itemId == "COIN_CASE" then
     return "failed", { Strings("Coin count:\n%d", save.coins or 0) }
+  end
+  -- PLATINUM'S BAG (UseItemInBag / TryUseRepel, applications/bag/main.c): a
+  -- Repel refuses while one still works, takes its step count from the item's
+  -- own effect parameter, and says so in the bag's own lines (bank 7: 61, 62,
+  -- and 63/64 for the White and Black Flutes, which set the flute factor)
+  if require("src.inventory.Gen4ItemUse").numeric(rawItemId) and (itemId == "REPEL" or itemId == "SUPER_REPEL" or itemId == "MAX_REPEL"
+     or itemId == "BLACK_FLUTE" or itemId == "WHITE_FLUTE") and require("src.core.GameVersion").isGen4() then
+    if battle then
+      return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+    end
+    local Game = package.loaded["src.core.Game"]
+    local T = require("src.import.Gen4Text")
+    local function line(i, fallback)
+      if Game then pcall(T.buffer, Game, save.player.name, name) end
+      -- HGSS: bank 10, renumbered (src/ui/Gen4PartyText.lua)
+      local bank, n = require("src.ui.Gen4PartyText").bagIndex(data, i)
+      return (Game and bank and T.resolve(data, bank, n, Game)) or fallback
+    end
+    if itemId == "BLACK_FLUTE" or itemId == "WHITE_FLUTE" then
+      save.gen4Flute = itemId == "BLACK_FLUTE" and "black" or "white"
+      return "kept", { line(itemId == "WHITE_FLUTE" and 63 or 64, Strings("%s used the\n%s.", save.player.name, name)) }
+    end
+    if (save.repelSteps or 0) > 0 then
+      return "failed", { line(62, Strings("Since a Repel's effects still linger,\nyou can't use this now.")) }
+    end
+    save.repelSteps = tonumber(itemDef.holdEffectParam) or (itemId == "REPEL" and 100 or itemId == "SUPER_REPEL" and 200 or 250)
+    pcall(function() require("src.core.Sound").play(data, "Repel") end)
+    return "consumed", { line(61, Strings("%s used the\n%s.", save.player.name, name)) }
   end
   if itemId == "REPEL" or itemId == "SUPER_REPEL" or itemId == "MAX_REPEL" then
     local steps = itemId == "REPEL" and 100 or itemId == "SUPER_REPEL" and 200 or 250
@@ -896,6 +1540,19 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
   end
 
   return "failed", { Strings("OAK: %s!\nThis isn't the\ntime to use that!", save.player.name) }
+end
+
+-- PLATINUM'S REFUSAL IS ROWAN'S, not Oak's (Gen4ItemUse.translateRefusal):
+-- every refusal above, through one exit
+do
+  local inner = ItemEffects.use
+  function ItemEffects.use(data, save, ...)
+    local kind, msgs, extra = inner(data, save, ...)
+    if kind == "failed" then
+      msgs = require("src.inventory.Gen4ItemUse").translateRefusal(data, save, msgs)
+    end
+    return kind, msgs, extra
+  end
 end
 
 return ItemEffects

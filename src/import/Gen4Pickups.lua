@@ -37,6 +37,33 @@ local Gen4Pickups = {}
 
 Gen4Pickups.VISIBLE_BASE = 7000
 Gen4Pickups.HIDDEN_BASE = 8000
+Gen4Pickups.HIDDEN_FLAGS_START = 0x02DA
+-- HeartGold/SoulSilver: HIDDEN_ITEMS_FLAG_BASE 800 (pokeheartgold
+-- include/constants/flags.h; HiddenItemScriptNoToFlagId). Platinum's 0x2DA
+-- there lands on story flags (0x2E9 FLAG_HIDE_VIOLET_GYM_FALKNER ...).
+Gen4Pickups.HGSS_HIDDEN_FLAGS_START = 0x0320
+
+local function isHgss()
+  local okG, GV = pcall(require, "src.core.GameVersion")
+  return okG and GV and GV.family and GV.family() == "hgss"
+end
+
+function Gen4Pickups.hiddenFlag(script, hgss)
+  if type(script) ~= 'number' or script < 8000 or script >= 8800 then return nil end
+  if hgss == nil then hgss = isHgss() end
+  return script-8000+(hgss and Gen4Pickups.HGSS_HIDDEN_FLAGS_START or Gen4Pickups.HIDDEN_FLAGS_START)
+end
+
+function Gen4Pickups.prepareHidden(save, sign)
+  local pickup = sign and sign.pickup
+  local flag = sign and Gen4Pickups.hiddenFlag(sign.script)
+  if not (save and pickup and pickup.kind == 'hidden' and flag) then return false end
+  local key = ('FLAG_G4_%04X'):format(flag)
+  if (save.flags or {})[key] then return false end
+  save.gen4Vars = save.gen4Vars or {}
+  save.gen4Vars[0x8000], save.gen4Vars[0x8001], save.gen4Vars[0x8002] = pickup.item, pickup.quantity or 1, flag
+  return true
+end
 
 Gen4Pickups.VAR_ITEM = 0x8008
 Gen4Pickups.VAR_QUANTITY = 0x8009

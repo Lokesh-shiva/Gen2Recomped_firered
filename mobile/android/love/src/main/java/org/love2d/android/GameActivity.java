@@ -59,7 +59,12 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.StatFs;
 import android.os.Vibrator;
+import android.os.storage.StorageManager;
+import android.os.storage.StorageVolume;
+import android.provider.DocumentsContract;
+import android.provider.Settings;
 import android.util.Log;
 import android.util.DisplayMetrics;
 import android.view.*;
@@ -79,7 +84,9 @@ public class GameActivity extends SDLActivity {
     public static final int FILE_PICKER_REQUEST_CODE = 4;
     public static final int FILE_CREATE_REQUEST_CODE = 5;
     public static final int STEP_PERMISSION_REQUEST_CODE = 6;
+    public static final int NOTIFY_PERMISSION_REQUEST_CODE = 7;
     public static final int RESTART_REQUEST_CODE = 7;
+    public static final int FOLDER_PICKER_REQUEST_CODE = 8;
     /** @deprecated Prefer FILE_PICKER_REQUEST_CODE; kept for older call sites. */
     public static final int ROM_PICKER_REQUEST_CODE = FILE_PICKER_REQUEST_CODE;
     // Mirrors conf.lua's t.identity ("pokemon-love2d"): where the picked file
@@ -90,8 +97,14 @@ public class GameActivity extends SDLActivity {
     private static final String PICKED_ROM_FILENAME = "picked_rom.gb";
     private static final String PICKED_MOD_FILENAME = "picked_mod.zip";
     private static final String PICKED_SAVE_FILENAME = "picked_save.sav";
+    private static final String PICKED_IMAGE_FILENAME = "picked_sky.png";
     private static final String PENDING_EXPORT_FILENAME = "pending_export.sav";
     private static final String EXPORT_DONE_FILENAME = "export_done.flag";
+    private static final String PICKED_FOLDER_FILENAME = "picked_folder.txt";
+    // App-owned subdirectory under each getExternalFilesDir volume: mods and
+    // imported games land here so they are not competing with saves for the
+    // identity folder's space.
+    private static final String GAME_DATA_SUBDIR = "gamedata";
     // Written when a SAF pick cannot be read at all, with the destination
     // basename as its body, so RomImporter:focus can say so in the launcher
     // instead of leaving the player on "No ROM imported" (issue #442).
@@ -133,6 +146,18 @@ public class GameActivity extends SDLActivity {
      */
     private boolean pickRetried = false;
     private static final String STATE_PENDING_PICK = "pendingPickFilename";
+    // Absolute save directory physfs actually mounted, as reported by the
+    // native bridge call that opened the picker (love/src/common/android.cpp,
+    // bridgeSaveDirectory).  This activity used to recompute
+    // getExternalFilesDir(null)/save/<identity> on its own at result time; on
+    // merged / adopted-SD storage that can name a different volume than the
+    // one LOVE mounted, so the copied pick (and pick_error.flag) landed where
+    // Lua never scans -- the launcher then "did nothing" after a pick (#604)
+    // and the folders a file manager can browse stayed empty while the game
+    // saved fine elsewhere (#839).  Empty string means "not told yet": fall
+    // back to the historical computation.
+    private String pendingPickSaveDir = "";
+    private static final String STATE_PENDING_PICK_DIR = "pendingPickSaveDir";
     private static final String STATE_PENDING_CREATE = "pendingCreateSuggestedName";
     // Suggested download name for the in-flight SAF create (set by showCreateDocument).
     private String pendingCreateSuggestedName = "export.sav";
@@ -203,6 +228,8 @@ public class GameActivity extends SDLActivity {
             // a recreated activity still lands under the basename it asked for.
             String pick = savedInstanceState.getString(STATE_PENDING_PICK);
             if (pick != null) pendingPickFilename = pick;
+            String pickDir = savedInstanceState.getString(STATE_PENDING_PICK_DIR);
+            if (pickDir != null) pendingPickSaveDir = pickDir;
             String create = savedInstanceState.getString(STATE_PENDING_CREATE);
             if (create != null) pendingCreateSuggestedName = create;
         }
@@ -484,13 +511,23 @@ public class GameActivity extends SDLActivity {
      * @param destFilename basename under the app save identity (e.g.
      *                     picked_rom.gb, picked_mod.zip, picked_save.sav)
      */
+    /** Legacy single-argument entry; resolves the save dir itself. */
     @Keep
     public static boolean showFilePicker(String destFilename) {
+        return showFilePicker(destFilename, null);
+    }
+
+    @Keep
+    public static boolean showFilePicker(String destFilename, String saveDir) {
         GameActivity self = (GameActivity) mSingleton;
         if (self == null) return false;
         if (destFilename == null || destFilename.length() == 0) {
             destFilename = PICKED_ROM_FILENAME;
         }
+        // Remember where LOVE's filesystem is really mounted so
+        // onActivityResult copies the pick there, not into a recomputed
+        // (possibly different-volume) root (#604, #839).
+        self.pendingPickSaveDir = (saveDir != null) ? saveDir : "";
         // Reject path separators so a hostile JNI caller cannot escape the
         // save identity directory.
         if (destFilename.indexOf('/') >= 0 || destFilename.indexOf('\\') >= 0) {
@@ -500,6 +537,16 @@ public class GameActivity extends SDLActivity {
 
         self.pendingPickFilename = destFilename;
         self.pickRetried = false;
+        // Only bridge-owned inbox files, never the user's selected source.
+        // A previous ready ROM must not wake Lua before this new copy lands.
+        try {
+            File inbox = self.saveIdentityDir();
+            new File(inbox, destFilename).delete();
+            new File(inbox, "pick_done.flag").delete();
+        } catch (RuntimeException error) {
+            Log.e("GameActivity", "could not prepare picker inbox", error);
+            return false;
+        }
         if (android.os.Build.VERSION.SDK_INT >= 21) {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -566,6 +613,346 @@ public class GameActivity extends SDLActivity {
     @Keep
     public static boolean showSaveFilePicker() {
         return showFilePicker(PICKED_SAVE_FILENAME);
+    }
+
+    /** Image picker convenience wrapper used for skybox selection. */
+    @Keep
+    public static boolean showImageFilePicker() {
+        if (android.os.Build.VERSION.SDK_INT < 19) return false;
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+
+        self.pendingPickFilename = PICKED_IMAGE_FILENAME;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        try {
+            self.startActivityForResult(intent, FILE_PICKER_REQUEST_CODE);
+            return true;
+        } catch (Exception e) {
+            Log.d("GameActivity", "could not open image picker: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * App-owned volumes where io.* / PhysFS can actually write: each
+     * getExternalFilesDir plus a gamedata/ subdirectory. Phone storage is
+     * the first row; a removable SD card (when present) is the rest.
+     * Returned as "label\\tpath" lines for love.system.getExternalDataDirs.
+     */
+    @Keep
+    public static String getExternalDataDirs() {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return "";
+        StringBuilder sb = new StringBuilder();
+        File[] dirs = self.getExternalFilesDirs(null);
+        if (dirs == null) return "";
+        for (int i = 0; i < dirs.length; i++) {
+            File dir = dirs[i];
+            if (dir == null) continue;
+            File gameData = new File(dir, GAME_DATA_SUBDIR);
+            if (!gameData.exists() && !gameData.mkdirs()) {
+                Log.d("GameActivity", "could not create " + gameData);
+                continue;
+            }
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(self.volumeLabel(dir, i)).append('\t')
+                .append(gameData.getAbsolutePath());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * True when POSIX fopen / PhysFS can use shared storage (Downloads, a
+     * user-picked tree, the SD card root). App-owned dirs never need this.
+     */
+    @Keep
+    public static boolean hasStorageAccess() {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            return Environment.isExternalStorageManager();
+        }
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        if (android.os.Build.VERSION.SDK_INT < 23) return true;
+        return ActivityCompat.checkSelfPermission(self,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** True when path is under this app's files / external-files dirs. */
+    @Keep
+    public static boolean pathIsAppOwned(String path) {
+        if (path == null || path.length() == 0) return false;
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        String norm = path.replace('\\', '/');
+        if (!norm.endsWith("/")) norm = norm + "/";
+        File internal = self.getFilesDir();
+        if (internal != null && under(norm, internal)) return true;
+        File[] dirs = self.getExternalFilesDirs(null);
+        if (dirs != null) {
+            for (int i = 0; i < dirs.length; i++) {
+                if (dirs[i] != null && under(norm, dirs[i])) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean under(String normPathWithSlash, File dir) {
+        String base = dir.getAbsolutePath().replace('\\', '/');
+        if (!base.endsWith("/")) base = base + "/";
+        return normPathWithSlash.equals(base) || normPathWithSlash.startsWith(base);
+    }
+
+    /**
+     * Opens the system "all files access" screen (API 30+) or the legacy
+     * write-storage prompt. Does not block: Lua retries on the next focus.
+     */
+    @Keep
+    public static boolean requestStorageAccess() {
+        if (hasStorageAccess()) return true;
+        final GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        self.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        Intent intent = new Intent(
+                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                        intent.setData(Uri.parse("package:" + self.getPackageName()));
+                        self.startActivity(intent);
+                    } catch (Exception e) {
+                        try {
+                            self.startActivity(new Intent(
+                                Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                        } catch (Exception e2) {
+                            Log.d("GameActivity", "could not open storage settings: "
+                                + e2.getMessage());
+                        }
+                    }
+                } else if (android.os.Build.VERSION.SDK_INT >= 23) {
+                    ActivityCompat.requestPermissions(self, new String[] {
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        Manifest.permission.READ_EXTERNAL_STORAGE
+                    }, EXTERNAL_STORAGE_REQUEST_CODE);
+                }
+            }
+        });
+        return true;
+    }
+
+    /** Java mkdirs for a game-data tree; FFI mkdir often EACCES on shared storage. */
+    @Keep
+    public static boolean mkdirsReal(String path) {
+        if (path == null || path.length() == 0) return false;
+        File dir = new File(path);
+        return dir.isDirectory() || dir.mkdirs();
+    }
+
+    /**
+     * Volume dialog (phone / SD) plus optional ACTION_OPEN_DOCUMENT_TREE.
+     * The chosen absolute path is written to picked_folder.txt in the
+     * mounted save identity so RomImporter can apply it on the next poll
+     * (an AlertDialog does not steal activity focus the way SAF does).
+     */
+    @Keep
+    public static boolean showFolderPicker(String saveDir) {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        self.pendingPickSaveDir = (saveDir != null) ? saveDir : "";
+        self.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                self.showFolderPickerDialog();
+            }
+        });
+        return true;
+    }
+
+    private String volumeLabel(File dir, int index) {
+        String name = index == 0 ? "Phone storage" : "SD card";
+        boolean removable = index > 0;
+        if (android.os.Build.VERSION.SDK_INT >= 24) {
+            try {
+                StorageManager sm = (StorageManager) getSystemService(Context.STORAGE_SERVICE);
+                if (sm != null) {
+                    StorageVolume vol = sm.getStorageVolume(dir);
+                    if (vol != null) {
+                        String desc = vol.getDescription(this);
+                        if (desc != null && desc.length() > 0) name = desc;
+                        removable = vol.isRemovable();
+                    }
+                }
+            } catch (Exception e) {
+                // keep the index-based fallback
+            }
+        }
+        long free = bytesFree(dir);
+        String extra = free >= 0 ? " · " + formatBytes(free) : "";
+        if (removable && index == 0) name = name + " (removable)";
+        return name + extra;
+    }
+
+    private static long bytesFree(File dir) {
+        try {
+            StatFs stat = new StatFs(dir.getAbsolutePath());
+            if (android.os.Build.VERSION.SDK_INT >= 18) {
+                return stat.getAvailableBytes();
+            }
+            return (long) stat.getAvailableBlocks() * (long) stat.getBlockSize();
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    private static String formatBytes(long bytes) {
+        double gb = bytes / (1024.0 * 1024.0 * 1024.0);
+        if (gb >= 1) {
+            return String.format(java.util.Locale.US, "%.1f GB free", gb);
+        }
+        double mb = bytes / (1024.0 * 1024.0);
+        return String.format(java.util.Locale.US, "%.0f MB free", mb);
+    }
+
+    private void showFolderPickerDialog() {
+        final ArrayList<String> labels = new ArrayList<String>();
+        final ArrayList<String> paths = new ArrayList<String>();
+        String listing = getExternalDataDirs();
+        if (listing != null && listing.length() > 0) {
+            String[] lines = listing.split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                int tab = line.indexOf('\t');
+                if (tab <= 0 || tab >= line.length() - 1) continue;
+                labels.add(line.substring(0, tab));
+                paths.add(line.substring(tab + 1));
+            }
+        }
+        final boolean canBrowse = android.os.Build.VERSION.SDK_INT >= 21;
+        if (canBrowse) labels.add("Browse…");
+        if (labels.isEmpty()) {
+            writeSaveDirFlag(PICK_ERROR_FILENAME, PICKED_FOLDER_FILENAME
+                + "\nno writable storage volume was found");
+            return;
+        }
+        CharSequence[] items = labels.toArray(new CharSequence[labels.size()]);
+        new AlertDialog.Builder(this)
+            .setTitle("Where to install games and mods")
+            .setItems(items, new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    if (canBrowse && which == labels.size() - 1) {
+                        launchTreePicker();
+                        return;
+                    }
+                    if (which >= 0 && which < paths.size()) {
+                        acceptPickedFolder(paths.get(which));
+                    }
+                }
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    private void launchTreePicker() {
+        if (android.os.Build.VERSION.SDK_INT < 21) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if (android.os.Build.VERSION.SDK_INT >= 19) {
+            intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        }
+        try {
+            startActivityForResult(intent, FOLDER_PICKER_REQUEST_CODE);
+        } catch (Exception e) {
+            Log.d("GameActivity", "could not open folder picker: " + e.getMessage());
+            writeSaveDirFlag(PICK_ERROR_FILENAME, PICKED_FOLDER_FILENAME
+                + "\ncould not open the system folder picker");
+        }
+    }
+
+    private void acceptPickedFolder(String path) {
+        if (path == null || path.length() == 0) {
+            writeSaveDirFlag(PICK_ERROR_FILENAME, PICKED_FOLDER_FILENAME
+                + "\nno folder chosen");
+            return;
+        }
+        File dir = new File(path);
+        if (!dir.exists() && !dir.mkdirs()) {
+            writeSaveDirFlag(PICK_ERROR_FILENAME, PICKED_FOLDER_FILENAME
+                + "\ncould not create that folder");
+            return;
+        }
+        if (!pathIsAppOwned(path) && !hasStorageAccess()) {
+            requestStorageAccess();
+        }
+        if (!folderIsWritable(path)) {
+            writeSaveDirFlag(PICK_ERROR_FILENAME, PICKED_FOLDER_FILENAME
+                + "\nthat folder could not be written to. Grant All files access "
+                + "when Android asks, or pick Phone storage / SD card from the list.");
+            return;
+        }
+        writeSaveDirFlag(PICKED_FOLDER_FILENAME, path);
+    }
+
+    private boolean folderIsWritable(String path) {
+        File dir = new File(path);
+        if (!dir.exists() && !dir.mkdirs()) return false;
+        File probe = new File(dir, ".gen2recomp-write-test");
+        try {
+            FileOutputStream fos = new FileOutputStream(probe, false);
+            fos.write("gen2recomp".getBytes("UTF-8"));
+            fos.close();
+            probe.delete();
+            return true;
+        } catch (Exception e) {
+            Log.d("GameActivity", "folder not writable " + path + ": " + e);
+            return false;
+        }
+    }
+
+    /**
+     * Best-effort filesystem path for a tree URI. App-owned dirs and some
+     * primary-storage trees still resolve; Downloads / Drive usually do
+     * not, and folderIsWritable then rejects them instead of pretending.
+     */
+    private String pathFromTreeUri(Uri uri) {
+        if (uri == null) return null;
+        if ("file".equals(uri.getScheme()) && uri.getPath() != null) {
+            return uri.getPath();
+        }
+        if (android.os.Build.VERSION.SDK_INT < 21) return null;
+        String docId;
+        try {
+            docId = DocumentsContract.getTreeDocumentId(uri);
+        } catch (Exception e) {
+            return null;
+        }
+        if (docId == null || docId.length() == 0) return null;
+        String volume;
+        String rel = "";
+        int colon = docId.indexOf(':');
+        if (colon >= 0) {
+            volume = docId.substring(0, colon);
+            rel = docId.substring(colon + 1);
+        } else {
+            volume = docId;
+        }
+        File root;
+        if ("primary".equalsIgnoreCase(volume)) {
+            root = Environment.getExternalStorageDirectory();
+        } else {
+            root = new File("/storage/" + volume);
+            if (!root.exists()) {
+                File alt = new File("/mnt/media_rw/" + volume);
+                if (alt.exists()) root = alt;
+            }
+        }
+        if (root == null) return null;
+        if (rel == null || rel.length() == 0) return root.getAbsolutePath();
+        return new File(root, rel.replace("/", File.separator)).getAbsolutePath();
     }
 
     /**
@@ -685,8 +1072,14 @@ public class GameActivity extends SDLActivity {
      * return degrades on the Lua side (RomImporter export) to "Exported
      * inside the app folder", which is the correct pre-KitKat behavior.
      */
+    /** Legacy single-argument entry; resolves the save dir itself. */
     @Keep
     public static boolean showCreateDocument(String suggestedName) {
+        return showCreateDocument(suggestedName, null);
+    }
+
+    @Keep
+    public static boolean showCreateDocument(String suggestedName, String saveDir) {
         if (android.os.Build.VERSION.SDK_INT < 19) return false;
         // (see showFilePicker for why the import side got a pre-19 path)
         GameActivity self = (GameActivity) mSingleton;
@@ -698,9 +1091,12 @@ public class GameActivity extends SDLActivity {
             Log.d("GameActivity", "refusing unsafe create name: " + suggestedName);
             return false;
         }
-        File source = new File(
-            new File(self.getExternalFilesDir(null), "save"),
-            ROM_SAVE_IDENTITY + "/" + PENDING_EXPORT_FILENAME);
+        // Route through the mounted save dir (#604, #839): Lua staged
+        // pending_export.sav where physfs writes, which is not necessarily
+        // where a fresh getExternalFilesDir(null) points on merged /
+        // adopted-SD storage.
+        self.pendingPickSaveDir = (saveDir != null) ? saveDir : "";
+        File source = new File(self.saveIdentityDir(), PENDING_EXPORT_FILENAME);
         if (!source.isFile()) {
             Log.d("GameActivity", "no pending export at " + source);
             return false;
@@ -721,14 +1117,28 @@ public class GameActivity extends SDLActivity {
     }
 
     private File saveIdentityDir() {
-        return new File(new File(getExternalFilesDir(null), "save"), ROM_SAVE_IDENTITY);
+        // Prefer the mounted save dir the last bridge call reported: the
+        // recomputation below can name a different volume than the one LOVE
+        // mounted on merged / adopted-SD storage (#604, #839).
+        if (pendingPickSaveDir != null && pendingPickSaveDir.length() > 0) {
+            return new File(pendingPickSaveDir);
+        }
+        File ext = getExternalFilesDir(null);
+        if (ext == null) {
+            // Shared storage unavailable (ejected / mid-adoption): without
+            // this guard File(null, "save") silently built the RELATIVE
+            // path save/<identity>, mkdirs() failed against "/", and the
+            // pick was dropped with no message at all (#604).
+            ext = getFilesDir();
+        }
+        return new File(new File(ext, "save"), ROM_SAVE_IDENTITY);
     }
 
     /** Drops a small flag file in the save identity for Lua to consume on focus. */
     private void writeSaveDirFlag(String name, String body) {
         try {
             FileOutputStream fos = new FileOutputStream(new File(saveIdentityDir(), name), false);
-            fos.write(body.getBytes());
+            fos.write(body.getBytes("UTF-8"));
             fos.close();
         } catch (IOException e) {
             Log.d("GameActivity", "could not write " + name + ": " + e.getMessage());
@@ -746,6 +1156,99 @@ public class GameActivity extends SDLActivity {
      * runtime permission; the first call shows the system prompt and a later
      * sync (the mod retries on save load / option change) delivers.
      */
+    /**
+     * Pokéwalker notifications, called from Lua as love.system.walkerNotify
+     * (src/pokewalker/WalkerNotify.lua): one JSON command, handled by
+     * WalkerNotifications. Android 13+ needs POST_NOTIFICATIONS at runtime;
+     * the first call asks for it (a refusal only means no notifications).
+     */
+    /**
+     * Cloud saves (src/cloud/Http.lua through love.system.httpRequest): one
+     * HTTP request of any method. In: {"method","url","headers":{..},"body"};
+     * out: {"status": n, "body": "..."} or {"error": "..."}. Runs on the
+     * calling (Lua) thread, which is not the UI thread, so blocking is fine.
+     * Redirects are followed (Microsoft Graph answers downloads with 302).
+     */
+    @Keep
+    public static String httpRequest(String json) {
+        org.json.JSONObject out = new org.json.JSONObject();
+        HttpURLConnection conn = null;
+        try {
+            org.json.JSONObject req = new org.json.JSONObject(json);
+            String method = req.optString("method", "GET");
+            URL url = new URL(req.getString("url"));
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(120000);
+            conn.setInstanceFollowRedirects(true);
+            if ("PATCH".equals(method)) {
+                // HttpURLConnection has no PATCH: the override header Drive honours
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("X-HTTP-Method-Override", "PATCH");
+            } else {
+                conn.setRequestMethod(method);
+            }
+            org.json.JSONObject headers = req.optJSONObject("headers");
+            if (headers != null) {
+                java.util.Iterator<String> keys = headers.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    conn.setRequestProperty(k, headers.getString(k));
+                }
+            }
+            if (req.has("body") && !req.isNull("body")) {
+                byte[] body = req.getString("body").getBytes("UTF-8");
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(body.length);
+                OutputStream os = conn.getOutputStream();
+                os.write(body);
+                os.close();
+            }
+            int status = conn.getResponseCode();
+            InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            String text = "";
+            if (in != null) {
+                java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                int n;
+                while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+                in.close();
+                text = buf.toString("UTF-8");
+            }
+            out.put("status", status);
+            out.put("body", text);
+        } catch (Exception e) {
+            try { out.put("error", String.valueOf(e)); } catch (Exception ignored) {}
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        return out.toString();
+    }
+
+    @Keep
+    public static boolean walkerNotify(final String json) {
+        final GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && ActivityCompat.checkSelfPermission(self,
+                    "android.permission.POST_NOTIFICATIONS")
+                    != PackageManager.PERMISSION_GRANTED
+                && !self.getSharedPreferences(WalkerNotifications.PREFS, MODE_PRIVATE)
+                    .getBoolean("asked", false)) {
+            self.getSharedPreferences(WalkerNotifications.PREFS, MODE_PRIVATE)
+                .edit().putBoolean("asked", true).apply();
+            self.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    ActivityCompat.requestPermissions(self,
+                        new String[]{"android.permission.POST_NOTIFICATIONS"},
+                        NOTIFY_PERMISSION_REQUEST_CODE);
+                }
+            });
+        }
+        return WalkerNotifications.command(self.getApplicationContext(), json);
+    }
+
     @Keep
     public static boolean syncHealthSteps() {
         final GameActivity self = (GameActivity) mSingleton;
@@ -916,6 +1419,7 @@ public class GameActivity extends SDLActivity {
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putString(STATE_PENDING_PICK, pendingPickFilename);
+        outState.putString(STATE_PENDING_PICK_DIR, pendingPickSaveDir);
         outState.putString(STATE_PENDING_CREATE, pendingCreateSuggestedName);
     }
 
@@ -940,6 +1444,32 @@ public class GameActivity extends SDLActivity {
             } else {
                 Log.d("GameActivity", "could not write export to " + uri);
             }
+            return;
+        }
+        if (requestCode == FOLDER_PICKER_REQUEST_CODE) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                Log.d("GameActivity", "folder picker cancelled");
+                return;
+            }
+            Uri tree = data.getData();
+            try {
+                int keep = data.getFlags()
+                    & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                if (keep != 0 && android.os.Build.VERSION.SDK_INT >= 19) {
+                    getContentResolver().takePersistableUriPermission(tree, keep);
+                }
+            } catch (Exception e) {
+                Log.d("GameActivity", "no persistable tree grant for " + tree + ": " + e);
+            }
+            String path = pathFromTreeUri(tree);
+            if (path == null) {
+                writeSaveDirFlag(PICK_ERROR_FILENAME, PICKED_FOLDER_FILENAME
+                    + "\nthat location has no filesystem path this app can write to. "
+                    + "Pick Phone storage or an SD card from the list instead.");
+                return;
+            }
+            acceptPickedFolder(path);
             return;
         }
         if (requestCode != FILE_PICKER_REQUEST_CODE) return;
@@ -997,7 +1527,7 @@ public class GameActivity extends SDLActivity {
                 android.os.ParcelFileDescriptor pfd =
                     getContentResolver().openFileDescriptor(uri, "r");
                 if (pfd != null) {
-                    source = new java.io.FileInputStream(pfd.getFileDescriptor());
+                    source = new android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd);
                 }
             } catch (Exception e) {
                 if (why == null) why = e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -1034,15 +1564,40 @@ public class GameActivity extends SDLActivity {
                 + "\n" + (why == null ? "no reader accepted it" : why));
             return;
         }
-        if (!copyAssetFile(source, destFile.getPath())) {
-            Log.d("GameActivity", "could not copy picked file to " + destFile);
-            // A truncated pick would only fail verification later, so drop it
-            // and report instead.
-            destFile.delete();
-            writeSaveDirFlag(PICK_ERROR_FILENAME, destName
-                + "\nfrom " + uri.getScheme() + "://" + uri.getAuthority()
-                + "\nthe file opened but the copy did not finish");
+        // Lua polls on its own thread while the provider stream is copied.
+        // Publish the recognized filename only after a complete close, so a
+        // partial ROM cannot be rejected and blacklisted as the user's pick.
+        final InputStream pickedSource = source;
+        final String pickedName = destName;
+        // Provider/SD copying must not block the Android activity thread.
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean published = publishPickedFile(pickedSource, destFile);
+                if (!published) {
+                    Log.d("GameActivity", "could not copy picked file to " + destFile);
+                    writeSaveDirFlag(PICK_ERROR_FILENAME, pickedName
+                        + "\nfrom " + uri.getScheme() + "://" + uri.getAuthority()
+                        + "\nthe file opened but the copy did not finish");
+                } else {
+                    writeSaveDirFlag("pick_done.flag", pickedName);
+                }
+            }
+        }, "rom-picker-copy").start();
+    }
+
+    boolean publishPickedFile(InputStream source, File destFile) {
+        File stagedFile = new File(destFile.getParentFile(), destFile.getName() + ".part");
+        boolean published = false;
+        try {
+            boolean copied = copyAssetFile(source, stagedFile.getPath());
+            published = copied && (!destFile.exists() || destFile.delete())
+                && stagedFile.renameTo(destFile);
+        } catch (RuntimeException error) {
+            Log.e("GameActivity", "picked file publication failed", error);
+        } finally {
+            if (!published) stagedFile.delete();
         }
+        return published;
     }
 
     /**
@@ -1393,6 +1948,9 @@ public class GameActivity extends SDLActivity {
     // in src/jni/love/src/common/android.cpp.
     private static volatile SecondaryPresentation secondaryPresentation;
     private static volatile boolean secondaryEnabled = false;
+    private static final int MAX_SECONDARY_TOUCHES = 32;
+    private static final java.util.ArrayDeque<String> secondaryTouches =
+        new java.util.ArrayDeque<>();
 
     @Keep
     public static void setSecondaryEnabled(final boolean on) {
@@ -1445,6 +2003,7 @@ public class GameActivity extends SDLActivity {
     private static void teardownSecondaryDisplay() {
         SecondaryPresentation p = secondaryPresentation;
         secondaryPresentation = null;
+        synchronized (secondaryTouches) { secondaryTouches.clear(); }
         if (p != null) {
             try { p.dismiss(); } catch (Throwable t) {}
         }
@@ -1460,6 +2019,13 @@ public class GameActivity extends SDLActivity {
         SecondaryPresentation p = secondaryPresentation;
         if (p != null && buf != null && w > 0 && h > 0) {
             p.updateFrame(buf, w, h);
+        }
+    }
+
+    @Keep
+    public static String pollSecondaryDisplayTouch() {
+        synchronized (secondaryTouches) {
+            return secondaryTouches.pollFirst();
         }
     }
 
@@ -1529,6 +2095,7 @@ public class GameActivity extends SDLActivity {
         private final android.graphics.Paint paint = new android.graphics.Paint();
         private final Object lock = new Object();
         private int fw, fh;
+        private int activePointer = -1;
 
         FrameView(Context context) {
             super(context);
@@ -1550,6 +2117,52 @@ public class GameActivity extends SDLActivity {
             postInvalidate();
         }
 
+        private void enqueueTouch(String event) {
+            synchronized (secondaryTouches) {
+                if (secondaryTouches.size() >= MAX_SECONDARY_TOUCHES) {
+                    secondaryTouches.clear();
+                    secondaryTouches.addLast("cancel,0,0");
+                } else {
+                    secondaryTouches.addLast(event);
+                }
+            }
+        }
+
+        private int logicalX(float x) {
+            return Math.min(fw - 1, Math.max(0,
+                (int) ((x - dst.left) * fw / dst.width())));
+        }
+
+        private int logicalY(float y) {
+            return Math.min(fh - 1, Math.max(0,
+                (int) ((y - dst.top) * fh / dst.height())));
+        }
+
+        @Override
+        public boolean onTouchEvent(android.view.MotionEvent event) {
+            synchronized (lock) {
+                int action = event.getActionMasked();
+                if (action == android.view.MotionEvent.ACTION_DOWN && fw > 0
+                        && dst.contains((int) event.getX(), (int) event.getY())) {
+                    activePointer = event.getPointerId(0);
+                    enqueueTouch("down," + logicalX(event.getX()) + ","
+                        + logicalY(event.getY()));
+                } else if (action == android.view.MotionEvent.ACTION_UP
+                        && activePointer >= 0) {
+                    int index = event.findPointerIndex(activePointer);
+                    if (index >= 0 && fw > 0) {
+                        enqueueTouch("up," + logicalX(event.getX(index)) + ","
+                            + logicalY(event.getY(index)));
+                    }
+                    activePointer = -1;
+                } else if (action == android.view.MotionEvent.ACTION_CANCEL) {
+                    activePointer = -1;
+                    enqueueTouch("cancel,0,0");
+                }
+            }
+            return true;
+        }
+
         @Override
         protected void onDraw(android.graphics.Canvas canvas) {
             synchronized (lock) {
@@ -1564,5 +2177,67 @@ public class GameActivity extends SDLActivity {
                 canvas.drawBitmap(bitmap, null, dst, paint);
             }
         }
+    }
+
+    public static byte[] translateOffline(String source, String target, byte[] input) throws Exception {
+        return OfflineTranslation.translate(source, target, input);
+    }
+
+    /**
+     * Gen2Recomp in-app updates (src/update/Check.lua, Check.install): open
+     * Android's package installer on a downloaded release APK. Every release
+     * is signed with the same key (docs/android-signing.md), so it installs
+     * over this app in place and the save directory is kept. The APK is in the
+     * app's own storage, shared through the FileProvider declared in the app
+     * manifest (authority <applicationId>.updates).
+     */
+    public static boolean installApk(String path) {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null || path == null) return false;
+        try {
+            Context context = self.getApplicationContext();
+            if (!canInstallApks()) return false;
+            File apk = new File(path);
+            if (!apk.isFile()) return false;
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                context, context.getPackageName() + ".updates", apk);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            self.startActivity(intent);
+            return true;
+        } catch (Exception e) {
+            Log.d("GameActivity", "could not open the installer: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Android 8+: has the player allowed installs from this app? */
+    public static boolean canInstallApks() {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null) return false;
+        if (android.os.Build.VERSION.SDK_INT < 26) return true;
+        return self.getPackageManager().canRequestPackageInstalls();
+    }
+
+    /** Open the "install unknown apps" setting for this app. */
+    public static boolean requestInstallPermission() {
+        GameActivity self = (GameActivity) mSingleton;
+        if (self == null || android.os.Build.VERSION.SDK_INT < 26) return false;
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:" + self.getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            self.startActivity(intent);
+            return true;
+        } catch (Exception e) {
+            Log.d("GameActivity", "could not open the install permission screen: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public static boolean closeOfflineTranslation() {
+        OfflineTranslation.close();
+        return true;
     }
 }

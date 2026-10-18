@@ -129,6 +129,9 @@ end
 -- people whatever the slot actually held.
 local function isVariableSpriteId(spriteId)
   if type(spriteId) ~= "string" then return false end
+  if require("src.core.GameVersion").get() == "polishedcrystal" then
+    return spriteId:match("^SPRITE_VAR_%d+$") ~= nil
+  end
   if VAR_SPRITE_SLOTS[spriteId] then return true end
   return spriteId:match("^SPRITE_VAR_%d+$") ~= nil
 end
@@ -145,6 +148,7 @@ function NPC.variableSpriteSlot(spriteId)
   if type(spriteId) ~= "string" then return nil end
   local slot = tonumber(spriteId:match("^SPRITE_VAR_(%d+)$"))
   if slot then return slot end
+  if require("src.core.GameVersion").get() == "polishedcrystal" then return nil end
   slot = VAR_SPRITE_SLOTS[spriteId]
   if slot then return slot end
   -- raw $F0-$FF spellings, the same last resort resolveVariableSprite takes
@@ -384,7 +388,8 @@ local function resolveSpriteDef(data, spriteId)
   -- Sudowoodo post-reveal sheet by direct id.  The OverworldSprites row is
   -- $52 (pret SPRITE_SUDOWOODO) -- $6D is not a sprite constant at all, and
   -- looking it up is why the revealed tree came back as a placeholder.
-  if spriteId == "SPRITE_SUDOWOODO" or spriteId == 0x52 then
+  if (spriteId == "SPRITE_SUDOWOODO" or spriteId == 0x52)
+     and require("src.core.GameVersion").get() ~= "polishedcrystal" then
     local s = findSheet(sprites, {
       "SPRITE_SUDOWOODO", "sudowoodo", "Sudowoodo",
     }, 0x52)
@@ -553,7 +558,33 @@ function NPC.new(data, mapId, objDef)
     self.gen3Elevation = nil
   end
 
-  self.facing = (g3 and g3.facing) or FACING_FROM_RANGE[objDef.range] or "down"
+  -- A GEN 4 OBJECT STATES ITS FACING AND NOTHING WAS READING IT.
+  --
+  -- `g3` above is HOENN's movement-type table, and a Platinum cache has no
+  -- `constants.gen3MovementTypes` at all -- so on Sinnoh `g3` is nil, `range`
+  -- is nil too (a Gen 4 template spells its wander box as `movementRangeX` /
+  -- `movementRangeZ`), and EVERY object in the region fell through to the
+  -- final "down".
+  --
+  -- The value is right there on the def.  `ObjectEvent.dir` is a `FaceDirection`
+  -- (`include/location.h`: FACE_UP 0, FACE_DOWN 1, FACE_LEFT 2, FACE_RIGHT 3),
+  -- which is the SAME four-value order `Gen4Movement.DIR` already uses for a
+  -- movement action -- so this is one table rather than a second convention.
+  --
+  -- CENSUSED over all 3,555 object events in the cartridge, and the census is
+  -- what says the field is an enum rather than a number: exactly four values
+  -- occur -- 1,836 up, 921 down, 415 left, 383 right -- and nothing else.  So
+  -- 2,634 of 3,555 objects (74%) stood facing the wrong way, which is every
+  -- shopkeeper behind a counter, every guard at a gate, and the guitarist who
+  -- is supposed to be watching Twinleaf's north exit.
+  --
+  -- GEN 4 ONLY BY CONSTRUCTION: `direction` is written by RomExtractorGen4 and
+  -- by no other extractor, so a Gen 1/Gen 2/Gen 3 def cannot reach this line
+  -- with one, and Hoenn's own answer still wins where it has one.
+  local GEN4_FACING = { [0] = "up", [1] = "down", [2] = "left", [3] = "right" }
+  self.facing = (g3 and g3.facing)
+                or GEN4_FACING[tonumber(objDef.direction) or -1]
+                or FACING_FROM_RANGE[objDef.range] or "down"
   -- Movement scripts can ask for the object's original direction.  Imported
   -- Gen 3 defs spell that as a movement type rather than a `facing` field, so
   -- retain both the initial resolved direction and the current type here.
@@ -564,6 +595,10 @@ function NPC.new(data, mapId, objDef)
   -- draws exactly this 16x16 row and skips facing entirely -- a tree has
   -- no directions to turn to.
   self.fixedFrame = objDef.frame
+  -- Polished packs the Weird Tree's shake poses into one non-directional
+  -- sheet. Turning toward the player must not select a different pose.
+  if require('src.core.GameVersion').get() == 'polishedcrystal'
+     and objDef.sprite == 'SPRITE_WEIRD_TREE' then self.fixedFrame = 0 end
   self.moving = false
   self.progress = 0
   self.stepFlip = false

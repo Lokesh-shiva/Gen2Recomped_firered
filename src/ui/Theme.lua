@@ -37,6 +37,16 @@ local Theme = {
 --
 -- A theme whose box fits the classic screen gets the classic screen, so Gen 1
 -- and Gen 2 are byte-identical.
+-- THE SMALLEST REAL SCREEN THE TEXT BOX FITS ON.
+--
+-- A surface is a whole screen, not a bounding box, so the answer is picked
+-- from the screens these games are actually drawn on rather than rounded up to
+-- the box's own size.  In order, because each one contains the one before it.
+local SCREENS = {
+  { 240, 160 },   -- Game Boy Advance
+  { 256, 192 },   -- Nintendo DS
+}
+
 function Theme.uiSize()
   local Renderer = require("src.render.Renderer")
   local box = Theme.textBox or {}
@@ -45,8 +55,17 @@ function Theme.uiSize()
   if needW <= Renderer.WIDTH and needH <= Renderer.HEIGHT then
     return Renderer.WIDTH, Renderer.HEIGHT
   end
-  -- a surface is a whole screen, not a bounding box
-  return 240, 160
+  -- THE DS STEP, and why it was missing.  This used to end at the GBA screen,
+  -- which is 160 rows: Sinnoh's dialogue box sits at tiles 18..23, needs 192,
+  -- and so was asked to fit in a surface a full tile-and-a-half too short.
+  -- Reported from play as the box not fitting the bottom of the screen, with
+  -- the text spilling out of it.  Gen 1, 2 and 3 are untouched -- their boxes
+  -- still stop at the first screen they fit on, which is the one they always
+  -- got.
+  for _, screen in ipairs(SCREENS) do
+    if needW <= screen[1] and needH <= screen[2] then return screen[1], screen[2] end
+  end
+  return SCREENS[#SCREENS][1], SCREENS[#SCREENS][2]
 end
 
 function Theme.load(data)
@@ -58,6 +77,23 @@ function Theme.load(data)
   -- so a font that knows where its own arrows are says so and this takes
   -- them; one that does not keeps the Gen 1 codes exactly as before.
   local symbols = data and data.font and data.font.symbols
+  -- PLATINUM'S FONT CARRIES NO `symbols`, so every Gen 4 menu that asked for
+  -- Theme.cursor drew Gen 1's $ED -- which in pl_font's charset is ")". The
+  -- cartridge's own menu arrow is CHAR_ARROW_MENU, charcode 0x011F "‣"
+  -- (colored_arrow.c ColoredArrow_New), and 0x011D "↓" its down arrow; both
+  -- are taken from the font's own charmap, so a font without them keeps the
+  -- old codes.
+  if type(symbols) ~= "table" and data and data.isGen4Cache and data.font
+     and type(data.font.charmap) == "table" then
+    local has = {}
+    for _, entry in ipairs(data.font.charmap) do
+      if type(entry) == "table" and entry.code then has[entry.code] = entry.seq end
+    end
+    if has[0x011F] == "‣" then
+      symbols = { cursor = 0x011F, cursorHollow = 0x011F }
+      if has[0x011D] == "↓" then symbols.moreArrow = 0x011D end
+    end
+  end
   if type(symbols) == "table" then
     for _, key in ipairs({ "cursor", "cursorHollow", "moreArrow" }) do
       if type(symbols[key]) == "number" then Theme[key] = symbols[key] end

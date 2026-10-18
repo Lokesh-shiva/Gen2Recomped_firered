@@ -18,6 +18,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# THE BUNDLED MODS (scripts/bundled_mods.txt), packed into game.love
+BUNDLED_MODS=""
+if [ -f "$ROOT/scripts/bundled_mods.txt" ]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"; line="${line//[[:space:]]/}"
+    [ -n "$line" ] && [ -d "$ROOT/mods/$line" ] && BUNDLED_MODS="$BUNDLED_MODS mods/$line"
+  done < "$ROOT/scripts/bundled_mods.txt"
+fi
 ANDROID_DIR="$ROOT/mobile/android"
 EMBED_ASSETS="$ANDROID_DIR/app/src/embed/assets"
 LOVE_FILE="$EMBED_ASSETS/game.love"
@@ -263,15 +271,24 @@ pack_love_archive() {
     # was the only packer that had them apart -- scripts/pack_love.sh carries
     # both, and its own header records that the map editor was missed there
     # once already.
+    #
+    # ...EXCEPT THE BUNDLED MODS (scripts/bundled_mods.txt), now asked for on
+    # every platform: "the dramatic shapes mod isnt prepackaging with the game
+    # release packages on any platforms". The crash above came from ELEVEN
+    # mods a working folder happened to hold; only the listed one ships now,
+    # without its development material. It cannot be deleted from inside
+    # the APK, but it can be switched off in MODS like any other.
     (cd "$root" && zip -q -9 -r "$archive" \
       main.lua conf.lua src data assets tools/save-editor tools/map-editor \
-      $manifests \
+      $manifests $BUNDLED_MODS \
       -x '*.DS_Store' -x '*/.git/*' -x '*/.DS_Store' \
-      -x 'data/generated/*' -x 'assets/generated/*')
+      -x 'data/generated/*' -x 'assets/generated/*' -x '*/generated/*' \
+      -x 'mods/*/tests/*' -x 'mods/*/tools/*' -x 'mods/*/oxr/*' -x 'mods/*.zip' \
+      -x 'mods/*/CHANGELOG.md' -x 'mods/*_PLAN.md' -x 'mods/*/.git*')
     return
   fi
 
-  python3 - "$root" "$archive" "$manifests" <<'PY'
+  python3 - "$root" "$archive" "$manifests $BUNDLED_MODS" <<'PY'
 import fnmatch
 import os
 import pathlib
@@ -281,10 +298,13 @@ import zipfile
 root = pathlib.Path(sys.argv[1]).resolve()
 archive = pathlib.Path(sys.argv[2])
 manifest_words = [w for w in sys.argv[3].split() if w]
-# mods/ intentionally absent -- see the note on the zip path above.
+# only the bundled mods (in the word list beside the manifests) -- see the
+# note on the zip path above
 includes = ["main.lua", "conf.lua", "src", "data", "assets",
             "tools/save-editor", "tools/map-editor", *manifest_words]
-excludes = ["*.DS_Store", "*/.DS_Store", "*/.git/*", "data/generated/*", "assets/generated/*"]
+excludes = ["*.DS_Store", "*/.DS_Store", "*/.git/*", "data/generated/*", "assets/generated/*",
+            "*/generated/*", "mods/*/tests/*", "mods/*/tools/*", "mods/*/oxr/*", "mods/*.zip",
+            "mods/*/CHANGELOG.md", "mods/*_PLAN.md", "mods/*/.git*"]
 
 def excluded(rel: str) -> bool:
     rel = rel.replace("\\", "/")
@@ -328,7 +348,19 @@ apply_android_branding() {
 
   say "applying Android branding (gradle.properties + permission trim)"
 
-  python3 - "$props" "$APPLICATION_ID" "$APP_NAME" "$VERSION" "$VERSION_CODE" <<'PY'
+  # Detect if running on Windows (Git Bash) or Linux/macOS
+  local is_windows=false
+  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+    is_windows=true
+  fi
+
+  if [ "$is_windows" = true ]; then
+    local win_props
+    local win_manifest
+    win_props="$(git_bash_to_windows_path "$props")"
+    win_manifest="$(git_bash_to_windows_path "$manifest")"
+
+    py - "$win_props" "$APPLICATION_ID" "$APP_NAME" "$VERSION" "$VERSION_CODE" <<'PY'
 import pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 app_id, name, version, version_code = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
@@ -352,19 +384,18 @@ if version:
 path.write_text(text)
 PY
 
-  python3 - "$manifest" <<'PY'
+    py - "$win_manifest" <<'PY'
 import pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 
-# Drop mic / legacy storage, not needed by this game.
-# Keep VIBRATE (love.system.vibrate), BLUETOOTH (optional gamepads) and
-# INTERNET: link play is not offline-only any more, and stripping INTERNET
-# made every LAN host and every relay connect fail with EPERM (issue #287).
-# Orientation / label come from gradle.properties placeholders.
+# Drop mic only. WRITE_EXTERNAL_STORAGE / MANAGE_EXTERNAL_STORAGE stay:
+# a player-chosen game-data folder (ROM cache, non-mod files) is POSIX
+# io.open + PhysFS, which Android 11+ otherwise denies. Keep VIBRATE,
+# BLUETOOTH, INTERNET (issue #287). Orientation / label come from
+# gradle.properties placeholders.
 for perm in (
     "android.permission.RECORD_AUDIO",
-    "android.permission.WRITE_EXTERNAL_STORAGE",
 ):
     text = re.sub(
         rf'\s*<uses-permission android:name="{re.escape(perm)}"[^/]*/>\s*',
@@ -374,6 +405,54 @@ for perm in (
 text = re.sub(r'\s*android:usesCleartextTraffic="true"', "", text)
 path.write_text(text)
 PY
+  else
+    # Linux/macOS - use native paths
+    python3 - "$props" "$APPLICATION_ID" "$APP_NAME" "$VERSION" "$VERSION_CODE" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+app_id, name, version, version_code = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+text = path.read_text()
+
+def set_prop(text, key, value):
+    pat = re.compile(rf"(?m)^{re.escape(key)}=.*$")
+    line = f"{key}={value}"
+    if pat.search(text):
+        return pat.sub(line, text)
+    return text.rstrip() + "\n" + line + "\n"
+
+# Prefer plain app.name; clear byte-array form so it cannot win.
+text = re.sub(r"(?m)^app\.name_byte_array=.*\n?", "", text)
+text = set_prop(text, "app.name", name)
+text = set_prop(text, "app.application_id", app_id)
+text = set_prop(text, "app.orientation", "fullUser")
+if version:
+    text = set_prop(text, "app.version_name", version)
+    text = set_prop(text, "app.version_code", version_code)
+path.write_text(text)
+PY
+
+    python3 - "$manifest" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+
+# Drop mic only. WRITE_EXTERNAL_STORAGE / MANAGE_EXTERNAL_STORAGE stay:
+# a player-chosen game-data folder (ROM cache, non-mod files) is POSIX
+# io.open + PhysFS, which Android 11+ otherwise denies. Keep VIBRATE,
+# BLUETOOTH, INTERNET (issue #287). Orientation / label come from
+# gradle.properties placeholders.
+for perm in (
+    "android.permission.RECORD_AUDIO",
+):
+    text = re.sub(
+        rf'\s*<uses-permission android:name="{re.escape(perm)}"[^/]*/>\s*',
+        "\n",
+        text,
+    )
+text = re.sub(r'\s*android:usesCleartextTraffic="true"', "", text)
+path.write_text(text)
+PY
+  fi
 }
 
 # --------------------------------------------------------------- game.love
@@ -385,11 +464,27 @@ pack_game_love() {
   rm -f "$LOVE_FILE"
   # tools/save-editor ships with the app: the launcher's Edit button on a save
   # row opens it in-process, so it must be inside the archive (see build.sh).
-  # Deliberately NO fused mods: a mod inside game.love sits in the read-only
-  # APK, so the mod manager's Delete can't remove it and it reappears every
-  # launch.  Pokewalker ships as an importable .zip instead, which gives it
-  # a real install/upgrade/delete lifecycle.
+  # Only the bundled mods (scripts/bundled_mods.txt) are fused: a mod inside
+  # game.love sits in the read-only APK, so the mod manager's Delete can't
+  # remove it (it can be switched off). Pokewalker ships as an importable
+  # .zip instead, which gives it a real install/upgrade/delete lifecycle.
   pack_love_archive "$LOVE_FILE" "$ROOT" "$MANIFESTS"
+  # The cloud-save sign-in credentials (git-ignored; release.yml writes them
+  # with scripts/write_cloud_clients.sh). This packer builds its OWN game.love,
+  # not the payload job's, so without this the APK had none and Google Drive /
+  # OneDrive sign-in on Android stopped at "not set up" -- no code popup.
+  if [ -f "$ROOT/cloud_clients.lua" ]; then
+    local pybin
+    pybin="$(command -v python3 || command -v python || command -v py)"
+    "$pybin" - "$LOVE_FILE" "$ROOT/cloud_clients.lua" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "a", zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[2], "cloud_clients.lua")
+PY
+    say "packed cloud_clients.lua (cloud-save sign-in)"
+  else
+    warn "no cloud_clients.lua: Google Drive / OneDrive sign-in will say 'not set up'"
+  fi
   local archive_entries
   archive_entries="$(archive_list "$LOVE_FILE")"
   if grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/' <<< "$archive_entries"; then
@@ -397,6 +492,11 @@ pack_game_love() {
   fi
   grep -qx 'tools/save-editor/App.lua' <<< "$archive_entries" \
     || fail "game.love is missing the save editor (Edit on a save row would crash)"
+  local bundled
+  for bundled in $BUNDLED_MODS; do
+    grep -qx "$bundled/manifest.json" <<< "$archive_entries" \
+      || fail "game.love is missing the bundled mod $bundled"
+  done
   local required
   for required in $MANIFESTS; do
     grep -qx "$required" <<< "$archive_entries" \
@@ -612,9 +712,77 @@ run_gradle() {
   fi
 }
 
+# ------------------------------------------------------- second display
+# The AYN Thor's bottom panel. mobile/second-display/SecondDisplayHost.java is
+# a plain Java class kept OUTSIDE mobile/android/ on purpose: that directory is
+# a vendored love-android checkout that gets wiped and re-cloned, and anything
+# left inside it goes with it. This copies it into the app module and
+# registers it.
+#
+# It is registered as a <provider>, not as <application android:name>. A
+# provider is constructed before Application.onCreate and is handed a Context,
+# which is all it needs -- and registering one ADDS an element, where
+# android:name would REPLACE whatever the vendored manifest already declares.
+#
+# Both steps are idempotent: re-running the build re-copies the file and
+# leaves an already-patched manifest alone.
+install_second_display_host() {
+  local host="$ROOT/mobile/second-display/SecondDisplayHost.java"
+  local manifest="$ANDROID_DIR/app/src/main/AndroidManifest.xml"
+  local javadir="$ANDROID_DIR/app/src/main/java/org/love2d/android"
+
+  if [ ! -f "$host" ]; then
+    warn "no mobile/second-display/SecondDisplayHost.java; the bottom screen"
+    warn "  will fall back to the in-window stacked layout"
+    return 0
+  fi
+  [ -f "$manifest" ] || fail "missing $manifest"
+
+  say "installing the second-display host"
+  mkdir -p "$javadir"
+  cp "$host" "$javadir/SecondDisplayHost.java"
+
+  local PYBIN
+  PYBIN="$(command -v python3 || command -v python || command -v py)"
+  [ -n "$PYBIN" ] || fail "no python on PATH to patch the manifest"
+
+  "$PYBIN" - "$manifest" "$APPLICATION_ID" <<'PY'
+import pathlib, re, sys
+
+path = pathlib.Path(sys.argv[1])
+app_id = sys.argv[2]
+text = path.read_text()
+name = "org.love2d.android.SecondDisplayHost"
+
+if name in text:
+    sys.stdout.write("   second-display provider already registered\n")
+    raise SystemExit(0)
+
+# An authority must be unique across the whole device, so it hangs off the
+# application id rather than a fixed string -- two builds of this game side by
+# side would otherwise refuse to install.
+provider = (
+    '\n        <provider\n'
+    '            android:name="%s"\n'
+    '            android:authorities="%s.seconddisplay"\n'
+    '            android:exported="false"\n'
+    '            android:initOrder="100" />\n' % (name, app_id)
+)
+
+m = re.search(r"</application>", text)
+if not m:
+    sys.stderr.write("error: no </application> in the manifest\n")
+    raise SystemExit(1)
+text = text[:m.start()] + provider + "    " + text[m.start():]
+path.write_text(text)
+sys.stdout.write("   registered %s\n" % name)
+PY
+}
+
 # --------------------------------------------------------------- main
 require_packaging_tools
 apply_android_branding
+install_second_display_host
 pack_game_love
 
 if $PACKAGE_ONLY; then

@@ -22,6 +22,7 @@ local PartyMod = require("src.pokemon.Party")
 local BoxesMod = require("src.pokemon.Boxes")
 local Bag = require("src.inventory.Bag")
 local MonOps = require("MonOps")
+local Catalog = require("Catalog")
 
 local Ops = {}
 
@@ -112,6 +113,7 @@ function Ops.partyAdd(S)
     return Ops.say(S, ("Party is full (%d/%d)"):format(#S.save.party, PartyMod.MAX))
   end
   local species = S.cat.species[1]
+  if not species then return Ops.say(S,'No selectable Pokemon in this dataset') end
   local mon = MonOps.create(S.data, species, 5)
   mon.ot = S.save.player.name
   mon.otId = S.save.player.id
@@ -244,7 +246,7 @@ end
 function Ops.speciesMatches(S, id, query)
   if not query or query == "" then return true end
   local q = tostring(query):lower()
-  if id:lower():find(q, 1, true) then return true end
+  if tostring(id):lower():find(q, 1, true) then return true end
   local def = S.data.pokemon[id]
   local name = def and def.name
   if name and tostring(name):lower():find(q, 1, true) then return true end
@@ -308,6 +310,7 @@ end
 function Ops.cycleMove(S, mon, slot)
   if not mon then return false end
   local moves = S.cat.moves
+  if not moves or #moves==0 then return Ops.say(S, 'No moves available in this dataset') end
   local current = mon.moves and mon.moves[slot] and mon.moves[slot].id
   local idx = 0
   if current then
@@ -317,7 +320,7 @@ function Ops.cycleMove(S, mon, slot)
   end
   local nextId = moves[(idx % #moves) + 1]
   MonOps.setMove(S.data, mon, slot, nextId)
-  return Ops.mark(S, ("Move %d set to %s"):format(slot, nextId))
+  return Ops.mark(S, ("Move %d set to %s"):format(slot, Catalog.moveLabel(S.data,nextId)))
 end
 
 function Ops.clearMove(S, mon, slot)
@@ -325,13 +328,20 @@ function Ops.clearMove(S, mon, slot)
     return Ops.say(S, ("Move slot %d is already empty"):format(slot))
   end
   local id = mon.moves[slot].id
-  mon.moves[slot] = nil
-  return Ops.mark(S, ("Cleared move slot %d (%s)"):format(slot, id))
+  if (S.data.constants or {}).gen==4 then
+    -- Pokemon_ClearMoveSlot shifts the remaining moves, including their PP
+    -- and PP Ups. A hole also makes ipairs-based battle menus lose later slots.
+    for at=slot,3 do mon.moves[at]=mon.moves[at+1] end
+    mon.moves[4]=nil
+  else
+    mon.moves[slot] = nil
+  end
+  return Ops.mark(S, ("Cleared move slot %d (%s)"):format(slot, Catalog.moveLabel(S.data,id)))
 end
 
 function Ops.resetMoves(S, mon)
   if not mon then return false end
-  local def = S.data.pokemon[mon.species]
+  local def = require('src.pokemon.Gen4Forms').definition(S.data,mon)
   local learned = Pokemon.movesAtLevel(def, mon.level)
   mon.moves = {}
   for slot, id in ipairs(learned) do
@@ -343,14 +353,27 @@ end
 
 function Ops.healMon(S, mon)
   if not mon then return false end
-  if mon.hp == mon.stats.hp and not mon.status then
+  local needsHeal=mon.hp~=mon.stats.hp or mon.status~=nil
+  for slot=1,4 do
+    local mv=(mon.moves or {})[slot]
+    local def=mv and S.data.moves[mv.id]
+    if def then
+      local ups=math.min(3,math.max(0,math.floor(tonumber(mv.ppUps) or 0)))
+      if mv.pp~=def.pp+ups*math.floor(def.pp/5) then needsHeal=true end
+    end
+  end
+  if not needsHeal then
     return Ops.say(S, ("%s is already at full HP"):format(mon.species))
   end
   mon.hp = mon.stats.hp
   mon.status = nil
-  for _, mv in ipairs(mon.moves or {}) do
-    local def = S.data.moves[mv.id]
-    if def then mv.pp = def.pp + ((mv.ppUps or 0) * math.floor(def.pp / 5)) end
+  for slot=1,4 do
+    local mv=(mon.moves or {})[slot]
+    local def = mv and S.data.moves[mv.id]
+    if def then
+      local ups=math.min(3,math.max(0,math.floor(tonumber(mv.ppUps) or 0)))
+      mv.pp = def.pp + ups * math.floor(def.pp / 5)
+    end
   end
   return Ops.mark(S, ("Healed %s to %d/%d HP"):format(mon.species, mon.hp, mon.stats.hp))
 end
@@ -361,22 +384,22 @@ function Ops.boxes(S)
 end
 
 function Ops.selectBox(S, index)
-  S.selectedBox = clamp(index, 1, BoxesMod.COUNT)
+  S.selectedBox = clamp(index, 1, BoxesMod.count())
   S.selectedBoxSlot = 1
   S.save.currentBox = S.selectedBox
   local box = Ops.boxes(S)[S.selectedBox]
-  S.status = ("Box %d  (%d/%d)"):format(S.selectedBox, #box, BoxesMod.CAPACITY)
+  S.status = ("Box %d  (%d/%d)"):format(S.selectedBox, BoxesMod.used(box), BoxesMod.capacity())
   return true
 end
 
 function Ops.stepBox(S, delta)
-  local n = BoxesMod.COUNT
+  local n = BoxesMod.count()
   return Ops.selectBox(S, ((S.selectedBox - 1 + delta) % n) + 1)
 end
 
 function Ops.selectBoxSlot(S, index)
   local box = Ops.boxes(S)[S.selectedBox]
-  S.selectedBoxSlot = clamp(index, 1, BoxesMod.CAPACITY)
+  S.selectedBoxSlot = clamp(index, 1, BoxesMod.capacity())
   local mon = box[S.selectedBoxSlot]
   S.editingMon = mon
   S.status = mon
@@ -388,19 +411,22 @@ end
 
 function Ops.boxAdd(S)
   local box = Ops.boxes(S)[S.selectedBox]
-  if #box >= BoxesMod.CAPACITY then
+  if BoxesMod.used(box)>=BoxesMod.capacity() then
     return Ops.say(S, ("Box %d is full (%d/%d)")
-      :format(S.selectedBox, #box, BoxesMod.CAPACITY))
+      :format(S.selectedBox, BoxesMod.used(box), BoxesMod.capacity()))
   end
   local species = S.cat.species[1]
+  if not species then return Ops.say(S,'No selectable Pokemon in this dataset') end
   local mon = MonOps.create(S.data, species, 5)
   mon.ot = S.save.player.name
   mon.otId = S.save.player.id
-  table.insert(box, mon)
-  S.selectedBoxSlot = #box
+  local slot=BoxesMod.firstFree(box)
+  if BoxesMod.capacity()>20 and S.selectedBoxSlot and not box[S.selectedBoxSlot] then slot=S.selectedBoxSlot end
+  box[slot]=mon
+  S.selectedBoxSlot=slot
   S.editingMon = mon
   return Ops.mark(S, ("Added %s Lv5 to box %d slot %d")
-    :format(species, S.selectedBox, #box))
+    :format(species,S.selectedBox,S.selectedBoxSlot))
 end
 
 function Ops.withdraw(S)
@@ -411,9 +437,10 @@ function Ops.withdraw(S)
     return Ops.say(S, ("Party is full (%d/%d), deposit one first")
       :format(#S.save.party, PartyMod.MAX))
   end
-  table.remove(box, S.selectedBoxSlot)
+  if BoxesMod.capacity()>20 then box[S.selectedBoxSlot]=nil
+  else table.remove(box,S.selectedBoxSlot) end
   table.insert(S.save.party, mon)
-  S.selectedBoxSlot = clamp(S.selectedBoxSlot, 1, math.max(#box, 1))
+  S.selectedBoxSlot = clamp(S.selectedBoxSlot, 1, BoxesMod.capacity())
   S.selectedParty = #S.save.party
   return Ops.mark(S, ("Withdrew %s to party slot %d"):format(mon.species, #S.save.party))
 end
@@ -426,9 +453,10 @@ function Ops.release(S)
       ("Release %s permanently? Click again to confirm"):format(mon.species)) then
     return false
   end
-  table.remove(box, S.selectedBoxSlot)
+  if BoxesMod.capacity()>20 then box[S.selectedBoxSlot]=nil
+  else table.remove(box,S.selectedBoxSlot) end
   if S.editingMon == mon then S.editingMon = nil end
-  S.selectedBoxSlot = clamp(S.selectedBoxSlot, 1, math.max(#box, 1))
+  S.selectedBoxSlot = clamp(S.selectedBoxSlot, 1, BoxesMod.capacity())
   return Ops.mark(S, ("Released %s"):format(mon.species))
 end
 
@@ -479,10 +507,11 @@ function Ops.bagAdjust(S, id, delta)
   if not id then return Ops.say(S, "No bag row selected") end
   if delta > 0 then
     local have = S.save.inventory[id] or 0
-    if have >= Ops.STACK_MAX then
-      return Ops.say(S, ("%s is already at x%d"):format(id, Ops.STACK_MAX))
+    local limit=Bag.stackLimit(id,S.data)
+    if have+delta>limit then
+      return Ops.say(S,("%s cannot exceed x%d"):format(id,limit))
     end
-    Bag.add(S.save, id, delta, S.data)
+    if not Bag.add(S.save,id,delta,S.data) then return Ops.say(S,'That item pocket is full') end
   else
     Bag.remove(S.save, id, -delta)
     if not S.save.inventory[id] then
@@ -507,7 +536,7 @@ end
 function Ops.pcOrder(S)
   local ids = {}
   for id in pairs(Ops.pcItems(S)) do ids[#ids + 1] = id end
-  table.sort(ids)
+  table.sort(ids,require('Catalog').keyLess)
   return ids
 end
 
@@ -544,7 +573,7 @@ end
 -- Badges are truthy inventory flags, not stackable items, which is why the
 -- design gives them toggle chips instead of quantity rows.
 function Ops.isBadgeId(id)
-  return id:find("BADGE", 1, true) ~= nil
+  return type(id)=="string" and id:find("BADGE", 1, true) ~= nil
 end
 
 -- The badge set comes from src/inventory/Badges.lua, not from the item
@@ -592,6 +621,7 @@ end
 -- disagree about whether a badge is earned.
 function Ops.hasBadge(S, id)
   return (S.save.inventory and S.save.inventory[id])
+    or (S.save.badges and S.save.badges[id])
     or (S.save.flags and S.save.flags[id]) and true or false
 end
 
@@ -617,6 +647,9 @@ end
 function Ops.toggleBadge(S, id)
   local on = Ops.hasBadge(S, id)
   local GameVersion = require("src.core.GameVersion")
+  if GameVersion.isGen4 and GameVersion.isGen4(S.version) then
+    S.save.badges=S.save.badges or {};S.save.badges[id]=not on or nil
+  end
   local gen2 = GameVersion.isGen2(S.version) or GameVersion.isGen3(S.version)
   if gen2 then
     S.save.flags = S.save.flags or {}

@@ -20,6 +20,7 @@
 
 // LOVE
 #include "wrap_System.h"
+#include "common/android.h"
 #include "sdl/System.h"
 
 namespace love
@@ -28,6 +29,43 @@ namespace system
 {
 
 #define instance() (Module::getInstance<System>(Module::M_SYSTEM))
+
+#ifdef LOVE_ANDROID
+int w_closeOfflineTranslation(lua_State *L)
+{
+    luax_pushboolean(L, love::android::closeOfflineTranslation());
+    return 1;
+}
+int w_installApk(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    luax_pushboolean(L, love::android::installApk(path));
+    return 1;
+}
+int w_canInstallApks(lua_State *L)
+{
+    luax_pushboolean(L, love::android::canInstallApks());
+    return 1;
+}
+int w_requestInstallPermission(lua_State *L)
+{
+    luax_pushboolean(L, love::android::requestInstallPermission());
+    return 1;
+}
+int w_translateOffline(lua_State *L)
+{
+    const char *source = luaL_checkstring(L, 1);
+    const char *target = luaL_checkstring(L, 2);
+    std::string text = luax_checkstring(L, 3), output;
+    if (!love::android::translateOffline(source, target, text, output)) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "Offline translation failed. Check Wi-Fi and available storage for the model download.");
+        return 2;
+    }
+    luax_pushstring(L, output);
+    return 1;
+}
+#endif
 
 int w_getOS(lua_State *L)
 {
@@ -109,6 +147,65 @@ int w_createFile(lua_State *L)
 	return 1;
 }
 
+int w_pickFolder(lua_State *L)
+{
+	luax_pushboolean(L, instance()->pickFolder());
+	return 1;
+}
+
+int w_getExternalDataDirs(lua_State *L)
+{
+	luax_pushstring(L, instance()->getExternalDataDirs());
+	return 1;
+}
+
+int w_mountDirectory(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	luax_pushboolean(L, instance()->mountDirectory(path));
+	return 1;
+}
+
+int w_hasStorageAccess(lua_State *L)
+{
+	luax_pushboolean(L, instance()->hasStorageAccess());
+	return 1;
+}
+
+int w_requestStorageAccess(lua_State *L)
+{
+	luax_pushboolean(L, instance()->requestStorageAccess());
+	return 1;
+}
+
+int w_pathIsAppOwned(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	luax_pushboolean(L, instance()->pathIsAppOwned(path));
+	return 1;
+}
+
+int w_mkdirs(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	luax_pushboolean(L, instance()->mkdirs(path));
+	return 1;
+}
+
+int w_httpRequest(lua_State *L)
+{
+	const char *json = luaL_checkstring(L, 1);
+	luax_pushstring(L, instance()->httpRequest(json));
+	return 1;
+}
+
+int w_walkerNotify(lua_State *L)
+{
+	const char *json = luaL_checkstring(L, 1);
+	luax_pushboolean(L, instance()->walkerNotify(json));
+	return 1;
+}
+
 int w_syncHealthSteps(lua_State *L)
 {
 	luax_pushboolean(L, instance()->syncHealthSteps());
@@ -142,6 +239,13 @@ int w_hasBackgroundMusic(lua_State *L)
 static const luaL_Reg functions[] =
 {
 	{ "getOS", w_getOS },
+#ifdef LOVE_ANDROID
+    { "translateOffline", w_translateOffline },
+    { "closeOfflineTranslation", w_closeOfflineTranslation },
+    { "installApk", w_installApk },
+    { "canInstallApks", w_canInstallApks },
+    { "requestInstallPermission", w_requestInstallPermission },
+#endif
 	{ "getProcessorCount", w_getProcessorCount },
 	{ "setClipboardText", w_setClipboardText },
 	{ "getClipboardText", w_getClipboardText },
@@ -150,6 +254,15 @@ static const luaL_Reg functions[] =
 	{ "vibrate", w_vibrate },
 	{ "pickFile", w_pickFile },
 	{ "createFile", w_createFile },
+	{ "pickFolder", w_pickFolder },
+	{ "getExternalDataDirs", w_getExternalDataDirs },
+	{ "mountDirectory", w_mountDirectory },
+	{ "hasStorageAccess", w_hasStorageAccess },
+	{ "requestStorageAccess", w_requestStorageAccess },
+	{ "pathIsAppOwned", w_pathIsAppOwned },
+	{ "mkdirs", w_mkdirs },
+	{ "walkerNotify", w_walkerNotify },
+	{ "httpRequest", w_httpRequest },
 	{ "syncHealthSteps", w_syncHealthSteps },
 	{ "restartApp", w_restartApp },
 	{ "httpDownload", w_httpDownload },

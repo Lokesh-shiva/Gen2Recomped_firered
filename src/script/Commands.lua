@@ -110,15 +110,145 @@ end
 -- play_cry's waitForButton form keeps that cry gate but hands the box back
 -- to the A/B path once the cry is over -- see TextBox's opts.auto.wait
 -- (#247, #251).
+-- A GEN 4 LINE CARRIES ITS MARKUP IN BRACES, AND NOTHING READ ANY OF IT.
+--
+-- Gen 1-3 write `{RAM:wStringBufferN}` and the pass below resolves it.  Gen 4's
+-- msgdata has its own escape -- `0xFFFE <type> <argc> <params...>` -- and
+-- `Gen4Text.render` spells it `{STRVAR_1 1 0 0}` or `{COLOR 0}`, which matched
+-- nothing here and went to the player exactly as written.  Measured over the
+-- whole archive: **5,747 of 46,053 strings (12.5%) carry a variable** -- every
+-- "<mon> used <move>!", every line that says the player's name -- and another
+-- **2,068 (4.5%) carry a formatting marker**, 4,044 of them `{COLOR}`.
+--
+-- WHICH NUMBER IS THE SLOT is the part worth writing down, because three of the
+-- four numbers in a `{STRVAR_1 ...}` are not it.  `StringTemplate_Format`
+-- (string_template.c) substitutes an escape only when its TYPE's high byte is
+-- 0x100, 0x500 or 0x600, and what it substitutes is
+-- `CharCode_FormatArgParam(c, 0)` -- the FIRST PARAMETER, not the type's low
+-- byte.  Measured over all 46,053 strings, this cartridge uses exactly four
+-- escape families: 0x0100 (8,377 occurrences), 0x0200 (191), 0x0600 (131) and
+-- 0xFF00 (4,083).  Only 0x0100 and 0x0600 are template arguments, and their
+-- first parameter runs 0..18 -- an argument index -- while the low byte takes
+-- 53 distinct values, which is the printer's own formatting.  0x0200 is
+-- YESNO/PAUSE/WAIT/CURSOR and 0xFF00 is COLOR/SIZE; substituting either would
+-- put a Pokemon's name where a control code belongs.
+--
+-- `Gen4RowanIntro:fill` had already worked the slot out for two names -- "the
+-- middle number is the variable slot" -- and nothing generalised it.  This
+-- agrees with it and with the cartridge.
+--
+-- The slot numbering needs no adjustment: `bufferplayername <slot>` calls
+-- `StringTemplate_SetPlayerName(template, slot, ...)`, `Format` reads
+-- `args[param0]`, and `g4_buffer` files the value at `stringBuffers[slot + 1]`
+-- because Lua counts from one.
+--
+-- AN UNFILLED SLOT IS DROPPED, and the first version of this left it visible
+-- on the theory that a token on screen is a bug report.  It is -- but it is a
+-- bug report delivered to the PLAYER, mid-sentence, in a font with no braces:
+-- reported from play as `that to my /STRVAR_1 3 1 0/./`.  The report belongs in
+-- the log, which is where it goes now, once per slot per session so a scene
+-- with a repeated line does not fill it.
+--
+-- The markers below are DROPPED, not printed.  They are instructions to a text
+-- renderer this port does not have -- colour, size, cursor position, alignment
+-- -- and one line's worth of braces on screen is worse than losing a colour.
+-- `PAUSE` and `WAIT` are the exception worth naming: they are timing, 73
+-- occurrences between them, and dropping them makes those lines advance
+-- without their beat.  Anything not on this list is left exactly as it is,
+-- which is what keeps `{RAM:...}` for the pass below and leaves the decoder's
+-- own `{TRUNCATED}` and `{UNKNOWN_xxxx}` diagnostics legible.
+local GEN4_DROP = {
+  COLOR = true, SIZE = true, CURSOR_X = true, CURSOR_Y = true,
+  ALN_CENTER = true, ALN_RIGHT = true, YESNO = true, PAUSE = true,
+  WAIT = true,
+}
+
+local reportedSlots = {}
+
+local function gen4Markup(text, game)
+  if type(text) ~= "string" or not text:find("{", 1, true) then return text end
+  local slots = game and game.stringBuffers
+  return (text:gsub("{(%u[%u_0-9]*)([^}]*)}", function(name, rest)
+    -- HGSS also fills 0x0300, 0x0400 and 0x3400 (MsgArray_ControlCodeIsStrVar,
+    -- string_control_code.c): 208 lines, the Groups' names among them
+    if name == "STRVAR_1" or name == "STRVAR_6" or name == "STRVAR_3" or name == "STRVAR_4"
+       or name == "STRVAR_34" then
+      -- `<low> <param0> <param1>`: the middle one.
+      local param0 = rest:match("^%s*%d+%s+(%d+)")
+      local value = param0 and slots and slots[tonumber(param0) + 1]
+      if value ~= nil and value ~= "" then return tostring(value) end
+      if param0 and not reportedSlots[param0] then
+        reportedSlots[param0] = true
+        require("src.core.Logger").warn(
+          "gen4 text: string slot %s was never buffered; the line prints with "
+          .. "a gap where its name should be", param0)
+      end
+      -- A malformed token -- no slot number at all -- is left alone, because
+      -- that is a decoder fault rather than an unfilled one and silently
+      -- swallowing it would hide it.
+      return param0 and "" or nil
+    end
+    if GEN4_DROP[name] then return "" end
+    -- BLACK AND WHITE (src/import/Gen5Text): a message's 0xF000 escapes come
+    -- through as {VARn} (0x01xx, argument slot n - 1) and {CMD xxxx args}.
+    -- 0x0200..0x0208 are NUMBERS from a slot (the first argument) -- "won
+    -- {CMD 0203 1} battles in a row"; everything else is formatting and
+    -- timing (0xFF00 colour, 0xBDxx alignment, 0xBE02 / 0xBE05 waits, 0xBE09
+    -- the speaker's name box) and is dropped. Reported in N's Castle as
+    -- "N: {C...": 4,269 strings carried one, printed brace and all, and
+    -- VAR4 and up (683 more) had nothing reading them.
+    local n = name:match("^VAR(%d+)$")
+    if n and rest == "" then
+      local value = slots and slots[tonumber(n)]
+      return type(value) == "string" and value or (value ~= nil and tostring(value) or "")
+    end
+    if name == "CMD" then
+      local cmd, slot = rest:match("^%s*(%x+)%s*(%d*)")
+      local code = cmd and tonumber(cmd, 16)
+      if code and code >= 0x0200 and code <= 0x02FF and slot ~= "" then
+        local value = slots and slots[tonumber(slot) + 1]
+        return value ~= nil and tostring(value) or ""
+      end
+      return ""
+    end
+    return nil
+  end))
+end
+
+-- Published because a Gen 4 MENU row is a message too -- `addmenuentryimm`
+-- names an entry in a text bank -- and it is drawn by src/ui/Menu rather than
+-- by the text box, so it never passes through show_text.  One spelling of the
+-- rule, two callers.
+Commands.gen4Markup = gen4Markup
+
 function Commands.show_text(ctx, textId, subs, extraOpts)
+  -- `msgbox gStringVarN` on a buffer nothing filled (a Frontier function that
+  -- is not ported) is no box at all, not an empty one
+  if type(textId) == "string" and require("src.core.GameVersion").isGen3() then
+    local n = textId:match("^{RAM:wStringBuffer(%d)}$")
+    if n then
+      local b = ctx.game and ctx.game.stringBuffers and ctx.game.stringBuffers[tonumber(n)]
+      if b == nil or b == "" then return end
+    end
+  end
   -- The ROM has no "text id" at the point a YES/NO or phone prompt opens: the
   -- menu simply rides the box that is already on screen.  Recording the last
   -- id shown lets those prompts reproduce it when the writetext that printed
   -- it lived inside a `scall` and so could not be folded at compile time.
   if textId ~= nil then ctx.g2LastText = textId end
   local text = textId ~= nil and ctx.game.data.text[textId] or nil
+  local literal=false
   if not text and ctx.overworld then
     text = ctx.game.data:resolveText(ctx.overworld.map.def.label, textId)
+  end
+  if not text and type(textId) == "string" and textId:match("^TEXT_B%d+_%d+$") then
+    -- A GEN 4 LABEL WITH NO TEXT prints as the label itself; say which, once
+    Commands._missingLabels = Commands._missingLabels or {}
+    if not Commands._missingLabels[textId] then
+      Commands._missingLabels[textId] = true
+      require("src.core.Logger").warn("gen4 text: %s has no text (map %s) -- shown as its label", textId,
+        tostring(ctx.overworld and ctx.overworld.map and ctx.overworld.map.id))
+    end
   end
   if not text then
     -- LITERAL STRING FALLBACK for hand-ported scripts -- and for the map
@@ -130,10 +260,7 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
     -- past the reader instead of waiting for A. Marked-up text is returned
     -- unchanged, so nothing the extractor produced is re-broken.
     text = textId
-    if type(text) == "string" then
-      local okTB, TB = pcall(require, "src.render.TextBox")
-      if okTB and TB.fromProse then text = TB.fromProse(text) end
-    end
+    literal=true
   end
   -- Belt and braces: a row that reaches here with no usable id at all used to
   -- throw on the first gsub below, and a throw inside the runner leaves the
@@ -172,8 +299,10 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
   -- "Chikorita" once Lyra's starter set the buffer.  <PLAYER> is charmap
   -- $4F -> wPlayerName (n-gram pointer, 00:$3c16 -> $d47b), so it decodes to
   -- {RAM:wPlayerName}, and this pass must not touch it.
+  text = gen4Markup(text, ctx.game)
   if text:find("{RAM:", 1, true) then
     text = text:gsub("{RAM:([%w_]*)}", function(name)
+      if name=='hScriptVar' then return tostring(ctx.g2Var or 0) end
       local slot = tonumber(name:match("^wStringBuffer(%d)$") or "")
       if slot then
         local slots = ctx.game.stringBuffers
@@ -202,6 +331,7 @@ function Commands.show_text(ctx, textId, subs, extraOpts)
     end)
   end
   local runner = ctx.runner
+  if literal then text=TextBox.fromProse(text) end
   local opts
   if ctx.pendingCry then
     local species = ctx.pendingCry
@@ -513,6 +643,11 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- BATTLE_TYPE_LEGENDARY, which only the three legendary specials set.
     -- The transition reads it (see OverworldState:pushBattleTransition).
     if opts and opts.legendary then battle.legendary = true end
+    -- Platinum's Encounter_NewFatefulVsSpeciesAtLevel: the wild Pokemon
+    -- carries the fateful-encounter mark (Shaymin, Darkrai)
+    if opts and opts.fateful and battle.enemy and battle.enemy.mon then
+      battle.enemy.mon.fatefulEncounter = true
+    end
   else
     battle = BattleState.newTrainer(ctx.game, a, b)
     -- the beaten trainer's own line, printed on the battle screen before
@@ -530,6 +665,20 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- was decided.
     if opts and opts.double then battle.double = true end
     if opts and opts.canLose then battle.canLose = true end
+    -- A TAG BATTLE'S PARTNER (src/battle/AllyAI.lua)
+    if opts and opts.ally then battle:setAlly(opts.ally) end
+    -- BATTLE_TYPE_FRONTIER: no experience (Emerald's Battle Tower)
+    if opts and opts.noExp then battle.noExp = true end
+    -- BATTLE_TYPE_PALACE: natures choose the moves (src/battle/Gen3Palace.lua)
+    if opts and opts.palace then battle.palace = true end
+    -- BATTLE_TYPE_ARENA: three turns, then the referee (src/battle/Gen3Arena.lua)
+    if opts and opts.arena then require("src.battle.Gen3Arena").install(battle) end
+    -- BATTLE_TYPE_FRONTIER: RUN asks whether to forfeit
+    if opts and opts.forfeit then battle.forfeitable = true end
+    -- ...and the bag stays shut (BattleScript_ActionSelectionItemsCantBeUsed)
+    if opts and opts.noItems then battle.noItems = true end
+    -- a Frontier battle: frontier.battlesCount rather than the game stats
+    if opts and opts.frontier then battle.gen3Frontier = true end
     if battle.trainer and battle.trainer.doubleBattle then battle.double = true end
     -- AND WHO THE OTHER ONE IS, when two walked up together.  The battle
     -- fills its second opponent slot from this trainer's own party rather
@@ -553,6 +702,11 @@ function Commands.start_battle(ctx, kind, a, b, opts)
   end
   battle.onFinish = function(result)
     ctx.lastBattleResult = result
+    -- PLATINUM'S ESCORTS: a battle not lost with the partner beside you ends
+    -- with the party healed (encounter.c, Party_HealAllMembers)
+    if battle.ally and battle.ally.escort and result ~= "lose" then
+      require("src.script.Gen4Commands").healParty(ctx.save)
+    end
     if before then
       local Gen3 = require("src.script.Gen3Commands")
       ctx.lastBattleFacts = Gen3.battleFacts(ctx.save, before,
@@ -614,6 +768,12 @@ function Commands.start_battle(ctx, kind, a, b, opts)
     -- `reloadmapafterbattle` can tell that case from a real whiteout.
     ctx.lastBattleCanLose = battle.canLose and true or false
     ctx.lastCheck = result == "win"
+    -- THE FIELD COMES BACK BEFORE THE SCRIPT CARRIES ON (Gen 4): the map's
+    -- ON_LOAD / ON_RESUME scripts run now, as the cartridge's field init does
+    if ctx.overworld and ctx.overworld.gen4FieldResumed and not battle.g4FieldResumed then
+      battle.g4FieldResumed = true
+      pcall(ctx.overworld.gen4FieldResumed, ctx.overworld)
+    end
     if ctx.overworld then
       -- A map script often follows a trainer battle with its own text.
       -- Keep a level evolution behind that text: otherwise afterBattle
@@ -676,14 +836,36 @@ function Commands.wait(ctx, frames)
   ctx.runner:yield()
 end
 
-local function walkEntity(ctx, entity, dir, tiles)
+-- `rate` is the movement action's own speed, as a multiplier on the walker's
+-- step duration (bigger is slower).  `scriptMove` has taken one all along and
+-- Gen 3 has supplied one all along; Gen 4's table simply did not carry it, so
+-- every scripted walk in Sinnoh ran at one pace.  Optional, so the three
+-- callers that have no opinion are unchanged.
+local function walkEntity(ctx, entity, dir, tiles, rate)
   claimMove(ctx, entity)
   local runner = ctx.runner
   ctx.overworld:scriptMove(entity, dir, tiles or 1, function()
     runner:resume()
-  end)
+  end, nil, rate)
   runner:yield()
 end
+
+-- PUBLISHED, because Gen 4's `applymovement` walks an entity this file has no
+-- verb for: the object is named by its `localID` rather than by the def index
+-- `move_npc` takes, and a movement list is a sequence of steps rather than one
+-- of them.  Sharing the function rather than reimplementing it keeps the move
+-- lock, the yield and the parallel-runner preemption identical.
+Commands.walkEntity = walkEntity
+
+-- ...AND THE LOCK ON ITS OWN, for a caller that queues a movement WITHOUT
+-- blocking on it.
+--
+-- Gen 4's `applymovement` does not wait -- the cartridge starts the animation
+-- and runs on to `waitmovement` -- so it cannot go through `walkEntity`, which
+-- yields. It still needs the same lock and the same parallel-runner
+-- preemption, and the only honest way to share those is to publish them rather
+-- than to write a second copy that drifts.
+Commands.claimMove = claimMove
 
 function Commands.move_player(ctx, dir, tiles)
   walkEntity(ctx, ctx.overworld.player, dir, tiles)
@@ -1097,6 +1279,10 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, opts)
     skipNickname = true
   end
   ctx.game.stringBuffer = ctx.game.data.pokemon[species].name or species
+  if require('src.core.GameVersion').isGen2() then
+    ctx.game.stringBuffers=ctx.game.stringBuffers or {}
+    ctx.game.stringBuffers[1]=ctx.game.stringBuffer
+  end
   ctx.pendingPokemonName = species
   -- GIVEN: a gift, a starter or an egg.  An EGG has no met level yet -- the
   -- cartridge writes zero when it HATCHES, and zero is what makes the memo
@@ -1107,6 +1293,8 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, opts)
     level = mon.level,
     location = BattleStateMod.metHere(ctx.game),
   } or nil)
+  require('src.pokemon.Gen4Origin').stamp(ctx.game,mon,mon.isEgg and 'egg' or 'met',
+    BattleStateMod.metHere(ctx.game))
   local addedToParty = Party.add(ctx.save.party, mon)
   local boxNum = nil
   if not addedToParty then
@@ -1121,8 +1309,10 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, opts)
     dex.seen[species] = true
     dex.owned[species] = true
   end
+  require('src.pokemon.Gen4Forms').record(ctx.game,species,mon)
   ctx.lastCheck = true
   ctx.addedToParty = addedToParty
+  require('src.pokemon.Gen4PoketchState').remember(ctx.game, mon)
   ctx.boxNum = boxNum
   -- AskName: both AddPartyMon and SendNewMonToBox; skip mod-set nicks
   -- and callback-style callers with no script runner to yield on.
@@ -1884,20 +2074,67 @@ end
 -- every verb in this module is the registry's built-in set; a mod adding a
 -- verb registers, a mod replacing one has to say override
 function Commands.registerInto(registry, _, owner)
+  -- BOTH IMPORTED VOCABULARIES ARE LOADED BEFORE ANYTHING IS COUNTED.
+  --
+  -- Reported from play, booting EMERALD: "commands already registered:
+  -- g4_check_two_alive" -- a Sinnoh verb, crashing a Hoenn cartridge at boot.
+  --
+  -- `Gen3Commands` and `Gen4Commands` both add their verbs to THIS table and
+  -- keep their helpers on their own.  Those requires used to sit BELOW the
+  -- general loop, so what the loop saw depended entirely on whether anything
+  -- had required the modules yet -- and this function runs again every time
+  -- `Loader.load` does, which is once at startup and again for every game
+  -- booted from the launcher.
+  --
+  -- Two different faults came out of that, and only one of them crashed:
+  --
+  --   SINNOH.  First call: not loaded, the loop missed the 155 `g4_` verbs and
+  --   the `g4_` pass below registered them.  Second call: loaded, the loop took
+  --   them, and the pass registered them a SECOND time into a registry that had
+  --   just taken them.  That is the reported crash, and it needed two boots to
+  --   appear, which is why it looked like a cartridge problem.
+  --
+  --   HOENN, silently.  All 109 of `Gen3Commands`' verbs live on `Commands`,
+  --   and the `g3_` pass below reads the MODULE table, which has none of them.
+  --   So on a first load they reached the registry only if something else had
+  --   already required the module: 219 verbs on the first call and 326 on the
+  --   second, in the same process.  Dispatch survived it on `resolve`'s lazy
+  --   `g3_` fallback -- which is the only reason this was not a second crash --
+  --   but nothing could OVERRIDE a Hoenn verb that was not in the registry.
+  --
+  -- Requiring both here makes every call identical.
+  pcall(require, "src.script.Gen3Commands")
+  pcall(require, "src.script.Gen4Commands")
   for verb, fn in pairs(Commands) do
     if type(fn) == "function" and not NOT_VERBS[verb] then
       registry:register(verb, fn, owner)
       registered[verb] = fn
     end
   end
-  -- Imported Gen3 rows share ScriptRunner's command registry. Register their
-  -- handlers here so generated FireRed events cannot silently skip battle
-  -- verbs when the Gen3 module is loaded lazily.
-  local ok, Gen3 = pcall(require, "src.script.Gen3Commands")
-  if ok and Gen3 then
+  -- THE TWO PASSES BELOW ARE BACKSTOPS NOW, AND THEY SKIP WHAT IS ALREADY
+  -- THERE.  The loop above has taken everything on `Commands`; these catch a
+  -- verb a module keeps on its OWN table instead, which `Gen3Commands` was
+  -- always assumed to do and never did.  The registry check is the part that
+  -- matters: a require moving back down the function must not be able to bring
+  -- the double registration back, and a guard that asks the registry cannot be
+  -- fooled by load order the way a comment can.
+  local okThree, Gen3 = pcall(require, "src.script.Gen3Commands")
+  if okThree and type(Gen3) == "table" then
     for verb, fn in pairs(Gen3) do
-      if type(fn) == "function" and verb:sub(1, 3) == "g3_" then
+      if type(fn) == "function" and verb:sub(1, 3) == "g3_"
+         and registry:get(verb) == nil then
         registry:register(verb, fn, owner)
+        registered[verb] = fn
+      end
+    end
+  end
+  local okFour, Gen4 = pcall(require, "src.script.Gen4Commands")
+  if okFour and type(Gen4) == "table" then
+    for verb, fn in pairs(Gen4) do
+      if type(fn) == "function" and verb:sub(1, 3) == "g4_"
+         and registry:get(verb) == nil then
+        registry:register(verb, fn, owner)
+        registered[verb] = fn
       end
     end
   end

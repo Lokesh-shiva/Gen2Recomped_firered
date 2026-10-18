@@ -307,6 +307,9 @@ function Font.split(text)
         end
       end
       span = { from = i, to = last }
+      if text:byte(i)>=128 then
+        span.code=require("src.translation.UnicodeFont").code(text:sub(i,last))
+      end
     end
     spans[#spans + 1] = span
     i = span.to + 1
@@ -346,7 +349,7 @@ function Font.encode(text)
           if nb < 0x80 or nb > 0xBF then break end
           j = j + 1
         end
-        codes[#codes + 1] = string.byte("?")
+        codes[#codes + 1] = require("src.translation.UnicodeFont").code(text:sub(i,j-1)) or string.byte("?")
         i = j
       end
     end
@@ -580,6 +583,20 @@ local function blitCode(code, x, y)
 end
 
 function Font.drawCode(code, x, y)
+  if FALLBACK.enabled and code and code>=32 and code<=126
+      and require("src.translation.UnicodeFont").active() then
+    code=require("src.translation.UnicodeFont").code(string.char(code))
+  end
+  if code and code<0 then
+    local paint=borderPaint or (activeStyle and activeStyle.text) or {0,0,0,1}
+    local _,_,_,alpha=love.graphics.getColor()
+    love.graphics.push("all")
+    love.graphics.setShader()
+    love.graphics.setColor(paint[1],paint[2],paint[3],(paint[4] or 1)*(alpha or 1))
+    require("src.translation.UnicodeFont").draw(code,x,y,Font.glyphHeight())
+    love.graphics.pop()
+    return
+  end
   local style = activeStyle
   local paint = borderPaint or (style and style.text)
   if not paint then return blitCode(code, x, y) end
@@ -658,6 +675,12 @@ end
 -- TextBox's own wrapping via spansFitting -- so one answer keeps the layout
 -- and the drawing agreeing.  A page with no width table is unchanged.
 function Font.advanceOf(code)
+  if FALLBACK.enabled and code and code>=32 and code<=126
+      and require("src.translation.UnicodeFont").active() then
+    return require("src.translation.UnicodeFont").width(
+      require("src.translation.UnicodeFont").code(string.char(code)),Font.glyphHeight())
+  end
+  if code and code<0 then return require("src.translation.UnicodeFont").width(code,Font.glyphHeight()) end
   local page = pageFor(code)
   if not page then return GLYPH end
   local widths = page.widths
@@ -672,7 +695,19 @@ end
 -- Pixel width of a string (glyph advances, not UTF-8 byte length).
 -- Multi-byte charmap entries like "¥" are one glyph; callers that
 -- right-align with `#text * 8` mis-place them.
+-- An engine literal drawn whole ("SAVE", "CANCEL", a status tag) in the
+-- player's language when a translation is installed; anything else as is.
+local translationService
+local function localize(text)
+  if type(text) ~= "string" then return text end
+  translationService = translationService or package.loaded["src.translation.Service"]
+  if not (translationService and translationService.engineKeys) then return text end
+  return translationService.display(text)
+end
+Font.localize = localize
+
 function Font.width(text)
+  text = localize(text)
   local w = 0
   for _, code in ipairs(Font.encode(text)) do
     w = w + Font.advanceOf(code)
@@ -688,6 +723,7 @@ end
 -- name beside a level -- the healthbox, the party screen -- needs this, and
 -- two copies of it would drift.
 function Font.fit(text, pixels)
+  text = localize(text)
   local spans = Font.split(text or "")
   local n = Font.spansFitting(spans, pixels)
   if n >= #spans then return text or "" end
@@ -701,7 +737,8 @@ end
 -- Draw a plain single-line string at pixel (x, y).  Returns the width
 -- drawn, which is #codes * 8 for every fixed-width page.
 function Font.draw(text, x, y)
-  if FALLBACK.enabled then
+  text = localize(text)
+  if FALLBACK.enabled and not require("src.translation.UnicodeFont").active() then
     love.graphics.setFont(FALLBACK.font)
     love.graphics.print(text, x, y)
     return #text * GLYPH
@@ -956,36 +993,91 @@ local function gen4DialogueBox(rec, tx, ty, tw, th)
   if not (img and q) then return Font.drawBox(tx, ty, tw, th) end
   -- Six columns is the minimum that has one of each; below that there is no
   -- arrangement of these tiles that is a box, and the drawn rectangle is
-  -- honest where a squashed frame would not be.
-  if tw < 6 or th < 3 then return Font.drawBox(tx, ty, tw, th) end
+  -- honest where a squashed frame would not be.  The rectangle GROWS by three
+  -- columns on the way out (see below), so three is what has to arrive.
+  if tw < 3 or th < 3 then return Font.drawBox(tx, ty, tw, th) end
 
   local count = rec.count or 1
   local frame = 1
   do
     local ok, Game = pcall(require, "src.core.Game")
     local options = ok and Game and Game.save and Game.save.options
-    frame = math.floor(tonumber(options and options.gen3Frame) or 1)
+    -- a screen with a frame of its own (Black and White's battle box) asks
+    -- for it by number for as long as it is drawing
+    frame = math.floor(tonumber(Font.frameOverride) or tonumber(options and options.gen3Frame) or 1)
     if frame < 1 then frame = 1 end
     if frame > count then frame = count end
   end
   local row0 = (frame - 1) * 18
 
+  -- !! THE COMMENT ABOVE AND THE CODE BELOW USED TO DISAGREE, and the comment
+  -- was the one that was right.
+  --
+  -- It says the box "reaches one tile past the left of the rectangle it is
+  -- given and two past the right".  The loop did not: it drew strictly inside
+  -- [tx, tx + tw), so the whole eighteen-tile pattern was squeezed into the
+  -- port's rectangle and the two caps landed three columns in from where the
+  -- cartridge puts them.
+  --
+  -- DrawMessageBoxFrame (pokeplatinum src/render_window.c) is the arithmetic,
+  -- and it is written around the WINDOW -- the text interior -- not around the
+  -- frame:
+  --
+  --     +0 at x-2   +1 at x-1   +2 across [x, x+width)   +3 at x+width
+  --     +4 at x+width+1   +5 at x+width+2
+  --
+  -- Two tiles of cap on the left, THREE on the right.  Every rect in this
+  -- engine is the port's convention instead -- interior plus one tile of
+  -- border on each side, because that is what a nine-slice needs -- so a
+  -- caller hands over tx = interior - 1 and tw = interior + 2.  Converting:
+  --
+  --     cartridge leftmost  = interior - 2 = tx - 1
+  --     cartridge rightmost = interior + width + 2 = tx + tw + 1
+  --
+  -- which is tw + 3 columns starting one to the left.  Sinnoh's field box is
+  -- the case that proves it: the window is (2, 19) 27x4, the theme turns that
+  -- into tx = 1, tw = 29, and tx - 1 = 0 with tx + tw + 1 = 31 is the full
+  -- thirty-two-tile width of the DS screen -- which is exactly how wide
+  -- Platinum's message box is.
+  --
+  -- The ROWS were already right (top row, repeated middle, bottom row over
+  -- ty .. ty + th - 1), so they are untouched.
+  local cols, left = tw + 3, tx - 1
   love.graphics.setColor(1, 1, 1, 1)
   for row = 0, th - 1 do
     local base = (row == 0 and 0) or (row == th - 1 and 12) or 6
     local y = (ty + row) * 8
-    for col = 0, tw - 1 do
+    for col = 0, cols - 1 do
       local k = (col == 0 and 0) or (col == 1 and 1)
-        or (col == tw - 3 and 3) or (col == tw - 2 and 4)
-        or (col == tw - 1 and 5) or 2
-      love.graphics.draw(img, q[row0 + base + k], (tx + col) * 8, y)
+        or (col == cols - 3 and 3) or (col == cols - 2 and 4)
+        or (col == cols - 1 and 5) or 2
+      love.graphics.draw(img, q[row0 + base + k], (left + col) * 8, y)
     end
   end
+end
+
+-- the dialogue frame a cartridge's BATTLE box uses, when its record names one
+-- (Black and White: the dark message frame)
+function Font.battleFrame()
+  local def = state and state.def
+  return def and def.dialogueFrame and def.dialogueFrame.battleFrame or nil
 end
 
 function Font.hasDialogueFrame()
   local def = state and state.def
   return not FALLBACK.enabled and def ~= nil and def.dialogueFrame ~= nil
+end
+
+-- Dock the full painted ROM frame, including caps beyond the conventional
+-- interior-plus-one-border rectangle. Otherwise only the middle moves.
+function Font.dialogueBoxBounds(tx, ty, tw, th)
+  local rec = Font.hasDialogueFrame() and state.def.dialogueFrame
+  if rec and rec.layout == 'gen4' and tw >= 3 and th >= 3 then
+    return (tx-1)*8, ty*8, (tw+3)*8, th*8
+  elseif rec and rec.layout ~= 'gen4' and th >= 4 then
+    return (tx-1)*8, ty*8, (tw+2)*8, th*8
+  end
+  return tx*8, ty*8, tw*8, th*8
 end
 
 function Font.drawDialogueBox(tx, ty, tw, th)

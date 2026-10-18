@@ -3797,7 +3797,11 @@ function Gen3.forMap(map)
   local function overlay(from)
     if type(from) ~= "table" then return end
     for k, v in pairs(from) do
-      if (k == "joinery" or k == "roof_bands") and type(v) == "table" then
+      -- the art lists merge too: a map naming its own buildings must not
+      -- take away the ones its tileset names (Saffron's Dojo and the gate
+      -- houses every Kanto route shares)
+      if (k == "joinery" or k == "roof_bands" or k == "building_art"
+          or k == "doorless_art" or k == "elevation_art") and type(v) == "table" then
         local entries = type(profile[k]) == "table" and profile[k] or {}
         for meta, model in pairs(v) do entries[meta] = model end
         profile[k] = entries
@@ -3811,6 +3815,11 @@ function Gen3.forMap(map)
     overlay(spec_.tilesets[ctx.secondaryName])
   end
   if spec_ and spec_.maps then overlay(spec_.maps[ctx.mapName]) end
+  -- ...AND A PROFILE MAY SAY A MAP IS OUT IN THE OPEN.  The generated table
+  -- reads map.json's map_type, and Emerald types its event islands (Faraway,
+  -- Birth, Navel Rock) INDOOR -- so Faraway Island's jungle was meshed as a
+  -- room: every tree on a dirt plinth a course over the path.
+  if profile.outdoor ~= nil then ctx.outdoor = profile.outdoor and true or false end
   -- METATILE PINS, primary then secondary then the map: most general to most
   -- specific, each overlaying the last, the same order as the profile itself.
   local pins = nil
@@ -3849,6 +3858,24 @@ function Gen3.forMap(map)
         if n and what then t[n] = what end
       end
       ctx.buildingArt = next(t) and t or nil
+    end
+    local dl = profile.doorless_art
+    if type(dl) == "table" then
+      local t = {}
+      for id, on in pairs(dl) do
+        local n = tonumber(id)
+        if n and on then t[n] = true end
+      end
+      ctx.doorlessArt = next(t) and t or nil
+    end
+    local ev = profile.elevation_art
+    if type(ev) == "table" then
+      local t = {}
+      for id, on in pairs(ev) do
+        local n = tonumber(id)
+        if n and on then t[n] = true end
+      end
+      ctx.elevationArt = next(t) and t or nil
     end
   end
 
@@ -4773,8 +4800,7 @@ function Gen3.forMap(map)
       local an = Gen3.analyse(map.tileset)
       local st = an and an.stats and an.stats[mm]
       if not (st and (st.solid or 0) >= 0.9) then return false end
-      local counts = ctx.metatileCounts()
-      return (counts[mm] or 0) <= RARE_BUILD
+      return ctx.metatileBespoke(mm)
     end
     -- THE BUILDING'S OWN ART, as this function reads it everywhere else:
     -- "a building's art is BESPOKE -- the Mart's metatiles appear once or
@@ -4786,8 +4812,7 @@ function Gen3.forMap(map)
     local function bespokeCell(cx, cy)
       local mm = ctx.metatileAt(cx, cy)
       if mm == nil then return false end
-      local counts = ctx.metatileCounts()
-      return (counts[mm] or 0) <= RARE_BUILD
+      return ctx.metatileBespoke(mm)
     end
     -- ...and drawn ABOVE THE PLAYER, filling its cell, and bespoke: the
     -- three-part test for "a row of this building you walk behind".
@@ -4801,7 +4826,7 @@ function Gen3.forMap(map)
       end
       return bespokeCell(cx, cy)
     end
-    local function runAbove(cx, doorY)
+    local function runAbove(cx, doorY, stopAtWood)
       local y = doorY - 1
       if y < 0 then return nil end
       local mass = y
@@ -4820,7 +4845,14 @@ function Gen3.forMap(map)
         if mass < 0 or not blockedCell(cx, mass) then return nil end
       end
       local top = mass
+      -- `stopAtWood` -- see "A FLANK COLUMN MAY HAVE CLIMBED INTO THE WOOD"
+      -- in `take` below.  Off by default, so every existing caller gets the
+      -- walk it always got.
       while top - 1 >= 0 and blockedCell(cx, top - 1) and (y - (top - 1)) < 8 do
+        if stopAtWood and ctx.outdoor and foliageCell(cx, top - 1)
+           and not overheadBespoke(cx, top - 1) then
+          break
+        end
         top = top - 1
       end
       -- ...AND A WALK-BEHIND ROW IN THE MIDDLE OF A BUILDING IS STILL THE
@@ -4915,6 +4947,45 @@ function Gen3.forMap(map)
       return metaCounts
     end
 
+    -- ...AND A TILE THAT TILES ONLY INSIDE ONE BUILDING IS STILL BESPOKE.
+    --
+    -- MOTIVATED BY LAVENDER TOWN'S POKEMON TOWER, (15..21, 0..6): its window
+    -- band 723 is laid three wide on three storeys -- nine copies, over the
+    -- RARE_BUILD four -- so the trim read the tower's whole upper body as
+    -- landscape and kept one row of it: a two-course box under a tower
+    -- painted flat.  Rock and trees tile across the map; a building's
+    -- repeated band never leaves the building.  Every copy inside one
+    -- building-sized box (twelve cells either way) is the building's own.
+    local metaBox = nil
+    function ctx.metatileClustered(m)
+      if m == nil then return false end
+      if not metaBox then
+        metaBox = {}
+        for cy = 0, height - 1 do
+          for cx = 0, width - 1 do
+            local mm = ctx.metatileAt(cx, cy)
+            if mm then
+              local b = metaBox[mm]
+              if not b then metaBox[mm] = { cx, cy, cx, cy }
+              else
+                if cx < b[1] then b[1] = cx end
+                if cy < b[2] then b[2] = cy end
+                if cx > b[3] then b[3] = cx end
+                if cy > b[4] then b[4] = cy end
+              end
+            end
+          end
+        end
+      end
+      local b = metaBox[m]
+      return b ~= nil and (b[3] - b[1]) < 12 and (b[4] - b[2]) < 12
+    end
+    function ctx.metatileBespoke(m)
+      if m == nil then return false end
+      local counts = ctx.metatileCounts()
+      return (counts[m] or 0) <= RARE_BUILD or ctx.metatileClustered(m)
+    end
+
     -- (`RARE_BUILD` used to be declared here.  It moved above `runAbove`,
     -- which now needs it -- see A DOORWAY YOU WALK INTO IS STILL A DOORWAY
     -- IN A BUILDING.  Same value, same readers.)
@@ -4958,7 +5029,25 @@ function Gen3.forMap(map)
         warps = rec and rec.warps or nil
         if not warps and type(map.def) == "table" then warps = map.def.warps end
       end
-      if type(warps) ~= "table" then return built end
+      -- a map with no warps can still draw a building whose door is on the
+      -- next map (the doorless passes at the end); it just has no doors
+      if type(warps) ~= "table" then
+        if not (ctx.doorlessArt or ctx.elevationArt) then return built end
+        warps = {}
+      end
+      -- A CAVE MOUTH IS NOT A FRONT DOOR.  Rock Tunnel's south entrance on
+      -- Route 10 opens into the rock above it, and founded as a building that
+      -- rock -- 101 cells of it -- stood as one block 144px tall over the
+      -- river, walling the route off from the camera.  A warp into a map the
+      -- cartridge types as a cave leads into the landscape, not a house.
+      do
+        local kept = {}
+        for _, wp in ipairs(warps) do
+          local dest = maps and maps.maps and maps.maps[tostring(wp.destMap)]
+          if not (dest and dest.kind == "cave") then kept[#kept + 1] = wp end
+        end
+        warps = kept
+      end
       -- WHERE THE ROOF IS, THE BUILDING IS.
       --
       -- `runAbove` walks blocked cells, and outdoors that walk does not stop
@@ -5093,6 +5182,16 @@ function Gen3.forMap(map)
         end
         return nil
       end
+      -- WHICH WARPS ARE DOORS.  A warp with blocked mass above it is a door
+      -- in a wall; a warp with open ground above it is a place the map hands
+      -- you to another map -- the Safari Zone's area transitions, a route
+      -- seam, a cave floor's connecting hole.  `runAbove` is already exactly
+      -- that question and every other rule in this function asks it.
+      local doorWarp = {}
+      for _, wp2 in ipairs(warps) do
+        local x2, y2 = tonumber(wp2.x), tonumber(wp2.y)
+        if x2 and y2 and runAbove(x2, y2) then doorWarp[y2 * 8192 + x2] = true end
+      end
       for _, wp in ipairs(warps) do
         local wx, wy = tonumber(wp.x), tonumber(wp.y)
         if wx and wy then
@@ -5151,7 +5250,54 @@ function Gen3.forMap(map)
               end
               return top
             end
+            -- A COLUMN ANOTHER DOOR STANDS UNDER IS ANOTHER BUILDING'S.
+            --
+            -- MOTIVATED BY CERULEAN CITY'S POKEMON CENTRE, warp (22,19).
+            -- Neither it nor ROUTE 10's, warp (13,20), is founded at all: the
+            -- flank walk from the building BESIDE it gets there first.
+            --
+            -- MEASURED, CeruleanCity: House3's door is (15,17) and its walk
+            -- ran out to column 23 -- eleven columns -- because the Mart and
+            -- the Centre stand shoulder to shoulder with rooflines within a
+            -- row of each other.  Rows 15..17 of the Centre were claimed as
+            -- House3's, and when the Centre's own warp came up the guard
+            -- above refused it -- "not built.cell[t0 * 8192 + wx]", the top
+            -- of its column is inside a building that exists -- so the Centre
+            -- founded NOTHING and its shopfront row 18 fell through to the
+            -- role table as `cliff`.  Route 10 is the same picture with the
+            -- ROCK TUNNEL mouth doing the swallowing.
+            --
+            -- A WARP IS THE CARTRIDGE'S OWN STATEMENT THAT A BUILDING IS
+            -- HERE -- the sentence this whole function is built on, "a wall
+            -- is a wall because there is a door in it".  The walk was reading
+            -- it in one direction only: as licence to claim, never as a
+            -- boundary against claiming.
+            --
+            -- Three bounds, each measured:
+            --   * DOORS only, not every warp.  Sweeping all of them costs the
+            --     Safari Zone 63 cells across its three maps, whose warps are
+            --     area transitions on open ground -- `doorWarp` above.
+            --   * BELOW the door row only, so the Route 110 gate houses keep
+            --     their TWO front doors, (15,16)+(18,16) and (16,88)+(19,88),
+            --     the only twins in Hoenn.  They sit on the SAME row and are
+            --     what the `twin` guard above exists for.
+            --   * WITHIN ONE COLUMN.  MEASURED against two: at two, ONE
+            --     ISLAND's Pokemon Centre loses a column to its neighbour's
+            --     door four rows below, and ROUTE 10 loses the Rock Tunnel
+            --     mouth entirely instead of keeping both it and the Centre.
+            --     At one, Hoenn moves by two cells on a cave mouth and Kanto
+            --     founds two Pokemon Centres that were never built at all.
+            local function otherDoorUnder(cx)
+              if cx == wx or not ctx.outdoor then return false end
+              for y2 = wy + 1, math.min(height - 1, wy + 4) do
+                for dx2 = -1, 1 do
+                  if doorWarp[y2 * 8192 + cx + dx2] then return true end
+                end
+              end
+              return false
+            end
             local function take(cx)
+              if otherDoorUnder(cx) then return false end
               local aTop = artColumn(cx)
               if aTop then
                 for y = aTop, wy - 1 do
@@ -5172,7 +5318,56 @@ function Gen3.forMap(map)
                 if not r or math.abs(r - t0r) > 1 then return false end
                 t = r
               elseif math.abs(t - t0) > 1 then
-                return false
+                -- A FLANK COLUMN MAY HAVE CLIMBED INTO THE WOOD.
+                --
+                -- MOTIVATED BY PETALBURG CITY'S POKEMON MART, door (25,12),
+                -- footprint (24..27, 10..12).  REPORTED from play: "the marts
+                -- right side is sank probable due to the trees being right
+                -- next to it and some voxel rule we have" -- and the report
+                -- is right about the cause.
+                --
+                -- This test admits a flank column when its blocked run tops
+                -- out within a row of the door column's, and `runAbove`
+                -- climbs BLOCKED cells: a tree is blocked, so a column with
+                -- forest drawn hard against the back of the shop keeps
+                -- climbing out of the building and into the wood.  MEASURED:
+                -- the Mart's door column tops out at row 10, its own roof;
+                -- column 26, which has the trees at (26, 4..8) -- metatiles
+                -- 468 and 476, laid 66 and 49 times on this map -- directly
+                -- above it, tops out at row 4.  |4 - 10| > 1 refused it, the
+                -- walk stopped, and column 27 was never asked: HALF THE SHOP
+                -- left outside the footprint.  It fell through to the
+                -- generated role table as `cliff`, `capGen3Rock` gave those
+                -- columns "the drop they separate", and the right half of the
+                -- Mart sank into the ground with its shopfront art lying on
+                -- top of the rock.
+                --
+                -- This file already says the sentence twice -- the roofline
+                -- levelling refuses to fill a column through a leafy row, and
+                -- the flank walk refuses an all-foliage column, both because
+                -- "foliage is a hull, never a storey".  `runAbove` was the
+                -- one reader that disagreed.
+                --
+                -- ASKED ONLY AS A SECOND CHANCE, on a column this test has
+                -- ALREADY REFUSED, and that is the whole safety of it: it can
+                -- admit a column, never drop one, so no building in Hoenn can
+                -- lose a cell to it and the door column's `t0` -- the datum
+                -- every flank is measured against -- is never touched.
+                -- MEASURED, the alternatives are worse in both directions: a
+                -- stop applied to every walk moves MtPyre_Exterior's shrine
+                -- gate from 16 cells to 4, because its door column has the
+                -- two shrine trees drawn over it and the datum moved with it;
+                -- hoisting the art trim above this comparison instead moves
+                -- 54 maps and costs RustboroCity 92 claimed cells.
+                --
+                -- `foliageCell` already stands down where `building_art` has
+                -- claimed the art (Fortree's bamboo end walls), and a ROOF the
+                -- player walks behind is admitted by `overheadBespoke` -- the
+                -- test Viridian City's GREEN ROOFS are rescued by -- so a roof
+                -- painted the colour of a tree still stops nothing.
+                local t2, b2 = runAbove(cx, wy, true)
+                if not (t2 and math.abs(t2 - t0) <= 1) then return false end
+                t, b, rawTop = t2, b2, t2
               end
               -- A BUILDING STOPS WHERE ITS OWN ART STOPS.
               --
@@ -5223,7 +5418,7 @@ function Gen3.forMap(map)
                   if mm and ctx.buildingArt and ctx.buildingArt[mm] then
                     break
                   end
-                  if mm and (counts[mm] or 0) > RARE_BUILD then t = t + 1
+                  if mm and not ctx.metatileBespoke(mm) then t = t + 1
                   else break end
                 end
               end
@@ -5505,6 +5700,7 @@ function Gen3.forMap(map)
               -- does.
               local function grab(cx)
                 if cx < 0 or cx >= width then return false end
+                if otherDoorUnder(cx) then return false end
                 local t, b = runAbove(cx, wy)
                 if not t then return false end
                 for cy2 = t, b do
@@ -5548,8 +5744,35 @@ function Gen3.forMap(map)
               -- `grab` asks a new one, and where the answer is yes it is
               -- deepened to its own run.  Strictly weaker than admitting a
               -- new column, and it can only ever add cells.
+              -- ...AND THE WOOD BEHIND A ROOF MUST NOT POISON THE TEST.
+              --
+              -- MOTIVATED BY THREE ISLAND'S HOUSE, door (3,31), footprint
+              -- (2..6, 29..31), and the same shape on FOUR ISLAND, LAVENDER
+              -- TOWN, CERULEAN CITY and SEVEN ISLAND'S SEVAULT CANYON.
+              --
+              -- This loop is the apex rule: a roof's ridge row is drawn on
+              -- the BOTTOM layer, so `roofAt` refuses it and the walk stops
+              -- under it, and what admits it instead is that LANDSCAPE TILES
+              -- and a roof does not -- every row of the run above must be
+              -- bespoke.  `runAbove` climbs BLOCKED cells and a tree is
+              -- blocked, so on a house with forest drawn hard against its
+              -- back the run does not stop at the ridge: it carries on into
+              -- the wood, the wood's metatiles are laid in the tens, and the
+              -- rareness test fails for the WHOLE run -- refusing the one
+              -- genuine apex row along with the trees.
+              --
+              -- MEASURED, ThreeIsland: the house's ridge row 28 is metatiles
+              -- 796, 797, 798, 798, 799, each laid once; the run above it
+              -- runs to row 23 through canopy.  Five cells of roof came back
+              -- `cliff`, were sized by `capGen3Rock` as "the drop they
+              -- separate", and sat above the house as a rock ledge.
+              --
+              -- The stop is the one `take` already uses on a refused flank
+              -- (see "A FLANK COLUMN MAY HAVE CLIMBED INTO THE WOOD"), and it
+              -- can only ever ADD rows here: the rareness test still has to
+              -- pass on everything it admits.
               for _, e in ipairs(taken) do
-                local t2, b2 = runAbove(e.cx, wy)
+                local t2, b2 = runAbove(e.cx, wy, true)
                 if t2 and e.top and t2 < e.top then
                   local rare = true
                   for cy2 = t2, b2 do
@@ -5875,6 +6098,48 @@ function Gen3.forMap(map)
               end
               cells = keep
             end
+            -- ...AND A BUILDING THAT GOES ON ABOVE ITS AWNING IS STILL THAT
+            -- BUILDING.  Lavender's Pokemon Tower states a roof only on the
+            -- awning over its door (825, row 5); the five storeys above it
+            -- are blocked, solid, and the tower's own art (Gen3's
+            -- `metatileBespoke`), and the footprint stopped at the awning: a
+            -- one-row building under a tower painted flat.  Each column of
+            -- the finished footprint climbs on through cells that are
+            -- building -- never foliage, never another footprint -- and the
+            -- climb only counts when it is two rows or more.
+            if #cells > 0 and ctx.outdoor then
+              local an = Gen3.analyse(map.tileset)
+              local colTop, inSet = {}, {}
+              for _, c in ipairs(cells) do
+                inSet[c[2] * 8192 + c[1]] = true
+                if colTop[c[1]] == nil or c[2] < colTop[c[1]] then colTop[c[1]] = c[2] end
+              end
+              local grown = {}
+              local function buildingArt(cx, y)
+                local mm = ctx.metatileAt(cx, y)
+                local st = mm and an and an.stats and an.stats[mm]
+                return blockedCell(cx, y) and st and (st.solid or 0) >= 0.9
+                       and ctx.metatileBespoke(mm) and not foliageCell(cx, y)
+                       and built.cell[y * 8192 + cx] == nil
+              end
+              for cx, top in pairs(colTop) do
+                local y = top - 1
+                local add = {}
+                while y >= 0 and #add < 8 and buildingArt(cx, y) do
+                  add[#add + 1] = { cx, y }
+                  y = y - 1
+                end
+                if #add >= 2 then
+                  for _, c in ipairs(add) do grown[#grown + 1] = c end
+                end
+              end
+              for _, c in ipairs(grown) do
+                if not inSet[c[2] * 8192 + c[1]] then
+                  cells[#cells + 1] = c
+                  inSet[c[2] * 8192 + c[1]] = true
+                end
+              end
+            end
             if #cells > 0 then
               -- HOW MANY ROWS OF THIS BUILDING ARE DRAWN ABOVE THE PLAYER.
               --
@@ -6093,6 +6358,213 @@ function Gen3.forMap(map)
                                  overheadRows = 0, roofed = true }
             end
           end
+        end
+      end
+    end
+    -- A DOOR ON ANY FACE OF ART THE PROFILE NAMES AS A BUILDING.
+    --
+    -- Everything above finds a building NORTH of its door, which is how a
+    -- house is drawn.  A route gate is entered on whichever face the road
+    -- meets: Saffron's south gate from the north, its east and west gates
+    -- from the side.  Where the profile's `building_art` names the cells
+    -- beside such a door, the connected mass of them is the building.  No
+    -- art test, no guess: only ids a map's profile has written down.
+    if ctx.buildingArt then
+      for _, wp in ipairs(warps) do
+        local wx, wy = tonumber(wp.x), tonumber(wp.y)
+        if wx and wy and built.cell[wy * 8192 + wx] == nil then
+          local function named(x, y)
+            if x < 0 or y < 0 or x >= width or y >= height then return false end
+            if built.cell[y * 8192 + x] ~= nil then return false end
+            local mm = ctx.metatileAt(x, y)
+            return mm ~= nil and ctx.buildingArt[mm] ~= nil
+          end
+          local seed = nil
+          for _, d in ipairs({ { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }) do
+            if not seed and named(wx + d[1], wy + d[2]) then seed = { wx + d[1], wy + d[2] } end
+          end
+          if seed then
+            local cells, seen, queue, head = {}, { [seed[2] * 8192 + seed[1]] = true }, { seed }, 1
+            while head <= #queue and #queue <= 160 do
+              local c = queue[head]; head = head + 1
+              cells[#cells + 1] = c
+              for _, d in ipairs({ { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }) do
+                local nx, ny = c[1] + d[1], c[2] + d[2]
+                local k = ny * 8192 + nx
+                if not seen[k] and named(nx, ny) then
+                  seen[k] = true
+                  queue[#queue + 1] = { nx, ny }
+                end
+              end
+            end
+            if #cells >= 4 then
+              -- the stated door is the bottom-middle cell, the convention
+              -- the doorless pass above uses: its {0,1} is the street a
+              -- house stands on, which is what every reader of `door` wants
+              local x0, x1, yb = 1e9, -1e9, -1
+              for _, c in ipairs(cells) do
+                if c[2] > yb then yb = c[2] end
+                if c[1] < x0 then x0 = c[1] end
+                if c[1] > x1 then x1 = c[1] end
+              end
+              local id = #built.list + 1
+              for _, c in ipairs(cells) do built.cell[c[2] * 8192 + c[1]] = id end
+              built.list[id] = { cells = cells, door = { x0 + math.floor((x1 - x0) / 2), yb },
+                                 warp = { wx, wy },
+                                 overheadRows = 0, roofed = true }
+            end
+          end
+        end
+      end
+    end
+    local function foundDoorless(art, minRows, elevation)
+      -- ...AND A FRONT-VIEW MASS NEEDS NO DOOR AT ALL.  Every connected
+      -- run of `elevation` art no building has claimed is a building of its
+      -- own, stood up whole (see Structures' stand-up rule).
+      for cy = 0, height - 1 do
+        for cx = 0, width - 1 do
+          local k0 = cy * 8192 + cx
+          local m0 = ctx.metatileAt(cx, cy)
+          if built.cell[k0] == nil and m0 and art[m0]
+             and blockedCell(cx, cy) then
+            local cells, queue, head, seen = {}, { { cx, cy } }, 1, { [k0] = true }
+            while head <= #queue and #queue <= 200 do
+              local c = queue[head]; head = head + 1
+              cells[#cells + 1] = c
+              for _, d in ipairs({ { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }) do
+                local nx, ny = c[1] + d[1], c[2] + d[2]
+                local k = ny * 8192 + nx
+                local mm = (nx >= 0 and ny >= 0 and nx < width and ny < height) and ctx.metatileAt(nx, ny)
+                if not seen[k] and mm and art[mm]
+                   and built.cell[k] == nil and blockedCell(nx, ny) then
+                  seen[k] = true
+                  queue[#queue + 1] = { nx, ny }
+                end
+              end
+            end
+            local yt, ybb = 1e9, -1
+            for _, c in ipairs(cells) do if c[2] < yt then yt = c[2] end; if c[2] > ybb then ybb = c[2] end end
+            if #cells >= 4 and ybb - yt + 1 >= minRows then
+              local x0, x1, yb = 1e9, -1e9, -1
+              for _, c in ipairs(cells) do
+                if c[2] > yb then yb = c[2] end
+                if c[1] < x0 then x0 = c[1] end
+                if c[1] > x1 then x1 = c[1] end
+              end
+              local id = #built.list + 1
+              for _, c in ipairs(cells) do built.cell[c[2] * 8192 + c[1]] = id end
+              built.list[id] = { cells = cells, door = { x0 + math.floor((x1 - x0) / 2), yb },
+                                 overheadRows = 0, roofed = not elevation, elevation = elevation }
+            end
+          end
+        end
+      end
+    end
+    -- ...AND EVERY DOOR A BUILDING HOLDS WIDENS IT, NOT ONLY THE FIRST.
+    --
+    -- MOTIVATED BY LAVENDER TOWN'S SOUTH HOUSES, doors (5,16) and (10,16):
+    -- the first door's widening walked five cells each way and swallowed
+    -- the second house's door, so the second warp found its door already
+    -- claimed and grew nothing -- and the second house's east two columns
+    -- were never a building at all.  They stood as low rock: a sunken step
+    -- in the roof.  From every warp whose door is inside a building, walk
+    -- each of the building's rows outward through blocked cells wearing art
+    -- the building already wears.
+    if ctx.outdoor then
+      for _, wp in ipairs(warps) do
+        local wx, wy = tonumber(wp.x), tonumber(wp.y)
+        local id = wx and wy and built.cell[wy * 8192 + wx]
+        if not id and wx and wy then
+          for dy = 1, 2 do id = id or built.cell[(wy - dy) * 8192 + wx] end
+        end
+        local bl = id and built.list[id]
+        if bl then
+          local art, rows = {}, {}
+          for _, c in ipairs(bl.cells) do
+            local m = ctx.metatileAt(c[1], c[2])
+            if m then art[m] = true end
+            rows[c[2]] = true
+          end
+          for y in pairs(rows) do
+            for _, dir in ipairs({ -1, 1 }) do
+              local x = wx
+              for _ = 1, 6 do
+                x = x + dir
+                if x < 0 or x >= width then break end
+                local k = y * 8192 + x
+                local owner = built.cell[k]
+                if owner and owner ~= id then break end
+                if not owner then
+                  local m = ctx.metatileAt(x, y)
+                  if not (m and art[m] and blockedCell(x, y)) then break end
+                  built.cell[k] = id
+                  bl.cells[#bl.cells + 1] = { x, y }
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    if ctx.elevationArt then foundDoorless(ctx.elevationArt, 6, true) end
+    -- ...AND A BUILDING WHOSE DOOR IS ON THE NEXT MAP.  The Sevii harbours
+    -- stand on the sea map below their island, and their door warp is on
+    -- the island: the map that draws them has no warp at all, so nothing
+    -- founded them and each came out as a stepped tower of rock.
+    if ctx.doorlessArt then
+      -- ...AND A DOORED BUILDING GIVES BACK THE CELLS IT GREW INTO.  Its
+      -- widening walks along matching rows, and Celadon's Pokemon Centre
+      -- took three columns of the apartment block beside it.  Art a map
+      -- names as doorless belongs to no doored building -- unless that
+      -- building's own door is drawn in it (the Condominiums').
+      for id, bl in ipairs(built.list) do
+        if bl.door and not bl.elevation then
+          local dx, dy = bl.door[1], bl.door[2]
+          local above = ctx.metatileAt(dx, dy - 1)
+          local own = ctx.metatileAt(dx, dy)
+          local function ownArt(m)
+            return m ~= nil and (ctx.doorlessArt[m] or (ctx.elevationArt and ctx.elevationArt[m]))
+          end
+          if not (ownArt(above) or ownArt(own)) then
+            local keep = {}
+            for _, c in ipairs(bl.cells) do
+              local m = ctx.metatileAt(c[1], c[2])
+              if m and ctx.doorlessArt[m] then
+                built.cell[c[2] * 8192 + c[1]] = nil
+              else
+                keep[#keep + 1] = c
+              end
+            end
+            bl.cells = keep
+          end
+        end
+      end
+      foundDoorless(ctx.doorlessArt, 1, false)
+    end
+    -- ...AND WHERE THE PROFILE SAYS SO, A BUILDING IS ITS ART AND NOTHING
+    -- ELSE.  The north-of-door walk climbs every blocked row above a door,
+    -- and Verdanturf's Battle Tent stands against the cliff with a column
+    -- of trees beside it: the walk took both, 48 cells for a 25-cell tent,
+    -- and the tent stood as a cliff-high slab.  `art_footprint` is opt-in:
+    -- elsewhere a profile may name only part of a building on purpose.
+    if ctx.profile and ctx.profile.art_footprint and ctx.buildingArt then
+      for _, bl in ipairs(built.list) do
+        local keep, named = {}, 0
+        for _, c in ipairs(bl.cells) do
+          local m = ctx.metatileAt(c[1], c[2])
+          if m and ctx.buildingArt[m] then
+            named = named + 1
+            keep[#keep + 1] = c
+          end
+        end
+        if named >= 4 and named < #bl.cells then
+          for _, c in ipairs(bl.cells) do
+            local m = ctx.metatileAt(c[1], c[2])
+            if not (m and ctx.buildingArt[m]) then
+              built.cell[c[2] * 8192 + c[1]] = nil
+            end
+          end
+          bl.cells = keep
         end
       end
     end

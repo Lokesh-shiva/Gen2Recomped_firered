@@ -663,6 +663,7 @@ local function gen2RoofFor(map, data)
     slot = roofs.slot or 10,
     count = roofs.count or 9,
     palIndex = roofs.palIndex or 6,
+    variants = tileset.tileVariants,
     key = "#roof:" .. tostring(id) .. "." .. tostring(group),
   }
 end
@@ -753,6 +754,17 @@ local function getGen2Atlas(key, imagePath, perRow, palMap, palColors,
               end
             end
           end
+        end
+      end
+    end
+    if roof and roof.variants then
+      for tile,variant in pairs(roof.variants)do
+        if variant.base>=roof.slot and variant.base<roof.slot+roof.count then
+          local sx,sy=variant.base%perRow*8,math.floor(variant.base/perRow)*8
+          local dx,dy=tile%perRow*8,math.floor(tile/perRow)*8
+          for y=0,7 do for x=0,7 do
+            out:setPixel(dx+x,dy+y,out:getPixel(sx+(variant.flipX and 7-x or x),sy+(variant.flipY and 7-y or y)))
+          end end
         end
       end
     end
@@ -1252,10 +1264,47 @@ function TileRenderer.releaseGen3Sheets()
   gen3Used, gen3Clock = {}, 0
 end
 
+-- The stand-in palette's colour 0 -- `Gen4Tileset.palettes` writes the same
+-- { 24, 26, 34 } as the backdrop every class colour is drawn against, and
+-- naming it here rather than importing the extractor keeps a render file off
+-- an import file.
+local GEN4_BACKDROP = { 24 / 255, 26 / 255, 34 / 255 }
+
 function TileRenderer.new(map, data)
   local self = setmetatable({}, TileRenderer)
   self.map = map
   self.data = data
+  -- SINNOH DRAWS ITSELF, when the cache has its terrain in it.
+  --
+  -- Gen 4 has no tileset -- `TILESET_GEN4_STANDIN` exists only because
+  -- MapLoader will not build a map without one -- so a Platinum map that gets
+  -- this far has been drawing one flat colour per terrain class. With the
+  -- terrain stage in the cache the map's own chunk meshes are here instead,
+  -- and `drawWindow` hands over to them.
+  --
+  -- Nil for every other generation, and nil for a Platinum cache imported
+  -- before that stage, which is what keeps this a branch rather than a fork:
+  -- everything below is untouched and still runs when the ground is absent.
+  local okGround, ground = pcall(function()
+    return require("src.render.Gen4Ground").forMap(map, data)
+  end)
+  -- SAY WHY, when it does not build.
+  --
+  -- This `pcall` swallowed its error, and the fallback below is a flat colour
+  -- per terrain class -- so a Gen 4 map whose ground raised looked like a Gen 4
+  -- map with no 3D rather than like a crash, which is the same silent shape
+  -- that hid `module 'src.core.Assets' not found` for a whole session.
+  if not okGround then
+    Logger.warn("gen4 ground: forMap raised for %s (%s) -- the map falls back "
+                .. "to flat terrain colours", tostring(map and map.id),
+                tostring(ground))
+  end
+  self.gen4Ground = okGround and ground or nil
+  -- THE GEN 1/2 TILT STANDS DOWN ON A SINNOH MAP, and comes back on every
+  -- other one.  Written here rather than read from the map because this is the
+  -- one line in the engine that already knows which of the two world cameras
+  -- is about to own the frame.
+  require("src.render.Tilt").suppressed = (self.gen4Ground ~= nil)
   -- A GEN 3 TILESET HAS NO SHEET ON DISK, and that is not a gap: its art is
   -- two half-banks of 8x8 tiles that only become a picture once the primary
   -- and secondary tilesets are composited together, which happens below in
@@ -1728,6 +1777,9 @@ end
 
 local WINDOW_MARGIN = 8 -- tiles of slack kept around the view between refills
 
+-- one window report per map (see the report in ensureWindow)
+local gen3WinSaid = {}
+
 -- The window bounds, written in place.  A fresh table per fill is one
 -- allocation every time the camera leaves the margin, which on a Gen 3 map
 -- used to be several times a second.
@@ -1816,11 +1868,19 @@ function TileRenderer:ensureWindow(camX, camY, vw, vh)
     local cx1, cy1 = math.ceil(tx1 / n), math.ceil(ty1 / n)
     local slots = self.gen3.animSlots
     local moving = false
+    -- COUNTED, because a cell with no quad draws NOTHING and says nothing.
+    -- A metatile id past the end of the baked sheet is skipped here in
+    -- silence, so a room made of such cells is simply black -- no error, no
+    -- warning, and nothing on screen to tell it from a camera that is
+    -- looking the wrong way.  See the report below.
+    local cells, drew = 0, 0
     for cy = cy0, cy1 - 1 do
       for cx = cx0, cx1 - 1 do
+        cells = cells + 1
         local id = map:blockAt(cx, cy)
         local quad = id and self:gen3QuadFor(id)
         if quad then
+          drew = drew + 1
           local wx, wy = cx * 16, cy * 16
           self.winBatch:add(quad, wx, wy)
           self.winBatchTop:add(quad, wx, wy)
@@ -1830,6 +1890,35 @@ function TileRenderer:ensureWindow(camX, camY, vw, vh)
     end
     -- whether the NEXT animation tick has anything to redraw
     self.winAnimated = moving
+    -- WHAT THE WINDOW ACTUALLY DREW.
+    --
+    -- Reported from play, from somebody else's machine: "petalburg gym in
+    -- emerald still showing as a black background when i warp through the
+    -- rooms".  Every static check of that map passes -- the blocks, the
+    -- tileset pair, the id space, the warps, every room's window fill
+    -- (tools/gen3_map_render_check.lua) -- so whatever is wrong is something
+    -- a live session does, and a bug report cannot carry it.
+    --
+    -- This is the line that can.  Once per map, and EVERY time a fill draws
+    -- nothing at all, which is what a black room is: the map, the camera,
+    -- the window the fill settled on, and how many of its cells found a
+    -- picture.  Those four together separate the three things a black screen
+    -- can be -- a camera off the map (an empty window), cells with no quad
+    -- (cells > 0, drew == 0), or a fill that never ran (no line at all).
+    --
+    -- Probe rather than Logger on purpose: Logger buffers 64 lines and
+    -- truncates on boot, so a handful of lines produced while walking around
+    -- never reaches the disk (src/core/Probe.lua says the rest).
+    local mapId = map and map.id
+    if drew == 0 or not gen3WinSaid[mapId or "?"] then
+      gen3WinSaid[mapId or "?"] = true
+      Probe.say("gen3window",
+                "%s cam=(%d,%d) view=%dx%d win=%d,%d..%d,%d cells=%d "
+                .. "drew=%d body=%dx%d slots=%s",
+                tostring(mapId), math.floor(camX), math.floor(camY),
+                math.floor(vw), math.floor(vh), tx0, ty0, tx1, ty1,
+                cells, drew, W, H, tostring(self.gen3.slots))
+    end
     self:setWin(tx0, ty0, tx1, ty1)
     return
   end
@@ -1885,6 +1974,48 @@ end
 
 -- draw the static tile window, then its animated overdraw, at the camera offset
 function TileRenderer:drawWindow(camX, camY, vw, vh)
+  -- THE STAND-IN STAYS UNDERNEATH THE GEN 4 GROUND, and returning early
+  -- instead of this is what put a white screen round one baked chunk.
+  --
+  -- A chunk bakes at most one per frame, so on a map entry only one of the two
+  -- to four on screen is ready; returning as soon as ANY of them drew left the
+  -- rest with nothing at all behind them. The tile window costs one batch draw
+  -- and it is already built, so the honest arrangement is to draw it first and
+  -- lay the real ground over whatever is ready -- the stand-in is then a floor
+  -- under the picture rather than an alternative to it, and the screen is
+  -- never blank.
+  -- ...AND ONCE SINNOH DRAWS ITSELF, THE STAND-IN IS NOT A FLOOR ANY MORE.
+  --
+  -- Reported from play: "i still see it surrounded by checkerboard instead of
+  -- what the rom uses as a border".  The checkerboard IS the stand-in.
+  -- `Gen4Tileset.metatiles` lays every cell down as a two-by-two checker of a
+  -- class colour and a darkened copy of it, on purpose, so that a map drawn in
+  -- flat colours still has a visible 16-pixel grid -- and behaviour 0, which is
+  -- ordinary ground, is 940 of Twinleaf Town's 1,024 cells.  With the mesh
+  -- drawing the map, all that is left showing is the part the mesh does NOT
+  -- cover, which is the void around it, in green.
+  --
+  -- THE CARTRIDGE HAS NO BORDER BLOCK.  Gen 1-3 tile a border metatile outside
+  -- the map; Sinnoh's overworld is one seamless matrix and its interiors are
+  -- sealed rooms inside a 32x32 chunk, so what the DS shows beyond the
+  -- geometry is the backdrop and nothing else.  This is that: the viewport is
+  -- filled with the stand-in palette's own colour 0 -- the backdrop it was
+  -- always drawn against -- and the ground is laid over it.
+  --
+  -- The stand-in still runs when there is no ground (a cache imported before
+  -- the terrain stage), which is the case it was written for.  The reason it
+  -- used to draw underneath was that a chunk bakes over several frames and the
+  -- screen would otherwise be blank; a flat backdrop covers that just as well
+  -- and is what a map transition looks like on the cartridge anyway.
+  if self.gen4Ground then
+    local g = love.graphics
+    local r, gr, b, a = g.getColor()
+    g.setColor(GEN4_BACKDROP[1], GEN4_BACKDROP[2], GEN4_BACKDROP[3], 1)
+    g.rectangle("fill", 0, 0, vw or 0, vh or 0)
+    g.setColor(r, gr, b, a)
+    self.gen4Ground:draw(camX, camY, vw, vh)
+    return
+  end
   self:ensureWindow(camX, camY, vw, vh)
   if self.winBatch then
     love.graphics.draw(self.winBatch, -math.floor(camX), -math.floor(camY))
@@ -2000,6 +2131,20 @@ end
 -- cell's lower tile row to hide a sprite's feet in tall grass -- a per-cell
 -- exception -- where a Gen 3 top layer applies to every cell on the map.
 function TileRenderer:drawAbove(camX, camY, vw, vh)
+  -- SINNOH'S ROOFS GO HERE, for the same reason Hoenn's treetops do: this is
+  -- the pass that runs AFTER the sprites.  Routed through the renderer rather
+  -- than from the overworld so it is handed exactly the camera the ground was
+  -- drawn with -- the two pictures have to line up to the pixel, and the only
+  -- way to be sure of that is for one call site to give both their arguments.
+  if self.gen4Ground then
+    -- ...and a neighbour's canopy stands down with its ground, or it would
+    -- paint a second copy of the same treetops over the sprites.
+    if self.gen4Neighbour then
+      self.gen4Neighbour = false
+      return false
+    end
+    return self.gen4Ground:drawCanopy(camX, camY, vw, vh)
+  end
   if not self.gen3 then return false end
   self:ensureWindow(camX, camY, vw, vh)
   if self.winBatchTop then
@@ -2011,7 +2156,7 @@ end
 -- Does this map draw anything above the sprites?  Lets a caller skip the
 -- state changes around the call on the generations that do not.
 function TileRenderer:hasAboveLayer()
-  return self.gen3 ~= nil
+  return self.gen3 ~= nil or self.gen4Ground ~= nil
 end
 
 -- IS THIS MAP'S ART ALREADY IN COLOUR?
@@ -2029,6 +2174,32 @@ end
 -- border ring is served by :drawBorderFill for the current map too -- the
 -- only remaining difference is the trueColor mark extent.
 function TileRenderer:drawMapOnly(camX, camY, vw, vh)
+  -- A SINNOH NEIGHBOUR DRAWS NOTHING, AND THAT IS NOT A SHORTCUT.
+  --
+  -- `Gen4Ground:draw` picks its chunks from the SHARED 30x30 matrix, bounded
+  -- by the grid and not by the map's own extent -- so the current map's ground
+  -- already draws every visible chunk, whoever owns the cell.  A neighbour
+  -- recomputes the identical `left/top`, resolves the identical cell, and
+  -- paints the identical picture over the top.
+  --
+  -- Measured from a play log: SIX grounds (R201, T02, T01, L01, R202, R219)
+  -- all reported `left/top=(1653,13524) -> cell (3,26) -> land 5` in one
+  -- frame, and with the live pass each was a full-screen colour+depth target
+  -- -- about 36 MB a frame, five sixths of it overwritten by the next one.
+  --
+  -- WHICH ONE SHOULD WIN IS A REAL CHOICE, because a chunk is textured from
+  -- the ground's OWN `mapTextureArchiveID` and 71 distinct sets exist across
+  -- the 593 maps.  The current map is the principled answer: it is the area
+  -- the player is standing in, and the cartridge loads that area's texture set
+  -- and no other.  The old behaviour -- last neighbour drawn wins the whole
+  -- screen -- was arbitrary in a way this is not.
+  --
+  -- The flag is read by `drawAbove`, which is called for neighbours too and
+  -- must stand down for the same reason.
+  if self.gen4Ground then
+    self.gen4Neighbour = true
+    return
+  end
   if self.trueColor then self:markTrueColor(camX, camY, 0) end
   self:drawWindow(camX, camY, vw, vh)
 end

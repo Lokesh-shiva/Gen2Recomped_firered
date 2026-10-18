@@ -594,12 +594,25 @@ end
 -- and nothing else. Every gate ABOVE the call (scripted moves, trainer
 -- engagement, transitions, anything on the stack) still applies to the
 -- free walk, because the wrap sits below them all.
+-- (Rewrap: replaced by a later load in the same process, see lib/Rewrap.lua)
+local installSeams
+
 function FreeMove.install()
+  V.require("Rewrap").install({
+    { require("src.world.OverworldController"), "dramaticShapeFreeMoveHook", { "handleInput" } },
+  }, installSeams)
+end
+
+installSeams = function()
   local OverworldState = require("src.world.OverworldController")
   if OverworldState.dramaticShapeFreeMoveHook then return end
   local inner = OverworldState.handleInput
 
   function OverworldState:handleInput()
+    if self.map and self.map.def and self.map.def.generation==4 then
+      FreeMove.drop()
+      return inner(self)
+    end
     if not FirstPerson.driving() then
       if pos then
         -- stepping off the rung: back onto the grid, on the cell the

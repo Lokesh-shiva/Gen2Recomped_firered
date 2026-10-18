@@ -43,6 +43,12 @@ function Bag.capacity(data)
   if type(configured) == "number" and configured >= 1 then
     return math.floor(configured)
   end
+  local pockets=Bag.gen4Pockets(data) or Bag.gen3Pockets(data)
+  if pockets then
+    local total=0
+    for _,capacity in pairs(pockets) do if type(capacity)=='number' then total=total+capacity end end
+    if total>0 then return total end
+  end
   return DEFAULT_CAPACITY
 end
 
@@ -55,8 +61,24 @@ function Bag.gen3Pockets(data)
   return (type(pockets) == "table" and next(pockets) ~= nil) and pockets or nil
 end
 
+-- Platinum's eight pockets and native ordinary/TM stack limits.
+local GEN4_POCKET_CAP={ITEMS=165,MEDICINE=40,POKE_BALLS=15,TM_HM=100,
+ BERRIES=64,MAIL=12,BATTLE_ITEMS=30,KEY_ITEMS=50}
+function Bag.gen4Pockets(data)
+ data=data or require('src.core.Data')
+ local constants=data and data.constants
+ if constants and constants.gen==4 then
+  return constants.gen4Bag and constants.gen4Bag.pockets or GEN4_POCKET_CAP
+ end
+end
+function Bag.stackLimit(id,data)
+ data=data or require('src.core.Data')
+ if Bag.gen4Pockets(data) and pocketOf(id,data)~='TM_HM' then return 999 end
+ return 99
+end
+
 local function isBadge(id)
-  return id:find("BADGE", 1, true) ~= nil
+  return type(id) == "string" and id:find("BADGE", 1, true) ~= nil
 end
 
 -- exported so item lists that share save.inventory (e.g. the PC deposit
@@ -91,7 +113,12 @@ function Bag.order(save)
     for id in pairs(save.inventory) do
       if not isBadge(id) then table.insert(order, id) end
     end
-    table.sort(order)
+    table.sort(order,function(a,b)
+      if type(a)=='number' and type(b)=='number' then return a<b end
+      if type(a)=='number' then return true end
+      if type(b)=='number' then return false end
+      return tostring(a)<tostring(b)
+    end)
     save.bagOrder = order
   end
   -- drop stale ids, append unknown ones (defensive against direct
@@ -121,6 +148,18 @@ function Bag.add(save, id, qty, data)
   -- pocket's thirty
   data = data or require("src.core.Data")
   local inv = save.inventory
+  -- INSIDE THE BATTLE PYRAMID the bag is its own ten slots, no pockets
+  -- (AddPyramidBagItem; see Gen3BattlePyramid.syncBag)
+  if save.gen3PyramidBag then
+    local slots = 0
+    for _ in pairs(inv) do slots = slots + 1 end
+    if not inv[id] and slots >= 10 then return false end
+    if (inv[id] or 0) + (qty or 1) > 99 then return false end
+    local isNew = not inv[id]
+    inv[id] = (inv[id] or 0) + (qty or 1)
+    if isNew then table.insert(Bag.order(save), id) end
+    return true
+  end
   if not inv[id] and not isBadge(id) then
     -- EMERALD'S BAG IS FIVE POCKETS, and the sizes are the cartridge's:
     -- they fall out of the save layout, where each pocket starts where the
@@ -129,7 +168,12 @@ function Bag.add(save, id, qty, data)
     -- -- the twenty-first was refused with "you can't carry any more", with
     -- 186 slots of empty pockets behind it.
     local gen3 = Bag.gen3Pockets(data)
-    if gen3 then
+    local gen4=Bag.gen4Pockets(data)
+    if gen4 then
+      local pocket=pocketOf(id,data)
+      local cap=gen4[pocket] or gen4.ITEMS
+      if Bag.pocketSlots(save,pocket,data)>=cap then return false end
+    elseif gen3 then
       local pocket = pocketOf(id, data)
       local cap = gen3[pocket]
       if cap and Bag.pocketSlots(save, pocket, data) >= cap then
@@ -157,7 +201,7 @@ function Bag.add(save, id, qty, data)
       end
     end
   end
-  if not isBadge(id) and (inv[id] or 0) + (qty or 1) > 99 then
+  if not isBadge(id) and (inv[id] or 0) + (qty or 1) > Bag.stackLimit(id,data) then
     return false
   end
   local isNew = not inv[id]
@@ -217,11 +261,22 @@ end
 -- GSC held items (engine/items/pack.asm GiveItem / TryGiveItemToMon).  Give
 -- returns whatever the mon was already holding -- the ROM offers to swap and
 -- the old item goes straight back into the pack.
+-- A held item can change a Gen 4 form: Giratina is Origin Forme exactly while
+-- it holds the Griseous Orb (`Pokemon_SetGiratinaFormByHeldItem`, which the
+-- cartridge's party menu calls after every give and take).
+local function heldItemForm(mon, data)
+  if not (data and (data.constants or {}).gen == 4) then return end
+  pcall(function()
+    require("src.pokemon.Gen4Forms").giratinaByHeldItem(data, mon)
+  end)
+end
+
 function Bag.giveHeld(save, mon, id, data)
   local previous = mon.item
   mon.item = id
   Bag.remove(save, id, 1)
   if previous then Bag.add(save, previous, 1, data) end
+  heldItemForm(mon, data)
   return previous
 end
 
@@ -232,6 +287,7 @@ function Bag.takeHeld(save, mon, data)
   if not id then return nil end
   if not Bag.add(save, id, 1, data) then return nil, "full" end
   mon.item = nil
+  heldItemForm(mon, data)
   return id
 end
 

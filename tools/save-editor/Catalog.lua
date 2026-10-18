@@ -46,20 +46,54 @@ local function canShell()
   return true
 end
 
+-- Extracted Gen4 IDs are numeric; merged compatibility/mod entries may use
+-- names. Keep native numeric order without comparing unlike Lua types.
+function Catalog.keyLess(a,b)
+  local ta,tb=type(a),type(b)
+  if ta=='number' and tb=='number' then return a<b end
+  if ta=='number' then return true end
+  if tb=='number' then return false end
+  return tostring(a)<tostring(b)
+end
+
 local function sortedKeys(t)
   local keys = {}
   for k in pairs(t) do
     table.insert(keys, k)
   end
-  table.sort(keys)
+  table.sort(keys,Catalog.keyLess)
   return keys
 end
 
 function Catalog.build(data)
+  local species=sortedKeys(data.pokemon)
+  local moves=sortedKeys(data.moves)
+  if data.isGen4Cache or (data.constants or {}).gen==4 then
+    local selectable={}
+    for _,key in ipairs(species) do
+      local id=tonumber(key) or tonumber(tostring(key):match('^SPECIES_(%d+)$'))
+      -- Personal rows 0 and 494..507 are sentinels, eggs and alternate
+      -- stat records. Forms belong to their base species, not this picker.
+      if id~=0 and not (id and id>=494 and id<=507) then
+        selectable[#selectable+1]=key
+      end
+    end
+    species=selectable
+    local selectableMoves={}
+    for _,key in ipairs(moves) do
+      local id=tonumber(key) or tonumber(tostring(key):match('^MOVE_(%d+)$'))
+      -- Native MAX_MOVES is 468. The archive has three additional unnamed
+      -- internal records; named mod moves beyond the native range remain valid.
+      local entry=data.moves[key]
+      local internal=id and id>=468 and id<=470 and not (type(entry.name)=='string' and entry.name~='')
+      if id~=0 and not internal then selectableMoves[#selectableMoves+1]=key end
+    end
+    moves=selectableMoves
+  end
   return {
-    species = sortedKeys(data.pokemon),
+    species = species,
     items = sortedKeys(data.items),
-    moves = sortedKeys(data.moves),
+    moves = moves,
   }
 end
 
@@ -186,7 +220,6 @@ end
 -- ITEM_nnn (RomExtractorGen2); after a real ROM extract, data.items[id].name
 -- is the ROM ItemNames string and .key is POTION / TM_01 / etc.
 function Catalog.itemLabel(data, id)
-  if type(id) ~= "string" then return tostring(id) end
   local entry = data and data.items and data.items[id]
   if type(entry) == "table" then
     local name = entry.name
@@ -197,7 +230,7 @@ function Catalog.itemLabel(data, id)
       return entry.key
     end
   end
-  return id
+  return tostring(id or "?")
 end
 
 -- Friendly event flag label.  Storage stays EVENT_G2_%04d / FLAG_G3_%04X;
@@ -223,7 +256,7 @@ function Catalog.flagLabel(id, data)
     local label = okG and Gen3Names.flag(data, id) or nil
     if label then return label end
   end
-  return id
+  return tostring(id or "?")
 end
 
 -- WHAT A MAP IS CALLED IN THE GAME, for every list that shows a map id.
@@ -234,13 +267,16 @@ end
 -- which Gen3Names reads.  Gen 1 and Gen 2 map ids are already words
 -- (PALLET_TOWN), so they are their own label and fall straight through.
 function Catalog.mapLabel(data, id)
+  local def=data and data.maps and data.maps[id]
+  if def and type(def.label)=='string' and def.label~='' then return def.label end
+  if def and type(def.name)=='string' and def.name~='' then return def.name end
   if type(id) ~= "string" then return tostring(id) end
   if id:match("^MAP_G%d+_N%d+$") then
     local ok, Gen3Names = pcall(require, "Gen3Names")
     local label = ok and Gen3Names.map(data, id) or nil
     if label then return label end
   end
-  return id
+  return tostring(id or "?")
 end
 
 -- Every Hoenn flag this dataset can put a name to, sorted.
@@ -274,7 +310,6 @@ end
 -- Friendly species label.  Gen2 keys are SPECIES_nnn; after a ROM extract
 -- data.pokemon[id].name is the PokemonNames string (BULBASAUR, …).
 function Catalog.speciesLabel(data, id)
-  if type(id) ~= "string" then return tostring(id or "?") end
   local entry = data and data.pokemon and data.pokemon[id]
   if type(entry) == "table" then
     local name = entry.name
@@ -284,7 +319,14 @@ function Catalog.speciesLabel(data, id)
       return name
     end
   end
-  return id
+  return tostring(id or "?")
+end
+
+function Catalog.moveLabel(data, id)
+  if id==nil then return '-- --' end
+  local entry=data and data.moves and data.moves[id]
+  if type(entry)=='table' and type(entry.name)=='string' and entry.name~='' then return entry.name end
+  return tostring(id)
 end
 
 return Catalog

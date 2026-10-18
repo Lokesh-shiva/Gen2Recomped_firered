@@ -12,6 +12,14 @@ local BagMenu = {}
 local Bag = require("src.inventory.Bag")
 local Strings = require("src.core.Strings")
 
+-- The money line under the bag, with the cartridge's own sign -- Kanto's
+-- U+00A5 is the JAPANESE YEN KANJI in Platinum's font.  See
+-- GameVersion.moneySign.
+local function moneyLine(game)
+  local sign = require("src.core.GameVersion").moneySign()
+  return ("%s%d"):format(sign, (game.save or {}).money or 0)
+end
+
 -- Gen2's pack has four pages (engine/items/pack.asm): ITEM, BALL, KEY ITEM
 -- and TM/HM, switched with LEFT/RIGHT.  The pocket lives on the item record
 -- (ItemAttributes byte 5); a cache from before that was extracted -- and
@@ -165,10 +173,22 @@ BagMenu.refreshCount = refreshCount
 -- every other item the picker popped itself first and closePicker's identity
 -- check makes it a no-op (#252).
 local function useOn(game, battle, id, target, list, moveIndex, picker)
+  -- HGSS: the party screen's own msg_0300 line for the item (src/ui/Gen4PartyText.lua)
+  local PartyText = require("src.ui.Gen4PartyText")
+  local g4Before = (not battle and target) and PartyText.snapshot(game, target) or nil
   local result, payload, extra = ItemEffects.use(game.data, game.save, id, target,
                                                  battle, moveIndex, game.overworld)
+  if g4Before then
+    payload = PartyText.itemUseMessages(game, id, target, g4Before, result, payload, moveIndex)
+  end
   local function closePicker()
     if picker then picker:close() end
+  end
+  -- BLACK / WHITE's own field uses: the bike, repels, the Dowsing MCHN ...
+  -- (src/inventory/Gen5ItemUse.lua)
+  if type(result) == "string" and result:sub(1, 3) == "bw_" then
+    require("src.inventory.Gen5ItemUse").handle(game, list, id, result, payload, extra, showMessages)
+    return
   end
 
   -- field POKé FLUTE: play the tune, then the no-effect text
@@ -228,6 +248,82 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     return
   end
 
+  -- THE EXPLORER KIT: down to the Underground, and back up again.
+  --
+  -- Both of the cartridge's entry points do the same one thing --
+  -- UseExplorerKitFromMenu and UseExplorerKitInField each build a
+  -- MapChangeUndergroundContext and run FieldTask_MapChangeToUnderground -- so
+  -- there is one arm here and not two.
+  --
+  -- THE ORDER OF THESE TWO TESTS MATTERS. `canUse` refuses underground, on
+  -- purpose, because CanUseExplorerKit does: it reads the map label and the
+  -- Underground's is "Mystery Zone". So "am I down there already?" has to be
+  -- asked first, or climbing out would be answered with the refusal for being
+  -- down there.
+  if result == "explorer_kit" then
+    local Underground = require("src.world.Gen4Underground")
+    local ow = game.overworld
+    if Underground.isUnderground(ow) then
+      list:close()
+      local up, why = Underground.leave(game, ow)
+      -- A refusal here is not cosmetic: it means nothing recorded where the
+      -- player came down, and saying so beats a silent no-op in a place with
+      -- no other way out.
+      if not up then
+        require("src.core.Logger").warn(
+          "explorer kit: could not leave the Underground -- %s", tostring(why))
+      end
+      return
+    end
+    local can, why = Underground.canUse(game, ow)
+    if not can then
+      -- STAND-IN WORDING. The cartridge prints
+      -- CommonStrings_Text_CantDoThatRightNow from TEXT_BANK_COMMON_STRINGS
+      -- with the player's name substituted (BagContext_FormatErrorMessage, the
+      -- `default` arm). That bank is not in this dataset -- searched, not
+      -- assumed -- so this is a paraphrase of the string's own name and should
+      -- be replaced by the real line the moment the bank is joined. The reason
+      -- goes to the log rather than the screen, because the cartridge gives the
+      -- player one generic refusal for all eight causes.
+      require("src.core.Logger").info("explorer kit refused: %s", tostring(why))
+      showMessages(game, { Strings("%s!\nYou can't do that right now.",
+                                   game.save.player.name) })
+      return
+    end
+    list:close()
+    Underground.enter(game, ow)
+    return
+  end
+  -- PLATINUM: an item whose use is a field script (Gen4ItemUse) -- the berry
+  -- patch's planting, mulching and watering, the Vs. Seeker.  The bag closes,
+  -- the item goes in VAR_0x8000 (SCRIPT_DATA_PARAMETER_0) and the script runs
+  -- with the faced object as its target, as sub_02068540 starts it.
+  if result == "gen4_script" and extra then
+    list:close()
+    local ow = game.overworld
+    local rows = require("src.world.Gen4TileScripts").compile(game.data, extra.band, extra.entry)
+    if ow and rows then
+      local C = require("src.script.Gen4Commands")
+      if C.setVar then C.setVar(game.save, 0x8000, extra.item) end
+      ow.runner:run(rows, { npc = extra.npc, mapId = ow.map and ow.map.id })
+    end
+    return
+  end
+  -- Mail: the mail reader over the bag, back to the bag when it closes
+  -- (StartMenu_ExitMail returns to the bag); nothing is used up
+  if result == "gen4_mail" and extra then
+    local MailView = require("src.ui.Gen4MailView")
+    game.stack:push(MailView.new(game, extra.mailType))
+    return
+  end
+  -- Honey: taken from the bag and Sweet Scent's lure task run
+  if result == "honey" then
+    list:close()
+    consume(game, id)
+    local ow = game.overworld
+    if ow and ow.gen4SweetScent then ow:gen4SweetScent() end
+    return
+  end
   if result == "bicycle" then
     -- StartMenu_Item .useOrTossItem (engine/menus/start_sub_menus.asm):
     -- while BIT_ALWAYS_ON_BIKE of wStatusFlags6 is set -- the Cycling Road,
@@ -246,7 +342,21 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     -- IsBikeRidingAllowed (home/overworld.asm) for Gen1, BikeFunction
     -- .CheckEnvironment for Gen2; the overworld owns both rules.
     local function bikeAllowed()
-      return ow and ow:bikeAllowed(ow.map.id) or false
+      if not (ow and ow:bikeAllowed(ow.map.id)) then return false end
+      local p = ow.player
+      -- GEN 4: CanUseBicycle (pokeplatinum item_use_functions.c) /
+      -- ItemCheckUseFunc_Bicycle (pokeheartgold field_use_item.c): no partner,
+      -- no Rocket disguise, not standing in very tall grass or mud
+      if ow.map.def and ow.map.def.generation == 4 and p then
+        if require("src.world.Gen4Follower").hasPartner(game.save) then return false end
+        if game.save.hgssRocketCostume then return false end
+        local b = ow.map.cellBehaviour and ow.map:cellBehaviour(p.cellX, p.cellY)
+        local name = b and require("src.import.Gen4Behaviors").name(b)
+        if name == "VERY_TALL_GRASS" or name == "MUD" or name == "MUD_DEEP"
+           or name == "MUD_WITH_GRASS" or name == "MUD_DEEP_WITH_GRASS" then return false end
+      end
+      return not (p and (p.surfing or (ow.map.runningBlockedAt
+        and ow.map:runningBlockedAt(p.cellX, p.cellY))))
     end
     -- WHICH BIKE.  Hoenn has two and they ride differently: the Mach Bike
     -- climbs muddy slopes at speed, and the Acro Bike hops and wheelies over
@@ -257,12 +367,20 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
       game.save.onBike = false
       game.save.bikeKind = nil
       Music.playMap(game.data, ow and ow.map.id, false)
-      showMessages(game, { Strings("%s got off\nthe BICYCLE.", save_name(game)) })
+      if not require("src.core.GameVersion").isGen4() then
+        showMessages(game, { Strings("%s got off\nthe BICYCLE.", save_name(game)) })
+      end
     elseif bikeAllowed() then
       game.save.onBike = true
       game.save.bikeKind = payload
       Music.playMap(game.data, ow.map.id, true)
-      showMessages(game, { Strings("%s got on\nthe BICYCLE!", save_name(game)) })
+      -- Platinum's UseBicycleFromMenu closes the bag and mounts, silently
+      if not require("src.core.GameVersion").isGen4() then
+        showMessages(game, { Strings("%s got on\nthe BICYCLE!", save_name(game)) })
+      end
+    elseif require("src.core.GameVersion").isGen4() then
+      -- Rowan's / Oak's words (ITEM_USE_CANNOT_USE_GENERIC / _OAKSWORDS)
+      showMessages(game, { require("src.inventory.Gen4ItemUse").rowanLine(game.data, game.save) })
     else
       showMessages(game, { Strings("No cycling\nallowed here.") })
     end
@@ -290,6 +408,12 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
                               game.save.player.name) })
       return
     end
+    -- BattleBag's hasTwoOpponents: no ball while two wild Pokemon stand
+    if battle.kind == "wild" and battle.wildFoesStanding and battle:wildFoesStanding() > 1 then
+      showMessages(game, { (game.data.text and game.data.text.TEXT_B0002_00044)
+        or Strings("It's no good! It's impossible to aim\nwhen there are two POKéMON!") })
+      return
+    end
     consume(game, id)
     list:close()
     -- Catching/AnimPlayer key off the Gen1 ball ids
@@ -305,6 +429,7 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
       local function taught()
         require("src.world.PikachuFollower")
           .modifyHappiness(game.save, "USEDTMHM", target)
+        require("src.pokemon.Gen2Friendship").change(target,"LEARNMOVE")
       end
       if #target.moves < 4 then
         table.insert(target.moves, { id = moveId, pp = mdef.pp })
@@ -322,6 +447,40 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     end
     list:close()
     teach()
+    return
+  end
+
+  -- THE POFFIN CASE: its list on top of the bag (src/ui/Gen4PoffinCase.lua)
+  if result == "poffin_case" then
+    require("src.ui.Gen4PoffinCase").open(game)
+    return
+  end
+
+  -- THE POKE RADAR: close the bag and switch it on (src/world/Gen4Radar.lua)
+  if result == "poke_radar" then
+    local ow = game and game.overworld
+    local refusal = ow and ow.gen4UseRadar and ow:gen4UseRadar()
+    if refusal then
+      showMessages(game, { Strings("Can't use that here.") })
+      return
+    end
+    if list and list.close then list:close() end
+    pcall(function()
+      local stack = game.stack
+      local guard = 0
+      while stack.top and stack:top() and stack:top() ~= ow and guard < 8 do
+        stack:pop(); guard = guard + 1
+      end
+    end)
+    return
+  end
+
+  -- PLATINUM'S JOURNAL, over the Bag (src/ui/Gen4Journal.lua)
+  if result == "journal" then
+    local ok = pcall(function()
+      game.stack:push(require("src.ui.Gen4Journal").new(game, { save = game.save }))
+    end)
+    if not ok then showMessages(game, { Strings("Can't use that here.") }) end
     return
   end
 
@@ -419,11 +578,24 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     -- anywhere -- in a cave, in Victory Road, in the Aqua Hideout, nowhere.
     -- The cartridge keeps it in the map header's flag byte
     -- (`allowEscaping`, alongside allowRunning and allowCycling, which are
-    -- both already read), and it means Escape Rope, Dig and Teleport alike.
+    -- both already read), and it gates Escape Rope and Dig. Teleport uses
+    -- its separate outdoor map-type gate.
     local ow = game.overworld
     local gen3 = require("src.core.GameVersion").isGen3()
     local allowed
-    if gen3 then
+    local gen4 = ow and ow.map and ow.map.def and ow.map.def.generation == 4
+    if gen4 then
+      -- CanUseEscapeRope (pokeplatinum item_use_functions.c; pokeheartgold
+      -- field_use_item.c ItemCheckUseFunc_EscapeRope): a cave map whose header
+      -- allows the rope, no partner, and (HGSS) no Rocket disguise; the warp
+      -- is the recorded exit (FieldOverworldState_GetExitLocation)
+      local def = ow.map.def
+      local mt = tonumber(def.mapType)
+      allowed = def.allowEscapeRope == true and (mt == nil or mt == 3)
+        and not require("src.world.Gen4Follower").hasPartner(game.save)
+        and not game.save.hgssRocketCostume
+        and ow.escapePoint and ow:escapePoint() and true or false
+    elseif gen3 then
       allowed = ow and ow.map and ow.map.def and ow.map.def.allowEscaping == true
     else
       allowed = ow and (ESCAPE_ROPE_TILESETS[ow.map.def.tileset]
@@ -436,8 +608,8 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
     -- dig warp is a "can't use that here", not a silent teleport somewhere
     -- else.
     local gen2 = require("src.core.GameVersion").generation() == 2
-    local escapePoint = gen2 and ow and ow.escapePoint and ow:escapePoint()
-    if gen2 and allowed and not escapePoint then allowed = false end
+    local escapePoint = (gen2 or gen3 or gen4) and ow and ow.escapePoint and ow:escapePoint()
+    if (gen2 or gen3) and allowed and not escapePoint then allowed = false end
 
     if allowed and ow.map.id ~= "AGATHAS_ROOM" then
       list:close()
@@ -453,6 +625,8 @@ local function useOn(game, battle, id, target, list, moveIndex, picker)
       -- generation's business: Gen 1 the last Pokémon Center town door like
       -- Fly (#196), Gen 2 the recorded entrance.
       ow:beginTeleportOut(nil, { escape = escapePoint and true or nil })
+    elseif gen4 then
+      showMessages(game, { require("src.inventory.Gen4ItemUse").rowanLine(game.data, game.save) })
     else
       showMessages(game, { Strings(
         "OAK: %s!\nThis isn't the\ntime to use that!",
@@ -634,8 +808,31 @@ local function pickTargetAndUse(game, battle, id, list)
   if def and def.machine then
     opts.tmhm = { move = def.machine.move, kind = def.machine.kind }
   end
-  require("src.ui.Screens").push(game, "PartyMenu", opts)
+  -- PLATINUM'S BATTLE PARTY LIST picks the target on the bottom screen when
+  -- the battle says it is the party screen there (BattleState:
+  -- gen4ItemTargetScreen); it asks for the move itself (its RESTORE WHICH
+  -- MOVE? page) and hands it to `onMove`.
+  local screenId = "PartyMenu"
+  if battle and type(battle.gen4ItemTargetScreen) == "function" and not opts.tmhm then
+    local okS, sid = pcall(battle.gen4ItemTargetScreen, battle)
+    if okS and sid then
+      screenId = sid
+      opts.mode, opts.itemId = "useItem", id
+      if wantsMove then
+        opts.onMove = function(mon, mi) useOn(game, battle, id, mon, list, mi) end
+      end
+    end
+  end
+  require("src.ui.Screens").push(game, screenId, opts)
 end
+
+-- TEXT_BANK_BAG, line 8 of generated/text_banks.txt (zero-based 7), and the
+-- three machine lines in it.  Named rather than written into the lookup, so
+-- the numbers are readable and appear once.
+local BAG_TEXT_BANK = 7
+local BAG_TEXT_BOOTED_TM = 58
+local BAG_TEXT_BOOTED_HM = 59
+local BAG_TEXT_CONTAINED = 60
 
 local function useItem(game, battle, id, list)
   local def = game.data.items[id]
@@ -657,7 +854,46 @@ local function useItem(game, battle, id, list)
       -- on a yes.  Both lines and the question are the cartridge's own
       -- (constants.gen3ItemText), so this is Hoenn's wording rather than
       -- Johto's with the exclamation marks filed off.
+      -- SINNOH SAYS IT TOO, out of its own bank.
+      --
+      -- `TEXT_BANK_BAG` is bank 7, and the three lines are 58 "Booted up a
+      -- TM.", 59 "Booted up an HM." and 60 "It contained {MOVE}. / Teach
+      -- {MOVE} to a Pokemon?" -- which is the same shape Hoenn has, down to
+      -- the question, and NOT the shape below it: Gen 1's wording ends in
+      -- exclamation marks and never asks, so a Platinum player was reading
+      -- Kanto's lines and being sent straight to the party with no question.
+      --
+      -- Entry 60 carries both halves and the wait-and-scroll between them --
+      -- "It contained CUT." waits for the button, then "Teach CUT to a
+      -- Pokemon?" scrolls up into the same box -- so it is handed to the box
+      -- whole and pages exactly as the cartridge does.
+      --
+      -- THE MOVE NAME GOES IN A BUFFER, NOT A GSUB.  Both halves of entry 60
+      -- say `{STRVAR_1 6 0 0}`, which is string slot 0, and
+      -- `TMHMUseTask` fills it on the row before it formats the line:
+      -- `StringTemplate_SetMoveName(controller->strTemplate, 0, move)`.  One
+      -- buffer, two tokens, and the same expansion every other Gen 4 line
+      -- gets -- which is why `resolve` is handed the game.
       local cart = (game.data.constants or {}).gen3ItemText
+      if require("src.core.GameVersion").isGen4() then
+        local Gen4Text = require("src.import.Gen4Text")
+        Gen4Text.buffer(game, moveName)
+        -- HGSS: bank 10, one later (src/ui/Gen4PartyText.lua)
+        local PT = require("src.ui.Gen4PartyText")
+        local function bag(i)
+          local b, n = PT.bagIndex(game.data, i)
+          if b ~= BAG_TEXT_BANK then i = n end
+          return Gen4Text.resolve(game.data, b or BAG_TEXT_BANK, i, game)
+        end
+        local contained = bag(BAG_TEXT_CONTAINED)
+        if contained then
+          cart = {
+            contained = contained,
+            bootedTM = bag(BAG_TEXT_BOOTED_TM),
+            bootedHM = bag(BAG_TEXT_BOOTED_HM),
+          }
+        end
+      end
       if cart and type(cart.contained) == "string" then
         local asks = cart.contained:gsub("{VAR1}", moveName)
                                    :gsub("{STR_VAR1}", moveName)
@@ -736,21 +972,26 @@ local function handOver(game, mon, id, onChanged, opts)
   end
   if not held then
     if hand() then
-      showMessages(game, { Strings("%s is now holding\n%s.", monName, name) })
+      -- HGSS: msg_0300 107 (src/ui/Gen4PartyText.lua)
+      showMessages(game, { require("src.ui.Gen4PartyText").say(game, 107,
+        Strings("%s is now holding\n%s.", monName, name), monName, name) })
     end
     return
   end
   local heldName = (game.data.items[held] or {}).name or held
   local ChoiceBox = require("src.ui.ChoiceBox")
-  showMessages(game, {
+  -- HGSS: msg_0300 79 (both sentences in one line) and 85
+  local PartyTextH = require("src.ui.Gen4PartyText")
+  local hgAsk = PartyTextH.say(game, 79, nil, monName, heldName)
+  showMessages(game, hgAsk and { hgAsk } or {
     Strings("%s is already\nholding %s.", monName, heldName),
     Strings("Switch items?"),
   }, function()
     game.stack:push(ChoiceBox.new(game, function(yes)
       if not yes then return end
       if hand() then
-        showMessages(game, { Strings("Took %s and\nmade it hold %s.",
-          heldName, name) })
+        showMessages(game, { PartyTextH.say(game, 85, Strings("Took %s and\nmade it hold %s.",
+          heldName, name), monName, heldName, name) })
       end
     end))
   end)
@@ -860,8 +1101,8 @@ function BagMenu.new(game, opts)
       local def = row and row.value and game.data.items[row.value]
       local text = def and def.description
       if type(text) == "string" and text ~= "" then return text end
-      return ("¥%d"):format(game.save.money)
-    end or ("¥%d"):format(game.save.money),
+      return moneyLine(game)
+    end or moneyLine(game),
     -- B returns to the start menu when the bag was opened from it
     onCancel = opts.onCancel,
     -- SELECT reorders items like the original bag (swap_items.asm).  A
@@ -1015,6 +1256,9 @@ function BagMenu.canRegister(game, id)
     end)
     return (ok and yes) and true or false
   end
+  -- GEN 4: the item record's own canRegister bit (Gen4Items, the packed
+  -- ITEM_PARAM_CAN_REGISTER), which is what Gen4BagMenu offers REGISTER by
+  if data.isGen4Cache and def.canRegister ~= nil then return def.canRegister and true or false end
   return def.registerable and true or false
 end
 

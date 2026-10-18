@@ -31,6 +31,20 @@ namespace love
 {
 namespace android
 {
+// Gen2Recomp offline translation bridge, called from a LOVE worker thread.
+bool closeOfflineTranslation();
+bool translateOffline(const char *source, const char *target, const std::string &text, std::string &output);
+
+/**
+ * Gen2Recomp in-app updates: hand a downloaded release APK (absolute path) to
+ * Android's package installer, which installs it over this app. Android 8+
+ * asks the player to allow installs from this app once first
+ * (canInstallApks / requestInstallPermission). Main thread only.
+ **/
+bool installApk(const char *path);
+bool canInstallApks();
+bool requestInstallPermission();
+
 
 /**
  * Enables or disables immersive mode where the navigation bar is hidden.
@@ -69,10 +83,41 @@ void vibrate(double seconds);
 bool showFilePicker(const char *destFilename = nullptr);
 
 /**
+ * Shows the system's "pick an image" UI (Storage Access Framework with image/* MIME type).
+ * Returns true if the picker was launched; the picked file (if any) is
+ * copied asynchronously by GameActivity.onActivityResult into the app's
+ * external save directory as picked_sky.png, not returned here.
+ **/
+bool showImagePicker();
+
+/**
  * Shows ACTION_CREATE_DOCUMENT so Lua can export a staged pending_export.sav
  * to a user-chosen location. suggestedName is the dialog default filename.
  **/
 bool showCreateDocument(const char *suggestedName = nullptr);
+
+/**
+ * Game-data / mods folder picker. Volume dialog plus optional
+ * ACTION_OPEN_DOCUMENT_TREE; the path lands in picked_folder.txt.
+ **/
+bool showFolderPicker();
+
+/**
+ * "label\\tab path" rows for app-owned external files volumes.
+ **/
+std::string getExternalDataDirs();
+
+/**
+ * Mount an absolute directory onto the PhysFS search path (appended).
+ * love.filesystem.mount refuses paths outside the save dir; the game-data
+ * folder lives beside it (phone/SD gamedata/), so CacheFs needs this.
+ **/
+bool mountDirectory(const char *path);
+
+bool hasStorageAccess();
+bool requestStorageAccess();
+bool pathIsAppOwned(const char *path);
+bool mkdirsReal(const char *path);
 
 /**
  * Pokéwalker step bridge: asks GameActivity to read the hardware step
@@ -80,6 +125,21 @@ bool showCreateDocument(const char *suggestedName = nullptr);
  * GameActivity.syncHealthSteps). Returns whether a sync could start.
  */
 bool syncHealthSteps();
+
+/**
+ * Pokéwalker notifications (GameActivity.walkerNotify): `json` is one
+ * command -- {"post":{"title","text"}} shows a notification now,
+ * {"watch":{...}} stores step milestones and starts the background check,
+ * {"stop":true} cancels it. Returns whether the command was taken.
+ */
+bool walkerNotify(const char *json);
+
+/**
+ * One HTTP request for the cloud saves (GameActivity.httpRequest): `json` is
+ * {"method","url","headers":{...},"body"}; the answer is {"status","body"} or
+ * {"error"} as a JSON string ("" when the bridge itself is missing).
+ */
+std::string httpRequest(const char *json);
 
 /**
  * Full process relaunch (GameActivity.restartApp): schedules the app's

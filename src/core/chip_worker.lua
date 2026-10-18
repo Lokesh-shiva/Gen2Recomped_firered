@@ -21,6 +21,9 @@ require("love.thread")
 require("love.timer")
 require("love.sound")
 require("love.filesystem")
+package.preload['src.core.WorkerFs']=function()
+  return assert(love.filesystem.load('src/core/WorkerFs.lua'))()
+end
 
 -- Load the synth explicitly via love.filesystem (a fresh thread Lua state does
 -- not necessarily carry the package searcher that resolves "src.core..."):
@@ -62,6 +65,7 @@ local data = nil       -- { audio = <slim audio tables> } for ROM bank/wave read
 
 local function handle(cmd)
   if cmd.cmd == "play" then
+    ChipSynth.setStereo(cmd.stereo)
     gen = cmd.gen
     finished = false
     engine = nil
@@ -88,6 +92,7 @@ local function handle(cmd)
     finished = false
     outCh:clear()
   elseif cmd.cmd == "channelMix" then
+    ChipSynth.setStereo(cmd.stereo)
     if cmd.volumes ~= nil then ChipSynth.setChannelVolumes(cmd.volumes) end
     if cmd.pitches ~= nil then ChipSynth.setChannelPitches(cmd.pitches) end
   elseif cmd.cmd == "invalidate" then

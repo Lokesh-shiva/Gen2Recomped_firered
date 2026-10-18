@@ -4,6 +4,7 @@
 return function(game)
   local U = require("tests.drivers.util")
   local save = U.freshSave(game)
+  require("src.script.Gen3Commands").setVar(save, 0x4068, 1)
 
   -- Keep the room-entry helper from moving the player while this test starts
   -- one step south of the exit. Lorelei is deliberately still undefeated so

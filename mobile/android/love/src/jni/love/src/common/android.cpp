@@ -36,6 +36,14 @@
 #include <unistd.h>
 
 #include "filesystem/physfs/PhysfsIo.h"
+#include "libraries/physfs/physfs.h"
+
+// #604 / #839: the SAF bridges below must hand GameActivity the exact
+// directory physfs mounted as the save dir -- the same contract the iOS
+// GRPickerBridge already gets (mobile/ios/patch_love_src.py,
+// gr_saveDirectory) -- instead of letting Java recompute the root on its
+// own, which can name a different volume on merged / adopted-SD storage.
+#include "filesystem/Filesystem.h"
 
 namespace love
 {
@@ -183,6 +191,19 @@ void vibrate(double seconds)
 	env->DeleteLocalRef(activity);
 }
 
+// The directory physfs actually mounted as the save dir, or "" before the
+// filesystem module is up.  GameActivity must copy SAF picks HERE: its own
+// getExternalFilesDir(null) recomputation can disagree with the mounted
+// root on merged / adopted-SD storage (#604, #839).
+static const char *bridgeSaveDirectory()
+{
+	auto fs = Module::getInstance<love::filesystem::Filesystem>(Module::M_FILESYSTEM);
+	if (fs == nullptr)
+		return "";
+	const char *dir = fs->getSaveDirectory();
+	return dir != nullptr ? dir : "";
+}
+
 bool showFilePicker(const char *destFilename)
 {
 	if (destFilename == nullptr || destFilename[0] == '\0')
@@ -192,10 +213,24 @@ bool showFilePicker(const char *destFilename)
 	jclass activity = env->FindClass("org/love2d/android/GameActivity");
 
 	jmethodID method = env->GetStaticMethodID(activity, "showFilePicker",
-		"(Ljava/lang/String;)Z");
+		"(Ljava/lang/String;Ljava/lang/String;)Z");
 	jstring jname = env->NewStringUTF(destFilename);
-	jboolean result = env->CallStaticBooleanMethod(activity, method, jname);
+	jstring jsavedir = env->NewStringUTF(bridgeSaveDirectory());
+	jboolean result = env->CallStaticBooleanMethod(activity, method, jname, jsavedir);
+	env->DeleteLocalRef(jsavedir);
 	env->DeleteLocalRef(jname);
+
+	env->DeleteLocalRef(activity);
+	return result;
+}
+
+bool showImagePicker()
+{
+	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+	jclass activity = env->FindClass("org/love2d/android/GameActivity");
+
+	jmethodID method = env->GetStaticMethodID(activity, "showImageFilePicker", "()Z");
+	jboolean result = env->CallStaticBooleanMethod(activity, method);
 
 	env->DeleteLocalRef(activity);
 	return result;
@@ -210,13 +245,195 @@ bool showCreateDocument(const char *suggestedName)
 	jclass activity = env->FindClass("org/love2d/android/GameActivity");
 
 	jmethodID method = env->GetStaticMethodID(activity, "showCreateDocument",
-		"(Ljava/lang/String;)Z");
+		"(Ljava/lang/String;Ljava/lang/String;)Z");
 	jstring jname = env->NewStringUTF(suggestedName);
-	jboolean result = env->CallStaticBooleanMethod(activity, method, jname);
+	jstring jsavedir = env->NewStringUTF(bridgeSaveDirectory());
+	jboolean result = env->CallStaticBooleanMethod(activity, method, jname, jsavedir);
+	env->DeleteLocalRef(jsavedir);
 	env->DeleteLocalRef(jname);
 
 	env->DeleteLocalRef(activity);
 	return result;
+}
+
+bool showFolderPicker()
+{
+	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+	jclass activity = env->FindClass("org/love2d/android/GameActivity");
+
+	jmethodID method = env->GetStaticMethodID(activity, "showFolderPicker",
+		"(Ljava/lang/String;)Z");
+	jstring jsavedir = env->NewStringUTF(bridgeSaveDirectory());
+	jboolean result = env->CallStaticBooleanMethod(activity, method, jsavedir);
+	env->DeleteLocalRef(jsavedir);
+
+	env->DeleteLocalRef(activity);
+	return result;
+}
+
+std::string getExternalDataDirs()
+{
+	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+	jclass activity = env->FindClass("org/love2d/android/GameActivity");
+
+	jmethodID method = env->GetStaticMethodID(activity, "getExternalDataDirs",
+		"()Ljava/lang/String;");
+	jstring jresult = (jstring) env->CallStaticObjectMethod(activity, method);
+	std::string result;
+	if (jresult != nullptr)
+	{
+		const char *chars = env->GetStringUTFChars(jresult, nullptr);
+		if (chars != nullptr)
+		{
+			result = chars;
+			env->ReleaseStringUTFChars(jresult, chars);
+		}
+		env->DeleteLocalRef(jresult);
+	}
+
+	env->DeleteLocalRef(activity);
+	return result;
+}
+
+bool mountDirectory(const char *path)
+{
+	if (path == nullptr || path[0] == '\0')
+		return false;
+	if (!PHYSFS_isInit())
+		return false;
+	return PHYSFS_mount(path, nullptr, 1) != 0;
+}
+
+static bool callStaticBool(const char *name, const char *sig, const char *arg)
+{
+	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+	if (env == nullptr)
+		return false;
+	// Folder creation also runs in the ROM import worker. FindClass on a
+	// native thread uses the system loader, which cannot resolve app classes.
+	// Use SDL's live activity, as the background HTTP bridge does below.
+	jobject activityObj = (jobject) SDL_AndroidGetActivity();
+	if (env->ExceptionCheck() || activityObj == nullptr)
+	{
+		env->ExceptionClear();
+		if (activityObj != nullptr) env->DeleteLocalRef(activityObj);
+		return false;
+	}
+	jclass activity = env->GetObjectClass(activityObj);
+	env->DeleteLocalRef(activityObj);
+	if (env->ExceptionCheck() || activity == nullptr)
+	{
+		env->ExceptionClear();
+		if (activity != nullptr) env->DeleteLocalRef(activity);
+		return false;
+	}
+	jmethodID method = env->GetStaticMethodID(activity, name, sig);
+	if (env->ExceptionCheck() || method == nullptr)
+	{
+		env->ExceptionClear();
+		env->DeleteLocalRef(activity);
+		return false;
+	}
+	jboolean result;
+	if (arg != nullptr)
+	{
+		jstring jarg = env->NewStringUTF(arg);
+		if (env->ExceptionCheck() || jarg == nullptr)
+		{
+			env->ExceptionClear();
+			if (jarg != nullptr) env->DeleteLocalRef(jarg);
+			env->DeleteLocalRef(activity);
+			return false;
+		}
+		result = env->CallStaticBooleanMethod(activity, method, jarg);
+		env->DeleteLocalRef(jarg);
+	}
+	else
+		result = env->CallStaticBooleanMethod(activity, method);
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionClear();
+		result = JNI_FALSE;
+	}
+	env->DeleteLocalRef(activity);
+	return result;
+}
+
+bool hasStorageAccess()
+{
+	return callStaticBool("hasStorageAccess", "()Z", nullptr);
+}
+
+bool requestStorageAccess()
+{
+	return callStaticBool("requestStorageAccess", "()Z", nullptr);
+}
+
+bool pathIsAppOwned(const char *path)
+{
+	if (path == nullptr)
+		return false;
+	return callStaticBool("pathIsAppOwned", "(Ljava/lang/String;)Z", path);
+}
+
+std::string httpRequest(const char *json)
+{
+	std::string result;
+	if (json == nullptr)
+		return result;
+	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+	if (env == nullptr)
+		return result;
+	jobject activityObj = (jobject) SDL_AndroidGetActivity();
+	if (env->ExceptionCheck() || activityObj == nullptr)
+	{
+		env->ExceptionClear();
+		if (activityObj != nullptr) env->DeleteLocalRef(activityObj);
+		return result;
+	}
+	jclass activity = env->GetObjectClass(activityObj);
+	env->DeleteLocalRef(activityObj);
+	jmethodID method = env->GetStaticMethodID(activity, "httpRequest", "(Ljava/lang/String;)Ljava/lang/String;");
+	if (env->ExceptionCheck() || method == nullptr)
+	{
+		env->ExceptionClear();
+		env->DeleteLocalRef(activity);
+		return result;
+	}
+	jstring jarg = env->NewStringUTF(json);
+	jstring jresult = (jstring) env->CallStaticObjectMethod(activity, method, jarg);
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionClear();
+		jresult = nullptr;
+	}
+	if (jresult != nullptr)
+	{
+		const char *chars = env->GetStringUTFChars(jresult, nullptr);
+		if (chars != nullptr)
+		{
+			result = chars;
+			env->ReleaseStringUTFChars(jresult, chars);
+		}
+		env->DeleteLocalRef(jresult);
+	}
+	env->DeleteLocalRef(jarg);
+	env->DeleteLocalRef(activity);
+	return result;
+}
+
+bool walkerNotify(const char *json)
+{
+	if (json == nullptr)
+		return false;
+	return callStaticBool("walkerNotify", "(Ljava/lang/String;)Z", json);
+}
+
+bool mkdirsReal(const char *path)
+{
+	if (path == nullptr || path[0] == '\0')
+		return false;
+	return callStaticBool("mkdirsReal", "(Ljava/lang/String;)Z", path);
 }
 
 bool syncHealthSteps()
@@ -259,7 +476,19 @@ bool httpDownload(const char *url, const char *destPath, const char *userAgent, 
 		return false;
 
 	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
-	jclass activity = env->FindClass("org/love2d/android/GameActivity");
+	// NOT FindClass: this is the one bridge called off the main thread
+	// (love.thread workers in src/net/fetch_worker.lua and
+	// src/update/check_worker.lua).  A worker is a raw pthread whose JNI
+	// class loader is the system one, which cannot see app classes, so
+	// FindClass("org/love2d/android/GameActivity") left a pending
+	// ClassNotFoundException and the next JNI call aborted the process --
+	// opening FIND MODS killed the app on the first stats fetch.  Resolving
+	// through the live activity instance works from any attached thread.
+	jobject activityObj = (jobject) SDL_AndroidGetActivity();
+	if (activityObj == nullptr)
+		return false;
+	jclass activity = env->GetObjectClass(activityObj);
+	env->DeleteLocalRef(activityObj);
 
 	// Old APK / new liblove skew: report "no transport" the same way a
 	// missing curl does, instead of aborting on a missing method (#597).
@@ -286,6 +515,55 @@ bool httpDownload(const char *url, const char *destPath, const char *userAgent, 
 		env->DeleteLocalRef(jaccept);
 	env->DeleteLocalRef(activity);
 	return result;
+}
+
+bool installApk(const char *path)
+{
+    return callStaticBool("installApk", "(Ljava/lang/String;)Z", path);
+}
+
+bool canInstallApks()
+{
+    return callStaticBool("canInstallApks", "()Z", nullptr);
+}
+
+bool requestInstallPermission()
+{
+    return callStaticBool("requestInstallPermission", "()Z", nullptr);
+}
+
+bool closeOfflineTranslation()
+{
+    return callStaticBool("closeOfflineTranslation", "()Z", nullptr);
+}
+
+// Gen2Recomp: byte arrays preserve standard UTF-8, including supplementary characters.
+bool translateOffline(const char *source, const char *target, const std::string &text, std::string &output)
+{
+    JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+    jobject obj = (jobject) SDL_AndroidGetActivity();
+    if (!obj) return false;
+    jclass activity = env->GetObjectClass(obj);
+    env->DeleteLocalRef(obj);
+    jmethodID method = env->GetStaticMethodID(activity, "translateOffline", "(Ljava/lang/String;Ljava/lang/String;[B)[B");
+    if (!method) { env->ExceptionClear(); env->DeleteLocalRef(activity); return false; }
+    jstring from = env->NewStringUTF(source);
+    jstring to = env->NewStringUTF(target);
+    jbyteArray bytes = env->NewByteArray((jsize) text.size());
+    env->SetByteArrayRegion(bytes, 0, (jsize) text.size(), (const jbyte*) text.data());
+    jbyteArray result = (jbyteArray) env->CallStaticObjectMethod(activity, method, from, to, bytes);
+    bool ok = !env->ExceptionCheck() && result;
+    if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
+    if (ok) {
+        output.resize(env->GetArrayLength(result));
+        if (!output.empty()) env->GetByteArrayRegion(result, 0, (jsize) output.size(), (jbyte*) &output[0]);
+    }
+    if (result) env->DeleteLocalRef(result);
+    env->DeleteLocalRef(bytes);
+    env->DeleteLocalRef(from);
+    env->DeleteLocalRef(to);
+    env->DeleteLocalRef(activity);
+    return ok;
 }
 
 /*
@@ -965,6 +1243,35 @@ void love_android_secondary_enable(int on)
 	else
 		env->ExceptionClear();
 	env->DeleteLocalRef(activity);
+}
+
+extern "C" __attribute__((visibility("default")))
+const char *love_android_poll_secondary_touch()
+{
+	static thread_local std::string event;
+	event.clear();
+	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
+	jclass activity = env->FindClass("org/love2d/android/GameActivity");
+	jmethodID method = env->GetStaticMethodID(activity, "pollSecondaryDisplayTouch",
+		"()Ljava/lang/String;");
+	if (!method)
+		env->ExceptionClear();
+	else
+	{
+		jstring value = (jstring) env->CallStaticObjectMethod(activity, method);
+		if (value)
+		{
+			const char *utf = env->GetStringUTFChars(value, nullptr);
+			if (utf)
+			{
+				event = utf;
+				env->ReleaseStringUTFChars(value, utf);
+			}
+			env->DeleteLocalRef(value);
+		}
+	}
+	env->DeleteLocalRef(activity);
+	return event.empty() ? nullptr : event.c_str();
 }
 
 #endif // LOVE_ANDROID

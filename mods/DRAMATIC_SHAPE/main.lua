@@ -199,9 +199,22 @@ function V.data(name)
     return value
   end
   local value = chunkFor("data/" .. name .. ".lua")(V)
+  if name == "voxel_heights" and version == "polishedcrystal" then
+    value = V.require("PolishedProfile").apply(value,
+      chunkFor("data/polishedcrystal/voxel_indices.lua")(V),
+      chunkFor("data/polishedcrystal/furniture.lua")(V))
+  end
   dataFiles[name] = value
   return value
 end
+
+-- ------- a previous load's engine wraps come off first
+--
+-- The launcher's live backdrop runs Game:load behind the menu, and Play runs
+-- it again in the same process, so every game is this mod's SECOND load at
+-- least. The engine's tables keep the last load's wraps; they are put back
+-- here, before anything below installs this load's (lib/Rewrap.lua).
+V.require("Rewrap").unwindAll()
 
 -- ------- pipelines
 
@@ -213,8 +226,18 @@ local Tier = V.require("Tier")
 local Voxel = V.require("VoxelState")
 local Voxel3D = V.require("Voxel3D")
 local VoxelScene = V.require("VoxelScene")
+local NativeGen4 = V.require('NativeGen4')
 local TiltShift = V.require("TiltShift")
 local ChunkMesher = V.require("ChunkMesher")
+-- LEDGE TERRACES moves the ground, so every built mesh goes: the disk cache
+-- already keys on it (VoxelDiskCache.shapeSignature), this drops the copies
+-- in memory and the queue, and the world rebuilds around the player.
+V.require("Structures").ledgeSetting.onChange = function()
+  ChunkMesher.invalidate()
+end
+if require('src.core.GameVersion').get() == 'polishedcrystal' then
+  ChunkMesher.setCacheRulesTag('emerald-clean-civic-roofs-v16')
+end
 -- Forward declaration: the prebake pass is set up far below (it needs the
 -- options schema first) but the update hook that drives it is written above
 -- that, and a closure cannot capture a local that does not exist yet.
@@ -311,6 +334,13 @@ mod.content.render_pipelines:register("voxel", {
   -- pump slice -- so stepping out of a door lands on terrain that is
   -- already there instead of a flat flash.
   update = function(dt, level)
+    local game=require('src.core.Game')
+    if NativeGen4.update(game and game.overworld,level) then
+      NativeGen4.tick(dt)
+      Voxel.update(dt,level)
+      FirstPerson.update(dt)
+      return
+    end
     -- FULL is a preset, so it is applied ON THE PRESS rather than held every
     -- frame: it SETS the other rows and then leaves them alone. Holding them
     -- would make the zoom keys and the wheel dead while the mode was on, and
@@ -382,6 +412,7 @@ mod.content.render_pipelines:register("voxel", {
   end,
 
   drawWorld = function(ctx)
+    if NativeGen4.drawWorld(ctx.state) then return nil end
     local tFrame = Perf.now()
     -- the palette closure, stashed for the VR frame: it renders from the
     -- update hook, where no ctx exists to carry one
@@ -583,6 +614,17 @@ end
 
 local SETTINGS = {
   { VoxelGrid.setting, "One-pixel wireframe along every voxel edge." },
+  -- Geometry, not look: the FULL preset does not own it, so `full = true`
+  -- keeps it on the menu there too.  A change drops every built mesh (see
+  -- rebuildForLedges below) because the ground itself moves.
+  { V.require("Structures").ledgeSetting,
+    "Gen 3 hop-down ledges raise the ground behind them into terraces. OFF "
+    .. "keeps the map's own ground level and gives each ledge a low lip.",
+    when = function()
+      local ok, GV = pcall(require, "src.core.GameVersion")
+      return ok and GV.generation and GV.generation(GV.get()) == 3
+    end,
+    full = true },
   { WorldCurve.setting,
     "Bend the world down over the horizon, Animal Crossing style." },
   { Water.setting,
@@ -975,7 +1017,10 @@ end
 -- reimplementation drifting out of date in lib/VR.lua.
 VR.cycleVoxel = cycleVoxel
 
-do
+-- (Rewrap: unguarded, this stacked one more layer per load -- each older
+-- one still cycling its own dead copy of the rungs; see lib/Rewrap.lua)
+V.require("Rewrap").install({ { require("src.core.Game"),
+  "dramaticShapeKeysHook", { "keypressed" } } }, function()
   local Game = require("src.core.Game")
   local Pipelines = require("src.render.Pipelines")
   local inner = Game.keypressed
@@ -1042,7 +1087,7 @@ do
     end
     return inner(self, key)
   end
-end
+end)
 
 -- ------- the mode's rows, kept together
 --
@@ -1274,7 +1319,8 @@ end)
 -- wrapper now forwards every argument and returns every result.
 do
   local Map = require("src.world.Map")
-  if not Map.dramaticShapeBlockHook then
+  -- (Rewrap: replaced by a later load in the same process, see lib/Rewrap.lua)
+  V.require("Rewrap").install({ { Map, "dramaticShapeBlockHook", { "setBlock" } } }, function()
     local setBlock = Map.setBlock
     Map.setBlock = function(self, bx, by, ...)
       local before = self:blockAt(bx, by)
@@ -1293,7 +1339,7 @@ do
       return r1, r2, r3
     end
     Map.dramaticShapeBlockHook = true
-  end
+  end)
 end
 
 -- A reloaded map is rebuilt from scratch (warps that re-enter the same map,
@@ -1335,7 +1381,8 @@ end)
 -- instead of jumping to the top when the list below it shortens.
 do
   local OptionsMenu = require("src.ui.OptionsMenu")
-  if not OptionsMenu.dramaticShapeFullHook then
+  -- (Rewrap: replaced by a later load in the same process, see lib/Rewrap.lua)
+  V.require("Rewrap").install({ { OptionsMenu, "dramaticShapeFullHook", { "update" } } }, function()
     local Pipelines = require("src.render.Pipelines")
     local inner = OptionsMenu.update
 
@@ -1371,7 +1418,7 @@ do
     end
 
     OptionsMenu.dramaticShapeFullHook = true
-  end
+  end)
 end
 
 -- ------- battles on the map
@@ -1381,6 +1428,7 @@ end
 -- where the reasoning for each one is written down. Installed once, here,
 -- so this file keeps naming every engine seam the mod touches.
 OverworldBattle.install()
+NativeGen4.installBattles(function() return OverworldBattle.enabled() end,V.require('BattleCam'))
 
 -- ------- the free-roam rungs' inputs and their walk
 --
@@ -1472,21 +1520,30 @@ do
     end)
     return (ok and yes) and true or false
   end
-  if not OverworldState.dramaticShapeSelectHook then
+  -- (Rewrap: replaced by a later load in the same process, see lib/Rewrap.lua)
+  V.require("Rewrap").install({ { OverworldState, "dramaticShapeSelectHook", { "handleInput" } } }, function()
     local inner = OverworldState.handleInput
     function OverworldState:handleInput(...)
       local Game = require("src.core.Game")
       local input = Game.input
-      if input and input.wasPressed and input:wasPressed("select") then
+      -- ON A DS CARTRIDGE "select" IS ALSO Y (Input alsoHeld: Y uses the
+      -- registered key item), and the shifts are SELECT too. A bare press of
+      -- either stepped OFF -> VOXEL 15 out of the first/third-person camera
+      -- with no R press ("randomly"). So on a DS game only B + a real SELECT
+      -- (Tab/Shift/the pad's Select) steps the ladder; Y stays the item's.
+      local GV = require("src.core.GameVersion")
+      local nds = GV.isNds and GV.isNds() or false
+      if input and input.wasPressed and input:wasPressed("select")
+         and not (nds and input:wasPressed("y")) then
         local held = input.isDown and input:isDown("b")
-        if held or not registeredItemOwnsSelect(Game) then
+        if held or (not nds and not registeredItemOwnsSelect(Game)) then
           if cycleVoxel(Game) then return end
         end
       end
       return inner(self, ...)
     end
     OverworldState.dramaticShapeSelectHook = true
-  end
+  end)
 end
 
 -- ------- the konami code, and everything it turns on
@@ -1513,14 +1570,15 @@ Horde.install()
 -- what the headset sees. Off-headset frames fall through untouched.
 do
   local Game = require("src.core.Game")
-  if not Game.dramaticShapeAnchorHold then
+  -- (Rewrap: replaced by a later load in the same process, see lib/Rewrap.lua)
+  V.require("Rewrap").install({ { Game, "dramaticShapeAnchorHold", { "uiAnchorsHeldInStack" } } }, function()
     local inner = Game.uiAnchorsHeldInStack
     function Game.uiAnchorsHeldInStack(stack)
       if VR.active() then return true end
       return inner(stack)
     end
     Game.dramaticShapeAnchorHold = true
-  end
+  end)
 end
 
 -- The overworld's own pushBattle is the choke point for a wild encounter or

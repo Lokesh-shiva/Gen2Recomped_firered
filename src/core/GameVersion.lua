@@ -984,6 +984,89 @@ GameVersion.VERSIONS = {
     -- VERSION rather than testing the generation number in a dozen places.
     dualScreen = true,
   },
+  -- HEARTGOLD AND SOULSILVER, Gen 4 on Platinum's engine: pret/pokeheartgold
+  -- builds both, and both dumps hash to what it builds. The Gen 4 extractor
+  -- reads them through src/import/Gen4Versions.lua -- their own paths (almost
+  -- everything under /a/x/y/z) and their own text banks over Platinum's.
+  -- Public imports are enabled; the launcher labels these builds PRE-ALPHA.
+  -- Two screens, Platinum's camera: both follow from generation 4 and
+  -- `dualScreen`, the same as Platinum, with nothing version-specific added.
+  heartgold = {
+    id = "heartgold",
+    generation = 4,
+    family = "hgss",
+    label = "HeartGold",
+    displayName = "Pokemon HeartGold",
+    launcherName = "HeartGold",
+    sha1 = "4fcded0e2713dc03929845de631d0932ea2b5a37",   -- IPKE, USA
+    gameCode = "IPKE",
+    manifest = "tools/rom_manifest_heartgold.json",
+    cachePrefix = "heartgold/",
+    saveSuffix = "_heartgold",
+    importable = true,
+    experimental = true,
+    experimentalLabel = "PRE-ALPHA",
+    hasRunning = true,
+    dualScreen = true,
+  },
+  soulsilver = {
+    id = "soulsilver",
+    generation = 4,
+    family = "hgss",
+    label = "SoulSilver",
+    displayName = "Pokemon SoulSilver",
+    launcherName = "SoulSilver",
+    sha1 = "f8dc38ea20c17541a43b58c5e6d18c1732c7e582",   -- IPGE, USA/Australia
+    gameCode = "IPGE",
+    manifest = "tools/rom_manifest_soulsilver.json",
+    cachePrefix = "soulsilver/",
+    saveSuffix = "_soulsilver",
+    importable = true,
+    experimental = true,
+    experimentalLabel = "PRE-ALPHA",
+    hasRunning = true,
+    dualScreen = true,
+  },
+  -- BLACK AND WHITE, Gen 5: squiddonaut/pokeblack decompiles Black and builds
+  -- exactly this dump (IRBO); White is the same engine and data layout with
+  -- its own version exclusives. Two screens and a 3D field like Platinum, so
+  -- the same second-screen modes, single-screen mode and camera controls.
+  black = {
+    id = "black",
+    generation = 5,
+    family = "bw",
+    label = "Black",
+    displayName = "Pokemon Black",
+    launcherName = "Black",
+    sha1 = "26ad0b9967aa279c4a266ee69f52b9b2332399a5",   -- IRBO, USA/Europe (NDSi Enhanced)
+    gameCode = "IRBO",
+    manifest = "tools/rom_manifest_black.json",
+    cachePrefix = "black/",
+    saveSuffix = "_black",
+    importable = true,
+    experimental = true,
+    experimentalLabel = "PRE-ALPHA",
+    hasRunning = true,
+    dualScreen = true,
+  },
+  white = {
+    id = "white",
+    generation = 5,
+    family = "bw",
+    label = "White",
+    displayName = "Pokemon White",
+    launcherName = "White",
+    sha1 = "bc696a0dfb448c7b3a8a206f0f8214411a039208",   -- IRAO, USA/Europe (NDSi Enhanced)
+    gameCode = "IRAO",
+    manifest = "tools/rom_manifest_white.json",
+    cachePrefix = "white/",
+    saveSuffix = "_white",
+    importable = true,
+    experimental = true,
+    experimentalLabel = "PRE-ALPHA",
+    hasRunning = true,
+    dualScreen = true,
+  },
 }
 
 -- Launcher column order: the CARTRIDGES in generation order, then the ROM
@@ -993,6 +1076,7 @@ GameVersion.VERSIONS = {
 -- ordering rule tests/polished_crystal_registration_test.lua asserts.
 GameVersion.ORDER = { "red", "blue", "yellow", "gold", "silver", "crystal",
                       "firered", "emerald", "platinum",
+                      "heartgold", "soulsilver", "black", "white",
                       "prism", "polishedcrystal" }
 
 GameVersion.current = "red"
@@ -1036,6 +1120,55 @@ end
 -- other three generations take.
 function GameVersion.isGen4(id)
   return GameVersion.generation(id) == 4
+end
+
+-- The fifth, Black and White. Same caveat again: a predicate, not support.
+function GameVersion.isGen5(id)
+  return GameVersion.generation(id) == 5
+end
+
+-- A Nintendo DS cartridge: a filesystem, two screens, a 3D field.
+function GameVersion.isNds(id)
+  return GameVersion.generation(id) >= 4
+end
+
+-- TWO SCREENS: `GameVersion.isDualScreen` below. src/ui/SecondScreen.lua
+-- offers every second-screen mode (OFF among them -- the single-screen
+-- layout) wherever it is true: Platinum, HeartGold, SoulSilver, Black, White.
+
+-- The game's family within its generation ("platinum", "hgss", "bw").
+function GameVersion.family(id)
+  local info = GameVersion.info(id)
+  return info and (info.family or info.id) or nil
+end
+
+-- THE MONEY SIGN THIS CARTRIDGE'S FONT DRAWS, which is a different character
+-- in every generation and is never a dollar.
+--
+--   * Gen 1 and Gen 2 spell it $F0, which `charmap.asm` gives as U+00A5.
+--   * Gen 3 has its own POKe DOLLAR glyph at U+20BD.
+--   * PLATINUM'S IS A LITERAL ASCII "$".  Its own format string is
+--     `${STRVAR_1 55, 5, 0}`; the extracted charmap puts "$" at code 424; and
+--     glyph 424 on `font_message_sheet.png` is the Poke-dollar, a P with a
+--     double stroke, confirmed by looking at it.
+--
+-- WHY THE FALLBACK IS THE CALLER'S RATHER THAN THIS FUNCTION'S.  Before this
+-- existed the engine printed money in five places and did not agree with
+-- itself: `ShopMenu` used U+20BD on Gen 3 and U+00A5 elsewhere, while
+-- `QuantityBox`, `ListMenu`, `BagMenu` and `BattleState` used U+00A5 for
+-- everything -- so Hoenn already showed two different signs on two screens.
+-- This answers only the Gen 4 question and hands every other version straight
+-- back what the caller was already printing, so nothing below Sinnoh changes
+-- by one pixel.  Making the four agree on Gen 3 is a real fix and a separate
+-- one; it needs a Hoenn screen looked at, not an assumption.
+--
+-- WITHOUT THIS, Sinnoh fell through to U+00A5, which the Gen 4 charmap maps
+-- to code 274 -- the JAPANESE YEN KANJI.  Every price in the Sinnoh mart read
+-- "\u5186 300", and so did the bag, the quantity box and the prize money
+-- after a battle.
+function GameVersion.moneySign(fallback)
+  if GameVersion.isGen4() then return "$" end
+  return fallback or "\194\165"
 end
 
 -- Does this cartridge have a second screen?  Asked of the VERSION rather than

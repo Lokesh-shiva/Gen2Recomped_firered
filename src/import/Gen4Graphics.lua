@@ -60,6 +60,7 @@
 local Gen4Graphics = {}
 
 local byte, sub, floor = string.byte, string.sub, math.floor
+local min = math.min
 local char, concat = string.char, table.concat
 
 local function u16(s, at)
@@ -211,6 +212,32 @@ function Gen4Graphics.decryptSprite(pixels)
   return table.concat(out)
 end
 
+-- DIAMOND AND PEARL'S ORDER, which HeartGold and SoulSilver keep for their
+-- trainer pictures: pokeheartgold's UnscanPokepic (src/pokepic.c) sends
+-- NARC_a_0_5_8 and NARC_a_0_0_6 -- the trainer fronts and backs -- to
+-- UnscanPokepic_DP, which seeds from the LAST halfword and walks BACKWARDS,
+-- where the Platinum/HGSS order above seeds from the first and walks forward.
+-- Same key step; only the end it starts from differs.
+function Gen4Graphics.decryptSpriteDP(pixels)
+  if type(pixels) ~= "string" or #pixels < 2 then return pixels end
+  local count = floor(#pixels / 2)
+  local key = byte(pixels, count * 2 - 1) + byte(pixels, count * 2) * 256
+  local out = {}
+  for i = count, 1, -1 do
+    local lo, hi = byte(pixels, i * 2 - 1, i * 2)
+    local v = lo + hi * 256
+    local r, place, a, b = 0, 1, v, key
+    for _ = 1, 16 do
+      local x, y = a % 2, b % 2
+      if x ~= y then r = r + place end
+      a, b, place = floor(a / 2), floor(b / 2), place * 2
+    end
+    out[i] = string.char(r % 256, floor(r / 256))
+    key = (key * 0x41C64E6D + 0x6073) % 65536
+  end
+  return table.concat(out) .. sub(pixels, count * 2 + 1)
+end
+
 -- ---------------------------------------------------------------------------
 -- The container
 -- ---------------------------------------------------------------------------
@@ -268,8 +295,59 @@ function Gen4Graphics.palette(data)
   local size = u32(c.data, s.body + 8)
   local perPalette = u32(c.data, s.body + 12)
   local at = s.body + 16
+  -- !! THE STATED SIZE IS A VRAM ALLOCATION, NOT THE DATA LENGTH, and trusting
+  -- it reads past the end of the section.
+  --
+  -- The move-effect palettes are the case that proves it: every one of the 39
+  -- members of wepltt.narc states 480 bytes -- fifteen full banks -- inside a
+  -- TTLP section of FIFTY-SIX. The loop ran to 239 entries, walked off the
+  -- section, and only stopped when the file ended, so about twenty real colours
+  -- were followed by five made of whatever came next. Clamped to what the
+  -- section actually holds, which is the one number that cannot be a promise
+  -- about VRAM.
+  --
+  -- Exactly the same trap as Gen 2's sprite_header length byte, which is the
+  -- VRAM allocation and not the sheet size. Two generations, one mistake.
+  local room = floor(((s.size or 16) - 16) / 2)
+  local stated = floor((size or 0) / 2)
+  local count = (room < stated) and room or stated
+  if count < 0 then count = 0 end
+  -- A COMPRESSED PALETTE (a PMCP section, nitro's `-pcmp`) says itself how
+  -- many 16-colour palettes it holds and which slot each goes to, and its
+  -- TTLP size may be written INVERTED (`-invertsize`: 0x200 - size). The
+  -- Poffin Case's background.NCLR states 160 bytes for eleven palettes; read
+  -- by the size it came out five palettes long, and the case's screens
+  -- composed with the wrong colours or none. With a PMCP the slot list is
+  -- the authority, each palette placed at its slot.
+  local pm = c.sections.PMCP
+  if pm then
+    local n = u16(c.data, pm.body) or 0
+    local listAt = pm.body + (u32(c.data, pm.body + 4) or 8) - 0
+    -- a PMCP palette is sixteen colours at 4bpp and 256 at 8bpp (depth 4,
+    -- an extended palette): the credits' memories are the latter, and read
+    -- sixteen at a time they came out in their first sixteen colours only
+    local per = (u32(c.data, s.body) == 4) and 256 or 16
+    local out = {}
+    for k = 0, n - 1 do
+      local slot = u16(c.data, listAt + k * 2)
+      if slot == nil or (k + 1) * per > room then break end
+      for i = 0, per - 1 do
+        local v = u16(c.data, at + (k * per + i) * 2)
+        if v then
+          local r, g, b = bgr555(v)
+          out[slot * per + i + 1] = { r, g, b }
+        end
+      end
+    end
+    -- slots that no palette fills stay black rather than holes, so `#` and
+    -- ipairs over the result behave as they do for an ordinary file
+    local top = 0
+    for i in pairs(out) do if i > top then top = i end end
+    for i = 1, top do out[i] = out[i] or { 0, 0, 0 } end
+    if top > 0 then return out, perPalette end
+  end
   local out = {}
-  for i = 0, floor((size or 0) / 2) - 1 do
+  for i = 0, count - 1 do
     local v = u16(c.data, at + i * 2)
     if not v then break end
     local r, g, b = bgr555(v)
@@ -343,17 +421,57 @@ function Gen4Graphics.tilemap(data)
   local w, h = u16(c.data, s.body), u16(c.data, s.body + 2)
   local size = u32(c.data, s.body + 8)
   local cells, at = {}, s.body + 12
-  for i = 0, floor((size or 0) / 2) - 1 do
-    local v = u16(c.data, at + i * 2)
-    if not v then break end
-    cells[i + 1] = {
-      tile = v % 1024,
-      flipX = floor(v / 1024) % 2 == 1,
-      flipY = floor(v / 2048) % 2 == 1,
-      palette = floor(v / 4096) % 16,
-    }
+
+  -- !! NOT EVERY TILEMAP IS TWO BYTES A CELL.
+  --
+  -- Reported from play: "14. The trainer card is the Game Boy one, not
+  -- Platinum's".  It was, because the port could not compose Platinum's:
+  -- `trainer_card_front` came out 6,760 opaque pixels of 65,536, a
+  -- scattering of blocks, and the screen fell back to drawing a box and
+  -- some text.
+  --
+  -- An AFFINE background's map is ONE BYTE A CELL -- a bare tile number,
+  -- with no flip bits and no sub-palette, because an affine layer is
+  -- always 256-colour.  Read two bytes at a time it yields half as many
+  -- cells as the map has and tile numbers built out of two neighbours.
+  --
+  -- THE MAP SAYS WHICH IT IS AND NEEDS NO GUESS.  Its own declared width
+  -- and height give the cell count, and the data size is either that or
+  -- twice it.  Measured over the 63 tilemaps in the fifteen UI archives:
+  -- 59 are two bytes a cell, 4 are one, and NOT ONE is neither -- so the
+  -- rule decides every case rather than most of them.
+  --
+  -- Both symptoms of reading them wrong came from this one thing and
+  -- pointed at it together: on exactly those four the declared size
+  -- disagreed with the cell count, AND the tile ids ran past the end of
+  -- the sheet -- `trainer_card_front` asked for tile 978 of a 240-tile
+  -- sheet. Read a byte at a time its highest is 226.
+  local expected = floor((w or 0) / 8) * floor((h or 0) / 8)
+  local wide = not (expected > 0 and size == expected)
+
+  if wide then
+    for i = 0, floor((size or 0) / 2) - 1 do
+      local v = u16(c.data, at + i * 2)
+      if not v then break end
+      cells[i + 1] = {
+        tile = v % 1024,
+        flipX = floor(v / 1024) % 2 == 1,
+        flipY = floor(v / 2048) % 2 == 1,
+        palette = floor(v / 4096) % 16,
+      }
+    end
+  else
+    for i = 0, (size or 0) - 1 do
+      -- `at` is already a 1-based index, the same one `u16` takes above.
+      local v = byte(c.data, at + i)
+      if not v then break end
+      -- No flip and no sub-palette: an affine layer has neither, and a
+      -- palette of 0 is what `compose` already means by "the whole of it".
+      cells[i + 1] = { tile = v, flipX = false, flipY = false, palette = 0 }
+    end
   end
-  return { width = w, height = h, cells = cells }
+
+  return { width = w, height = h, cells = cells, affine = (not wide) or nil }
 end
 
 -- ---------------------------------------------------------------------------
@@ -430,7 +548,220 @@ end
 --
 -- Returns { width, height, rgba }, rgba being width * height * 4 bytes.
 -- Palette entry 0 is transparent, as everywhere else on the hardware.
-function Gen4Graphics.compose(map, sheet, palette)
+-- STAMP one tilemap into another at a TILE offset, which is `Bg_LoadToTilemapRect`
+-- and is the thing this file could not express.
+--
+-- A Gen 4 screen is very often NOT one tilemap.  The Pokedex's entry page is
+-- four of them laid into one 32x24 grid over a single tile sheet -- and because
+-- the composer here made one picture per tilemap, each of the four came out as
+-- its own fragment drawn with a BORROWED sheet and a BORROWED palette, which is
+-- why 275 of the 282 pictures under `pokedex/` are under 400 bytes and every
+-- one of them is blank.  The parts were all there; nothing put them together.
+--
+-- Cells are copied as they are -- a cell carries its own tile index, flip bits
+-- and sub-palette -- so the result composes exactly like any other tilemap.
+-- Anything that would land outside the base is dropped rather than wrapped: a
+-- rect that does not fit is a wrong offset, and wrapping would hide it.
+function Gen4Graphics.stamp(base, patch, tileX, tileY)
+  if not (base and patch and base.cells and patch.cells) then return base end
+  local bw = floor((base.width or 0) / 8)
+  local bh = floor((base.height or 0) / 8)
+  local pw = floor((patch.width or 0) / 8)
+  local ph = floor((patch.height or 0) / 8)
+  if bw == 0 or bh == 0 or pw == 0 then return base end
+  for row = 0, ph - 1 do
+    for col = 0, pw - 1 do
+      local cell = patch.cells[row * pw + col + 1]
+      local x, y = (tileX or 0) + col, (tileY or 0) + row
+      if cell and x >= 0 and x < bw and y >= 0 and y < bh then
+        base.cells[y * bw + x + 1] = cell
+      end
+    end
+  end
+  return base
+end
+
+-- A blank 32x24 canvas, for a screen whose first tilemap is smaller than the
+-- screen.  Cell zero of a Gen 4 tile sheet is transparent by convention and
+-- `compose` skips colour index 0 anyway, so an empty cell draws nothing.
+function Gen4Graphics.canvas(tilesWide, tilesHigh)
+  local cells = {}
+  for i = 1, tilesWide * tilesHigh do
+    cells[i] = { tile = 0, flipX = false, flipY = false, palette = 0 }
+  end
+  return { width = tilesWide * 8, height = tilesHigh * 8, cells = cells }
+end
+
+-- `firstTile` is WHERE THE SHEET WAS LOADED, not an offset into the picture,
+-- and leaving it out is what made the Poke Ball step of the intro a field of
+-- one repeated tile with a hole in the middle.
+--
+-- A tilemap's cells index VRAM, not the member they were shipped beside.  The
+-- intro's ball is sixteen tiles (member 32/33/34, 512 bytes each) and its
+-- tilemap (member 40) points at tiles 32..47, because the app loads those
+-- sixteen at tile 32 of the background's character base.  Composed without
+-- that base every ball cell fell past the end of a 16-tile sheet and came out
+-- transparent, while the 736 cells that hold tile 0 -- the empty ones -- all
+-- drew the sheet's own tile 0 instead.  The picture was the exact inverse of
+-- the ball: a repeated glyph everywhere and a 48x48 hole where the ball goes.
+--
+-- Nothing else in that archive needs it and that was checked rather than
+-- assumed: the five backdrops run to tile 121 and the figures' tilemap to 127,
+-- both inside their own 128-tile sheets.  Only the ball is loaded high.
+-- grayscalePalette(palette, count) -> the same palette, greyed the DS's way
+--
+-- `BattleAnimUtil_ConvertColorsToGrayscale` is one line of pret:
+--   `y = RGB_TO_GRAYSCALE(r, g, b)` = `(r * 76 + g * 151 + b * 29) >> 8`
+-- on FIVE-BIT channels, written back as `(y << 10) | (y << 5) | y`. The weights sum
+-- to 256, so white stays white and nothing can overflow.
+--
+-- THE FIVE BITS MATTER, which is why this converts back down before weighting and
+-- up again after. `palette` has already expanded each channel to eight bits
+-- (`round(v * 255 / 31)`), and weighting the expanded values then re-rounding gives
+-- a slightly different grey from the cartridge's -- a difference of one or two
+-- levels on most colours, which is exactly the kind of thing that makes a port
+-- "nearly" right in a way nothing can measure. The expansion is invertible over
+-- 0..31, so going back is exact rather than approximate.
+--
+-- `count` is how many ENTRIES to grey and defaults to the cartridge's own scope:
+-- `PALETTE_SIZE * BATTLE_BG_PALETTE_MON_SPRITE` is 16 * 8 = 128, sub-palettes 0 to
+-- 7, which leaves the Pokemon-sprite palette at slot 8 and the effect
+-- background's at slot 9 in colour.
+Gen4Graphics.GRAYSCALE_SCOPE = 128
+
+function Gen4Graphics.grayscalePalette(palette, count)
+  if type(palette) ~= "table" then return nil end
+  count = count or Gen4Graphics.GRAYSCALE_SCOPE
+  local out = {}
+  for i, colour in pairs(palette) do
+    if i > count or type(colour) ~= "table" then
+      out[i] = colour
+    else
+      local r = floor((colour[1] or 0) * 31 / 255 + 0.5)
+      local g = floor((colour[2] or 0) * 31 / 255 + 0.5)
+      local b = floor((colour[3] or 0) * 31 / 255 + 0.5)
+      local y = floor((r * 76 + g * 151 + b * 29) / 256)
+      local v = ch(y)
+      out[i] = { v, v, v }
+    end
+  end
+  return out
+end
+
+-- coversScreen(image, width, height) -> true when every pixel of the window has ink
+--
+-- A composed picture leaves colour-0 pixels transparent, which is what the hardware
+-- does for every background layer but the bottom one -- so a whole-screen operation
+-- on a layer, such as blending its palette toward white, is only reproducible as a
+-- whole-screen quad where the layer HAS no holes.
+--
+-- The window defaults to the DS's own 256x192 and not to the whole image, because a
+-- background is 512x256 and half of it is off the screen until something scrolls.
+-- `rgba` is four bytes a pixel with alpha last, so this is one byte per pixel.
+--
+-- IT LIVES HERE RATHER THAN IN THE EXTRACTOR so that it can be tested: the extractor
+-- cannot be loaded outside the engine (it reaches the logger and the image writer),
+-- and a rule that only the extractor knows is a rule no check can call.
+function Gen4Graphics.coversScreen(image, width, height)
+  if not (image and image.rgba and image.width and image.height) then return false end
+  width = min(width or 256, image.width)
+  height = min(height or 192, image.height)
+  for y = 0, height - 1 do
+    local row = y * image.width
+    for x = 0, width - 1 do
+      if byte(image.rgba, (row + x) * 4 + 4) == 0 then return false end
+    end
+  end
+  return true
+end
+
+-- paletteAtSlot(palette, slot) -> a sparse palette for `compose`
+--
+-- WHY THIS EXISTS AT ALL. A 4bpp background's tilemap cell carries a four-bit
+-- SUB-PALETTE index, and `compose` reads colour `cell.palette * 16 + value`. A
+-- sheet whose palette member holds one sixteen-colour palette is therefore only
+-- composable if that palette sits where the cells say it does -- and the game
+-- decides where that is when it loads it, not the archive.
+--
+-- The move-animation effect backgrounds are the case that needs it:
+-- `PaletteData_LoadBufferFromFileStart(..., PLTT_DEST(BATTLE_BG_PALETTE_EFFECT))`
+-- puts their sixteen colours in SLOT 9, and 64,866 of the 115,712 cells in those
+-- tilemaps name sub-palette 9. Composed with the palette at slot 0 every one of
+-- those cells reads past the end of a sixteen-entry table and comes out
+-- transparent: all 81 of the effect backgrounds compose to an empty picture,
+-- which is exactly what happened the first time.
+--
+-- THE OTHER 50,846 CELLS NAME SLOT 0, and this leaves them transparent, which is
+-- deliberate: nothing loads a slot-0 palette for that layer, so on the hardware
+-- those cells show whatever the battle backdrop left in the main BG palette's
+-- first sixteen entries. 11,708 of them point at a tile with ink in it (tiles 1,
+-- 24 and 26). Painting those in some invented colour would be this port drawing
+-- art the cartridge does not, so they are dropped and the count is recorded.
+function Gen4Graphics.paletteAtSlot(palette, slot)
+  if type(palette) ~= "table" then return nil end
+  local out = {}
+  local base = (tonumber(slot) or 0) * 16
+  for i = 1, 16 do out[base + i] = palette[i] end
+  if next(out) == nil then return nil end
+  return out
+end
+
+-- A PALETTE AS ONE STRING, so the cache can carry every screen's colours
+-- without carrying 33,904 Lua tables.
+--
+-- WHY THE CACHE NEEDS THEM AT ALL.  A composed screen picture cannot contain
+-- a colour that appears nowhere but in TEXT, and Platinum's text is drawn at
+-- runtime out of a sub-palette the app's own C code names -- TEXT_COLOR(1, 2,
+-- 0) on BG palette 3 for the bag, on BG palette 15 for the trainer card.  So
+-- every screen that prints anything had to have its ink written down by hand,
+-- and a hand-written colour is a colour that can be wrong without anything
+-- noticing.  Published here, it is the cartridge's.
+--
+-- WHY HEX AND NOT A TABLE.  146 distinct palettes across the fifteen UI
+-- archives, 129 of them full 256-colour banks: 33,904 colours in all.  As
+-- nested `{ r, g, b }` that is about 850 KB of Lua source; as six hex digits
+-- a colour it is about 200 KB, and it decodes with one `tonumber` per
+-- channel.  The cache is a file the importer writes and the game reads, not
+-- a thing anyone hand-edits, so the compact form costs nothing.
+--
+-- The string is RRGGBB per colour, in palette order, with NO separator.
+function Gen4Graphics.paletteHex(colours)
+  if type(colours) ~= "table" then return nil end
+  local parts = {}
+  for i = 1, #colours do
+    local c = colours[i]
+    if type(c) ~= "table" then return nil end
+    parts[i] = ("%02x%02x%02x"):format(c[1] % 256, c[2] % 256, c[3] % 256)
+  end
+  if #parts == 0 then return nil end
+  return table.concat(parts)
+end
+
+-- ...and back, one SUB-PALETTE at a time, as the 0-1 triples LOVE draws with.
+--
+-- `slot` is the sixteen-colour bank the cartridge names, so slot 15 is colours
+-- 240..255.  Returns a 1..16 array -- NOT the sparse 241..256 shape
+-- `paletteAtSlot` builds, which exists to be handed to `compose` at an offset.
+-- A caller wanting entry 1 of the bank asks for `[2]`, because the cartridge's
+-- index 0 is the transparent one and is kept so the indices line up with
+-- TEXT_COLOR's own numbering.
+function Gen4Graphics.slotFromHex(hex, slot)
+  if type(hex) ~= "string" then return nil end
+  local base = ((tonumber(slot) or 0) * 16) * 6
+  if base + 96 > #hex then return nil end
+  local out = {}
+  for i = 0, 15 do
+    local at = base + i * 6
+    out[i + 1] = {
+      tonumber(hex:sub(at + 1, at + 2), 16) / 255,
+      tonumber(hex:sub(at + 3, at + 4), 16) / 255,
+      tonumber(hex:sub(at + 5, at + 6), 16) / 255,
+    }
+  end
+  return out
+end
+
+function Gen4Graphics.compose(map, sheet, palette, firstTile)
   if not (map and sheet and palette) then return nil, "compose needs a tilemap, tiles and a palette" end
 
   local w, h = map.width, map.height
@@ -443,14 +774,72 @@ function Gen4Graphics.compose(map, sheet, palette)
     if h == 0 then return nil, "tilemap has no size and no cells" end
   end
 
+  -- WHERE CELL n GOES, WHICH IS NOT SIMPLY "n cells across".
+  --
+  -- The DS lays a background's screen data out in 32x32-ENTRY BLOCKS, one per
+  -- 256x256 pixels, in reading order -- so a 512x256 map is TWO blocks side by
+  -- side and its first 1024 cells are the WHOLE LEFT HALF, not the top two
+  -- rows of the full width.  Reading it as one 64-wide grid interleaves the
+  -- halves every 32 cells, and the result is a picture chopped into 256-pixel
+  -- strips stacked in the wrong order.
+  --
+  -- Reported from play: the battle backdrop drew "flat horizontal bands with a
+  -- black stripe through the middle". Platinum's outdoor backdrops ARE
+  -- horizontal gradients -- that part is the cartridge's own art -- but the
+  -- stripe was this: the transparent bottom of each half landing in the middle
+  -- of the picture. pl_batt_bg member 2 states it twice over, and neither
+  -- statement needs the art to read:
+  --   * block 0 row 0 is tiles 576,1,2..31 and block 1 row 0 is 31,30..1,576 --
+  --     the same run mirrored, with the H-flip bit set on 607 of block 1's
+  --     cells and on NONE of block 0's. A 512-wide backdrop is a 256-wide
+  --     gradient beside its own mirror, which is what makes the scroll seamless.
+  --   * every blank cell starts at ROW 20 OF EACH BLOCK -- one clean horizontal
+  --     boundary at y 160, where the platforms and battlers take over. Read
+  --     linearly the blanks span rows 10 through 31, which is the stripe.
+  --
+  -- 199 of the cartridge's 983 tilemaps move because of this, so it was never
+  -- only the backdrop: the town map, the box screens, the title demo and the
+  -- Frontier backgrounds are all in the list.
+  --
+  -- ONLY AT THE HARDWARE'S OWN BG SIZES, which above 256x256 are exactly
+  -- 512x256, 256x512 and 512x512. Everything else stays linear, and the
+  -- restriction is deliberate rather than cautious:
+  --   * ten members state sizes the hardware has no BG for at all (352x192,
+  --     384x144, 448x192, 320x72, 256x400, 256x488, 256x504). Those are laid
+  --     out by software and splitting them would scramble screens that work.
+  --   * two more state 1024x1024, which is not a text BG size either. THE
+  --     BLOCK RULE IS NOT VERIFIED THERE and both readings happen to fill the
+  --     same top half (8,192 cells, exactly half the grid), so extrapolating
+  --     would be a guess dressed as a rule. Left linear until something proves
+  --     otherwise.
+  -- Measured over the cartridge's 983 tilemaps: 201 compose differently now
+  -- (131 at 512x256, 68 at 512x512, 2 at 1024x1024 -- the last of which this
+  -- restriction puts back), ten are a single block column and so unchanged by
+  -- arithmetic, and ten are the odd sizes above.
   local cols = floor(w / 8)
+  local blockCols = nil
+  -- ...AND NOT AN AFFINE ONE. An extended rotation/scaling background (BG
+  -- mode 5's bg2/bg3 -- the Battle Frontier's scenes) is one linear grid at
+  -- any size; the caller that knows its BG mode says so with `map.linear`.
+  if not map.linear and (w == 256 or w == 512) and (h == 256 or h == 512)
+     and (w > 256 or h > 256) then
+    blockCols = floor(w / 256)
+  end
   local four = sheet.bpp == 4
   local perTile = sheet.perTile or (four and 32 or 64)
   local data = sheet.pixels
   -- `palette` is the flat array Gen4Graphics.palette returns: one { r, g, b }
   -- per entry, sub-palettes laid end to end in sixteens.
   local colours = palette
-  if type(colours) ~= "table" or #colours == 0 then return nil, "palette has no colours" end
+  -- `next` RATHER THAN `#`, because a palette may legitimately be SPARSE. A
+  -- background loaded into sub-palette slot n has its sixteen colours at
+  -- n * 16 + 1 .. n * 16 + 16 and nothing at all below that -- see
+  -- `paletteAtSlot` -- and `#` on such a table is not defined to be anything
+  -- useful. What the guard is actually for is a palette member that decoded to
+  -- nothing, and an empty table is still caught.
+  if type(colours) ~= "table" or next(colours) == nil then
+    return nil, "palette has no colours"
+  end
 
   local out = {}
   local blank = char(0, 0, 0, 0)
@@ -458,13 +847,25 @@ function Gen4Graphics.compose(map, sheet, palette)
 
   for index = 1, #map.cells do
     local cell = map.cells[index]
-    local cx = ((index - 1) % cols) * 8
-    local cy = floor((index - 1) / cols) * 8
-    if cy < h then
-      local base = cell.tile * perTile
-      -- A cell may point past the end of a sheet that was cut short; leave
-      -- those transparent instead of reading whatever follows.
-      if base + perTile <= #data then
+    local cx, cy
+    if blockCols then
+      -- 1024 entries per block; within one, 32 cells to a row.
+      local n = index - 1
+      local block = floor(n / 1024)
+      local k = n % 1024
+      cx = (block % blockCols) * 256 + (k % 32) * 8
+      cy = floor(block / blockCols) * 256 + floor(k / 32) * 8
+    else
+      cx = ((index - 1) % cols) * 8
+      cy = floor((index - 1) / cols) * 8
+    end
+    if cy < h and cx < w then
+      local base = (cell.tile - (firstTile or 0)) * perTile
+      -- A cell may point past the end of a sheet that was cut short, or below
+      -- the base the sheet was loaded at; leave those transparent instead of
+      -- reading whatever follows -- or, for a negative index, whatever
+      -- precedes.
+      if base >= 0 and base + perTile <= #data then
         local shift = four and (cell.palette * 16) or 0
         for y = 0, 7 do
           local sy = cell.flipY and (7 - y) or y

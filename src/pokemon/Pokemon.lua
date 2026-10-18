@@ -108,9 +108,45 @@ end
 -- Everything the personality decides is recomputed from it rather than
 -- copied, so a seed carrying only the two numbers the cartridge stores is
 -- enough to rebuild the rest.
+-- THE NATURE WAS GOING INTO THE EVS SLOT.
+--
+-- `Stats.calc(speciesDef, level, dvs, statExp, evs, nature)` takes SIX, and
+-- the three calls in this file passed five -- so `nature` landed in `evs`,
+-- `evs` landed in `statExp`, and the Gen 3 branch's `evs or statExp` then
+-- picked the nature over the real EVs. The two callers outside this file
+-- (Gen3Commands, Gen3SpecialsFRLG) have always passed all six; this file was
+-- the outlier.
+--
+-- It went unnoticed for as long as it did because a Gen 3 nature is a STRING
+-- and Lua lets you index a string: `evs[key]` answered nil, the EVs read as
+-- zero, and a freshly built Pokemon has zero EVs anyway. A GEN 4 nature is a
+-- NUMBER, and indexing a number RAISES -- which is how building any Sinnoh
+-- Pokemon came to take the game down (Stats.lua:105).
+--
+-- THIS DOES CHANGE GEN 3 STATS, and the first version of this note said it did
+-- not.  That claim came from a regression harness whose "before" overlay had
+-- been deleted, so it compared the new file against itself and reported no
+-- difference -- and it also never called `Stats.setNatures`, which `Data:load`
+-- does before `seedDefaults`.  Both faults pointed the same way.  Measured
+-- properly, against a reconstructed pre-fix file with the natures loaded:
+--
+--   crystal (gen 2)   753 builds   0 differ
+--   emerald (gen 3)   900 builds   900 differ
+--
+-- and the direction is the cartridge's.  Over 600 seeded Emerald builds, the
+-- five NEUTRAL natures move nothing (108 builds, 0 changed) and every
+-- modifying one moves exactly two stats (492 builds, all changed): an Adamant
+-- mon gains 10% Attack and loses 10% Sp.Atk, a Bold one loses 10% Attack.
+-- Gen 1 and Gen 2 are untouched, because `Stats.isGen3` is false for them and
+-- the nature never reaches the formula.
+--
+-- So this completes a feature that was written and never took effect, rather
+-- than only removing a crash.  `gen3Seed`'s own comment above calls the
+-- absence a bug -- "nothing in the game ever got the ten percent its nature is
+-- supposed to move" -- and it was still describing an open one.
 function Pokemon.applySeed(data, mon, seed)
   if type(mon) ~= "table" or type(seed) ~= "table" then return false end
-  local def = data and data.pokemon and data.pokemon[mon.species]
+  local def = require('src.pokemon.Gen4Forms').definition(data,mon)
   if not def then return false end
   mon.personality = seed.personality or mon.personality
   mon.ivs = seed.ivs or mon.ivs
@@ -127,7 +163,8 @@ function Pokemon.applySeed(data, mon, seed)
   if mon.ivs then
     local full = mon.hp ~= nil and mon.stats ~= nil
                  and mon.hp >= (mon.stats.hp or 0)
-    mon.stats = Stats.calc(def, mon.level or 1, mon.ivs, mon.evs, mon.nature)
+    mon.stats = Stats.calc(def, mon.level or 1, mon.ivs, nil, mon.evs,
+                           mon.nature)
     -- a mon rebuilt at full health stays at full health; one carrying a
     -- wound keeps it, clamped to whatever the new maximum turned out to be
     mon.hp = full and mon.stats.hp
@@ -136,13 +173,19 @@ function Pokemon.applySeed(data, mon, seed)
   return true
 end
 
-function Pokemon.new(data, species, level, rng)
-  local def = data.pokemon[species]
+function Pokemon.new(data, species, level, rng, form)
+  local nativeForm=(data.constants or {}).gen==4 and (form or 0) or nil
+  local speciesDef=(data.pokemon or {})[species]
+  if require("src.core.GameVersion").get()=="polishedcrystal" and speciesDef and speciesDef.forms then
+    nativeForm=form or require("src.pokemon.PolishedUnown").choose(nil,rng)
+  end
+  local def = require('src.pokemon.Gen4Forms').definition(data,
+    {species=species,form=nativeForm})
   assert(def, "unknown species " .. tostring(species))
   local dvs = Stats.randomDVs(rng)
   local seed = Stats.isGen3(def) and gen3Seed(data, def, rng) or nil
   local stats = seed
-    and Stats.calc(def, level, seed.ivs, seed.evs, seed.nature)
+    and Stats.calc(def, level, seed.ivs, nil, seed.evs, seed.nature)
     or Stats.calc(def, level, dvs)
   local moves = {}
   for _, id in ipairs(Pokemon.movesAtLevel(def, level)) do
@@ -151,6 +194,7 @@ function Pokemon.new(data, species, level, rng)
   end
   local mon = {
     species = species,
+    form = nativeForm,
     level = level,
     exp = Growth.expForLevel(def.growthRate, level),
     dvs = dvs,
@@ -171,11 +215,17 @@ function Pokemon.new(data, species, level, rng)
     statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
     stats = stats,
     hp = stats.hp,
-    -- Gen2 party mons carry a happiness byte (BASE_HAPPINESS, seeded by
-    -- GivePoke); Gen1 has no such field, so leave it nil there and the
-    -- HAPPINESS evolution method simply never fires.
-    happiness = require("src.core.GameVersion").isGen2()
-      and require("src.pokemon.Evolution").BASE_HAPPINESS or nil,
+    -- Emerald seeds friendship from the species record. Gen2 uses its
+    -- shared BASE_HAPPINESS; Gen1 has no friendship byte.
+    -- ...AND SO DOES PLATINUM (`baseFriendship`, the personal record's own
+    -- byte), which had none: every Sinnoh Pokemon's friendship was nil, so
+    -- the friendship evolutions (Golbat, Chansey, Riolu, Budew, Chingling,
+    -- Munchlax, Azurill ...) could never fire and Return hit for nothing.
+    happiness = (require("src.core.GameVersion").isGen4()
+                 and (def.baseFriendship or def.friendship or 70))
+      or require("src.core.GameVersion").get()=="emerald" and (def.friendship or 70)
+      or (require("src.core.GameVersion").isGen2()
+      and require("src.pokemon.Evolution").BASE_HAPPINESS or nil),
     -- the Gen1 catch-rate byte freezes at catch time: evolution does NOT
     -- update it, so PKHeX expects a preevolution's rate on an evolved mon
     -- (#206).  Evolution.apply mutates in place and never touches this.
@@ -228,7 +278,7 @@ function Pokemon.forceShiny(data, mon, rng, otId)
       return mon
     end
     mon.personality = Stats.shinyPersonality(mon.personality, otId, rng)
-    local def = data and data.pokemon and data.pokemon[mon.species]
+    local def = require('src.pokemon.Gen4Forms').definition(data,mon)
     if def then
       -- the nature rides on the personality, so the stats follow it
       local order = data.constants and data.constants.natureOrder
@@ -240,7 +290,8 @@ function Pokemon.forceShiny(data, mon, rng, otId)
         mon.abilitySlot = (mon.personality % 2) + 1
       end
       local full = mon.stats and mon.stats.hp
-      mon.stats = Stats.calc(def, mon.level or 1, mon.ivs, mon.evs, mon.nature)
+      mon.stats = Stats.calc(def, mon.level or 1, mon.ivs, nil, mon.evs,
+                             mon.nature)
       mon.hp = (full and mon.hp and mon.hp < full)
                and math.min(mon.hp, mon.stats.hp) or mon.stats.hp
     end
@@ -249,7 +300,7 @@ function Pokemon.forceShiny(data, mon, rng, otId)
   local dvs = {}
   for k, v in pairs(Pokemon.SHINY_DVS) do dvs[k] = v end
   mon.dvs = dvs
-  local def = data and data.pokemon and data.pokemon[mon.species]
+  local def = require('src.pokemon.Gen4Forms').definition(data,mon)
   if def then
     local full = mon.stats and mon.stats.hp
     mon.stats = Stats.calc(def, mon.level or 1, dvs, mon.statExp)
@@ -398,18 +449,28 @@ end
 -- Pokémon Center / blackout heal (engine/events/heal_party.asm
 -- HealParty): full HP, status cleared, and every move's PP restored to
 -- its base plus the PP-Up bonus (RestoreBonusPP adds maxPP/5 per PP UP).
-function Pokemon.heal(mon)
-  mon.hp = mon.stats.hp
-  mon.status = nil
-  local moves = require("src.core.Data").moves
+function Pokemon.maxPP(def, slot)
+  local base = math.max(0,tonumber(def and def.pp) or 0)
+  local ups = type(slot)=='table' and math.min(3,math.max(0,math.floor(tonumber(slot.ppUps) or 0))) or 0
+  return base + ups * math.floor(base / 5)
+end
+
+function Pokemon.restorePP(mon, moves)
+  moves = moves or require("src.core.Data").moves
   if moves then
-    for _, mv in ipairs(mon.moves) do
+    for _, mv in ipairs(mon.moves or {}) do
       local mdef = moves[mv.id]
       if mdef then
-        mv.pp = mdef.pp + (mv.ppUps or 0) * math.floor(mdef.pp / 5)
+        mv.pp = Pokemon.maxPP(mdef,mv)
       end
     end
   end
+end
+
+function Pokemon.heal(mon)
+  mon.hp = mon.stats.hp
+  mon.status = nil
+  Pokemon.restorePP(mon)
 end
 
 function Pokemon.isFainted(mon)

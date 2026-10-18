@@ -112,7 +112,8 @@ end
 -- patches is what it patches, and the registry remains the truth once loaded.
 -- `generations`: [1, 2] -- the generations a mod is written for.
 --
--- Validated to the three that exist and sorted, so the set is comparable and
+-- Validated to the generations that exist (ModGens.COUNT -- 1 to 5) and
+-- sorted, so the set is comparable and
 -- an out-of-range entry is dropped rather than widening the mod's claim.  An
 -- empty or malformed list reads as "unstated" (nil), NOT as "none": a mod that
 -- says nothing intelligible must keep working exactly as it did.
@@ -122,7 +123,10 @@ local function parseGenerations(raw)
   local seen, out = {}, {}
   for _, entry in ipairs(list) do
     local n = tonumber(entry)
-    if n and n % 1 == 0 and n >= 1 and n <= 3 and not seen[n] then
+    -- WAS `n <= 3`, which silently dropped a mod's claim to Gen 4 (and would
+    -- have dropped Gen 5): a Platinum mod that said "generations": [4] read as
+    -- saying nothing at all
+    if n and n % 1 == 0 and n >= 1 and n <= require("src.mods.ModGens").COUNT and not seen[n] then
       seen[n] = true
       out[#out + 1] = n
     end
@@ -277,6 +281,24 @@ function Manifest.validate(raw, path)
 
   local conflicts = mergeConflictLists(raw.conflicts, raw.incompatible)
 
+  -- `support`: where to thank the mod's creator -- a Ko-fi, a Patreon, a
+  -- PayPal page. The launcher's mod card turns it into a "Support the
+  -- creator" button. ONLY http(s) is accepted, because the button hands it
+  -- to the OS to open: a `file:` or custom-scheme link from a downloaded
+  -- manifest is not something a click on a donate button should run. A bad
+  -- value is dropped with a warning rather than refusing the whole mod.
+  local support = raw.support or raw.support_url
+  if support ~= nil then
+    if type(support) == "string" and support:match("^https?://[%w%-%.]+%.%a+")
+       and not support:find("%s") then
+      support = scrubUtf8(support)
+    else
+      violation(false, raw.id, ("support must be an http(s) URL, got %q")
+        :format(tostring(support)))
+      support = nil
+    end
+  end
+
   return {
     id = raw.id,
     name = raw.name,
@@ -295,6 +317,7 @@ function Manifest.validate(raw, path)
     game_version = raw.game_version,
     description = raw.description or "",
     github = github,
+    support = support,
     updateCheck = updateCheck,
     experimental = experimental,
     profile = profile,

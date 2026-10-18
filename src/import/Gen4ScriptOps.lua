@@ -76,28 +76,28 @@ Gen4ScriptOps.COMMANDS = {
   [0x001] = { "dummy", "" },
   [0x002] = { "end", "" },
   [0x003] = { "waittime", "ww" },
-  [0x004] = { "unused_004", "" },
-  [0x005] = { "unused_005", "" },
-  [0x006] = { "unused_006", "" },
-  [0x007] = { "unused_007", "" },
-  [0x008] = { "unused_008", "" },
-  [0x009] = { "unused_009", "" },
-  [0x00A] = { "unused_00a", "" },
-  [0x00B] = { "unused_00b", "" },
-  [0x00C] = { "unused_00c", "" },
-  [0x00D] = { "unused_00d", "" },
-  [0x00E] = { "unused_00e", "" },
-  [0x00F] = { "unused_00f", "" },
-  [0x010] = { "unused_010", "" },
+  [0x004] = { "unused_004", "bb" },
+  [0x005] = { "unused_005", "bd" },
+  [0x006] = { "unused_006", "bd" },
+  [0x007] = { "unused_007", "db" },
+  [0x008] = { "unused_008", "db" },
+  [0x009] = { "unused_009", "bb" },
+  [0x00A] = { "unused_00a", "dd" },
+  [0x00B] = { "unused_00b", "bb" },
+  [0x00C] = { "unused_00c", "bb" },
+  [0x00D] = { "unused_00d", "bd" },
+  [0x00E] = { "unused_00e", "db" },
+  [0x00F] = { "unused_00f", "db" },
+  [0x010] = { "unused_010", "dd" },
   [0x011] = { "comparevartovalue", "ww" },
   [0x012] = { "comparevartovar", "ww" },
-  [0x013] = { "unused_013", "" },
+  [0x013] = { "unused_013", "w" },
   [0x014] = { "callcommonscript", "w" },
   [0x015] = { "returncommonscript", "" },
   [0x016] = { "goto", "d" },
-  [0x017] = { "unused_017", "" },
-  [0x018] = { "unused_018", "" },
-  [0x019] = { "unused_019", "" },
+  [0x017] = { "unused_017", "bd" },
+  [0x018] = { "unused_018", "bd" },
+  [0x019] = { "unused_019", "bd" },
   [0x01A] = { "call", "d" },
   [0x01B] = { "return", "" },
   [0x01C] = { "gotoif", "bd" },
@@ -114,7 +114,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x027] = { "subvar", "ww" },
   [0x028] = { "setvarfromvalue", "ww" },
   [0x029] = { "setvarfromvar", "ww" },
-  [0x02A] = { "unused_02a", "" },
+  [0x02A] = { "unused_02a", "ww" },
   [0x02B] = { "messageinstant", "b" },
   [0x02C] = { "message", "b" },
   [0x02D] = { "messagevar", "w" },
@@ -178,7 +178,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x067] = { "restorecamera", "" },
   [0x068] = { "faceplayer", "" },
   [0x069] = { "getplayermappos", "ww" },
-  [0x06A] = { "unused_06a", "" },
+  [0x06A] = { "unused_06a", "www" },
   [0x06B] = { "movecamera", "www" },
   [0x06C] = { "setobjectflagispersistent", "wb" },
   [0x06D] = { "setmovementtype", "ww" },
@@ -236,7 +236,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x0A1] = { "returntofield", "" },
   [0x0A2] = { "0a2", "" },
   [0x0A3] = { "0a3", "" },
-  [0x0A4] = { "unused_0a4", "" },
+  [0x0A4] = { "unused_0a4", "w" },
   [0x0A5] = { "0a5", "" },
   [0x0A6] = { "0a6", "www" },
   [0x0A7] = { "showdressupphoto", "ww" },
@@ -258,7 +258,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x0B7] = { "checkisapproachingtrainertaskdone", "ww" },
   [0x0B8] = { "getapproachingtrainertype", "w" },
   [0x0B9] = { "getapproachingtrainerid", "ww" },
-  [0x0BA] = { "unused_0ba", "" },
+  [0x0BA] = { "unused_0ba", "w" },
   [0x0BB] = { "openpokemonnamingscreen", "ww" },
   [0x0BC] = { "fadescreen", "wwww" },
   [0x0BD] = { "waitfadescreen", "" },
@@ -316,8 +316,8 @@ Gen4ScriptOps.COMMANDS = {
   [0x0F1] = { "gotoiftargettrainerdefeated", "d" },
   [0x0F2] = { "startbattleclient", "wwww" },
   [0x0F3] = { "startbattleserver", "wwww" },
-  [0x0F4] = { "unused_0f4", "" },
-  [0x0F5] = { "unused_0f5", "" },
+  [0x0F4] = { "unused_0f4", "w" },
+  [0x0F5] = { "unused_0f5", "w" },
   [0x0F6] = { "startlinkbattle", "" },
   [0x0F7] = { "unused_0f7", "" },
   [0x0F8] = { "startcontestcommsync", "w" },
@@ -383,7 +383,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x134] = { "checkpoketchappregistered", "ww" },
   [0x135] = { "135", "w" },
   [0x136] = { "clearreceivedtempdataallplayers", "" },
-  [0x137] = { "unused_137", "" },
+  [0x137] = { "unused_137", "w" },
   [0x138] = { "getunionroomtealamessage", "w" },
   [0x139] = { "139", "w" },
   [0x13A] = { "13a", "" },
@@ -540,7 +540,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x1D1] = { "dodefogfunc", "*" },  -- variable; see VARIABLE_LENGTH
   [0x1D2] = { "addaccessory", "ww" },
   [0x1D3] = { "canfitaccessory", "www" },
-  [0x1D4] = { "unused_1d4", "" },
+  [0x1D4] = { "unused_1d4", "www" },
   [0x1D5] = { "addcontestbackdrop", "w" },
   [0x1D6] = { "checkbackdrop", "ww" },
   [0x1D7] = { "openpoffincooking", "w" },
@@ -558,8 +558,8 @@ Gen4ScriptOps.COMMANDS = {
   [0x1E3] = { "1e3", "ww" },
   [0x1E4] = { "1e4", "w" },
   [0x1E5] = { "incrementgamerecord", "w" },
-  [0x1E6] = { "unused_1e6", "" },
-  [0x1E7] = { "unused_1e7", "" },
+  [0x1E6] = { "unused_1e6", "www" },
+  [0x1E7] = { "unused_1e7", "wwwb" },
   [0x1E8] = { "checklocaldexcompleted", "w" },
   [0x1E9] = { "checknationaldexcompleted", "w" },
   [0x1EA] = { "showdiplomasinnoh", "" },
@@ -567,7 +567,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x1EC] = { "addtrophygardenmon", "" },
   [0x1ED] = { "gettrophygardenslot1species", "w" },
   [0x1EE] = { "getpartymonhelditem_unused", "ww" },
-  [0x1EF] = { "unused_1ef", "" },
+  [0x1EF] = { "unused_1ef", "w" },
   [0x1F0] = { "deletepartymonhelditem_unused", "w" },
   [0x1F1] = { "getfossilcount", "w" },
   [0x1F2] = { "dummy_1f2", "" },
@@ -721,7 +721,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x286] = { "getundergrounditemsgivenaway", "w" },
   [0x287] = { "getundergroundfossilsunearthed", "w" },
   [0x288] = { "getundergroundtrapsset", "w" },
-  [0x289] = { "givepoffin", "*" },  -- variable; see VARIABLE_LENGTH
+  [0x289] = { "givepoffin", "wwwwwww" },  -- destVar, five flavors, smoothness (ScrCmd_GivePoffin)
   [0x28A] = { "checkhasemptypoffincaseslot", "w" },
   [0x28B] = { "checkdistributionevent", "bw" },
   [0x28C] = { "drawpokemonpreviewfrompartyslot", "w" },
@@ -745,7 +745,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x29E] = { "startdestroyobstacleanimation", "ww" },
   [0x29F] = { "29f", "w" },
   [0x2A0] = { "starttagbattle", "www" },
-  [0x2A1] = { "unused_2a1", "" },
+  [0x2A1] = { "unused_2a1", "www" },
   [0x2A2] = { "trysetunusedcollectedorbflag", "w" },
   [0x2A3] = { "checkhaswifilistvalidlogin", "w" },
   [0x2A4] = { "getwiflistvalidfriendscount", "w" },
@@ -779,7 +779,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x2C0] = { "messageautoscroll", "w" },
   [0x2C1] = { "opensaveinfo", "" },
   [0x2C2] = { "closesaveinfo", "" },
-  [0x2C3] = { "unused_2c3", "" },
+  [0x2C3] = { "unused_2c3", "b" },
   [0x2C4] = { "launchbattlefrontierscene", "b" },
   [0x2C5] = { "deleteactivebattlefactorystreak", "ww" },
   [0x2C6] = { "2c6", "" },
@@ -914,7 +914,7 @@ Gen4ScriptOps.COMMANDS = {
   [0x347] = { "bufferfloornumber", "bb" },
 }
 
--- The nine handlers whose operand count depends on what they just read, so
+-- The eight handlers whose operand count depends on what they just read, so
 -- no fixed spec can describe them.  Left unresolved on purpose: a guessed
 -- width here is the Sootopolis bug again, and the decoder should refuse a
 -- command it cannot size rather than silently walk past it.  Each needs its
@@ -928,7 +928,8 @@ Gen4ScriptOps.VARIABLE_LENGTH = {
   [0x237] = "calltvinterview",  -- scrcmd_tv_broadcast.c
   [0x23E] = "mysterygiftgive",  -- scrcmd_mystery_gift.c
   [0x27C] = "27c",  -- scrcmd_tv_broadcast.c
-  [0x289] = "givepoffin",  -- scrcmd.c
+  -- (givepoffin, 0x289, was listed here and is NOT variable: ScrCmd_GivePoffin
+  -- reads one var pointer and six vars, every time.)
 }
 
 -- What ends a script.  `end` returns from the whole script; `return` pops one
@@ -945,17 +946,111 @@ end
 
 -- Bytes this instruction occupies, opcode included -- or nil when the command
 -- is variable-length, which the caller must handle rather than skip.
-function Gen4ScriptOps.size(op)
-  local entry = Gen4ScriptOps.COMMANDS[op]
-  if not entry then return nil end
-  local spec = entry[2]
-  if spec:find("*", 1, true) then return nil end
-  local n = Gen4ScriptOps.OPCODE_BYTES
+-- Operand bytes a spec string accounts for, opcode NOT included.
+local function specWidth(spec)
+  local n = 0
   for i = 1, #spec do
     local c = spec:sub(i, i)
     n = n + (c == "b" and 1 or c == "w" and 2 or c == "d" and 4 or 0)
   end
   return n
+end
+Gen4ScriptOps.specWidth = specWidth
+
+function Gen4ScriptOps.size(op)
+  local entry = Gen4ScriptOps.COMMANDS[op]
+  if not entry then return nil end
+  local spec = entry[2]
+  if spec:find("*", 1, true) then return nil end
+  return Gen4ScriptOps.OPCODE_BYTES + specWidth(spec)
+end
+
+-- SOME VARIABLE-LENGTH COMMANDS ARE VARIABLE BY A RULE WE CAN READ, and
+-- leaving those undecoded costs whole scripts rather than single rows.
+--
+-- `Gen4Script.decode` stops the walk at a `*` command rather than guessing a
+-- width, which is right -- the header of this file records what a guessed
+-- width cost Gen 3 -- but "stop" means every instruction AFTER it is never
+-- decoded.  Measured on the cartridge: of 8,567 scripts, 8,549 end at `end`,
+-- 2 at an unknown opcode, 2 at an overrun, and **14 stop at a variable-length
+-- command** -- so fourteen scripts are truncated, not fourteen rows.
+--
+-- Four of those fourteen are the three field-move flag commands, and
+-- pokeplatinum states their rule outright in `asm/macros/scrcmd.inc`:
+--
+--     .macro DoStrengthFunc func, checkDestVarID=0
+--     .short SCRCMD_DOSTRENGTHFUNC
+--     .byte \func
+--     .if \func == FIELD_MOVE_FUNC_CHECK_ACTIVE
+--         .short \checkDestVarID
+--     .endif
+--     .endm
+--
+-- One byte always; a word as well, and only, when that byte is
+-- FIELD_MOVE_FUNC_CHECK_ACTIVE.  That is READ, not inferred from handler
+-- shapes, which is the same standard the fixed widths in this file are held
+-- to.
+--
+-- A function here returns the spec string for one instruction given the bytes
+-- at its position, or NIL -- and nil still stops the walk.  Refusing an
+-- undefined sub-function is the whole point: `ScrCmd_DoStrengthFunc`'s
+-- `default:` arm is `GF_ASSERT(FALSE)`, so a fourth value is not a width this
+-- table may invent.
+Gen4ScriptOps.FIELD_MOVE_FUNC = {
+  CLEAR_ACTIVE = 0, SET_ACTIVE = 1, CHECK_ACTIVE = 2,
+}
+
+local function fieldMoveFuncSpec(data, pc)
+  local func = data:byte(pc + Gen4ScriptOps.OPCODE_BYTES)
+  if func == Gen4ScriptOps.FIELD_MOVE_FUNC.CHECK_ACTIVE then return "bw" end
+  if func == Gen4ScriptOps.FIELD_MOVE_FUNC.SET_ACTIVE
+     or func == Gen4ScriptOps.FIELD_MOVE_FUNC.CLEAR_ACTIVE then return "b" end
+  return nil
+end
+
+-- MysteryGiftGive (scrcmd.inc): a u16 STAGE, then one destination var for
+-- CHECK_AVAILABLE_PGT / GET_PGT_TYPE / CHECK_CAN_RECEIVE (1, 2, 3), two for
+-- RECEIVED / CANT_RECEIVE (5, 6), and nothing for LOAD, GIVE and the two
+-- UNLOADs (0, 4, 7, 8). Undecodable before, so every mart's OnTransition
+-- (common script 10200) stopped at its first instruction and never set
+-- FLAG_HIDE_MART_MYSTERY_GIFT_DELIVERYMAN -- the deliveryman stood in every
+-- mart whether or not a gift was waiting.
+Gen4ScriptOps.MYSTERY_GIFT_STAGE_ARGS = { [0] = 0, 1, 1, 1, 0, 2, 2, 0, 0 }
+local function mysteryGiftSpec(data, pc)
+  local lo, hi = data:byte(pc + Gen4ScriptOps.OPCODE_BYTES, pc + Gen4ScriptOps.OPCODE_BYTES + 1)
+  if not (lo and hi) then return nil end
+  local args = Gen4ScriptOps.MYSTERY_GIFT_STAGE_ARGS[lo + hi * 256]
+  if not args then return nil end
+  return "w" .. ("w"):rep(args)
+end
+
+Gen4ScriptOps.VARIABLE_SPEC = {
+  [0x23E] = mysteryGiftSpec,    -- mysterygiftgive
+  [0x1CF] = fieldMoveFuncSpec,  -- dostrengthfunc
+  [0x1D0] = fieldMoveFuncSpec,  -- doflashfunc
+  [0x1D1] = fieldMoveFuncSpec,  -- dodefogfunc
+}
+
+-- The spec for the instruction at `pc`, resolving a `*` command when its rule
+-- is known.  `data` and `pc` are optional: without them a `*` command is
+-- undecidable, which is what every caller that has no bytes to hand should get.
+function Gen4ScriptOps.specAt(op, data, pc)
+  local entry = Gen4ScriptOps.COMMANDS[op]
+  if not entry then return nil end
+  local spec = entry[2]
+  if not spec:find("*", 1, true) then return spec end
+  local rule = Gen4ScriptOps.VARIABLE_SPEC[op]
+  if not rule or type(data) ~= "string" or type(pc) ~= "number" then return nil end
+  return rule(data, pc)
+end
+
+-- Bytes the instruction at `pc` occupies, opcode included, or nil when its
+-- width still cannot be known.  `size` above stays as it was: it answers from
+-- the opcode alone and several callers have nothing else to give it.
+function Gen4ScriptOps.sizeAt(op, data, pc)
+  local spec = Gen4ScriptOps.specAt(op, data, pc)
+  if not spec then return nil end
+  return Gen4ScriptOps.OPCODE_BYTES + specWidth(spec)
 end
 
 return Gen4ScriptOps

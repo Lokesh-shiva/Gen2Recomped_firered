@@ -332,6 +332,135 @@ end
 -- code.  Champion's persistent EVENT_BEAT_CHAMPION_RIVAL intentionally stays
 -- set when the cartridge clears FLAG_DEFEATED_CHAMP for a new League run;
 -- only the port's THIS_RUN marker is cleared with it.
+-- Saves made before the FireRed League flag bridge existed can be partway
+-- through the Elite Four with only one representation of a victory recorded.
+-- Fresh/current saves write both in g3_set_flag/checkVictoryRewards below, but
+-- an older port save commonly has only EVENT_BEAT_*; an imported cartridge
+-- save can have only FLAG_DEFEATED_*.
+--
+-- Repair only while VAR_MAP_SCENE_POKEMON_LEAGUE says a League run is active,
+-- or when an older port save is physically inside one of the League rooms and
+-- predates that native scene variable.  Hall of Fame/lobby are deliberately
+-- absent from the inference table: completed runs stay at scene 0 and cannot
+-- resurrect a previous run's defeated Elite Four.
+function Gen3Commands.repairFireRedLeagueFlags(save)
+  if require("src.core.GameVersion").get() ~= "firered" then return false end
+  if type(save) ~= "table" or type(save.flags) ~= "table" then return false end
+  local scene = math.floor(tonumber(getVar(save, 0x4068)) or 0)
+  local changed = false
+  local priorChampion = save.flags.EVENT_BEAT_CHAMPION_RIVAL == true
+    or save.flags.FLAG_G3_082C == true
+    or (tonumber(save.hallOfFame) or 0) > 0
+
+  -- Hall of Fame resets FireRed's native FLAG_DEFEATED_* bits and League
+  -- scene back to zero.  Builds before PR #60 did not clear the port-side
+  -- EVENT_BEAT_* mirrors at the same time, so a completed old save can sit in
+  -- the real Indigo Plateau lobby with stale previous-run progress.  Clear
+  -- only that run-scoped compatibility state here.  This is deliberately
+  -- limited to scene 0 + lobby + prior Champion history, so a first-ever
+  -- in-progress League save is never mistaken for a completed run.
+  local playerMap = save.player and save.player.map
+  if scene <= 0 and priorChampion
+     and (playerMap == "MAP_G13_N00" or playerMap == "INDIGO_PLATEAU_LOBBY") then
+    local staleFlags = {
+      "EVENT_STARTED_ELITE_4",
+      "EVENT_BEAT_LORELEIS_ROOM_TRAINER_0",
+      "EVENT_AUTOWALKED_INTO_LORELEIS_ROOM",
+      "EVENT_BEAT_BRUNOS_ROOM_TRAINER_0",
+      "EVENT_AUTOWALKED_INTO_BRUNOS_ROOM",
+      "EVENT_BEAT_AGATHAS_ROOM_TRAINER_0",
+      "EVENT_AUTOWALKED_INTO_AGATHAS_ROOM",
+      "EVENT_BEAT_LANCES_ROOM_TRAINER_0",
+      "EVENT_BEAT_LANCE",
+      "EVENT_LANCES_ROOM_LOCK_DOOR",
+      "EVENT_BEAT_CHAMPION_RIVAL_THIS_RUN",
+    }
+    for _, flag in ipairs(staleFlags) do
+      if save.flags[flag] ~= nil then
+        save.flags[flag] = nil
+        changed = true
+      end
+    end
+    if type(save.defeatedTrainers) == "table" then
+      for _, key in ipairs({
+        "LORELEIS_ROOM_obj_1", "BRUNOS_ROOM_obj_1",
+        "AGATHAS_ROOM_obj_1", "LANCES_ROOM_obj_1",
+      }) do
+        if save.defeatedTrainers[key] ~= nil then
+          save.defeatedTrainers[key] = nil
+          changed = true
+        end
+      end
+    end
+    return changed
+  end
+
+  if scene <= 0 then
+    local room = save.player and save.player.map
+    local roomScenes = {
+      MAP_G01_N75 = 1, LORELEIS_ROOM = 1,
+      MAP_G01_N76 = 2, BRUNOS_ROOM = 2,
+      MAP_G01_N77 = 3, AGATHAS_ROOM = 3,
+      MAP_G01_N78 = 4, LANCES_ROOM = 4,
+      MAP_G01_N79 = 4, CHAMPIONS_ROOM = 4,
+    }
+    scene = roomScenes[room]
+    if not scene then return false end
+    setVar(save, 0x4068, scene)
+    changed = true
+  end
+
+  local mirrors = {
+    FLAG_G3_04B8 = { "EVENT_BEAT_LORELEIS_ROOM_TRAINER_0", 1,
+                      "LORELEIS_ROOM_obj_1" },
+    FLAG_G3_04B9 = { "EVENT_BEAT_BRUNOS_ROOM_TRAINER_0", 2,
+                      "BRUNOS_ROOM_obj_1" },
+    FLAG_G3_04BA = { "EVENT_BEAT_AGATHAS_ROOM_TRAINER_0", 3,
+                      "AGATHAS_ROOM_obj_1" },
+    FLAG_G3_04BB = { "EVENT_BEAT_LANCE", 4,
+                      "LANCES_ROOM_obj_1" },
+    -- The persistent EVENT_BEAT_CHAMPION_RIVAL survives future League runs.
+    -- THIS_RUN is the run-scoped mirror of FLAG_DEFEATED_CHAMP.
+    FLAG_G3_04BC = { "EVENT_BEAT_CHAMPION_RIVAL_THIS_RUN", 4 },
+  }
+  -- A completed pre-bridge save is special: Hall of Fame already cleared the
+  -- native defeated bits and scene, but older builds did not clear their
+  -- legacy EVENT_BEAT_* mirrors. Once that player starts a rematch, those
+  -- stale legacy flags are ambiguous unless a native flag confirms the win.
+  -- Prefer making the player refight a member over silently skipping one.
+  for native, row in pairs(mirrors) do
+    local legacy, minScene, trainerKey = row[1], row[2], row[3]
+    local nativeSet = save.flags[native] == true
+    local legacySet = save.flags[legacy] == true
+    if nativeSet and not legacySet then
+      -- Cartridge/imported/current-run state is authoritative.
+      save.flags[legacy] = true
+      changed = true
+    elseif legacySet and not nativeSet then
+      if priorChampion then
+        -- Conservative cleanup for pre-PR #60 rematches. Their old
+        -- defeatedTrainers entry is stale for the same reason as the flag.
+        save.flags[legacy] = false
+        if trainerKey and type(save.defeatedTrainers) == "table" then
+          save.defeatedTrainers[trainerKey] = nil
+        end
+        changed = true
+      elseif scene >= minScene then
+        -- On a first-ever League run there is no previous run to confuse this
+        -- with, so the legacy bit is trustworthy compatibility evidence.
+        save.flags[native] = true
+        changed = true
+      end
+    end
+  end
+  if scene >= 4 and save.flags.FLAG_G3_04BC == true
+     and save.flags.EVENT_BEAT_CHAMPION_RIVAL ~= true then
+    save.flags.EVENT_BEAT_CHAMPION_RIVAL = true
+    changed = true
+  end
+  return changed
+end
+
 function Commands.g3_set_flag(ctx, name)
   Commands.set_flag(ctx, name)
   if require("src.core.GameVersion").get() ~= "firered" then return end
@@ -482,6 +611,7 @@ function Commands.g3_lock(ctx, all)
   -- them; lock freezes all but the one being talked to, who is about to be
   -- turned to face the player.  See OverworldState:gen3FreezeObjects.
   local ow = ctx.overworld
+  if ow then ow.mapNameSign=nil end
   if ow and ow.gen3FreezeObjects then
     ow:gen3FreezeObjects(not all and ctx.npc or nil)
   end
@@ -1850,6 +1980,11 @@ function Commands.g3_trainer_battle(ctx, kind, trainerId, winScript, cantText,
     end
     return
   end
+  -- EMERALD'S TRAINER_BATTLE_PYRAMID: the floor's frontier trainer, not the
+  -- placeholder the record names (src/script/Gen3BattlePyramid.lua)
+  if k == 9 and require("src.core.GameVersion").get() == "emerald" then
+    return require("src.script.Gen3BattlePyramid").trainerBattle(ctx)
+  end
   if FLAG_CHECKED_KINDS[k] then
     local name = trainerFlag(ctx.g3Trainer, ctx.game and ctx.game.data)
     if name and (ctx.save or {}).flags and ctx.save.flags[name] == true then
@@ -2094,8 +2229,27 @@ local function warpCell(ctx, mapId, index)
 end
 Gen3Commands.warpCell = warpCell
 
+do
+-- Warp x/y are halfword value-or-variable operands (ScrCmd_warpdoor uses
+-- VarGet), unlike the literal byte map and warp IDs. Petalburg's sliding
+-- doors pass VAR_0x8008/8009; treating those as coordinates lands off-map.
+local function warpCoordinate(ctx, operand)
+  if tonumber(operand) == nil then return nil end
+  return valueOf(ctx, operand)
+end
+
 function Commands.g3_warp(ctx, group, number, warpId, x, y)
   local id = mapKey(group, number)
+  -- THE PYRAMID FLOOR'S (1, 1) IS NOBODY'S CELL: the layout puts the player on
+  -- the entrance square's exit tile (GenerateBattlePyramidFloorLayout)
+  if id == "MAP_G26_N26" and require("src.core.GameVersion").get() == "emerald" then
+    local P = require("src.script.Gen3BattlePyramid")
+    local ex, ey = P.entrance(ctx.game.data, ctx.save)
+    if ex then
+      Commands.warp(ctx, id, ex, ey)
+      return
+    end
+  end
   -- warp id $FF means "use the x/y given"; anything else names a warp on the
   -- destination map and the coordinates are ignored
   local named = tonumber(warpId) or 0xFF
@@ -2108,7 +2262,7 @@ function Commands.g3_warp(ctx, group, number, warpId, x, y)
     Logger.warn("gen3 warp: %s has no warp %d -- falling back to the "
                 .. "coordinates beside it", tostring(id), named)
   end
-  Commands.warp(ctx, id, tonumber(x), tonumber(y))
+  Commands.warp(ctx, id, warpCoordinate(ctx, x), warpCoordinate(ctx, y))
 end
 
 -- THE HOLE WARP, which is a slot of its own and not the respawn point.
@@ -2120,7 +2274,7 @@ end
 function Commands.g3_set_hole_warp(ctx, group, number, warpId, x, y)
   ctx.save = ctx.save or {}
   ctx.save.gen3HoleWarp = { map = mapKey(group, number), warp = tonumber(warpId),
-                            x = tonumber(x), y = tonumber(y) }
+                            x = warpCoordinate(ctx, x), y = warpCoordinate(ctx, y) }
 end
 
 function Commands.g3_warp_hole(ctx, group, number)
@@ -2179,7 +2333,7 @@ function Commands.g3_set_warp(ctx, group, number, warpId, x, y)
   ctx.save.gen3PendingWarp = {
     map = mapKey(group, number),
     group = tonumber(group), number = tonumber(number),
-    warp = tonumber(warpId), x = tonumber(x), y = tonumber(y),
+    warp = tonumber(warpId), x = warpCoordinate(ctx, x), y = warpCoordinate(ctx, y),
   }
 end
 
@@ -2199,8 +2353,9 @@ function Commands.g3_set_dynamic_warp(ctx, group, number, warpId, x, y)
   ctx.save = ctx.save or {}
   ctx.save.gen3DynamicWarp = { map = mapKey(group, number),
                                warp = tonumber(warpId),
-                               x = tonumber(x), y = tonumber(y) }
+                               x = warpCoordinate(ctx, x), y = warpCoordinate(ctx, y) }
 end
+end -- warp coordinate operand scope
 
 function Commands.g3_set_respawn(ctx, index)
   local save = ctx.save
@@ -2345,6 +2500,10 @@ function Commands.g3_rotate_move(ctx, puzzle)
       local step = ROTATE_STEP[spec.order[dir + 1]]
       local rows = rotatingMovement(ctx, spec.walk[dir + 1])
       if step then
+        -- RotateTilePuzzle moves the template when the slide starts.
+        -- Internal gym teleports must respawn it at that destination.
+        rememberHome(ctx, npc.def and npc.def.index,
+                     npc.cellX + step[1], npc.cellY + step[2])
         state.objects[#state.objects + 1] = {
           entity = npc, index = npc.def and npc.def.index, from = dir,
           x = npc.cellX + step[1], y = npc.cellY + step[2],
@@ -3001,6 +3160,15 @@ end
 
 function Commands.g3_wait_state(ctx)
   Gen3Commands.restoreFade(ctx)
+  -- ...and, as on the cartridge, wait for whichever running effect calls
+  -- ScriptContext_Enable first: a camera shake, the Orb (src/world/Gen3ScreenFx)
+  local runner = ctx.runner
+  if ctx.overworld and runner and runner.yield then
+    local parked = require("src.world.Gen3ScreenFx").wait(ctx.overworld, function()
+      if runner.resume then runner:resume() end
+    end)
+    if parked then runner:yield() end
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -3688,23 +3856,13 @@ end
 -- already have for "it did not happen" -- the tent attendant says nothing more
 -- and lets you walk away, rather than warping you in on a save that is not
 -- there.
+-- The write itself moved to `src/script/ScriptSave.lua` in pass 171, where
+-- Sinnoh's `trysavegame` reads the same sentence.  Nothing about this arm
+-- changed: the veto, the raise and the headless fallback behave as they did
+-- and the log line is the same string.  What changed is that there is now one
+-- copy of it instead of the two this file would otherwise have been half of.
 Gen3Commands.SPECIALS[96] = function(ctx)
-  local game = ctx.game
-  local wrote = false
-  if game and game.writeSave then
-    local ok, result = pcall(game.writeSave, game)
-    wrote = ok and result ~= false
-    if not ok then
-      Logger.warn("gen3 save: the script's save failed: %s", tostring(result))
-    end
-  elseif ctx.save then
-    -- headless: no Game to capture through, so the save table is written as
-    -- it stands.  The scripts still need their answer.
-    local ok, SaveData = pcall(require, "src.core.SaveData")
-    if ok and SaveData and SaveData.save then
-      wrote = pcall(SaveData.save, ctx.save) and true or false
-    end
-  end
+  local wrote = require("src.script.ScriptSave").write(ctx, "gen3")
   local answer = wrote and 1 or 0
   setVar(ctx.save, VAR_RESULT, answer)
   Logger.info("gen3 save: script save %s", wrote and "written" or "declined")
@@ -3719,7 +3877,14 @@ Gen3Commands.SPECIALS[41] = function(ctx)
   local party = {}
   for i, mon in ipairs(stash) do party[i] = mon end
   save.party = party
-  save.gen3PartyStash = nil
+  -- THE STASH STAYS, as the cartridge's copy does: LoadPlayerParty only
+  -- copies saveblock + 0x238 back, it never clears it. The Battle Dome
+  -- leans on that -- every round runs LoadPlayerParty and then
+  -- ReduceDomePlayerPartyToSelectedMons, restoring the whole team before
+  -- cutting it to that round's two. Clearing it here made round 2's restore
+  -- a no-op, so round 2 cut from round 1's two and the third member -- and
+  -- everyone not entered -- was gone for good (reported from play). The next
+  -- SavePlayerParty overwrites it, exactly as on the cartridge.
 end
 
 -- ---------------------------------------------------------------------------
@@ -4685,15 +4850,38 @@ end
 -- what is honoured here is the DURATION, because that is the part the port's
 -- jolt has a knob for and inventing an amplitude scale it does not have would
 -- be a number this port chose.
+--
+-- NOW THE CARTRIDGE'S OWN (Task_ShakeCamera): the CAMERA pans by the two
+-- amplitudes, map and sprites together, the sign flipping every 0x8007th
+-- frame, 0x8006 times -- and the script's `waitstate` waits for it
+-- (src/world/Gen3ScreenFx.lua). A record with no usable count or delay keeps
+-- the old background jolt.
 local GEN3_SHAKE_DEFAULT = 32
 Gen3Commands.SPECIALS[312] = function(ctx)
   local ow = ctx.overworld
   if not ow then return end
+  local Fx = require("src.world.Gen3ScreenFx")
+  if Fx.shakeCamera(ow, getVar(ctx.save, 0x8004), getVar(ctx.save, 0x8005),
+                    getVar(ctx.save, 0x8006), getVar(ctx.save, 0x8007)) then
+    return
+  end
   local frames = getVar(ctx.save, 0x8006)
   if not frames or frames <= 0 or frames > 600 then
     frames = GEN3_SHAKE_DEFAULT
   end
   ow.quakeFrames = frames
+end
+
+-- 284 DoOrbEffect / 285 FadeOutOrbEffect: Maxie's and Archie's Orbs waking
+-- Groudon and Kyogre (Magma Hideout 4F, Seafloor Cavern) -- the red or blue
+-- circle, the rocking camera, and the fade. src/world/Gen3ScreenFx.lua.
+Gen3Commands.SPECIALS[284] = function(ctx)
+  if ctx.overworld then
+    require("src.world.Gen3ScreenFx").orb(ctx.overworld, getVar(ctx.save, VAR_RESULT))
+  end
+end
+Gen3Commands.SPECIALS[285] = function(ctx)
+  if ctx.overworld then require("src.world.Gen3ScreenFx").fadeOutOrb(ctx.overworld) end
 end
 
 -- 297 and 298: FACE ME, AND LET GO.
@@ -6178,6 +6366,7 @@ end
 Gen3Commands.SPECIALS[186] = function(ctx)
   local breed = dayCare().store(ctx.save, false)
   if breed then breed.egg = nil end
+  if require("src.core.GameVersion").get()=="emerald" then ctx.save.gen3EggStepCounter=0 end
 end
 
 -- 187: GiveEggFromDaycare
@@ -6190,6 +6379,7 @@ Gen3Commands.SPECIALS[187] = function(ctx)
   if #save.party >= 6 then return end
   breed.egg = nil
   table.insert(save.party, egg)
+  if require("src.core.GameVersion").get()=="emerald" then save.gen3EggStepCounter=0 end
 end
 
 -- 188: SetDaycareCompatibilityString -- STR_VAR_4, shown by 144.
@@ -6240,6 +6430,9 @@ Gen3Commands.SPECIALS[190] = function(ctx)
   local free = nil
   for i = 0, 1 do if not dayCareMon(ctx, i) then free = i break end end
   if free == nil then return end
+  if require("src.core.GameVersion").get() == "emerald" then
+    require("src.pokemon.Pokemon").restorePP(mon,ctx.game and ctx.game.data and ctx.game.data.moves)
+  end
   table.remove(party, slot)
   dayCare().deposit(save, dayCareSlot(free), mon)
 end
@@ -6278,24 +6471,27 @@ end
 
 -- 193: GetNumLevelsGainedFromDaycare, for the pen in 0x8004
 Gen3Commands.SPECIALS[193] = function(ctx)
-  local n = dayCareLevelsGained(ctx, getVar(ctx.save, 0x8004) or 0)
+  local index = getVar(ctx.save, 0x8004) or 0
+  local n = dayCareLevelsGained(ctx, index)
   local game = ctx.game
   if game then
     game.stringBuffers = game.stringBuffers or {}
+    game.stringBuffers[1] = dayCareName(ctx,dayCareMon(ctx,index))
     game.stringBuffers[2] = tostring(n)
   end
   return n
 end
 
 -- 194: GetDaycareCostAndPrepareString -- the price into 0x8005, where the
--- till pair (200 and 201) reads it, and into STR_VAR_1 for the line
+-- till pair (200 and 201) reads it; nickname and cost fill STR_VAR_1/2.
 Gen3Commands.SPECIALS[194] = function(ctx)
   local cost = dayCareCost(ctx, getVar(ctx.save, 0x8004) or 0)
   setVar(ctx.save, 0x8005, cost)
   local game = ctx.game
   if game then
     game.stringBuffers = game.stringBuffers or {}
-    game.stringBuffers[1] = tostring(cost)
+    game.stringBuffers[1] = dayCareName(ctx, dayCareMon(ctx,getVar(ctx.save,0x8004) or 0))
+    game.stringBuffers[2] = tostring(cost)
   end
   return cost
 end
@@ -6316,6 +6512,10 @@ Gen3Commands.SPECIALS[195] = function(ctx)
   if not mon then return 0 end
   local startLevel = slot.depositLevel or mon.level or 1
   local newLevel, exp = DC.pendingLevel(data, slot)
+  local emerald = require("src.core.GameVersion").get() == "emerald"
+  -- Native withdrawal converts the boxed resident to a healthy party mon.
+  -- A resident already at level 100 does not receive its banked experience.
+  if emerald and (mon.level or 1) >= 100 then exp = mon.exp end
   DC.withdraw(save, pen)
   local def = data and data.pokemon and data.pokemon[mon.species]
   if newLevel and def then
@@ -6326,7 +6526,7 @@ Gen3Commands.SPECIALS[195] = function(ctx)
       mon.stats = Stats.calc(def, mon.level, mon.ivs or mon.dvs, mon.statExp,
                              mon.evs, mon.nature)
       if mon.stats and mon.stats.hp then
-        mon.hp = math.min(mon.hp or mon.stats.hp, mon.stats.hp)
+        mon.hp = emerald and mon.stats.hp or math.min(mon.hp or mon.stats.hp, mon.stats.hp)
       end
     end
     local okP, Pokemon = pcall(require, "src.pokemon.Pokemon")
@@ -6334,6 +6534,7 @@ Gen3Commands.SPECIALS[195] = function(ctx)
       Pokemon.learnMovesFromDayCare(data, mon, def, startLevel, newLevel)
     end
   end
+  if emerald then mon.status = nil end
   save.party = save.party or {}
   table.insert(save.party, mon)
   local game = ctx.game
@@ -6385,23 +6586,110 @@ Gen3Commands.SPECIALS[256] = function(ctx)
   ctx.g3TradeMon, ctx.g3TradeSlot = mon, slot
 end
 
--- 257: DoInGameTradeScene -- the swap itself.  The mon you gave leaves the
--- party and the one you were given joins at the END of it, which is where
--- RemovePokemon and AddPartyMon put it on the cartridge, and the Pokedex is
--- told about the new one.
+-- 257: DoInGameTradeScene -- THE TRADE ITSELF, AND THE MINUTE OF ANIMATION
+-- AROUND IT.
+--
+-- pokeemerald trade.c (pokefirered trade_scene.c is the same):
+--
+--     DoInGameTradeScene   LockPlayerFieldControls; fade the field to black
+--     Task_InGameTrade     when the fade is done: CB2_InitInGameTrade, and
+--                          gFieldCallback = FieldCB_ContinueScriptHandleMusic
+--     CB2_InGameTrade      DoTradeAnim_Wireless, every frame, to the end
+--
+-- src/ui/Gen3TradeAnim.lua is that sequence, drawn from the cartridge's own
+-- art (src/import/Gen3TradeArt.lua).  The script is parked on the
+-- `waitstate` after this special until the screen hands back, and the fade
+-- back in is the waitstate's (restoreFade), as it is for every other special
+-- that leaves the field black.
+--
+-- THE SWAP IS TradeMons, AND IT HAPPENS LATE: at STATE_TRY_EVOLUTION, after
+-- the last A press, not before the scene.  It is a SWAP -- `SWAP(*playerMon,
+-- *partnerMon)` -- so the new Pokemon takes the old one's party slot.  This
+-- used to remove the old one and append the new one at the end, which is not
+-- what either cartridge does.  The received Pokemon's friendship is set to
+-- 70, the Pokedex is told (seen and caught), and then GetEvolutionTarget-
+-- Species(EVO_MODE_TRADE) runs the trade evolution -- Kadabra, Machoke and
+-- the rest evolve inside the trade, before the field comes back.
+-- BufferInGameTradeMonName leaves the received nickname in STR_VAR_1 and the
+-- offered species' name in STR_VAR_2 for the thank-you line.
 Gen3Commands.SPECIALS[257] = function(ctx)
   local mon, slot = ctx.g3TradeMon, ctx.g3TradeSlot
   local party = (ctx.save or {}).party
   ctx.g3TradeMon, ctx.g3TradeSlot = nil, nil
   if not (mon and slot and party and party[slot]) then return end
-  table.remove(party, slot)
-  party[#party + 1] = mon
-  local save = ctx.save
-  save.pokedex = save.pokedex or {}
-  save.pokedex.seen = save.pokedex.seen or {}
-  save.pokedex.owned = save.pokedex.owned or {}
-  save.pokedex.seen[mon.species] = true
-  save.pokedex.owned[mon.species] = true
+  local given = party[slot]
+  local game, runner = ctx.game, ctx.runner
+  local trade = tradeAt(ctx, getVar(ctx.save, 0x8004))
+
+  local function tradeMons()
+    party[slot] = mon
+    if not (mon.isEgg or mon.egg) then mon.happiness = 70 end
+    local save = ctx.save
+    save.pokedex = save.pokedex or {}
+    save.pokedex.seen = save.pokedex.seen or {}
+    save.pokedex.owned = save.pokedex.owned or {}
+    save.pokedex.seen[mon.species] = true
+    save.pokedex.owned[mon.species] = true
+    if game then
+      game.stringBuffers = game.stringBuffers or {}
+      game.stringBuffers[1] = mon.nickname or speciesName(ctx, mon.species)
+      game.stringBuffers[2] = speciesName(ctx, trade and trade.species
+                                                or mon.species)
+    end
+    -- the trade evolution, gated the way Evolution.pendingFor gates a link
+    -- trade's (held item, Everstone)
+    if not game then return nil end
+    local okE, Evolution = pcall(require, "src.pokemon.Evolution")
+    if not okE then return nil end
+    local okP, target, row = pcall(Evolution.pendingFor, game, mon,
+                                   { kind = "trade" })
+    if not (okP and target) then return nil end
+    return function(resume)
+      local okV = pcall(Evolution.evolve, game, mon, target, resume,
+                        "TRADE", row)
+      if not okV then resume() end
+    end
+  end
+
+  local okA, TradeAnim = pcall(require, "src.ui.Gen3TradeAnim")
+  if not (okA and TradeAnim and TradeAnim.art(game) and game.stack and runner
+          and love and love.graphics and love.graphics.newCanvas) then
+    -- no trade art in this cache (imported before the stage existed) or no
+    -- renderer: the swap without the scene, as this special always did
+    if not (okA and TradeAnim and TradeAnim.art(game)) then
+      Logger.warn("gen3 in-game trade: this cache has no gen3_trade_art -- "
+                    .. "re-import for the trade animation")
+    end
+    local evolve = tradeMons()
+    if evolve and runner then
+      evolve(function() runner:resume() end)
+      runner:yield()
+    end
+    return
+  end
+  -- DoInGameTradeScene's own fade: BeginNormalPaletteFade(PALETTES_ALL, 0,
+  -- 0, 16, RGB_BLACK) is eighteen frames to black
+  ctx.g3FadedOut = true
+  Commands.fade(ctx, "out", 18, "black")
+  local pushed = pcall(function()
+    game.stack:push(TradeAnim.new(game, {
+      trade = trade, given = given, received = mon, slot = slot,
+      onTrade = tradeMons,
+      onDone = function() runner:resume() end,
+    }))
+  end)
+  if pushed then
+    runner:yield()
+    -- ...AND THE FIELD COMES BACK BEFORE THE SCRIPT DOES.  gFieldCallback is
+    -- FieldCB_ContinueScriptHandleMusic, which fades the field in from black
+    -- and only then re-enables the script, so the thank-you line is spoken
+    -- over the room, not over black.  restoreFade's non-blocking ramp would
+    -- sit frozen under the message box (only the top state updates).
+    ctx.g3FadedOut = nil
+    Commands.fade(ctx, "in", 18, "black")
+  else
+    tradeMons()
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -6939,6 +7227,34 @@ function Commands.g3_special(ctx, index, destVar)
     Logger.debug("gen3: special %s not implemented",
                  ok and Gen3Specials.label(id) or tostring(id))
   end
+end
+
+-- THE MIRAGE TOWER COMES DOWN: 411 / 413 / 483 / 484 / 485, the effects of
+-- mirage_tower.c -- see src/world/Gen3MirageTower.lua. None of the scripts
+-- waits on them; they run beside the message that follows.
+Gen3Commands.SPECIALS[411] = function(ctx)
+  require("src.world.Gen3MirageTower").ceilingCrumble(ctx.overworld, ctx.game)
+end
+Gen3Commands.SPECIALS[413] = function(ctx)
+  require("src.world.Gen3MirageTower").descend(ctx.overworld, ctx.game)
+end
+Gen3Commands.SPECIALS[483] = function(ctx)
+  require("src.world.Gen3MirageTower").startDisintegration(ctx.overworld, ctx.game)
+end
+Gen3Commands.SPECIALS[484] = function(ctx)
+  require("src.world.Gen3MirageTower").startShake(ctx.overworld, ctx.game)
+end
+Gen3Commands.SPECIALS[485] = function(ctx)
+  require("src.world.Gen3MirageTower").startFossil(ctx.overworld, ctx.game)
+end
+
+-- 133 SwapRegisteredBike (item.c): Rydel trades your bike for the other one,
+-- and a bike registered to SELECT moves with it rather than pointing at the
+-- bike you no longer have.
+Gen3Commands.SPECIALS[133] = function(ctx)
+  local reg = ctx.save.registeredItem
+  if reg == "MACH_BIKE" then ctx.save.registeredItem = "ACRO_BIKE"
+  elseif reg == "ACRO_BIKE" then ctx.save.registeredItem = "MACH_BIKE" end
 end
 
 -- ---------------------------------------------------------------------------
@@ -7718,6 +8034,9 @@ end
 -- Zero stays a real answer: it means "not a secret base spot", and the
 -- script's own branches all missing is then correct.
 Gen3Commands.SPECIALS[21] = function(ctx)
+  -- SetCurSecretBaseId captures the entrance before party/field-effect
+  -- scripts reuse VAR_0x8004 for the selected party slot.
+  ctx.g3SecretBaseId = getVar(ctx.save, VAR_SECRET_BASE_ID)
   local SB = require("src.world.Gen3SecretBase")
   local ow = ctx.overworld
   local player = ow and ow.player
@@ -7749,13 +8068,23 @@ end
 Gen3Commands.SPECIALS[6] = function(ctx)
   local save = ctx.save
   if not save then return end
-  local id = math.floor(tonumber(getVar(save, VAR_SECRET_BASE_ID)) or 0)
+  local id = math.floor(tonumber(ctx.g3SecretBaseId or getVar(save, VAR_SECRET_BASE_ID)) or 0)
   local ow = ctx.overworld
   local player = ow and ow.player
-  require("src.world.Gen3SecretBase").claim(save, id,
-                                            ow and ow.map and ow.map.id,
-                                            player and player.cellX,
-                                            player and player.cellY)
+  local back = save.gen3DynamicWarp
+  local outside = require("src.world.Gen3SecretBase").isRoom(secretBaseRecord(ctx),
+                         ow and ow.map and ow.map.id) and back or nil
+  local claimed = require("src.world.Gen3SecretBase").claim(save, id,
+                                            outside and outside.map or (ow and ow.map and ow.map.id),
+                                            outside and outside.x or (player and player.cellX),
+                                            outside and outside.y or (player and player.cellY))
+  if claimed then
+    local def = outside and ctx.game and ctx.game.data and ctx.game.data.maps
+                 and ctx.game.data.maps[outside.map] or (ow and ow.map and ow.map.def)
+    local section = def and def.regionMapSection
+    if section then setVar(save, 0x4026, section) end
+    setVar(save, 0x4054, 0) -- VAR_CURRENT_SECRET_BASE
+  end
 end
 
 local function enterSecretBase(ctx)
@@ -7764,7 +8093,7 @@ local function enterSecretBase(ctx)
   local record = secretBaseRecord(ctx)
   if not save then return end
   local mine = SB.mine(save)
-  local id = mine and mine.id or getVar(save, VAR_SECRET_BASE_ID)
+  local id = ctx.g3SecretBaseId or (mine and mine.id) or getVar(save, VAR_SECRET_BASE_ID)
   local room = SB.roomFor(record, id)
   if not room or not room.map then
     Logger.warn("gen3 secret base: no room for base %s -- this dataset was "
@@ -9457,10 +9786,14 @@ function Commands.g3_start_contest(ctx)
       state.standings = {}
       state.conditions = {}
       state.names = {}
+      state.trainers = {}
+      state.playerIndex = 0
       for i, c in ipairs(result.run.contestants) do
         state.standings[i] = c.place
         state.conditions[i] = c.condition
         state.names[i] = c.mon and (c.mon.nickname or c.mon.species) or "?"
+        state.trainers[i] = c.trainer or (c.player and ctx.save.player and ctx.save.player.name) or ""
+        if c.player then state.playerIndex = i - 1 end
       end
     end,
   })
@@ -9535,6 +9868,35 @@ Gen3Commands.SPECIALS[88] = function(ctx)
       return
     end
   end
+end
+
+-- GET_CONTEST_WINNER_ID (contest_util.c): the first contestant whose final
+-- standing is 0th, i.e. first place.
+function Gen3Commands.contestWinner(state)
+  for i, place in pairs(state.standings or {}) do
+    if place == 1 then return i end
+  end
+  return 1
+end
+
+-- 80 GetContestPlayerId: VAR_0x8004 = gContestPlayerMonIndex, the player's
+-- seat among the four (the results scripts compare it with the winner's).
+Gen3Commands.SPECIALS[80] = function(ctx)
+  setVar(ctx.save, 0x8004, contestState(ctx).playerIndex or 0)
+end
+
+-- 82 BufferContestWinnerTrainerName: STR_VAR_3, the winner's trainer.
+Gen3Commands.SPECIALS[82] = function(ctx)
+  local state = contestState(ctx)
+  ctx.save.buffers = ctx.save.buffers or {}
+  ctx.save.buffers[3] = tostring((state.trainers or {})[Gen3Commands.contestWinner(state)] or "")
+end
+
+-- 83 BufferContestWinnerMonName: STR_VAR_1, the winning Pokemon's nickname.
+Gen3Commands.SPECIALS[83] = function(ctx)
+  local state = contestState(ctx)
+  ctx.save.buffers = ctx.save.buffers or {}
+  ctx.save.buffers[1] = tostring((state.names or {})[Gen3Commands.contestWinner(state)] or "")
 end
 
 -- 79 GetContestWinnerId
@@ -11643,6 +12005,13 @@ function Gen3Commands.frontierCall(ctx, facility)
     Logger.debug("gen3 frontier: %s function %d is not ported", facility, arg)
   end
   if answers then setVar(ctx.save, VAR_RESULT, 0) end
+  -- ...and nothing left in gStringVar4 for a following `msgbox gStringVar4`
+  -- to show: a function that is not ported has not filled it, and the last
+  -- line some other script put there is not this one's
+  if ctx.game then
+    ctx.game.stringBuffers = ctx.game.stringBuffers or {}
+    ctx.game.stringBuffers[4] = ""
+  end
   return 0
 end
 
@@ -12729,15 +13098,25 @@ Gen3Commands.SPECIALS[239] = function(ctx)
     Logger.warn("gen3 tent: %s has no face on this dataset -- import the ROM "
                   .. "again", tostring(trainer.name))
   end
-  Logger.info("gen3 tent: fought under this engine's ordinary rules -- the "
-                .. "cartridge's PALACE rules (natures choosing the moves) are "
-                .. "not ported yet")
-  Commands.start_battle(ctx, "trainer", Gen3Commands.TENT_TRAINER_KEY, 1, nil)
+  -- Verdanturf (VAR_FRONTIER_FACILITY 2, FRONTIER_FACILITY_PALACE) fights
+  -- under PALACE rules; every tent battle is a Frontier one -- no
+  -- experience, and a loss is the challenge's end rather than a whiteout
+  -- ...and Fallarbor (3, FRONTIER_FACILITY_ARENA) under ARENA rules
+  local fac = math.floor(tonumber(getVar(ctx.save,
+    (parties or {}).tentVar or Gen3Commands.TENT_VAR)) or 0)
+  Commands.start_battle(ctx, "trainer", Gen3Commands.TENT_TRAINER_KEY, 1,
+    { canLose = true, noExp = true, palace = (fac == 2) or nil, arena = (fac == 3) or nil,
+      forfeit = true })
   local won = ctx.lastBattleResult == "win"
   setVar(ctx.save, VAR_RESULT, won and 1 or 0)
   return won and 1 or 0
 end
 
 Gen3Commands.installTent()
+
+-- ...and the Battle Tower over it (src/script/Gen3BattleFrontier.lua), which
+-- hands a tent's calls back to the handlers above
+package.loaded["src.script.Gen3Commands"] = Gen3Commands
+require("src.script.Gen3BattleFrontier").install()
 
 return Gen3Commands

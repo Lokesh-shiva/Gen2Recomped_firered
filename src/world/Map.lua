@@ -120,7 +120,20 @@ end
 -- GetTileAndCoordsInFrontOfPlayer / collision checks read the neighbor
 -- strip's tile bytes the same way.
 function Map.defCellTile(def, tilesetDef, cx, cy)
-  if not (def and tilesetDef and tilesetDef.blocks) then return nil end
+  -- `blocks` IS ONLY NEEDED BY THE LAST PATH IN HERE.
+  --
+  -- A tileset's `blocks` is the Game Boy metatile table, and the branch below
+  -- that reads it is the last of three.  Demanding it up front refused the
+  -- other two for any tileset that does not carry one -- which is every Gen 4
+  -- tileset, because Sinnoh's collision is per CELL and the stand-in carries a
+  -- `collision` table and `blockCells = 1` instead.
+  --
+  -- That is the whole of *"still can't walk out of twinleaf, invisible wall"*:
+  -- `defPassable` asks this for the neighbour's cell during an edge crossing,
+  -- got nil, and read nil as a wall -- so every seam in Sinnoh was shut.  It is
+  -- the same shape as the Littleroot/Route 101 bug the comment in
+  -- `defPassable` describes, one layer further down.
+  if not (def and tilesetDef) then return nil end
   local function blockAt(bx, by)
     if bx < 0 or by < 0 or bx >= def.width or by >= def.height then
       return def.borderBlock
@@ -149,6 +162,8 @@ function Map.defCellTile(def, tilesetDef, cx, cy)
     return tilesetDef.collision[blockId * cells * cells
       + (cx % cells) + (cy % cells) * cells + 1] or 0xFF
   end
+  -- ...and HERE is where it is genuinely required.
+  if not tilesetDef.blocks then return nil end
   local tx, ty = cx * 2, cy * 2 + 1
   local bx, by = math.floor(tx / tiles), math.floor(ty / tiles)
   local id = blockAt(bx, by)
@@ -228,7 +243,10 @@ function Map.defPassable(def, tilesetDef, cx, cy, surfing)
     if cx < 0 or cy < 0 or cx >= w or cy >= h then return false end
     return (cells[cy * w + cx + 1] or 0) == 0
   end
-  if not (def and tilesetDef and tilesetDef.blocks and tilesetDef.walkable) then
+  -- A per-cell `collision` table answers this just as well as a metatile
+  -- `blocks` table does, and Gen 4 ships the former and not the latter.
+  if not (def and tilesetDef and tilesetDef.walkable
+          and (tilesetDef.blocks or tilesetDef.collision)) then
     -- Gen2 connections to maps with no walkable data: allow the crossing.
     return GameVersion.isGen2()
   end
@@ -432,6 +450,8 @@ function Map.new(def, tilesetDef)
   -- only non-walkable marker so walls/boundaries are blocked but floors open.
   self.gen2BorderBlock = (GameVersion.isGen2() and next(self.walkable) == nil)
       and (def.borderBlock or 0) or nil
+  -- Off the map is off the map, on Gen 4 only.  See isWalkableCell.
+  self.voidOutsideMap = (def.generation == 4) or nil
   self.doorTiles = {}
   for _, t in ipairs(tilesetDef.doorTiles or {}) do self.doorTiles[t] = true end
   self.warpTiles = {}
@@ -478,13 +498,46 @@ function Map.new(def, tilesetDef)
   -- agreeing about def.width, and a cell a script shut must not be able to
   -- go missing down that seam.
   self.shutCells = {}
+  -- THE FIRST WARP ON A TILE WINS, NOT THE LAST.
+  --
+  -- Reported from play: "if i go to the lake next to twinleaf after visiting
+  -- the professor in sangem it starts the team galactic event before ever
+  -- getting to the point where it should be activated."
+  --
+  -- Sinnoh puts TWO warps on each of the lake entrances: Verity Lakefront's
+  -- tile (48, 43) carries warp 2 to header 311 -- the lake as it is at the
+  -- start -- and warp 3 to header 312, the same lake with Team Galactic in
+  -- it. A plain assignment let the later one overwrite the earlier, so both
+  -- entrances led to the Galactic version from a new game.
+  --
+  -- The cartridge takes the FIRST. `MapHeaderData_GetIndexOfWarpEventAtPos`
+  -- walks the array from zero and returns on the first coordinate that
+  -- matches; the later duplicates are ARRIVAL ANCHORS, the place a scripted
+  -- warp puts you down when the story is ready for that version of the map.
+  --
+  -- MEASURED BEFORE CHANGING IT, because this table is every game's:
+  -- Platinum has 15 tiles carrying more than one warp and the destination
+  -- differs on all 15 -- both entrances to all three lakes among them, so
+  -- Valor and Acuity had it too. EMERALD HAS NONE AT ALL, in 439 maps with
+  -- warps, which is what makes this a no-op everywhere but Sinnoh.
   self.warpAt = {}
   for i, w in ipairs(def.warps or {}) do
-    self.warpAt[w.y * self.widthCells + w.x] = { index = i, def = w }
+    local at = w.y * self.widthCells + w.x
+    if self.warpAt[at] == nil then
+      self.warpAt[at] = { index = i, def = w }
+    end
   end
   self.signAt = {}
   for _, s in ipairs(def.signs or {}) do
     self.signAt[s.y * self.widthCells + s.x] = s
+    -- BLACK / WHITE's stacked floors (Clay's lift panels): several signs on
+    -- one cell, one per level -- kept as a list, picked by `gen5Level`
+    if def.gen5Lifts and s.gen5Level then
+      self.signLevels = self.signLevels or {}
+      local k = s.y * self.widthCells + s.x
+      self.signLevels[k] = self.signLevels[k] or {}
+      table.insert(self.signLevels[k], s)
+    end
   end
   return self
 end
@@ -540,6 +593,11 @@ end
 function Map.isPushable(objDef)
   if objDef.smashable then return false end
   if objDef.pushable ~= nil then return objDef.pushable end
+  -- GEN 4's boulders are named by their graphics, not SPRITE_BOULDER:
+  -- Platinum's OBJ_EVENT_GFX_STRENGTH_BOULDER ("strength_boulder") and
+  -- HeartGold/SoulSilver's "rock" (their Rock Smash rock is "breakrock").
+  -- Reported from play: "You can't push strength boulders around".
+  if objDef.spriteName == "strength_boulder" or objDef.spriteName == "rock" then return true end
   return objDef.sprite == "SPRITE_BOULDER"
 end
 
@@ -649,6 +707,31 @@ end
 -- the behaviour byte straight off the metatile and lets the caller decide
 -- what the collision means.
 function Map:cellBehaviour(cx, cy)
+  if self.def.behaviorCells then
+    if not self:inBounds(cx, cy) then return nil end
+    return self.def.behaviorCells:byte(cy * self.widthCells + cx + 1)
+  end
+
+  -- THE OUTDOOR HALF OF SINNOH KEEPS ITS BEHAVIOUR SOMEWHERE ELSE.
+  --
+  -- Only 302 of Platinum's 593 map defs carry a `behaviorCells` grid. The
+  -- other 291 are the outdoor maps, and their per-tile behaviour lives in the
+  -- land chunk's permission block -- which is where every cave mouth in the
+  -- region says which way you have to walk to go in.
+  --
+  -- Without this the outdoor world answered nil here: not a wrong behaviour,
+  -- NO behaviour, so every rule keyed on one was silently off. Reported as
+  -- *"i cant walk directly into the cave it wont warp me"*.
+  --
+  -- Asked of the ground rather than of the def, because that is what holds the
+  -- matrix, this map's corner in it and the open side-car. `pcall` because a
+  -- map built from a cache written before the importer carried permissions has
+  -- none, and must keep answering exactly as it did.
+  local ground = self.renderer and self.renderer.gen4Ground
+  if ground and ground.behaviourAt then
+    local okB, behaviour = pcall(ground.behaviourAt, ground, cx, cy)
+    if okB and behaviour then return behaviour end
+  end
   if not self.def.collisionCells then return nil end
   if cx < 0 or cy < 0 or cx >= self.widthCells or cy >= self.heightCells then
     return nil
@@ -709,10 +792,19 @@ function Map:isUnderBridgeCell(cx, cy)
   return self:cellElevation(cx, cy) == ELEVATION_UNDER_BRIDGE
 end
 
--- what a mover's elevation becomes after landing on (cx,cy)
-function Map:elevationAfter(at, cx, cy)
+-- what a mover's elevation becomes after stepping from (px,py) onto (cx,cy)
+--
+-- ObjectEventUpdateElevation: the new tile's elevation, whatever it is --
+-- INCLUDING 0 -- unless the new tile or the one just left is 15 (multi-level),
+-- which leaves it alone.  0 is not "keep what you had": a mover standing on
+-- 0 is AT 0, and 0 matches anything (IsElevationMismatchAt), which is what
+-- carries you between levels.  Reported from play: "unable to walk down the
+-- stairs into the beach's low water" -- Mossdeep's stairs are 0 and the
+-- shallow water 3; keeping the upper ground's 4 on the stairs walled it off.
+function Map:elevationAfter(at, cx, cy, px, py)
   local there = self:cellElevation(cx, cy)
   if there == nil or there == ELEVATION_UNDER_BRIDGE then return at end
+  if px and py and self:cellElevation(px, py) == ELEVATION_UNDER_BRIDGE then return at end
   return there
 end
 
@@ -743,7 +835,53 @@ function Map:patchedImpassable(cx, cy)
   return patched ~= nil and patched ~= 0
 end
 
+-- BLACK / WHITE'S WATER is a behaviour, not a solid cell: 0x3D is river and
+-- pond (Striaton's river, the lake round Dragonspiral Tower), 0x3F the sea
+-- (Driftveil's harbour, 1,520 cells of Undella Bay), and 0x41 the BANK --
+-- solid to a walker, the cell a surfer crosses onto the water. The river's
+-- cells carry no collision bit at all, so without this a walker walked on
+-- it.
+local BW_WATER = { [0x3D] = true, [0x3F] = true, [0x41] = true }
+function Map:gen5WaterAt(cx, cy)
+  if not (self.def and self.def.gen5 and self.cellBehaviour) then return false end
+  return BW_WATER[self:cellBehaviour(cx, cy)] or false
+end
+
+-- PLATINUM'S WATER is a behaviour too: `sTileBehaviorFlags`' SURFABLE bit
+-- (pokeplatinum src/map_tile_behavior.c) -- river 0x10, sea 0x15, the
+-- waterfall 0x13 and the unnamed surfable rows -- and the three bridges over
+-- water, which a surfer passes under and a walker crosses on top of.  The
+-- water cells carry no collision bit; the cartridge keeps a walker off them
+-- because they are surfable.  Reported from play (an HM sweep): the player
+-- walked out onto Route 218's sea without surfing.
+local G4_SURFABLE = { [0x10] = true, [0x11] = true, [0x12] = true, [0x13] = true,
+  [0x14] = true, [0x15] = true, [0x19] = true, [0x22] = true, [0x2A] = true,
+  [0x50] = true, [0x51] = true, [0x52] = true, [0x53] = true }
+local G4_BRIDGE_OVER_WATER = { [0x73] = true, [0x78] = true, [0x7C] = true }
+Map.G4_SURFABLE, Map.G4_BRIDGE_OVER_WATER = G4_SURFABLE, G4_BRIDGE_OVER_WATER
+function Map:gen4WaterAt(cx, cy, forSurfer)
+  local def = self.def
+  -- HEARTGOLD / SOULSILVER TOO: the same SURFABLE rows (pokeheartgold
+  -- metatile_behavior.c sMetatileBehaviorFlags: 0x10-0x15, 0x19, 0x2A, 0x50-
+  -- 0x53, the bridges 0x73/0x78/0x7C). Leaving HGSS out let the player walk
+  -- onto New Bark's sea and meet Route 27's grass Pokemon there.
+  if not (def and def.generation == 4 and self.cellBehaviour) then return false end
+  -- ...BUT NOT BLACK / WHITE, whose defs are generation 4 in shape and whose
+  -- behaviour numbers are their own (gen5WaterAt has BW's water). Read as
+  -- Platinum's, 0x13 (WATERFALL) and 0x51-0x53 walled off the floor in front
+  -- of Lenora's bookshelves (Z018 row 19), so the books could not be read.
+  if def.gen5 then return false end
+  if not self:inBounds(cx, cy) then return false end
+  local b = self:cellBehaviour(cx, cy)
+  -- ...except 0x22, which is Platinum's surfable row and an unnamed WALKABLE
+  -- one in HGSS (TILE_BEHAVIOR_34: the Safari Zone's areas, D45, D47)
+  if b == 0x22 and def.cameraFamily == "hgss" then return false end
+  return G4_SURFABLE[b] or (forSurfer and G4_BRIDGE_OVER_WATER[b]) or false
+end
+
 function Map:isWalkableCell(cx, cy)
+  if self.def and self.def.gen5 and self:inBounds(cx, cy) and self:gen5WaterAt(cx, cy) then return false end
+  if self.def and self.def.generation == 4 and self:gen4WaterAt(cx, cy) then return false end
   -- FIRST, and before the tileset gets a word in.
   --
   -- Reported from play, twice: "the regi caves still arent fixed i can walk
@@ -754,6 +892,27 @@ function Map:isWalkableCell(cx, cy)
   -- passable.  A cave mouth is a warp cell, so the sealed entrance was
   -- walkable on that line alone no matter what the script had written.
   if self:patchedImpassable(cx, cy) then return false end
+  -- ...AND SECOND: A GEN 4 MAP HAS NO BORDER TO WALK ON.
+  --
+  -- Gen 1-3 tile a border metatile outside the map and the player is allowed
+  -- to stand on it for a step, because that is how a map CONNECTION works --
+  -- you walk onto the border and the seam hands you to the neighbour.  Gen 4
+  -- has neither: Sinnoh's overworld is one seamless matrix, its interiors are
+  -- sealed rooms, and `Gen4Maps.mapDef` sets `borderBlock = 0` with the note
+  -- "every cell outside the map reads as void, which is what the border is".
+  --
+  -- Block 0 is not void.  On the stand-in tileset it is ordinary ground, and
+  -- ordinary ground is walkable -- so the player walked off the edge of
+  -- Twinleaf Town and kept going, over terrain the ground renderer happily
+  -- draws (it draws whole chunks of the shared matrix, not the map's crop) and
+  -- nothing owns.  Reported as "im able to walk outside of the boundaries
+  -- still".
+  --
+  -- This is the edge, not the destination: a Gen 4 map that is a REGION of a
+  -- shared matrix should hand the player to whichever header owns the next
+  -- chunk -- the matrix carries that array -- and until that exists the honest
+  -- answer at the boundary is a wall rather than a field of nothing.
+  if self.voidOutsideMap and not self:inBounds(cx, cy) then return false end
   if self.walkable[self:cellTile(cx, cy)] then return true end
   if self.gen2BorderBlock ~= nil then
     -- Border-block heuristic: any block other than the border block is walkable
@@ -761,6 +920,11 @@ function Map:isWalkableCell(cx, cy)
     return self:blockAt(bx, by) ~= self.gen2BorderBlock
   end
   if self:patchedImpassable(cx, cy) then return false end
+  -- BLACK / WHITE'S DOORS AND HATCHES ARE SOLID, and a press into one is
+  -- what takes it (OverworldController.checkGen4EntranceWarp's gen5 branch).
+  -- Made passable here, Cold Storage's hatch at (5, 7) -- open floor on
+  -- the far side -- was walked straight over.
+  if self.def and self.def.gen5 then return false end
   return self:warpAtCell(cx, cy) ~= nil
 end
 
@@ -775,6 +939,8 @@ function Map:isGrassCell(cx, cy)
   -- animated grass tuft over the player's head for the whole step.  pokered
   -- only ever reads $52 from loaded map tiles, not the border filler.
   if not self:inBounds(cx, cy) then return false end
+  -- BLACK / WHITE: its own behaviour numbers (src/world/Gen5FieldRules.lua)
+  if self.def and self.def.gen5 then return require("src.world.Gen5FieldRules").isGrass(self, cx, cy) end
   return self.grassTiles[self:cellTile(cx, cy)] or false
 end
 
@@ -789,6 +955,8 @@ end
 --
 -- A tileset that does not name a wider set keeps the old answer exactly.
 function Map:isEncounterCell(cx, cy)
+  -- BLACK / WHITE: the tile's encounter bit (src/world/Gen5FieldRules.lua)
+  if self.def and self.def.gen5 then return require("src.world.Gen5FieldRules").isLandEncounter(self, cx, cy) end
   local wider = self.encounterTiles
   if not wider then return self:isGrassCell(cx, cy) end
   if not self:inBounds(cx, cy) then return false end
@@ -799,6 +967,10 @@ end
 -- (hash sets built in Map.new).  Tileset membership in water_tilesets.asm
 -- is checked by the caller.
 function Map:isWaterCell(cx, cy)
+  if self.def and self.def.gen5 then return self:gen5WaterAt(cx, cy) end
+  if self.def and self.def.generation == 4 then
+    return self:gen4WaterAt(cx, cy, true)
+  end
   -- A GEN 3 MAP SAYS "WATER" WITH ITS ELEVATION, not with a tile list.
   --
   -- There is no waterTiles list for Hoenn and there cannot usefully be one:
@@ -1232,6 +1404,135 @@ local GEN3_ARROW_WARPS = {
 -- rather than restate it
 Map.gen3ArrowWarps = GEN3_ARROW_WARPS
 
+-- WHICH WAY YOU HAVE TO PRESS TO GO IN, on a Gen 4 directional warp.
+--
+-- Reported from play, at the Mt. Coronet mouth on Route 208: walking LEFT
+-- into the cave did nothing, and inside, stepping onto the exit from above or
+-- below threw the player out. The mouth is (8,20), `TILE_BEHAVIOR_WARP_WEST`;
+-- the exit inside is (27,20), `TILE_BEHAVIOR_WARP_EAST`.
+--
+-- `Field_CheckMapTransition` (pokeplatinum src/overlay005/field_control.c) is
+-- the cartridge's PRESS path. It runs while the player stands still holding
+-- the direction they face, and only when the tile ahead is a WALL. It reads
+-- the behaviour UNDERFOOT and refuses any press that disagrees with it:
+--
+--     WARP_ENTRANCE_EAST  || WARP_EAST  || WARP_STAIRS_EAST  -> DIR_EAST only
+--     WARP_ENTRANCE_WEST  || WARP_WEST  || WARP_STAIRS_WEST  -> DIR_WEST only
+--     WARP_ENTRANCE_SOUTH || WARP_SOUTH                      -> DIR_SOUTH only
+--
+-- and then takes the warp event on that tile. Nothing north is here: a
+-- north-facing warp is an ARRIVAL warp, see `gen4ArrivalWarpAt`.
+--
+-- The earlier version of this table carried only the four ENTRANCE bytes.
+-- The cave mouths, cave exits and gate doorways on WARP_EAST/WEST/SOUTH, and
+-- every staircase, were left to the arrival rule, which fired from any
+-- direction -- the whole report.
+--
+-- The bytes are the cartridge's own, from
+-- `include/constants/field/map_tile_behaviors.h`.
+local GEN4_PRESS_WARP_DIRS = {
+  [0x5E] = "right",   -- TILE_BEHAVIOR_WARP_STAIRS_EAST
+  [0x5F] = "left",    -- TILE_BEHAVIOR_WARP_STAIRS_WEST
+  [0x62] = "right",   -- TILE_BEHAVIOR_WARP_ENTRANCE_EAST
+  [0x63] = "left",    -- TILE_BEHAVIOR_WARP_ENTRANCE_WEST
+  [0x65] = "down",    -- TILE_BEHAVIOR_WARP_ENTRANCE_SOUTH
+  [0x6C] = "right",   -- TILE_BEHAVIOR_WARP_EAST
+  [0x6D] = "left",    -- TILE_BEHAVIOR_WARP_WEST
+  [0x6F] = "down",    -- TILE_BEHAVIOR_WARP_SOUTH
+}
+Map.gen4PressWarpDirs = GEN4_PRESS_WARP_DIRS
+
+-- ...AND THE ONLY WARPS A COMPLETED STEP TAKES.
+--
+-- `Field_CheckTransition` is the ARRIVAL path, run when a step lands, and it
+-- opens a warp event for exactly these: the two escalators, WARP_ENTRANCE_NORTH
+-- or WARP_NORTH, and a WARP_PANEL. Every other warp event -- doors, mats,
+-- stairs, and the two dozen sitting on plain ground as script destinations --
+-- is never taken by stepping onto it, from any direction.
+local GEN4_ARRIVAL_WARPS = {
+  [0x64] = true,      -- TILE_BEHAVIOR_WARP_ENTRANCE_NORTH
+  [0x67] = true,      -- TILE_BEHAVIOR_WARP_PANEL
+  [0x6A] = true,      -- TILE_BEHAVIOR_ESCALATOR_FLIP_FACE
+  [0x6B] = true,      -- TILE_BEHAVIOR_ESCALATOR
+  [0x6E] = true,      -- TILE_BEHAVIOR_WARP_NORTH
+}
+Map.gen4ArrivalWarps = GEN4_ARRIVAL_WARPS
+
+function Map:gen4PressWarpDir(cx, cy)
+  -- GEN 4 ONLY, and tested on the map rather than the global version so the
+  -- editor and a mod's fixture answer for the data they actually hold. These
+  -- bytes mean something else on every earlier cartridge -- 0x62 is an
+  -- ordinary tile id in Kanto -- and reading them as doors there is exactly
+  -- the mistake `Map:speaksGen2Collision` exists to stop.
+  if (self.def and self.def.generation) ~= 4 then return nil end
+  local b = self:cellBehaviour(cx, cy)
+  return b and GEN4_PRESS_WARP_DIRS[b] or nil
+end
+
+-- true / false for a Gen 4 cell whose behaviour is known; nil when this is not
+-- a Gen 4 map or the cell has no behaviour to read, so a caller can keep its
+-- old answer rather than invent one.
+function Map:gen4ArrivalWarpAt(cx, cy)
+  if (self.def and self.def.generation) ~= 4 then return nil end
+  local b = self:cellBehaviour(cx, cy)
+  if b == nil then return nil end
+  -- HGSS's TILE_BEHAVIOR_LADDER_DOWN (0x3E) is the last arrival case of
+  -- pokeheartgold's Field_CheckTransition: the S.S. Aqua's 1F hatch to B1F
+  if b == 0x3E and self.def.cameraFamily == "hgss" then return true end
+  return GEN4_ARRIVAL_WARPS[b] == true
+end
+
+-- THE TERRAIN SAYS WALL, which is the gate on the whole press path:
+-- `TerrainCollisionManager_CheckCollision` on the tile ahead, before any
+-- behaviour is read. Terrain only -- not `isWalkableCell`, which calls every
+-- cell carrying a warp walkable and so would call a door open ground.
+function Map:gen4TerrainBlocked(cx, cy)
+  if not self:inBounds(cx, cy) then return true end
+  return self:cellTile(cx, cy) == 0xFF
+end
+
+-- PLATINUM'S BIKE SLOPES -- the mud ramps you need the bicycle to climb.
+--
+-- `TILE_BEHAVIOR_BIKE_SLOPE_TOP` is 0xD9 and `_BOTTOM` 0xDA, read straight off
+-- pokeplatinum's `enum TileBehavior`. MEASURED over the whole permission grid:
+-- 17 of each, in eight land chunks -- a small feature, and one that reached no
+-- code at all before this, so every ramp in Sinnoh was ordinary ground.
+--
+-- GEN 4 ONLY, tested on the map rather than the global version for the reason
+-- `gen4PressWarpDir` is: these bytes mean something else on every earlier
+-- cartridge.
+local GEN4_BIKE_SLOPES = { [0xD9] = true, [0xDA] = true }
+
+-- A DOOR IS THE TILE YOU WALK INTO, NOT THE ONE YOU STAND ON.
+--
+-- `TILE_BEHAVIOR_DOOR` is 0x69, and it is the OTHER half of
+-- `PlayerAvatar_WillWarp` -- the half this port never had. The first half asks
+-- what the mat UNDER the player names; this one steps one cell in the pressed
+-- direction and asks whether what is there is a door:
+--
+--     x += MapObject_GetDxFromDir(dir);
+--     z += MapObject_GetDzFromDir(dir);
+--     tileBehavior = TerrainCollisionManager_GetTileBehavior(fieldSystem, x, z);
+--     if (TileBehavior_IsDoor(tileBehavior) == TRUE) return TRUE;
+--
+-- MEASURED: 192 door tiles across 95 chunks, carrying 177 of the region's
+-- 1,213 warps -- and every one of those 177 has a plain walkable neighbour to
+-- be pressed into from. Cave mouths are doors, which is why walking into one
+-- did nothing: the behaviour the port read was the ordinary ground the player
+-- was standing on, and the door was never consulted at all.
+function Map:gen4DoorAt(cx, cy)
+  if (self.def and self.def.generation) ~= 4 then return false end
+  return self:cellBehaviour(cx, cy) == 0x69
+end
+
+function Map:gen4BikeSlopeAt(cx, cy)
+  if (self.def and self.def.generation) ~= 4 then return false end
+  -- Platinum's mud slopes; HGSS leaves 0xD9/0xDA unnamed
+  if require("src.core.GameVersion").family() == "hgss" then return false end
+  local b = self:cellBehaviour(cx, cy)
+  return (b ~= nil and GEN4_BIKE_SLOPES[b]) == true
+end
+
 function Map:arrowWarpDirAt(cx, cy)
   -- ONLY WHERE WARPS ARE EVENTS, which is the one thing a Gen 3 tileset says
   -- about itself and exactly the test isWarpTileCell already keys off.  On a
@@ -1240,6 +1541,13 @@ function Map:arrowWarpDirAt(cx, cy)
   -- reading them as arrows there would quietly disable real doors, which is
   -- the mistake Map:speaksGen2Collision exists to stop.
   if not (self.tileset and self.tileset.warpsAreEvents) then return nil end
+  -- ...AND NOT ON GEN 4, whose stand-in tileset also says its warps are
+  -- events. The bytes overlap and disagree: Hoenn's 0x6D is
+  -- MB_WATER_SOUTH_ARROW_WARP, Sinnoh's is TILE_BEHAVIOR_WARP_WEST. Read as an
+  -- arrow, the Mt. Coronet mouth on Route 208 -- WARP_WEST -- opened on a
+  -- press DOWN and refused the step LEFT, which is the report word for word.
+  -- Gen 4's own rule is `gen4PressWarpDir`.
+  if (self.def and self.def.generation) == 4 then return nil end
   local arrows = self.tileset.arrowWarpBehaviours or GEN3_ARROW_WARPS
   -- cellBehaviour, not cellTile: cellTile answers $FF for anything the
   -- collision bits block, and a Gen 3 warp cell very often IS blocked -- the
@@ -1294,6 +1602,9 @@ function Map:isIceCell(cx, cy)
   if not self.tileset.behaviourBytes then return false end
   local b = self:cellBehaviour(cx, cy)
   if not b then return false end
+  -- PLATINUM AND HEARTGOLD / SOULSILVER: TILE_BEHAVIOR_ICE, 0x20 in both
+  -- (Snowpoint Gym, Mahogany Gym, the Ice Path, Seafoam Islands)
+  if self.def and self.def.generation == 4 then return b == 0x20 end
   for _, ice in ipairs(self.tileset.iceBehaviours or {}) do
     if ice == b then return true end
   end
@@ -1419,6 +1730,11 @@ function Map:isCounterCell(cx, cy)
   -- answer for a cell you are never standing on.
   local t = self.tileset.behaviourBytes and self:cellBehaviour(cx, cy)
             or self:cellTile(cx, cy)
+  if self.tileset.id=='TILESET_GEN4_STANDIN' and t==0x80 then return true end
+  -- Black / White's counter is behaviour 0xD4 (Gen5Field: a room's counters
+  -- are byte 4 = 0xD4) -- every Pokemon Center nurse and mart clerk is
+  -- spoken to across one
+  if self.tileset.id=='TILESET_GEN4_STANDIN' and t==0xD4 and self.def and self.def.gen5 then return true end
   for _, c in ipairs(self.tileset.counterTiles or {}) do
     if c == t then return true end
   end
@@ -1448,6 +1764,11 @@ function Map:warpAtCell(cx, cy)
 end
 
 function Map:signAtCell(cx, cy)
+  local leveled = self.signLevels and self.signLevels[cy * self.widthCells + cx]
+  if leveled and self.gen5Level then
+    for _, s in ipairs(leveled) do if s.gen5Level == self.gen5Level then return s end end
+    return nil
+  end
   return self.signAt[cy * self.widthCells + cx]
 end
 

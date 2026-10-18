@@ -23,6 +23,10 @@ local function mid2(dv) return math.floor((dv or 0) / 2) % 4 end
 function Sprites.formIndex(def, mon)
   local forms = def and def.forms
   if not (forms and mon) then return nil end
+  if forms.base then return require('src.pokemon.Gen4Forms').key(def, mon) end
+  if require("src.core.GameVersion").get()=="polishedcrystal" and mon.form and forms[mon.form] then
+    return mon.form
+  end
   local dvs = mon.dvs
   if type(dvs) ~= "table" then return nil end
   local packed = mid2(dvs.attack) * 64 + mid2(dvs.defense) * 16
@@ -47,7 +51,8 @@ function Sprites.path(data, species, side, opts)
   local formIndex = Sprites.formIndex(def, opts.mon)
   if formIndex then
     local form = def.forms[formIndex]
-    path = (side == "back" and form.spriteBack or form.spriteFront) or path
+    path = (side == "back" and (form.spriteBack or form.back)
+                            or (form.spriteFront or form.front)) or path
   end
   -- A GEN 3 SHINY IS A WHOLE SECOND PICTURE, not a palette swap.
   --
@@ -63,6 +68,11 @@ function Sprites.path(data, species, side, opts)
   -- cartridge applies it to whichever sheet is on screen -- the back pic
   -- included, which is the one the player looks at for the whole battle.
   local shinyPath = (side == "back") and def.spriteShinyBack or def.spriteShiny
+  if formIndex then
+    local form = def.forms[formIndex]
+    shinyPath = (side == 'back' and (form.spriteShinyBack or form.shiny_back)
+                              or (form.spriteShiny or form.shiny_front)) or shinyPath
+  end
   if shinyPath and opts.mon
      and require("src.pokemon.Pokemon").isShiny(opts.mon) then
     path = shinyPath
@@ -111,6 +121,42 @@ function Sprites.playerForm(data, save)
   end
   local gender = save and save.player and save.player.gender
   return forms[gender] or forms.boy
+end
+
+-- EVERY PLAYER FORM ON A CARTRIDGE WHOSE ART IS ALREADY IN COLOUR.
+--
+-- Reported from play, on Platinum: "my trainers backsprite and possibly
+-- others are drawing with a red hue overlay rather than their proper colors".
+--
+-- Not a tint and not a palette fault.  The cache carries the right picture --
+-- `field.playerForms.boy.back` is Lucas's own back sprite -- and `playerPath`
+-- below picks it correctly.  What the record does not carry is `trueColor`, so
+-- `playerPath` answers false and `BattleState` hands the art to `getImage`
+-- WITH THE SGB PALETTE THE INTRO USES, which is `MEWMON`.  Mew's palette is
+-- pink, and a full-colour Lucas repainted to a four-shade ramp in it is
+-- exactly what was reported.
+--
+-- The flag already exists and is already honoured -- Crystal's KRIS and
+-- Hoenn's WALLY both set it -- so this only says it for a generation whose
+-- art is in colour by construction.  A dataset or mod that means otherwise
+-- sets the field to false and keeps it, because only `nil` is filled in.
+--
+-- Returns how many it marked, so a caller can say so and a check can measure
+-- it rather than assume it ran.
+function Sprites.markFormsTrueColor(field)
+  local forms = type(field) == "table" and field.playerForms
+  if type(forms) ~= "table" then return 0 end
+  local marked = 0
+  for _, form in pairs(forms) do
+    -- `order` is a list of names living in the same table; only a record with
+    -- a picture in it is a form
+    if type(form) == "table" and (form.back or form.card or form.intro)
+       and form.trueColor == nil then
+      form.trueColor = true
+      marked = marked + 1
+    end
+  end
+  return marked
 end
 
 function Sprites.playerPath(data, side, opts)

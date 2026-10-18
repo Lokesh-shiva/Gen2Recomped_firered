@@ -163,15 +163,24 @@ function Gen4Nsbmd.decodeDisplayList(data, at, size)
   -- it does not mention alone.  So all of it persists across commands.
   local x, y, z = 0, 0, 0
   local nx, ny, nz = 0, 0, 1
+  -- WHETHER A NORMAL WAS EVER GIVEN. The DS lights a vertex from the NORMAL
+  -- command; a display list that issues COLOR instead -- HeartGold /
+  -- SoulSilver's lightmapped (`_lm`) geometry -- carries its lighting baked
+  -- in, and (0, 0, 1) above is only this decoder's resting value, which read
+  -- as a real normal made every such floor a wall facing the camera.
+  local normalSet = false
   local u, v = 0, 0
   local r, g, b = 1, 1, 1
-  local matrix = 0
+  -- Before the display list's first MTX_RESTORE, the matrix is inherited
+  -- from SBC. Slot zero is a real register and cannot represent that state.
+  local matrix = nil
   local prim, run = nil, {}
 
   local function emit()
     vertices[#vertices + 1] = {
       x = x, y = y, z = z, nx = nx, ny = ny, nz = nz,
       u = u, v = v, r = r, g = g, b = b, matrix = matrix,
+      noNormal = (not normalSet) or nil,
     }
     stats.vertices = stats.vertices + 1
     return #vertices
@@ -206,6 +215,7 @@ function Gen4Nsbmd.decodeDisplayList(data, at, size)
         g = bits(p1, 5, 5) / 31
         b = bits(p1, 10, 5) / 31
       elseif cmd == 0x21 then
+        normalSet = true
         nx = sN(bits(p1, 0, 10), 10) / 512
         ny = sN(bits(p1, 10, 10), 10) / 512
         nz = sN(bits(p1, 20, 10), 10) / 512
@@ -232,10 +242,11 @@ function Gen4Nsbmd.decodeDisplayList(data, at, size)
         y = s16(p1 % 65536) / FX16
         z = s16(math.floor(p1 / 65536)) / FX16
       elseif cmd == 0x28 then
-        -- A RELATIVE vertex, at an eighth of the usual fractional precision.
-        x = x + sN(bits(p1, 0, 10), 10) / (FX16 * 8)
-        y = y + sN(bits(p1, 10, 10), 10) / (FX16 * 8)
-        z = z + sN(bits(p1, 20, 10), 10) / (FX16 * 8)
+        -- The signed delta is added directly to the hardware's 4.12 vertex
+        -- registers. Dividing by another eight shrinks every edge in a run.
+        x = x + sN(bits(p1, 0, 10), 10) / FX16
+        y = y + sN(bits(p1, 10, 10), 10) / FX16
+        z = z + sN(bits(p1, 20, 10), 10) / FX16
       elseif cmd == 0x40 then
         prim, run = p1 % 4, {}
       elseif cmd == 0x41 then
@@ -345,6 +356,8 @@ function Gen4Nsbmd.renderCommands(data, at, limit)
     local n = SBC_OPERANDS[op]
     if op == 0x06 then
       n = 3 + (flags % 2) + (math.floor(flags / 2) % 2)
+    elseif op == 0x07 or op == 0x08 then
+      n = 1 + (flags % 2) + (math.floor(flags / 2) % 2)
     elseif op == 0x09 then
       -- SKINNING, and the only variable-width command here: a matrix id, a
       -- term count, and then three bytes per term.  Its width has to be read
@@ -414,6 +427,7 @@ local function modelHeader(data, at)
     numMaterials = u8(data, at + 0x18),
     numShapes = u8(data, at + 0x19),
     posScale = (u32(data, at + 0x1C) or FX16) / FX16,
+    scalingRule = u8(data, at + 0x15),
     counts = {
       vertices = u16(data, at + 0x24),
       polygons = u16(data, at + 0x26),
@@ -459,6 +473,7 @@ function Gen4Nsbmd.parse(data)
     local model = {
       name = entry.name,
       posScale = header.posScale,
+      scalingRule = header.scalingRule,
       bounds = header.bounds,
       counts = header.counts,
       bones = {}, materials = {}, shapes = {},
@@ -517,10 +532,61 @@ function Gen4Nsbmd.parse(data)
       -- two records, neither derived from the other -- is what turns
       -- "untextured" from an excuse into a checked fact.  See `check`.
       local record = header.materials + (mat.offset or 0)
+      -- THE POLYGON ATTRIBUTE, whose alpha is the only thing that makes a DS
+      -- shadow a shadow.
+      --
+      -- `polyAttr` is the u32 at +0x0C and its bits 16..20 are a 0..31 alpha,
+      -- 31 being opaque.  Measured on `funsui`, which carries one shadow and
+      -- two ordinary materials:
+      --
+      --     c1_fun1   polyAttr=001F8081   alpha 31/31
+      --     c1_fun2   polyAttr=001F8088   alpha 31/31
+      --     h_kage    polyAttr=00090081   alpha  9/31
+      --
+      -- Nothing read it, so every building's ground shadow was drawn at full
+      -- strength -- and its texture is a 16x16 of palette index 0, which on
+      -- this material is opaque BLACK rather than transparent.  Reported from
+      -- play: *"there are shadows for the houses but they're showing as black
+      -- not how they look in the actual rom"*.  They were exactly black.
+      local polyAttr = u32(data, record + 0x0C) or 0
       model.materials[#model.materials + 1] = {
         name = mat.name, index = mat.index,
         texScale = u32(data, record + 0x20) or 0,
+        polyAttr = polyAttr,
+        -- Kept as the cartridge's own 0..31 rather than a float: it is what
+        -- the hardware register holds, and the renderer is the right place to
+        -- decide what 9/31 looks like in this engine's blend.
+        alpha = math.floor(polyAttr / 2 ^ 16) % 32,
+        -- THE TEXTURE PARAMETER, +0x14: its bits 30..31 are the texture
+        -- coordinate SOURCE -- 0 none, 1 the vertex's own, 2 the NORMAL
+        -- (environment mapping: the shine on HGSS's starter balls), 3 the
+        -- vertex position.
+        texImageParam = u32(data, record + 0x14) or 0,
+        texGen = math.floor((u32(data, record + 0x14) or 0) / 2 ^ 30) % 4,
+        -- THE TEXTURE MATRIX (NNSG3dResMatData): `flag` at +0x1E -- bit 0 use
+        -- it, bit 1 scale is one, bit 2 rotation is zero, bit 3 translation
+        -- is zero -- and after the two fx32 magnifications at +0x24 / +0x28,
+        -- an fx32 scale pair when bit 1 is clear. HGSS's floors repeat their
+        -- small plank and stone textures this way; read without it, Falkner's
+        -- gym stretched one 32-pixel plank across whole walkways.
+        texFlag = u16(data, record + 0x1E) or 0,
+        -- diffuse | ambient << 16 and specular | emission << 16, RGB555 each,
+        -- bit 15 of diffuse saying "vertex colour is the diffuse"
+        diffAmb = u32(data, record + 0x04) or 0,
+        specEmi = u32(data, record + 0x08) or 0,
       }
+      do
+        local m = model.materials[#model.materials]
+        local flag = m.texFlag
+        if flag % 2 == 1 and math.floor(flag / 2) % 2 == 0 then
+          local function fx32(at)
+            local v = u32(data, at) or 0
+            if v >= 0x80000000 then v = v - 0x100000000 end
+            return v / 4096
+          end
+          m.texScaleS, m.texScaleT = fx32(record + 0x2C), fx32(record + 0x30)
+        end
+      end
     end
     -- ...and the same fact the way a renderer wants it: material -> names.
     for _, tex in ipairs(model.textures) do
@@ -553,6 +619,23 @@ function Gen4Nsbmd.parse(data)
     -- than baked: see `poseCommands`.
     model.pose = Gen4Nsbmd.poseCommands(data, header.renderCommands,
                                         header.materials)
+    for _,op in ipairs(model.pose or {}) do if op.op=='mix' then
+      model.inverseBind={}
+      if header.matrices+header.numObjects*84>header.at+header.size then
+        return nil,'truncated model envelope matrices'
+      end
+      for node=0,header.numObjects-1 do
+        local raw={}
+        for k=0,11 do
+          local v=u32(data,header.matrices+node*84+k*4)
+          if v>=2147483648 then v=v-4294967296 end
+          raw[k+1]=v/4096
+        end
+        model.inverseBind[node+1]={raw[1],raw[4],raw[7],raw[10],raw[2],raw[5],raw[8],raw[11],
+          raw[3],raw[6],raw[9],raw[12],0,0,0,1}
+      end
+      break
+    end end
 
     local shapeDict = Gen4Nsbmd.dictionary(data, header.shapes)
     for _, shape in ipairs(shapeDict and shapeDict.entries or {}) do
@@ -735,32 +818,10 @@ end
 
 local function nodeBit(flags, n) return math.floor(flags / 2 ^ n) % 2 == 1 end
 
--- The same pivot reconstruction the animations use, with this format's own
--- field positions.  Kept here rather than shared because the two layouts
--- differ, and a shared function would have to be told which -- at which point
--- it is two functions with a flag.
-local function nodePivot(flags, a, b)
-  local p = math.floor(flags / 16) % 16
-  local neg = math.floor(flags / 256) % 4
-  local row, col = math.floor(p / 3), p % 3
-  local sign = ((row + col) % 2 == 0) and 1 or -1
-  local flip = (neg % 2 == 1)
-  if flip then sign = -sign end
-  local m = { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-  m[row * 3 + col + 1] = sign
-  local rows, cols = {}, {}
-  for i = 0, 2 do if i ~= row then rows[#rows + 1] = i end end
-  for i = 0, 2 do if i ~= col then cols[#cols + 1] = i end end
-  m[rows[1] * 3 + cols[1] + 1] = a
-  m[rows[1] * 3 + cols[2] + 1] = b
-  if flip then
-    m[rows[2] * 3 + cols[1] + 1] = b
-    m[rows[2] * 3 + cols[2] + 1] = -a
-  else
-    m[rows[2] * 3 + cols[1] + 1] = -b
-    m[rows[2] * 3 + cols[2] + 1] = a
-  end
-  return m
+-- Bone pivots use the same encoding as animation pivots, shifted four bits.
+local function nodePivot(flags,a,b)
+  local pivot=math.floor(flags/16)%16+(math.floor(flags/256)%8)*16
+  return require('src.import.Gen4Anim').pivotMatrix(pivot,a,b)
 end
 
 -- nodeMatrix(data, at) -> 4x4 row-major, size in bytes
@@ -788,6 +849,7 @@ function Gen4Nsbmd.nodeMatrix(data, at)
       for i = 0, 7 do
         r[i + 2] = nodeSigned16(data, pos + i * 2) / NODE_FX
       end
+      r={r[1],r[4],r[7],r[2],r[5],r[8],r[3],r[6],r[9]}
       pos = pos + 16
     end
   end
@@ -833,20 +895,35 @@ function Gen4Nsbmd.poseCommands(data, at, limit)
     local n = SBC_OPERANDS[op]
     if op == 0x06 then
       n = 3 + (flags % 2) + (math.floor(flags / 2) % 2)
+    elseif op == 0x07 or op == 0x08 then
+      n = 1 + (flags % 2) + (math.floor(flags / 2) % 2)
     elseif op == 0x09 then
       n = 2 + (u8(data, pos + 1) or 0) * 3
     end
     if n == nil then return ops, byte end
     if op == 0x06 then
-      local entry = { op = "node", node = u8(data, pos) }
+      local entry = { op = "node", node = u8(data, pos),parent=u8(data,pos+1),scaleFlags=u8(data,pos+2) }
       local i = 3
       if flags % 2 == 1 then entry.store = u8(data, pos + i); i = i + 1 end
       if math.floor(flags / 2) % 2 == 1 then entry.restore = u8(data, pos + i) end
       ops[#ops + 1] = entry
+    elseif op == 0x07 or op == 0x08 then
+      local entry={op='billboard',node=u8(data,pos),yOnly=op==0x08}
+      local i=1
+      if flags%2==1 then entry.store=u8(data,pos+i);i=i+1 end
+      if math.floor(flags/2)%2==1 then entry.restore=u8(data,pos+i) end
+      ops[#ops+1]=entry
     elseif op == 0x03 then
       ops[#ops + 1] = { op = "matrix", slot = u8(data, pos) }
     elseif op == 0x05 then
       ops[#ops + 1] = { op = "shape", shape = u8(data, pos) }
+    elseif op == 0x09 then
+      local entry={op='mix',slot=u8(data,pos),weights={}}
+      for i=0,(u8(data,pos+1) or 0)-1 do
+        local at=pos+2+i*3
+        entry.weights[#entry.weights+1]={slot=u8(data,at),node=u8(data,at+1),weight=u8(data,at+2)}
+      end
+      ops[#ops+1]=entry
     end
     pos = pos + n
   end
@@ -859,8 +936,9 @@ end
 -- the model's own node transform for the rest pose and a joint animation's
 -- frame for a moving one -- which is the whole point of keeping the sequence:
 -- the two are the same walk over different numbers.
-function Gen4Nsbmd.pose(ops, matrixOf)
-  local out, stack = {}, {}
+function Gen4Nsbmd.pose(ops, matrixOf, inverseBind, scalingRule, billboardOf)
+  local out, stack, scales = {}, {}, {}
+  out.stacks={}
   local current = {
     1, 0, 0, 0,
     0, 1, 0, 0,
@@ -874,6 +952,19 @@ function Gen4Nsbmd.pose(ops, matrixOf)
       end
       local local4 = matrixOf(entry.node)
       if local4 then
+        -- Maya segment-scale compensation: translation inherits the
+        -- parent's scale, while the child rotation/scale axes do not.
+        local own={}
+        for col=0,2 do own[col+1]=math.sqrt(local4[col+1]^2+local4[col+5]^2+local4[col+9]^2) end
+        local parent=scales[entry.parent]
+        if scalingRule==1 and (entry.scaleFlags or 0)%2==1 and parent then
+          local compensated={};for i=1,16 do compensated[i]=local4[i] end
+          for row=0,2 do for col=0,2 do
+            if parent[row+1]~=0 then compensated[row*4+col+1]=local4[row*4+col+1]/parent[row+1] end
+          end end
+          local4=compensated
+        end
+        scales[entry.node]=own
         local product = {}
         for row = 0, 3 do
           for col = 0, 3 do
@@ -887,12 +978,36 @@ function Gen4Nsbmd.pose(ops, matrixOf)
         current = product
       end
       if entry.store then stack[entry.store] = current end
+    elseif entry.op == 'billboard' then
+      if entry.restore then current=stack[entry.restore] or current end
+      if billboardOf then current=billboardOf(current,entry.yOnly) or current end
+      if entry.store then stack[entry.store]=current end
     elseif entry.op == "matrix" then
       current = stack[entry.slot] or current
+    elseif entry.op == 'mix' and inverseBind then
+      local mixed={};for i=1,16 do mixed[i]=0 end
+      for _,part in ipairs(entry.weights) do
+        local a,b=stack[part.slot],inverseBind[part.node+1]
+        if a and b then
+          for row=0,3 do for col=0,3 do
+            local sum=0
+            for k=0,3 do sum=sum+a[row*4+k+1]*b[k*4+col+1] end
+            mixed[row*4+col+1]=mixed[row*4+col+1]+sum*part.weight/256
+          end end
+        end
+      end
+      mixed[16]=1;current=mixed;stack[entry.slot]=mixed
     elseif entry.op == "shape" then
       out[entry.shape] = current
+      -- SBC matrix slots are reusable registers. A display list restores
+      -- from the palette as it exists WHEN THIS SHAPE IS DRAWN, not from
+      -- the final palette after later bones have overwritten those slots.
+      local snapshot={}
+      for slot,matrix in pairs(stack) do snapshot[slot]=matrix end
+      out.stacks[entry.shape]=snapshot
     end
   end
+  out.stack=stack
   return out
 end
 

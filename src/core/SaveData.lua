@@ -218,9 +218,11 @@ end
 -- machine by definition, and two relocation mechanisms arguing over one
 -- cache is a bug report nobody can read.
 --
--- DESKTOP ONLY, for the same reason portable mode is.  On Android/iOS there
--- is no arbitrary writable folder to point at, and the io.* writes CacheFs
--- would make into one fail per file rather than up front.
+-- Desktop always, Android once a folder can be proved writable with the
+-- same io.* probe CacheFs uses.  iOS still has no arbitrary writable
+-- folder to point at.  Android 11+ will refuse most shared folders
+-- (Downloads, DCIM); app-owned dirs on phone storage or an SD card still
+-- pass, which is the whole point of offering the setting there.
 local PROBE_NAME = ".gen2recomp-write-test"
 
 local dataDirChecked = false
@@ -232,6 +234,27 @@ function SaveData.dataDirSupported()
   if not (love.system and love.system.getOS) then return false end
   local osName = love.system.getOS()
   return osName == "Windows" or osName == "Linux" or osName == "OS X"
+    or osName == "Android"
+end
+
+-- Extra app-owned volumes the Android bridge can name (phone vs SD card).
+-- Each line from love.system.getExternalDataDirs is "label<TAB>absolute path".
+-- Empty on every other OS, and on an APK older than the bridge.
+function SaveData.externalDataDirs()
+  if not (love and love.system and type(love.system.getExternalDataDirs) == "function") then
+    return {}
+  end
+  local ok, raw = pcall(love.system.getExternalDataDirs)
+  if not ok or type(raw) ~= "string" or raw == "" then return {} end
+  local out = {}
+  for line in raw:gmatch("[^\r\n]+") do
+    local label, path = line:match("^(.-)\t(.+)$")
+    path = SaveData.normalizeDataDir(path or line)
+    if path then
+      out[#out + 1] = { label = (label and label ~= "" and label) or path, path = path }
+    end
+  end
+  return out
 end
 
 -- Trailing separators removed and slashes left alone otherwise: this string
@@ -371,6 +394,12 @@ local function persistFs(fs)
     return fs
   end
   return SaveData.portableFs() or fs or (love and love.filesystem)
+end
+
+-- Public seam for mods (Stadium import, HD zip install, custom pickers).
+-- Same routing as options/saves: injected fs, then portable.io, then LOVE.
+function SaveData.persistenceFs()
+  return persistFs(love and love.filesystem)
 end
 
 -- Port + original Options menu defaults.  Missing keys on load are filled
@@ -1280,6 +1309,30 @@ end)
 -- the game file.  mods (when given) refreshes the meta stamp; the write
 -- itself rolls the last good save into .bak and stages the new bytes as
 -- a .tmp witness before the swap, so a crash mid-write is recoverable.
+-- Is there already a save file where the next save will land?
+--
+-- Sinnoh's save script needs this: the cartridge's `SaveData_DataExists`
+-- decides whether the player is asked "There is already a saved file.  Is it
+-- OK to overwrite it?", which the FIRST save into a file skips and every
+-- later one shows (src/scrcmd.c ScrCmd_CheckSaveType).  The engine's answer is
+-- the same question about the active slot, resolved through the same
+-- saveNames/persistFs pair SaveData.save is about to write through, so the
+-- file it reports on is the file that is about to be overwritten.
+--
+-- nil rather than false when it cannot be asked -- an unknown version, or no
+-- filesystem at all under a headless check -- so a caller can tell "there is
+-- no file" from "there was no way to look".
+function SaveData.saveFileExists(version)
+  version = version or GameVersion.get()
+  if not knownVersion(version) then return nil end
+  local FILENAME = saveNames(version)
+  local fs = persistFs(nil)
+  if not (fs and fs.getInfo and FILENAME) then return nil end
+  local ok, info = pcall(fs.getInfo, FILENAME)
+  if not ok then return nil end
+  return info ~= nil
+end
+
 function SaveData.save(data, mods)
   -- write to the file matching this save's own version, not just the active
   -- one, so Blue/Yellow playthroughs land in save_blue.lua / save_yellow.lua
@@ -1484,9 +1537,15 @@ local function scrubMonList(list, where, save, data, report, slots)
 end
 
 local function scrubItemMap(map, where, save, data, report)
+  local badges={}
+  if where=='inventory' and data.isGen4Cache then
+    for _,entry in ipairs(Badges.list(data)) do badges[Badges.itemFor(entry)]=entry end
+  end
   if type(map) ~= "table" then return end
   for id, count in pairs(map) do
-    if not known(data.items, id) then
+    if badges[id] then
+      Badges.set(save,badges[id],true,'platinum')
+    elseif not known(data.items, id) then
       map[id] = nil
       ensureOrphaned(save)
       save.orphaned.items[#save.orphaned.items + 1] =
@@ -1609,7 +1668,10 @@ function SaveData.validate(save, data)
   -- hall of fame rosters keep their shape: an unknown species blanks in
   -- place so the team stays the size it won at, with the rest of the mon
   -- (level etc.) intact for display
-  for _, entry in ipairs(save.hallOfFame or {}) do
+  -- Gen3 stores the induction COUNT here (including zero), not rosters.
+  -- Keep it numeric: Champion/Mystery Gift code reads and increments it.
+  local rosters = type(save.hallOfFame) == "table" and save.hallOfFame or {}
+  for _, entry in ipairs(rosters) do
     if type(entry) == "table" then
       for i = 1, #entry do
         local mon = entry[i]
@@ -1801,6 +1863,60 @@ local function copyItemMap(src)
   return next(out) and out or nil
 end
 
+-- A SAVE THAT PREDATES THE OPENING FLAGS, REPAIRED IN PLACE.
+--
+-- Sinnoh's opening state is NEW-GAME state: 112 `setflag`s that keep the
+-- actors whose stories have not started off the map.  A save made while that
+-- state was not reaching the engine has none of them, and no amount of
+-- reloading will add them -- the player is left with the rival's mother
+-- standing on the tile her own house's exit warp occupies, which is not a
+-- cosmetic fault: it is unwinnable.  Reported from play four times, the last
+-- as *"i cant get out of the house because his mom is blocking my path"*.
+--
+-- NEVER TOUCHED IS THE WHOLE TEST, and it is only answerable because
+-- `Flags.clear` writes `false` rather than erasing the key -- it exists
+-- precisely so "a script cleared this" can be told from "no script has ever
+-- had an opinion here".  So a story the player has genuinely advanced past
+-- leaves `false` behind and is left alone, and only the flags whose scripts
+-- have never run are put back.  That makes this safe to run on EVERY load
+-- rather than once behind a stamp, and a stamp is the thing most likely to be
+-- wrong in a save that is already wrong.
+--
+-- Gen 4 only.  Gen 3 ships the same seam and its saves were never written
+-- without it, and Gen 1/Gen 2/Crystal/Prism have their own opening state that
+-- this must not touch.
+function SaveData.repairOpeningFlags(save, boot)
+  if type(save) ~= "table" or type(boot) ~= "table" then return 0 end
+  if not GameVersion.isGen4() then return 0 end
+
+  local flags, vars = 0, 0
+  if type(boot.initialFlags) == "table" then
+    save.flags = save.flags or {}
+    for _, name in ipairs(boot.initialFlags) do
+      if type(name) == "string" and save.flags[name] == nil then
+        save.flags[name] = true
+        flags = flags + 1
+      end
+    end
+  end
+  if type(boot.initialVars) == "table" then
+    save.gen4Vars = save.gen4Vars or {}
+    for _, row in ipairs(boot.initialVars) do
+      local id, value = tonumber(row.id), tonumber(row.value)
+      if id and value and save.gen4Vars[id] == nil then
+        save.gen4Vars[id] = value
+        vars = vars + 1
+      end
+    end
+  end
+
+  if flags > 0 or vars > 0 then
+    Logger.info("gen4 save repair: restored %d opening flag(s) and %d var(s) "
+                .. "this save never recorded", flags, vars)
+  end
+  return flags + vars
+end
+
 function SaveData.newGame(boot)
   boot = type(boot) == "table" and boot or {}
   local map = boot.startMap or "REDS_HOUSE_2F"
@@ -1885,6 +2001,33 @@ function SaveData.newGame(boot)
     for _, name in ipairs(boot.initialFlags) do
       if type(name) == "string" then save.flags[name] = true end
     end
+  end
+
+  -- ...AND THE VARS THAT COME WITH THEM, which only Gen 4 has.
+  --
+  -- Sinnoh's new-game script sets three (`0x4070 = 1`, `0x4093 = 1`,
+  -- `0x4040 = 9`) alongside its 112 flags, and a var is not a flag: Gen 4
+  -- keeps them in their own store, which is where `Gen4Commands` reads them
+  -- from.  Written as ids rather than names because a Gen 4 var has no name
+  -- -- the cartridge addresses them by number and so does every script that
+  -- compares one.
+  if type(boot.initialVars) == "table" then
+    save.gen4Vars = save.gen4Vars or {}
+    for _, row in ipairs(boot.initialVars) do
+      local id, value = tonumber(row.id), tonumber(row.value)
+      if id and value then save.gen4Vars[id] = value end
+    end
+  end
+
+  -- SAY WHETHER THE OPENING STATE WAS APPLIED AT ALL.
+  --
+  -- This only runs on a NEW GAME, which is the whole of the answer to "the
+  -- character who should be hidden is still there" -- and from inside the game
+  -- a save that predates the flags looks exactly like flags that did not work.
+  -- One line, once, so the log settles it.
+  if type(boot.initialFlags) == "table" or type(boot.initialVars) == "table" then
+    Logger.info("new game: applied %d opening flag(s) and %d var(s)",
+                #(boot.initialFlags or {}), #(boot.initialVars or {}))
   end
 
   -- BERRY TREES A NEW GAME STARTS WITH GROWING.

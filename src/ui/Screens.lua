@@ -11,6 +11,7 @@ local Screens = {}
 -- ids whose builtin module is not under src/ui/
 local BUILTIN = {
   ManagerState = "src.mods.ManagerState",
+  Gen2StartMenu = "src.ui.StartMenu",
 }
 
 local cache = {}
@@ -188,6 +189,10 @@ local GEN3_ALIASES = {
 -- will keep doing so until they do.  Adding an alias for a screen that is not
 -- written would open a module that is not there.
 local GEN4_ALIASES = {
+  EvolutionState = { id = "Gen4EvolutionState", positional = true },
+  StorageMenu = { id = "Gen4StorageMenu", opts = { onCancel = true, onDone = true } },
+  BoxMenu = { id = "Gen4BoxMenu", opts = { mode = true, onCancel = true, onDone = true } },
+  ShopMenu = { id = "Gen4ShopMenu", positional = true },
   OptionsMenu = { id = "Gen4Options", opts = { onCancel = true } },
   -- Reported from play alongside the options screen: the card was falling
   -- back to Kanto's.  The Gen 4 one answers the same one option.
@@ -199,21 +204,107 @@ local GEN4_ALIASES = {
   BagMenu = { id = "Gen4BagMenu",
               opts = { onCancel = true, battle = true, onPick = true,
                        pick = true, pocket = true } },
-  -- THE FIELD PARTY MENU, and only that.  `battle` is deliberately absent:
-  -- every in-battle push carries it, and the Gen 3 screen already answers
-  -- SHIFT, forced switches and an item's target out of Emerald's own words.
-  -- So are `tmhm`, `chooseOrder` and `onOrder`, each of which needs words this
-  -- cartridge's cache does not carry.  A declined push is Hoenn's screen doing
-  -- the job; a served one that cannot finish it is a dead end.
+  -- THE PARTY MENU, IN A BATTLE TOO.
+  --
+  -- `battle` used to be deliberately absent here, on the reasoning that a
+  -- declined push would be served by the Gen 3 screen, which already answers
+  -- SHIFT, forced switches and an item's target. IT WOULD NOT. Look at
+  -- `resolveId` below: once the Gen 4 alias declines it reaches
+  -- `if not isGen3(game) then return id, arg end` and hands back the GAME BOY
+  -- id, because a Platinum cache is not a Hoenn one. So every in-battle
+  -- POKeMON press on Platinum opened KANTO'S party list -- reported from play,
+  -- and the same shape as the keyboard and the Pokedex before it.
+  --
+  -- What made serving it honest rather than a dead end is that Gen4PartyMenu's
+  -- submenu now offers SEND OUT in a battle instead of SWITCH; whether the
+  -- member MAY go out is BattleState's own onSwitch, which already rejects an
+  -- egg, a fainted member and one already on the field.
+  --
+  -- `tmhm` IS SERVED NOW, AND ITS ABSENCE WAS NOT COSMETIC.
+  --
+  -- The note here used to say it needed words the cache does not carry. It
+  -- carries them: bank 453 has ABLE!, UNABLE!, LEARNED and "Teach which
+  -- Pokemon?", and Gen4Menus.PARTY_BANK says how that was settled. What the
+  -- absence actually cost was worse than a wrong-looking screen -- the push
+  -- was declined, `resolveId` handed back the GAME BOY id, and whichever
+  -- screen served it then called ItemEffects.use, which scans
+  -- `speciesDef.tmhm` with a bare ipairs. A Gen 4 cache had no such list. SO
+  -- USING A TM IN SINNOH RAISED. Both halves are fixed: the extractor unpacks
+  -- the cartridge's machine mask into that list, and this alias stops
+  -- declining the push.
+  --
+  -- STILL ABSENT, and the reason is now a different one: `chooseOrder` and
+  -- `onOrder` are pushed by ONE caller in the whole port, Gen3Commands'
+  -- chooseParty, which is a Gen 3 script special. NOTHING ON A GEN 4 CACHE
+  -- PUSHES THEM, so listing them here would serve a push that never arrives.
+  -- (The words are there too -- 154 ENTER, 155 NO ENTRY, 169..174
+  -- FIRST..SIXTH -- so the day a Gen 4 command needs it, only the screen has
+  -- to be written.)
   PartyMenu = { id = "Gen4PartyMenu",
                 opts = { onCancel = true, onSwitch = true, pickOnly = true,
-                         forceSwitch = true, keepOpen = true } },
+                         forceSwitch = true, keepOpen = true,
+                         battle = true, tmhm = true } },
   -- The summary is pushed with the Pokemon itself, which `servedBy` reads as
-  -- `mon`.  `choose` -- the move-learn screen asking which move to forget --
-  -- is NOT listed: that page needs the cartridge's own forget flow, and until
-  -- it exists the Gen 3 screen answers it.
+  -- `mon`.
+  --
+  -- `readOnlyMoves` IS LISTED, and leaving it off crashed the game.  The Gen 4
+  -- party menu's SUMMARY row pushes `{ mon = mon, readOnlyMoves = ... }` and
+  -- `Gen4SummaryMenu.new` reads that key -- but the alias did not name it, so
+  -- every press declined the Gen 4 screen and (on a Gen 4 cache, where the
+  -- Gen 3 table is never consulted) landed on the Game Boy `SummaryMenu`.
+  -- That screen takes `(game, mon, opts)` POSITIONALLY, so the options table
+  -- arrived as the Pokemon, `mon.species` was nil, and `data.pokemon[nil]`
+  -- was nil: "attempt to index local 'def' (a nil value)".
+  --
+  -- The lethal part is not the fallback, it is that the two generations'
+  -- screens have DIFFERENT SIGNATURES and the fallback crosses them.  An
+  -- unnamed key here is not a cosmetic downgrade; it is a crash.
+  --
+  -- `choose` -- the move-learn screen asking which move to forget -- is still
+  -- NOT listed: that page needs the cartridge's own forget flow, and
+  -- `Gen4SummaryMenu` assigns `self.choose` without ever reading it, so
+  -- serving it there would be a screen with no way to pick.  (The note that
+  -- used to sit here said the Gen 3 screen answers it.  It does not:
+  -- `resolveId` consults the Gen 3 table only `if isGen3(game)`, so on
+  -- Platinum a `choose` push reaches the Game Boy screen.  It is a fallback
+  -- with a known destination now rather than an assumed one -- and that screen
+  -- reads the options shape, so it no longer crashes on arrival.)
   SummaryMenu = { id = "Gen4SummaryMenu",
-                  opts = { onCancel = true, mon = true } },
+                  opts = { onCancel = true, mon = true, readOnlyMoves = true } },
+  -- THE KEYBOARD, which had no entry at all -- so every name the player types
+  -- opened Kanto's, on a Platinum save.  Reported as "the keyboard where you
+  -- type your name or your pokemons nickname is also not correct for gen4
+  -- platinum its falling back to gen1".
+  --
+  -- Every option the Game Boy screen takes is listed, because `servedBy`
+  -- declines a push carrying a key the alias does not name and a naming
+  -- screen is pushed from a dozen places with different halves of this set:
+  -- the intro asks for a player name with `presets`, a nickname prompt passes
+  -- `mon` and `species`, a box rename passes only `default`.
+  NamingScreen = { id = "Gen4NamingScreen",
+                   opts = { title = true, presets = true, maxLen = true,
+                            default = true, onDone = true, kind = true,
+                            species = true, mon = true, female = true } },
+  -- THE POKEDEX, which was the last of the four screens reported as "looking
+  -- like gen1 still" without an entry here.  It was left without one on
+  -- purpose: its art composed blank, and a Gen 4 Pokedex drawn on a blank page
+  -- would have been worse than Kanto's.  The `dex` stage composes it now.
+  PokedexMenu = { id = "Gen4Pokedex", opts = { onCancel = true } },
+  -- THE START MENU, which is the other half of the original brief: Platinum's
+  -- own rows and icons, on the MAIN screen by default like every other version
+  -- in this launcher, with a row on OPTIONS to move it to the second screen.
+  --
+  -- `servedBy` sees a bare push with no options at all from the field, which
+  -- is why `opts` is empty rather than absent -- an alias with no opts table
+  -- declines every push that carries one, and the Safari and Bug Contest
+  -- pushes do not carry any either.
+  StartMenu = { id = "Gen4StartMenu", opts = { onCancel = true } },
+  -- ...AND THE UNDERGROUND HAS ITS OWN, which REPLACES that one while you
+  -- are down there rather than sitting beside it. The cartridge builds a
+  -- different window from a different table (`sUndergroundMenuOptions` in
+  -- `src/underground/menus.c`), and GO UP exists nowhere else -- which is
+  -- why `CanUseExplorerKit` refuses the kit underground.
+  UndergroundMenu = { id = "Gen4UndergroundMenu", opts = { onCancel = true } },
 }
 
 local function isGen4(game)
@@ -235,6 +326,33 @@ end
 -- one warning per screen and option, not one per press
 local declined = {}
 
+-- SAY WHICH OPTION DECLINED A PUSH, once per screen and key.
+--
+-- A push carrying an option the generation's screen does not list falls back
+-- to the Game Boy one, and the player sees the wrong screen -- or, when the
+-- pusher is a SCRIPT, no screen at all and a question asked over and over
+-- ("when selecting someones pc ... it loops and asks over and over again").
+-- The rule is deliberate; the silence was not.
+--
+-- IT WAS ON THE GEN 3 PATH ONLY, which is how the Gen 4 summary crash stayed
+-- invisible: `Gen4PartyMenu` pushed `readOnlyMoves`, the Gen 4 alias did not
+-- name it, and nothing said so.  One sentence, both generations.
+local function warnDeclined(id, alias, arg)
+  if type(arg) ~= "table" then return end
+  for key in pairs(arg) do
+    if not alias.opts[key] then
+      local mark = id .. ":" .. tostring(key)
+      if not declined[mark] then
+        declined[mark] = true
+        require("src.core.Logger").warn(
+          "screens: a push of %s carries `%s`, which %s does not serve -- "
+          .. "falling back to the Game Boy screen", id, tostring(key),
+          alias.id)
+      end
+    end
+  end
+end
+
 local function servedBy(alias, arg)
   if arg == nil then return true end
   -- a bare species id, which is how the dex entry page is asked for
@@ -248,6 +366,17 @@ local function servedBy(alias, arg)
   end
   return true
 end
+
+-- THE ALIAS TABLES, PUBLISHED FOR THE SUITE, for the same reason `resolveId`
+-- is: the rule they encode can then be stated without driving a whole game.
+--
+-- What `tools/screen_alias_check.lua` does with them is the sweep that would
+-- have caught the Gen 4 summary crash: every table-literal `Screens.push`
+-- site in the port, every key in it, against the alias for that generation.
+-- An unnamed key is not a cosmetic downgrade -- the push falls through to a
+-- screen whose arguments are POSITIONAL, so the options table lands where the
+-- Pokemon goes.
+Screens.ALIASES_FOR_CHECKS = { gen3 = GEN3_ALIASES, gen4 = GEN4_ALIASES }
 
 -- Is this id served by a POSITIONAL alias?
 --
@@ -263,24 +392,89 @@ end
 -- folded, every argument passes through as it stands -- so buildScreen asks
 -- this before giving up on a multi-argument call.
 function Screens.positionalAlias(id)
-  local alias = GEN3_ALIASES[id]
+  local alias = GEN3_ALIASES[id] or GEN4_ALIASES[id]
   return (alias ~= nil and alias.positional == true) and true or false
 end
 
 -- The id a push should really open, and the arguments it should open with.
 -- Public so the suite can state the rule without driving a whole game.
 function Screens.resolveId(game, id, arg)
+  -- BLACK AND WHITE'S OWN SCREENS, ahead of everything (a Gen 5 cache is not
+  -- a Gen 4 one, so the table below would hand it the Game Boy's): so far the
+  -- evolution scene, positional like Platinum's
+  if id == "EvolutionState" then
+    local okV, V = pcall(require, "src.core.GameVersion")
+    if okV and V.isGen5 and V.isGen5() then
+      local screens = game and game.data and game.data.screens
+      if not (screens and screens[id]) then return "Gen5EvolutionState", arg end
+    end
+  end
+  -- HEARTGOLD / SOULSILVER'S SUMMARY takes every summary push, the move-
+  -- learning one (`choose`) included, which the Gen 4 alias below declines
+  if id == "SummaryMenu" and ((game and game.data) or {}).gen4_hgss_summary_art then
+    local screens = game.data.screens
+    if not (screens and screens[id]) then return "HgssSummaryMenu", arg end
+  end
+  -- ...and Black and White's (src/ui/Gen5SummaryMenu.lua)
+  if id == "SummaryMenu" and ((game and game.data) or {}).gen5_summary_art then
+    local screens = game.data.screens
+    if not (screens and screens[id]) then return "Gen5SummaryMenu", arg end
+  end
   -- Gen 4 first: a cache is one or the other, and asking in this order means
   -- the Gen 3 table never has to know that a fourth generation exists.
   local gen4 = GEN4_ALIASES[id]
   if gen4 and isGen4(game) then
     local screens = game and game.data and game.data.screens
-    if not (screens and screens[id]) and servedBy(gen4, arg) then
+    if not (screens and screens[id]) and (gen4.positional or servedBy(gen4, arg)) then
       local okG4, moduleG4 = pcall(builtinFor, gen4.id)
       if okG4 and type(moduleG4) == "table"
          and type(moduleG4.new) == "function" then
+        -- HGSS's card is its own layout (src/ui/HgssTrainerCard.lua), known
+        -- by the art its import wrote
+        if gen4.id == "Gen4TrainerCard"
+           and ((game and game.data or {}).gen4_trainer_card_art or {}).hgss then
+          return "HgssTrainerCard", arg
+        end
+        if gen4.id == "Gen4TrainerCard"
+           and ((game and game.data or {}).gen4_trainer_card_art or {}).bw then
+          return "Gen5TrainerCard", arg
+        end
+        -- HGSS's field menu is the touch panel (src/ui/HgssStartMenu.lua)
+        if gen4.id == "Gen4StartMenu" and (game and game.data or {}).gen4_hgss_menu_art then
+          return "HgssStartMenu", arg
+        end
+        if gen4.id == "Gen4StartMenu" and (game and game.data or {}).gen5_menu_art then
+          return "Gen5StartMenu", arg
+        end
+        if gen4.id == "Gen4BagMenu" and (game and game.data or {}).gen4_hgss_bag_art then
+          return "HgssBagMenu", arg
+        end
+        if gen4.id == "Gen4BagMenu" and (game and game.data or {}).gen5_bag_art then
+          return "Gen5BagMenu", arg
+        end
+        -- the Pokedex and the PC, each routed once its art is in the cache
+        -- (src/ui/HgssPokedex.lua / Gen5Pokedex.lua / HgssBoxMenu.lua / Gen5BoxMenu.lua)
+        do
+          local data = (game and game.data) or {}
+          local own = {
+            Gen4Pokedex = data.gen4_hgss_dex_art and "HgssPokedex" or data.gen5_dex_art and "Gen5Pokedex",
+            Gen4BoxMenu = data.gen4_hgss_box_art and "HgssBoxMenu" or data.gen5_box_art and "Gen5BoxMenu",
+          }
+          local to = own[gen4.id]
+          if to and pcall(builtinFor, to) then return to, arg end
+        end
+        if gen4.id == "Gen4SummaryMenu" and (game and game.data or {}).gen4_hgss_summary_art then
+          return "HgssSummaryMenu", arg
+        end
         return gen4.id, arg
       end
+    end
+    -- ...and when it did NOT serve, say which key -- see warnDeclined.
+    -- Only on the declining path: a push that was served has returned by
+    -- now, and a mod that overrode the id by name is not a decline.
+    if not (screens and screens[id]) and not gen4.positional
+       and not servedBy(gen4, arg) then
+      warnDeclined(id, gen4, arg)
     end
   end
   local alias = GEN3_ALIASES[id]
@@ -305,27 +499,7 @@ function Screens.resolveId(game, id, arg)
   local screens = game and game.data and game.data.screens
   if screens and screens[id] then return id, arg end
   if not servedBy(alias, arg) then
-    -- SAY WHICH OPTION DECLINED IT, once per screen and key.
-    --
-    -- A push carrying an option the Gen 3 screen does not list falls back to
-    -- the Game Boy one, silently, and the player sees the wrong screen -- or,
-    -- when the pusher is a SCRIPT, no screen at all and a question asked over
-    -- and over ("when selecting someones pc ... it loops and asks over and
-    -- over again").  The rule is deliberate; the silence was not.
-    if type(arg) == "table" then
-      for key in pairs(arg) do
-        if not alias.opts[key] then
-          local mark = id .. ":" .. tostring(key)
-          if not declined[mark] then
-            declined[mark] = true
-            require("src.core.Logger").warn(
-              "screens: a push of %s carries `%s`, which %s does not serve -- "
-              .. "falling back to the Game Boy screen", id, tostring(key),
-              alias.id)
-          end
-        end
-      end
-    end
+    warnDeclined(id, alias, arg)
     return id, arg
   end
   local ok, module = pcall(builtinFor, alias.id)
@@ -399,8 +573,7 @@ function Screens.push(game, id, ...)
   -- A POSITIONAL alias keeps every argument, because its screen is not an
   -- options-table screen -- MoveLearnMenu takes (mon, moveId, onDone) and
   -- dropping the last two would open it with nothing to teach.
-  local alias = GEN3_ALIASES[id]
-  if alias and alias.positional then
+  if Screens.positionalAlias(id) then
     local resolvedId = Screens.resolveId(game, id, ...)
     return pushWith(game, resolvedId, ...)
   end
