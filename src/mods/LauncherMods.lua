@@ -460,26 +460,41 @@ local function discover()
   -- them over, and LauncherMods.strandedMods below is what the panel says
   -- about them in the meantime.
   local confine = LauncherMods.confinedRoot()
-  local seen = {}
-  for _, name in ipairs(fs.getDirectoryItems("mods")) do
-    local path = "mods/" .. name
-    local info = fs.getInfo(path)
-    -- a dev-linked mod dir (ln -s) reports type "symlink" even with
-    -- setSymlinksEnabled(true); see the matching note in Loader:_discover.
-    if confine and not LauncherMods.underRoot(confine, path) then
-      info = nil
-    end
-    if info and (info.type == "directory" or info.type == "symlink") then
-      local raw = fs.read(path .. "/manifest.json")
-      if raw then
-        local manifest = decodeManifest(raw, path)
-        if manifest and not seen[manifest.id] then
-          seen[manifest.id] = true
-          out[#out + 1] = manifest
-        end
-      end
-    end
+  -- ONE COPY PER ID, BY THE SAME RULE THE LOADER USES (src/mods/ModCopies.lua):
+  -- the newest version, then the save directory over the game folder.  This
+  -- used to keep whichever folder was listed first, which is not always the
+  -- one the game then loaded, so the panel could show one version while the
+  -- game ran another.  A dev-linked mod dir (ln -s) reports type "symlink"
+  -- and is scanned like a directory.
+  local scan = require("src.mods.ModCopies").scan(fs, {
+    decode = decodeManifest,
+    allowReal = confine and require("src.mods.ModCopies").confinedTo(confine) or nil,
+  })
+  LauncherMods._lastScan = scan
+  local ids = {}
+  for id in pairs(scan.winners) do ids[#ids + 1] = id end
+  table.sort(ids)
+  for _, id in ipairs(ids) do
+    local copy = scan.winners[id]
+    out[#out + 1] = copy.manifest
   end
+  return out
+end
+
+-- WHAT THE PANEL SHOULD SAY ABOUT COPIES IT IS NOT USING: every copy of a mod
+-- that was found and will not load (an older version beside a newer one, the
+-- other home's copy, a zip in mods/), one line each, from the last listing.
+function LauncherMods.copiesReport()
+  local scan = LauncherMods._lastScan
+  local out = {}
+  if not scan then return out end
+  for _, row in ipairs(scan.ignored or {}) do
+    out[#out + 1] = ("%s %s at %s is ignored: %s"):format(tostring(row.copy.id),
+      tostring(row.copy.version), tostring(row.copy.where or row.copy.path),
+      tostring(row.reason))
+  end
+  for _, z in ipairs(scan.zips or {}) do out[#out + 1] = z.note end
+  for _, note in ipairs(scan.notes or {}) do out[#out + 1] = note end
   return out
 end
 
@@ -500,13 +515,73 @@ function LauncherMods.list()
     if require("src.mods.ModRename").adoptOptions(options, manifests) then
       SaveData.saveOptions(options)
     end
-    return LauncherMods.deriveList(manifests, options)
+    local rows = LauncherMods.deriveList(manifests, options)
+    -- WHICH COPY IS ACTIVE AND WHICH ARE NOT, on the row itself
+    local okA, annotate = pcall(LauncherMods.annotateCopies, rows, manifests,
+      LauncherMods._lastScan)
+    return okA and annotate or rows
   end)
   if not ok then
     -- a single bad options/mod file must not blank the launcher
     return {}
   end
   return result or {}
+end
+
+-- annotateCopies(rows, manifests, scan) -> rows, with
+--   row.ignoredCopies   { {version, path, reason} } -- copies of this id that
+--                       will not load, and why
+--   row.supersededBy    the id of another enabled mod that is the same mod
+--                       and will load instead (ModCopies.supersede)
+-- and statusDetail saying so, because a row reading "Ready" for a copy that
+-- will not run is how a player ends up with two of them switched on.
+function LauncherMods.annotateCopies(rows, manifests, scan)
+  local ModCopies = require("src.mods.ModCopies")
+  local byId, mods = {}, {}
+  for _, m in ipairs(manifests or {}) do byId[m.id] = m end
+  local winners = scan and scan.winners or {}
+  for _, row in ipairs(rows) do
+    local m = byId[row.id]
+    if m then
+      local w = winners[row.id]
+      mods[row.id] = { manifest = m, path = w and w.path or m.path,
+                       home = w and w.home or "other", where = w and w.where,
+                       enabled = row.enabled }
+      row.where = w and w.where or m.path
+    end
+  end
+  for _, ig in ipairs(scan and scan.ignored or {}) do
+    for _, row in ipairs(rows) do
+      if row.id == ig.copy.id then
+        row.ignoredCopies = row.ignoredCopies or {}
+        row.ignoredCopies[#row.ignoredCopies + 1] = { version = ig.copy.version,
+          path = ig.copy.where or ig.copy.path, reason = ig.reason }
+      end
+    end
+  end
+  local losers = ModCopies.supersede(mods, function(id, mod) return mod.enabled end)
+  local lost = {}
+  for _, l in ipairs(losers) do lost[l.id] = l end
+  for _, row in ipairs(rows) do
+    local l = lost[row.id]
+    if l then
+      row.supersededBy = l.winner
+      row.status = "warn"
+      row.statusDetail = ("Not loaded: %s -- switch it off to use this one")
+        :format(l.reason)
+    elseif row.ignoredCopies and row.status == "ok" then
+      local first = row.ignoredCopies[1]
+      row.statusDetail = ("Ready (%s); %d other cop%s ignored: %s %s")
+        :format(tostring(row.where), #row.ignoredCopies,
+          #row.ignoredCopies == 1 and "y" or "ies", tostring(first.version),
+          tostring(first.path))
+    end
+    -- the card draws the description, so that is where it is said
+    if l or row.ignoredCopies then
+      row.description = row.statusDetail .. "\n" .. (row.description or "")
+    end
+  end
+  return rows
 end
 
 -- setEnabled(id, enabled): persist options.mods[id] in the exact shape
@@ -1122,6 +1197,14 @@ function LauncherMods._installZipInner(source, opts)
     end
     manifest.id = opts.installId
     cloneNumber = manifest.id:match("%-(%d+)$")
+  elseif not opts.replace and LauncherMods.isUpdateOver(manifest) then
+    -- A NEWER RELEASE OF AN INSTALLED MOD IS AN UPDATE, NOT A SECOND COPY.
+    -- Importing Terrarium 1.8.7 over 1.6.0 used to land as
+    -- "DRAMATIC_SHAPE-1 (copy 1)" beside the old one; switching the new one
+    -- on left both enabled and both ran.  It replaces the installed folder
+    -- in place now (enable state kept, like any update); the same or an
+    -- older version still becomes a separate, disabled copy as before.
+    opts = setmetatable({ replace = true }, { __index = opts })
   elseif not opts.replace and LauncherMods.folderFor(manifest.id) then
     for n = 1, 9999 do
       local candidate = sourceId .. "-" .. n
@@ -1368,6 +1451,22 @@ function LauncherMods.folderFor(id)
     if folderDeclares(fs, path, id) then return path end
   end
   return nil
+end
+
+-- isUpdateOver(manifest) -> true when `manifest` is a NEWER version of a mod
+-- that is installed under the same id, in a folder the launcher may replace
+-- (not a source checkout).
+function LauncherMods.isUpdateOver(manifest)
+  if type(manifest) ~= "table" or type(manifest.id) ~= "string" then return false end
+  local fs = love and love.filesystem
+  if not fs then return false end
+  local folder = LauncherMods.folderFor(manifest.id)
+  if not folder or LauncherMods.checkoutAt(folder) then return false end
+  local raw = fs.read(folder .. "/manifest.json")
+  local installed = raw and decodeManifest(raw, folder)
+  if not installed then return false end
+  local c = Semver.compare(manifest.version, installed.version)
+  return c ~= nil and c > 0
 end
 
 function LauncherMods.uninstall(id)

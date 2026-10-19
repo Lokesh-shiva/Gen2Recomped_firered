@@ -104,7 +104,7 @@ function Gen3ItemPcQuantity:draw()
   if styles.dark then Font.pushStyle(styles.dark) end
   local verb = self.verb == "DEPOSIT" and Strings("Deposit how many")
                or Strings("Withdraw how many")
-  drawLines(verb .. "\n" .. self.itemName .. Strings("(s)?"),
+  drawLines(verb .. "\n" .. self.itemName .. Strings("(s)?"),  -- strings: line-break glue between translated parts
             prompt.x, prompt.y + 2)
 
   -- sWindowTemplates[3] + ItemPc_AddTextPrinterParameterized(..., 8, 10).

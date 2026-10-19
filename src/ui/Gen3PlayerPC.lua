@@ -287,7 +287,7 @@ local function g3Withdraw(game, back)
           pcOrder(game, pc)
           require("src.core.Sound").play(game.data, "Withdraw_Deposit")
           local line = require("src.ui.Gen3BagMenu").pcWord(game, "withdrew")
-          line = tostring(line or "Withdrew {VAR2}\n{VAR1}(s).")
+          line = tostring(line or Strings("Withdrew {VAR2}\n{VAR1}(s)."))
             :gsub("{STR_VAR1}", "{VAR1}"):gsub("{STR_VAR2}", "{VAR2}")
             :gsub("{VAR2}", tostring(qty)):gsub("{VAR1}", itemName(game, id))
           say(game, line,
