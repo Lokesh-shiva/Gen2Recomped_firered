@@ -5670,13 +5670,24 @@ function RomExtractorGen3:extractConstants()
 
   local spawn = self.manifest.newGame and self.manifest.newGame.spawn
   if type(spawn) == "table" and spawn.group and spawn.number then
+    local fireRed = (self.manifest or {}).frlgItemMenu ~= nil
+    -- FireRed does not use Emerald's WarpToTruck/centre-of-layout start.  Its
+    -- WarpToPlayersRoom calls SetWarpDestination(..., -1, 6, 6) explicitly
+    -- (pokefirered src/new_game.c), on the same bedroom map identified by the
+    -- manifest.  Keeping the Emerald-discovered y=3 put a new player beside
+    -- the PC instead of in the middle of the rug.
+    local startX = fireRed and 6 or (spawn.x or 0)
+    local startY = fireRed and 6 or (spawn.y or 0)
     constants.gen3NewGameSpawn = {
       map = ("MAP_G%02d_N%02d"):format(spawn.group, spawn.number),
-      x = spawn.x or 0, y = spawn.y or 0,
-      source = ("ROM:NewGameInitData -> WarpToTruck(group %d, map %d), "
-                .. "centre of a %dx%d layout")
-               :format(spawn.group, spawn.number,
-                       spawn.width or 0, spawn.height or 0),
+      x = startX, y = startY,
+      source = fireRed
+        and ("ROM:NewGameInitData -> WarpToPlayersRoom(group %d, map %d), (6,6)")
+             :format(spawn.group, spawn.number)
+        or (("ROM:NewGameInitData -> WarpToTruck(group %d, map %d), "
+             .. "centre of a %dx%d layout")
+            :format(spawn.group, spawn.number,
+                    spawn.width or 0, spawn.height or 0)),
     }
   end
 
@@ -13690,6 +13701,9 @@ RomExtractorGen3.PC_MENU = {
   AT_ORDER = 0x04,    -- ldr r0, =<the row list>
   AT_COUNT = 0x0A,    -- mov r0, #<how many>
   MOV_R0 = 0x2000,
+  -- FireRed's BedroomPC/PlayerPC call DisplayItemMessageOnField with this
+  -- string before opening the top menu.  The symbol is gText_WhatWouldYouLikeToDo.
+  FRLG_TOP_PROMPT = 0x416262,
   -- THE SCREEN ITSELF, which blinks on when the PC is used.  Both metatile
   -- sets are read out of the one function that writes them (08138D88), the
   -- blink out of the task that calls it (08138D10).
@@ -14212,6 +14226,14 @@ function RomExtractorGen3:extractPCMenu()
     end
   end
 
+  local topPrompt
+  if fireRed then
+    local okPrompt, text = pcall(self.readText, self, P.FRLG_TOP_PROMPT, 80)
+    if okPrompt and type(text) == "string" and text ~= "" then
+      topPrompt = text
+    end
+  end
+
   -- ---- ...AND THE POKEMON STORAGE MENU ----------------------------------
   --
   -- Reported from play: "for the storage missing deposit, withdrawal, and
@@ -14342,6 +14364,7 @@ function RomExtractorGen3:extractPCMenu()
     itemStorage = storage,
     mailbox = mailbox,
     describe = describe,
+    topPrompt = topPrompt,
     text = said,
     storage = box,
     orders = orders,
@@ -46620,6 +46643,9 @@ RomExtractorGen3.FRLG_NAMING = {
   GFX = 0xE980E4, BG_MAP = 0xE982BC,
   KB_MAPS = { upper = 0xE98398, lower = 0xE98458, symbols = 0xE98518 },
   MENU_PAL = 0xE98024, KB_PAL = 0xE97FE4,
+  -- text.c gKeypadIconTiles is a 128x32 4bpp sheet (64 tiles).  Naming's
+  -- WIN_BANNER loads GetTextWindowPalette(2), the third 16-colour row here.
+  KEYPAD_GFX = 0x1EA700, TEXT_WINDOW_PALS = 0x471DEC,
   -- naming_screen.c's private rival sheet is a second exact copy of
   -- gObjectEventPic_Blue (0x38A428) in the retail ROM.  Its dedicated palette
   -- sits between gNamingScreenKeyboard_Pal and gNamingScreenMenu_Pal in
@@ -46755,6 +46781,39 @@ function RomExtractorGen3:extractFireRedNaming(namingSpec, folder, constantKey)
   end
   pcall(layer, "bg", N.BG_MAP, true)
   for key, at in pairs(N.KB_MAPS) do pcall(layer, "kb_" .. key, at, false) end
+
+  -- PrintControls does not draw button-shaped boxes.  The {DPAD_ANY},
+  -- {A_BUTTON} and {B_BUTTON} control codes call DrawKeypadIcon, which blits
+  -- these exact pixels from gKeypadIconTiles with colour 0 keyed out.  Pull
+  -- those three icons so the runtime can compose gText_MoveOkBack with the
+  -- cartridge's own small-font glyphs and keypad art.
+  pcall(function()
+    local raw = rom:bytes(N.KEYPAD_GFX, 64 * 32)
+    local px = RomGba.tiles4bpp(raw, 16, 4)
+    local palRaw = rom:bytes(N.TEXT_WINDOW_PALS + 2 * 32, 32)
+    local bannerPal = {}
+    for i = 0, 15 do
+      bannerPal[i] = { RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256) }
+    end
+    local function keypad(key, tile, w, h)
+      local sx, sy = (tile % 16) * 8, math.floor(tile / 16) * 8
+      local img = ImageWriter.blank(w, h)
+      for y = 0, h - 1 do
+        for x = 0, w - 1 do
+          local v = px[sy + y + 1][sx + x + 1]
+          local col = v ~= 0 and bannerPal[v]
+          if col then
+            img:setPixel(x, y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+          end
+        end
+      end
+      save(key, img)
+    end
+    keypad("help_a", 0x00, 8, 12)
+    keypad("help_b", 0x01, 8, 12)
+    keypad("help_dpad", 0x22, 8, 12) -- CHAR_DPAD_NONE / {DPAD_ANY}
+  end)
+
   for key, spec in pairs(N.SPRITES) do
     pcall(function()
       local at, w, h, bank = spec[1], spec[2], spec[3], spec[4]
@@ -46762,14 +46821,21 @@ function RomExtractorGen3:extractFireRedNaming(namingSpec, folder, constantKey)
       local raw = rom:bytes(at, cols * rws * 32)
       local px = RomGba.tiles4bpp(raw, cols, rws)
       local img = ImageWriter.blank(w, h)
+      -- SpriteCB_Cursor changes ONLY OBJ palette entry 1 while the keyboard
+      -- cursor idles.  Keep those pixels in a separate white mask so the
+      -- runtime can replace that one colour every frame without tinting the
+      -- rest of the cartridge-ripped cursor art.
+      local pulse = key == "cursor" and ImageWriter.blank(w, h) or nil
       for y = 1, h do
         for x = 1, w do
           local v = px[y][x]
           local col = v ~= 0 and pal[bank * 16 + v]
           if col then img:setPixel(x - 1, y - 1, col[1] / 255, col[2] / 255, col[3] / 255, 1) end
+          if pulse and v == 1 then pulse:setPixel(x - 1, y - 1, 1, 1, 1, 1) end
         end
       end
       save(key, img)
+      if pulse then save("cursor_pulse", pulse) end
     end)
   end
   -- RIVAL's naming icon is not the ordinary object-event sprite at runtime:
@@ -46814,9 +46880,15 @@ function RomExtractorGen3:extractFireRedNaming(namingSpec, folder, constantKey)
   end)
   local function c(i) local t = pal[i] return { t[1], t[2], t[3] } end
   local constants = self._constants or {}
+  local cursorWord = rom:u16(N.MENU_PAL + 5 * 32 + 2) -- palette 5, entry 1
   constants[constantKey] = {
     images = images,
     rivalIcon = rivalIcon,
+    cursorPulseBase = {
+      cursorWord % 32,
+      math.floor(cursorWord / 32) % 32,
+      math.floor(cursorWord / 1024) % 32,
+    },
     colors = {
       fill = { upper = c(10 * 16 + 13), lower = c(10 * 16 + 14), symbols = c(10 * 16 + 15) },
       key = { c(10 * 16 + 1), c(10 * 16 + 2) },
@@ -47623,6 +47695,12 @@ RomExtractorGen3.FRLG_OAK_SPEECH = {
   GUIDE_TILES = 0x4605E8, PIKACHU_MAP = 0x460BA8,
   OAK_TILES = 0x460CA4, OAK_MAP = 0x460CE8,
   GUIDE_PAGE2 = 0x460D94, GUIDE_PAGE3 = 0x460E34,
+  -- The guide's top bar uses GetTextWindowPalette(2), and its A/B control
+  -- codes use text.c's shared keypad sheet.  The bobbing red page cursor is
+  -- sDoubleArrowTiles1 with gStandardMenuPalette.
+  KEYPAD_GFX = 0x1EA700, TEXT_WINDOW_PALS = 0x471DEC,
+  TEXT_CURSOR_GFX = 0x1EA54C, TEXT_CURSOR_PAL = 0x41F408,
+  DIALOGUE_ARROW_GFX = 0x1EA14C,
   PICS = {                             -- {pal, tiles, palette bank}
     red = { 0x4615FC, 0x46163C, 4 }, leaf = { 0x460ED4, 0x460F14, 4 },
     oak = { 0x461CD4, 0x461D14, 6 }, rival = { 0x4623AC, 0x4623EC, 6 },
@@ -47681,6 +47759,96 @@ function RomExtractorGen3:extractFireRedOakSpeech()
     self:saveImage(img, "oak_speech_frlg/" .. key .. ".png")
     record.images[key] = "assets/generated/oak_speech_frlg/" .. key .. ".png"
   end
+
+  -- Top-bar palette + the two control-code glyphs.  TopBarWindowPrintString
+  -- fills with palette index 15, uses indices 1/2 for the small-font ink and
+  -- shadow, and DrawKeypadIcon blits the same palette over gKeypadIconTiles.
+  pcall(function()
+    local palRaw = rom:bytes(S.TEXT_WINDOW_PALS + 2 * 32, 32)
+    local textPal = {}
+    for i = 0, 15 do
+      textPal[i] = { RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256) }
+    end
+    record.colors = {
+      topBar = textPal[15], topInk = textPal[1], topShadow = textPal[2],
+    }
+    -- NewGameScene's setup copies GetTextWindowPalette(2)[15] over BG palette
+    -- 0 colour 0 before the controls guide is shown.  Tile 0 is entirely index
+    -- 0, so this is also the guide's steady-state body colour and the colour
+    -- behind transparent-looking portions of the guide tilemaps.
+    bgColors[1] = textPal[15]
+    local raw = rom:bytes(S.KEYPAD_GFX, 64 * 32)
+    local px = RomGba.tiles4bpp(raw, 16, 4)
+    local function keypad(key, tile)
+      local sx, sy = (tile % 16) * 8, math.floor(tile / 16) * 8
+      local img = ImageWriter.blank(8, 12)
+      for y = 0, 11 do
+        for x = 0, 7 do
+          local v = px[sy + y + 1][sx + x + 1]
+          local col = v ~= 0 and textPal[v]
+          if col then
+            img:setPixel(x, y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+          end
+        end
+      end
+      save(key, img)
+    end
+    keypad("guideAButton", 0x00)
+    keypad("guideBButton", 0x01)
+  end)
+
+  -- CreateTextCursorSprite(sheet 0, 230,149) uses this 16x16 four-tile sprite.
+  pcall(function()
+    local raw = rom:bytes(S.TEXT_CURSOR_GFX, 0x80)
+    local px = RomGba.tiles4bpp(raw, 2, 2)
+    local palRaw = rom:bytes(S.TEXT_CURSOR_PAL, 32)
+    local pal = {}
+    for i = 0, 15 do
+      pal[i] = { RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256) }
+    end
+    local img = ImageWriter.blank(16, 16)
+    for y = 0, 15 do
+      for x = 0, 15 do
+        local v = px[y + 1][x + 1]
+        local col = v ~= 0 and pal[v]
+        if col then
+          img:setPixel(x, y, col[1] / 255, col[2] / 255, col[3] / 255, 1)
+        end
+      end
+    end
+    save("guideCursor", img)
+  end)
+
+  -- FireRed's ordinary text-printer prompt is not a font glyph.  text.c blits
+  -- a 10x12 rectangle from sDownArrowTiles at currentX/currentY, cycling source
+  -- x offsets 0,16,32,16.  Preserve the three distinct cartridge frames in one
+  -- strip; TextBox places them at the live pen rather than on the box border.
+  pcall(function()
+    local raw = rom:bytes(S.DIALOGUE_ARROW_GFX, 0x400)
+    local px = RomGba.tiles4bpp(raw, 16, 2) -- 128x16 source bitmap
+    local palRaw = rom:bytes(S.TEXT_WINDOW_PALS + 2 * 32, 32)
+    local pal = {}
+    for i = 0, 15 do
+      pal[i] = { RomGba.bgr555(palRaw[i * 2 + 1] + palRaw[i * 2 + 2] * 256) }
+    end
+    local img = ImageWriter.blank(30, 12)
+    for frame, sx in ipairs({ 0, 16, 32 }) do
+      for y = 0, 11 do
+        for x = 0, 9 do
+          local v = px[y + 1][sx + x + 1]
+          local col = v ~= 0 and pal[v]
+          if col then
+            img:setPixel((frame - 1) * 10 + x, y,
+                         col[1] / 255, col[2] / 255, col[3] / 255, 1)
+          end
+        end
+      end
+    end
+    save("dialogueArrow", img)
+    record.dialogueArrow = {
+      path = record.images.dialogueArrow, frames = 3, width = 10, height = 12,
+    }
+  end)
 
   -- a 4bpp tilemap, `cols` wide, placed at a tile offset on a 240x160 canvas
   local function compose(key, tiles, map, cols, rows, ox, oy)
